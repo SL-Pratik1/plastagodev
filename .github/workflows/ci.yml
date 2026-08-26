@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  verify:
+    name: Typecheck · Lint · Test · Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # Integration tests need a real Mongo. A replica set is required for
+      # multi-document transactions (§6A.3 #3) — `mongodb-replica-set` gives
+      # a single-node set, which is enough for `withTransaction` to work.
+      mongo:
+        image: mongo:8
+        ports: ['27017:27017']
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:8-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # `npm ci` respects the `allowScripts` policy in package.json, so esbuild's
+      # postinstall runs and Vite is usable. Without it the build fails opaquely.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Test
+        run: npm test
+        env:
+          NODE_ENV: test
+          MONGODB_URI: mongodb://127.0.0.1:27017/plastago_ci
+          ENABLE_QUEUES: 'true'
+          REDIS_URL: redis://127.0.0.1:6379
+
+      - name: Build
+        run: npm run build
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # The published API contract (§6A.9).
+      #
+      # The Flutter repo PINS a version of this artefact rather than chasing a
+      # moving target. Without publishing it, the two repos drift silently —
+      # which §6A.5 names as the main risk of splitting them.
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Generate OpenAPI spec
+        run: npm run openapi
+
+      - name: Fail if the committed spec is stale
+        run: |
+          if ! git diff --quiet -- apps/api/openapi/openapi.json 2>/dev/null; then
+            echo "::error::The OpenAPI spec is out of date. Run 'npm run openapi' and commit the result."
+            git diff -- apps/api/openapi/openapi.json
+            exit 1
+          fi
+
+      - name: Publish OpenAPI spec
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-${{ github.sha }}
+          path: apps/api/openapi/openapi.json
+          if-no-files-found: error
+          retention-days: 90
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PLACEHOLDER — the single most important job in this pipeline once pricing
+  # exists.
+  #
+  # Risk 1 is the highest-rated risk in the project, and because MongoDB gives
+  # no database-level integrity backstop (§6A.3), this harness is the ONLY guard
+  # on invoice correctness. It must gate deploys (§6A.10 #10).
+  #
+  # Target: 100% line-by-line match against 200–300 real TransVirtual invoices
+  # on base price, additional services, GST and total.
+  # ───────────────────────────────────────────────────────────────────────────
+  pricing-regression:
+    name: Pricing regression harness (not yet implemented)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reminder
+        run: |
+          echo "::warning::Pricing regression harness not implemented."
+          echo "Risk 1 — must land days 6-8, and cannot slip past day 10."
+          echo "Blocked on: an export of 200-300 real jobs + their TransVirtual invoices."

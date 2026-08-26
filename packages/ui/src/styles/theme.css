@@ -1,0 +1,325 @@
+/**
+ * PlastaGo design tokens — Tailwind v4, CSS-first (no tailwind.config.js).
+ *
+ * ── Palette provenance ─────────────────────────────────────────────────────
+ * These are the REAL brand colours, read from plastago.com.au's own `:root`
+ * block and from the primary logo artwork — no longer the placeholder ramp:
+ *
+ *   #75C37F   site `--color-primary`      recycling green
+ *   #CAE5C1   site `--color-secondary1`   soft green
+ *   #1B3820   site `--color-secondary3`   deep forest green  (logo fill #193920)
+ *   #E7F2E3   site `--color-secondary4`   lightest tint
+ *   #3E3E3E   site `--color-text`         body copy
+ *   #F37A34   top-bar icon accent — sparing, never a primary action colour
+ *
+ * ⚠️ #75C37F is ~2.1:1 on white, so it CANNOT carry small text or be a filled
+ * button behind white type. The forest green #1B3820 is therefore the action
+ * colour in light mode (13:1 on white) and #75C37F is reserved for accents,
+ * success, charts, and as the light-on-dark primary in dark mode. The marketing
+ * site makes the same choice — its nav and buttons are the dark green.
+ *
+ * The 400/600/700/900 steps are derived; the others are brand-exact.
+ *
+ * Consumed by each app as:
+ *   @import 'tailwindcss';
+ *   @import '@plastago/ui/styles.css';
+ *
+ * ── Theming approach ───────────────────────────────────────────────────────
+ * Each token is declared ONCE using `light-dark()`, with `color-scheme` on the
+ * root deciding which half applies. That gives three behaviours for free:
+ *
+ *   • default            → follows the operating system
+ *   • <html class="light"> → forced light
+ *   • <html class="dark">  → forced dark
+ *
+ * The alternative — a `:root` block plus a duplicated `.dark` block plus a
+ * third `prefers-color-scheme` block — means every new token must be added in
+ * three places, and the third is the one that gets forgotten.
+ */
+
+/* Escape hatch for the rare case a utility must branch on theme directly.
+   Prefer a token: the tokens already switch on their own. */
+@custom-variant dark (&:is(.dark, .dark *));
+
+:root {
+  color-scheme: light dark;
+
+  --radius: 0.625rem;
+
+  /* ── Brand ramp ─────────────────────────────────────────────────────────
+     Fixed, not theme-switched: a brand colour is the same colour in both
+     themes. What changes is which STEP each semantic token points at. */
+  --brand-50: #f4faf2;
+  --brand-100: #e7f2e3;
+  --brand-200: #cae5c1;
+  --brand-300: #a8d6ac;
+  --brand-400: #8fcf98;
+  --brand-500: #75c37f;
+  --brand-600: #4e9a5b;
+  --brand-700: #326e3f;
+  --brand-800: #1b3820;
+  --brand-900: #122616;
+
+  /* The orange is a deliberate rarity — status accents and nothing else. */
+  --brand-accent: #f37a34;
+
+  /* ── Surfaces ───────────────────────────────────────────────────────────── */
+  --background: light-dark(#ffffff, #0f1310);
+  --foreground: light-dark(#1e241f, #e8ede7);
+  --card: light-dark(#ffffff, #171c17);
+  --card-foreground: light-dark(#1e241f, #e8ede7);
+  --popover: light-dark(#ffffff, #1b211b);
+  --popover-foreground: light-dark(#1e241f, #e8ede7);
+
+  /* The page behind the cards. Not pure white in light mode: an all-white
+     console makes card edges invisible and grids hard to scan. */
+  --canvas: light-dark(#f7f9f6, #0b0e0b);
+
+  /* ── Action ─────────────────────────────────────────────────────────────── */
+  --primary: light-dark(var(--brand-800), var(--brand-500));
+  --primary-foreground: light-dark(#ffffff, #0e1a10);
+  --primary-hover: light-dark(var(--brand-700), var(--brand-400));
+
+  --secondary: light-dark(#eef2ec, #1f261f);
+  --secondary-foreground: light-dark(#2c3a2e, #e8ede7);
+  --muted: light-dark(#f3f6f2, #1d231d);
+  --muted-foreground: light-dark(#5a635b, #9aa69b);
+  --accent: light-dark(var(--brand-100), #24302a);
+  --accent-foreground: light-dark(var(--brand-800), var(--brand-200));
+
+  /* ── Status ─────────────────────────────────────────────────────────────── */
+  --destructive: light-dark(#c0362c, #f08279);
+  --destructive-foreground: light-dark(#ffffff, #2a0f0c);
+  --success: light-dark(#2f7d42, #6fcb85);
+  --success-foreground: light-dark(#ffffff, #0c1f12);
+  --warning: light-dark(#a65a08, #f0b357);
+  --warning-foreground: light-dark(#ffffff, #241503);
+  --info: light-dark(#2a5f7a, #7fbbd6);
+  --info-foreground: light-dark(#ffffff, #08161d);
+
+  /* ── Lines ──────────────────────────────────────────────────────────────── */
+  --border: light-dark(#e2e7df, #ffffff1f);
+  --input: light-dark(#d7ded4, #ffffff2b);
+  --ring: light-dark(var(--brand-600), var(--brand-400));
+
+  /* ── Charts ─────────────────────────────────────────────────────────────────
+     Both modes are SELECTED, not an automatic flip: each step was chosen for
+     its own surface and the set validated against the lightness band, chroma
+     floor, colour-vision separation, normal-vision floor and 3:1 contrast.
+
+     `--chart-primary` is the single-hue slot — one series, or bars whose
+     identity comes from the axis label rather than from colour.
+
+     `--chart-series-1/2` are the categorical slots, in fixed order. Blue and
+     orange deliberately: green↔orange sits at ΔE 6.9 under deuteranopia, which
+     is inside the warn band, so the brand green is NOT used as a categorical
+     slot beside orange. Assign in order and never cycle; a third measure gets
+     its own chart rather than a generated hue. */
+  --chart-primary: light-dark(#4e9a5b, #57a866);
+  --chart-series-1: light-dark(#2a6fd6, #4a8be0);
+  --chart-series-2: light-dark(#c2610a, #d2762b);
+  --chart-grid: light-dark(#e6ebe4, #ffffff14);
+  --chart-axis: light-dark(#6b746c, #8fa595);
+
+  /* ── Console chrome ─────────────────────────────────────────────────────────
+     The admin sidebar is dark green in BOTH themes. It is the one place the
+     logo colour appears at size, it separates navigation from content without
+     a border, and it keeps the console visually anchored to the brand. */
+  --sidebar: light-dark(#14291b, #0d1710);
+  --sidebar-foreground: light-dark(#d7e5d9, #cddcd0);
+  --sidebar-muted-foreground: light-dark(#9db3a2, #8fa595);
+  --sidebar-accent: light-dark(#22432a, #17291c);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: light-dark(#ffffff1a, #ffffff14);
+  --sidebar-ring: var(--brand-400);
+}
+
+/* Explicit user choice overrides the OS. `light-dark()` reads `color-scheme`,
+   so flipping it here re-resolves every token above — no redeclaration. */
+.light {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+@theme {
+  /*
+   * Brand typography, matching plastago.com.au: Montserrat for headings and
+   * navigation, Open Sans for body. Both have a real fallback stack so a
+   * blocked font request degrades to a system face rather than to serif.
+   *
+   * The marketing site swaps to Ropa Sans for mobile headings. Deliberately NOT
+   * carried across: a console that changes typeface at a breakpoint reads as a
+   * different product.
+   */
+  --font-sans: 'Open Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display:
+    Montserrat, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  /*
+   * Motion. Short and unfussy — this is a console people use all day, so
+   * transitions exist to explain where a panel came from, not to perform.
+   * The reduced-motion block in `@layer base` neutralises all of them.
+   */
+  --animate-fade-in: pg-fade-in 150ms ease-out;
+  --animate-zoom-in: pg-zoom-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slide-in-right: pg-slide-in-right 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slide-in-left: pg-slide-in-left 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slide-up: pg-slide-up 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes pg-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes pg-zoom-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(4px);
+  }
+}
+
+@keyframes pg-slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes pg-slide-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes pg-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-canvas: var(--canvas);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-brand-50: var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-200: var(--brand-200);
+  --color-brand-300: var(--brand-300);
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+  --color-brand-700: var(--brand-700);
+  --color-brand-800: var(--brand-800);
+  --color-brand-900: var(--brand-900);
+  --color-brand-accent: var(--brand-accent);
+
+  --color-chart-primary: var(--chart-primary);
+  --color-chart-series-1: var(--chart-series-1);
+  --color-chart-series-2: var(--chart-series-2);
+  --color-chart-grid: var(--chart-grid);
+  --color-chart-axis: var(--chart-axis);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-muted-foreground: var(--sidebar-muted-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Headings carry the brand face. Set once here so no screen has to remember. */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+
+  /*
+   * Driver app constraint (§M4): outdoors, one-handed, in gloves, in sun glare.
+   * 44px is the minimum comfortable touch target.
+   */
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /*
+   * Keyboard-only focus ring, used by every interactive primitive. Declared as
+   * a utility rather than repeated per component so the ring is identical
+   * everywhere — inconsistent focus styling is the fastest way to make a
+   * console feel unfinished.
+   */
+  .focus-ring {
+    outline: none;
+  }
+
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  /* Respect the OS setting rather than animating regardless (WCAG 2.3.3). */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

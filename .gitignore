@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+dev-dist/
+*.tsbuildinfo
+
+# Turborepo
+.turbo/
+
+# NOTE: apps/api/openapi/openapi.json IS committed on purpose.
+# It is the published contract the Flutter repo pins a version of (§6A.5), and
+# CI fails the build if the committed copy is stale. Generated, but tracked.
+
+# Environment — NEVER commit real credentials
+.env
+.env.*
+!.env.example
+
+# Test / coverage
+coverage/
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db

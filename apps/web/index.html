@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en-AU">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/png" href="/brand/plastago-mark.png" />
+    <link rel="apple-touch-icon" href="/brand/plastago-mark.png" />
+    <!-- The brand's deep forest green — matches the console's navigation rail. -->
+    <meta name="theme-color" content="#1b3820" />
+
+    <!--
+      Brand typography: Montserrat for headings and navigation, Open Sans for
+      body — the same pairing as plastago.com.au.
+
+      `preconnect` to both hosts because the stylesheet on fonts.googleapis.com
+      then pulls the font files from fonts.gstatic.com; without the second hint
+      that connection is only opened after the CSS parses. `display=swap` so text
+      paints in the fallback immediately rather than sitting invisible — a
+      supervisor on site mobile data should never see a blank screen waiting on a
+      font. Weights are pinned to the ones actually used; every extra weight is
+      another file on the critical path.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700&family=Open+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <meta
+      name="description"
+      content="PlastaGo — job intake, allocation, invoicing and customer portal."
+    />
+    <!-- Internal application: keep it out of search results. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <title>PlastaGo</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

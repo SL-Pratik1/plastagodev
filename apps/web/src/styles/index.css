@@ -1,0 +1,15 @@
+@import 'tailwindcss';
+@import '@plastago/ui/styles.css';
+
+/*
+ * Tailwind v4 scans the files it is pointed at. The shared component package
+ * lives outside this app's root, so its class names must be declared as an
+ * extra source or its styles are silently dropped from the bundle.
+ */
+@source '../../../../packages/ui/src';
+
+html,
+body,
+#root {
+  height: 100%;
+}

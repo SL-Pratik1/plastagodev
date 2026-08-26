@@ -1,0 +1,23 @@
+@import 'tailwindcss';
+@import '@plastago/ui/styles.css';
+
+@source '../../../../packages/ui/src';
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/*
+ * Driver-specific: this app is used on a phone, outdoors, one-handed.
+ *  • no pull-to-refresh stealing a swipe on a scrollable job list
+ *  • no double-tap zoom fighting a tap on a status button
+ *  • respect the notch / home indicator when installed standalone
+ */
+body {
+  overscroll-behavior-y: contain;
+  touch-action: manipulation;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
