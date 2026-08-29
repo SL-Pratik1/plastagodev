@@ -3,17 +3,22 @@ import type {
   DriverPerformance,
   DriverProfile,
   Vehicle,
+  VehicleDefectState,
+  VehicleDraft,
+  VehicleExpense,
+  VehicleExpenseDraft,
   VehicleListItem,
 } from '@plastago/shared';
 import { ServiceError } from '../service-error';
 import type { DriverService, VehicleService } from '../types';
 import { applyListQuery, byDate, byNumber, byText } from './list-query';
-import { DRIVERS } from './fixtures/reference';
+import { centsToMoney, DRIVERS, objectId } from './fixtures/reference';
 import {
   buildVehicles,
   CREDENTIAL_LEAD_DAYS,
   credentialsFor,
   expiryState,
+  REGO_LEAD_DAYS,
   isoInDays,
   trainingFor,
 } from './fixtures/fleet';
@@ -29,7 +34,7 @@ import { store, todayIso } from './store';
  * trusting both. Same store, one calculation.
  */
 
-const vehicles: Vehicle[] = buildVehicles();
+let vehicles: Vehicle[] = buildVehicles();
 
 /* ── Drivers ──────────────────────────────────────────────────────────────── */
 
@@ -184,6 +189,123 @@ function vehicleListItem(vehicle: Vehicle): VehicleListItem {
   return listItem;
 }
 
+/**
+ * Every derived field, recalculated from the expense log.
+ *
+ * ── Why one function and not a change per mutation ─────────────────────────
+ * Cost per kilometre, total spend, distance covered, the last service date, the
+ * odometer and both expiry badges are all *outputs*. Logging one service moves
+ * five of them at once and a renewal moves a sixth. Updating them at each call
+ * site is how a list and a detail page start disagreeing — so nothing writes a
+ * derived field directly; callers change the inputs and call this.
+ *
+ * The odometer takes the HIGHEST reading seen rather than the newest, because a
+ * back-dated expense is a correction to history, not news that the truck drove
+ * backwards.
+ */
+function recompute(vehicle: Vehicle): Vehicle {
+  const expenses = [...vehicle.expenses].sort((a, b) => b.incurredOn.localeCompare(a.incurredOn));
+
+  const totalCents = expenses.reduce(
+    (sum, expense) => sum + Math.round(Number(expense.amountExGst) * 100),
+    0,
+  );
+  const readings = expenses.map((expense) => expense.odometerKm);
+  const odometerKm = Math.max(vehicle.odometerKm, ...readings, 0);
+  const oldest = readings.length > 0 ? Math.min(...readings) : null;
+  const distance = oldest === null ? null : odometerKm - oldest;
+  const lastService = expenses.find((expense) => expense.kind === 'service');
+
+  return {
+    ...vehicle,
+    expenses,
+    odometerKm,
+    totalExpensesExGst: centsToMoney(totalCents),
+    distanceSinceFirstExpenseKm: distance !== null && distance > 0 ? distance : null,
+    costPerKm:
+      distance !== null && distance > 0 ? centsToMoney(Math.round(totalCents / distance)) : null,
+    lastServiceOn: lastService?.incurredOn ?? null,
+    serviceState:
+      vehicle.nextServiceDueOn === null
+        ? 'valid'
+        : expiryState(vehicle.nextServiceDueOn, REGO_LEAD_DAYS),
+    registrationState: expiryState(vehicle.registrationExpiresOn, REGO_LEAD_DAYS),
+    openDefectCount: vehicle.defects.filter((defect) => defect.state !== 'resolved').length,
+  };
+}
+
+/** Save one vehicle back to the store, recomputed. Returns a copy. */
+function commit(id: string, change: (vehicle: Vehicle) => Vehicle): Vehicle {
+  const index = vehicles.findIndex((candidate) => candidate.id === id);
+  const existing = vehicles[index];
+  if (index === -1 || !existing) throw new ServiceError('NOT_FOUND', `No vehicle ${id}`);
+
+  const updated = recompute(change(existing));
+  vehicles[index] = updated;
+  return { ...updated };
+}
+
+let nextVehicleSeq = 500;
+
+function toExpense(draft: VehicleExpenseDraft): VehicleExpense {
+  nextVehicleSeq += 1;
+  return { id: objectId('ex', nextVehicleSeq), ...draft };
+}
+
+/**
+ * Server-side validation, mirrored from the form.
+ *
+ * Same reasoning as the user service: a mock that accepts anything teaches the
+ * UI to skip the error path it will meet in production. The rego clash check in
+ * particular can ONLY live here — the form cannot know the rest of the fleet.
+ */
+function validateVehicle(draft: VehicleDraft, id: string | null): void {
+  const fieldErrors: Record<string, string> = {};
+
+  const clash = vehicles.find(
+    (vehicle) => vehicle.rego.toUpperCase() === draft.rego.toUpperCase() && vehicle.id !== id,
+  );
+  if (clash) fieldErrors.rego = `${draft.rego} is already in the fleet`;
+
+  // An expiry in the distant past is a mistyped year, not a very overdue truck.
+  if (draft.registrationExpiresOn < '2000-01-01') {
+    fieldErrors.registrationExpiresOn = 'Check the year on this date';
+  }
+  if (draft.purchasedOn && draft.purchasedOn > todayIso()) {
+    fieldErrors.purchasedOn = 'A purchase date cannot be in the future';
+  }
+
+  if (Object.keys(fieldErrors).length > 0) {
+    throw new ServiceError('VALIDATION_FAILED', 'Vehicle is not valid', { fieldErrors });
+  }
+}
+
+function validateExpense(draft: VehicleExpenseDraft, vehicle: Vehicle): void {
+  const fieldErrors: Record<string, string> = {};
+
+  if (draft.incurredOn > todayIso()) {
+    fieldErrors.incurredOn = 'An expense cannot be dated in the future';
+  }
+  if (Number(draft.amountExGst) <= 0) {
+    fieldErrors.amountExGst = 'Enter the amount paid, excluding GST';
+  }
+
+  /*
+   * ⚠️ A warning would be the wrong call here. A reading below one already
+   * logged makes `distanceSinceFirstExpenseKm` — and therefore cost per
+   * kilometre — silently wrong, and a quietly wrong cost per kilometre is worse
+   * than a blocked form, because nobody ever goes looking for it.
+   */
+  const highest = vehicle.expenses.reduce((max, expense) => Math.max(max, expense.odometerKm), 0);
+  if (draft.odometerKm < highest) {
+    fieldErrors.odometerKm = `Below the highest reading logged (${highest.toLocaleString('en-AU')} km)`;
+  }
+
+  if (Object.keys(fieldErrors).length > 0) {
+    throw new ServiceError('VALIDATION_FAILED', 'Expense is not valid', { fieldErrors });
+  }
+}
+
 export function createMockVehicleService(): VehicleService {
   return {
     async list(query) {
@@ -227,47 +349,127 @@ export function createMockVehicleService(): VehicleService {
       return { ...vehicle };
     },
 
-    async renewRegistration(id) {
-      await latency(520, 240);
-      const index = vehicles.findIndex((candidate) => candidate.id === id);
-      const vehicle = vehicles[index];
-      if (index === -1 || !vehicle) throw new ServiceError('NOT_FOUND', `No vehicle ${id}`);
+    async create(draft: VehicleDraft) {
+      await latency(460, 220);
+      validateVehicle(draft, null);
 
-      // F43 — "on renewal, log it and the date rolls forward by the registered
-      // period". Rolling from the CURRENT expiry, not from today, so a late
-      // renewal does not quietly shorten the next period.
-      const next = new Date(`${vehicle.registrationExpiresOn}T00:00:00Z`);
-      next.setUTCMonth(next.getUTCMonth() + vehicle.registrationPeriodMonths);
-      const registrationExpiresOn = next.toISOString().slice(0, 10);
+      nextVehicleSeq += 1;
+      const created = recompute({
+        id: objectId('vh', nextVehicleSeq),
+        rego: draft.rego,
+        label: draft.label,
+        type: draft.type,
+        active: true,
+        odometerKm: draft.odometerKm,
+        assignedDriverName: null,
+        costPerKm: null,
+        lastServiceOn: null,
+        /*
+         * Nothing is known about servicing yet, and inventing a date would put
+         * a brand-new truck on the overdue list on the day it was added — which
+         * is exactly the noise that made them stop trusting the old module.
+         */
+        nextServiceDueOn: null,
+        serviceState: 'valid',
+        registrationExpiresOn: draft.registrationExpiresOn,
+        registrationState: 'valid',
+        openDefectCount: 0,
+        make: draft.make,
+        model: draft.model,
+        year: draft.year,
+        registrationPeriodMonths: draft.registrationPeriodMonths,
+        purchasedOn: draft.purchasedOn,
+        notes: draft.notes,
+        expenses: [],
+        defects: [],
+        totalExpensesExGst: '0.00',
+        distanceSinceFirstExpenseKm: null,
+      });
 
-      const updated: Vehicle = {
-        ...vehicle,
-        registrationExpiresOn,
-        registrationState: expiryState(registrationExpiresOn, 14),
-      };
-      vehicles[index] = updated;
-      return { ...updated };
+      vehicles = [created, ...vehicles];
+      return vehicleListItem(created);
     },
 
-    async resolveDefect(vehicleId, defectId) {
+    async update(id, draft: VehicleDraft) {
       await latency(460, 220);
-      const index = vehicles.findIndex((candidate) => candidate.id === vehicleId);
-      const vehicle = vehicles[index];
-      if (index === -1 || !vehicle) throw new ServiceError('NOT_FOUND', `No vehicle ${vehicleId}`);
+      validateVehicle(draft, id);
 
-      const defects = vehicle.defects.map((defect) =>
-        defect.id === defectId
-          ? { ...defect, state: 'resolved' as const, resolvedOn: todayIso() }
-          : defect,
-      );
-
-      const updated: Vehicle = {
+      return commit(id, (vehicle) => ({
         ...vehicle,
-        defects,
-        openDefectCount: defects.filter((defect) => defect.state !== 'resolved').length,
-      };
-      vehicles[index] = updated;
-      return { ...updated };
+        rego: draft.rego,
+        label: draft.label,
+        type: draft.type,
+        make: draft.make,
+        model: draft.model,
+        year: draft.year,
+        // Only ever raised. The expense log owns the reading, and accepting a
+        // lower number here would rewrite the distance every cost divides by.
+        odometerKm: Math.max(vehicle.odometerKm, draft.odometerKm),
+        registrationExpiresOn: draft.registrationExpiresOn,
+        registrationPeriodMonths: draft.registrationPeriodMonths,
+        purchasedOn: draft.purchasedOn,
+        notes: draft.notes,
+      }));
+    },
+
+    async setActive(id, active) {
+      await latency(340, 160);
+      return commit(id, (vehicle) => ({ ...vehicle, active }));
+    },
+
+    async assignDriver(id, driverName) {
+      await latency(340, 160);
+      return commit(id, (vehicle) => ({ ...vehicle, assignedDriverName: driverName }));
+    },
+
+    async addExpense(id, draft: VehicleExpenseDraft) {
+      await latency(480, 220);
+      const existing = vehicles.find((candidate) => candidate.id === id);
+      if (!existing) throw new ServiceError('NOT_FOUND', `No vehicle ${id}`);
+      validateExpense(draft, existing);
+
+      return commit(id, (vehicle) => ({
+        ...vehicle,
+        expenses: [toExpense(draft), ...vehicle.expenses],
+      }));
+    },
+
+    async setDefectState(vehicleId, defectId, state: VehicleDefectState) {
+      await latency(420, 200);
+      return commit(vehicleId, (vehicle) => ({
+        ...vehicle,
+        defects: vehicle.defects.map((defect) =>
+          defect.id === defectId
+            ? { ...defect, state, resolvedOn: state === 'resolved' ? todayIso() : null }
+            : defect,
+        ),
+      }));
+    },
+
+    async setNextService(id, dueOn) {
+      await latency(360, 180);
+      return commit(id, (vehicle) => ({ ...vehicle, nextServiceDueOn: dueOn }));
+    },
+
+    async renewRegistration(id, expense) {
+      await latency(520, 240);
+      const existing = vehicles.find((candidate) => candidate.id === id);
+      if (!existing) throw new ServiceError('NOT_FOUND', `No vehicle ${id}`);
+      if (expense) validateExpense(expense, existing);
+
+      return commit(id, (vehicle) => {
+        // F43 — "on renewal, log it and the date rolls forward by the registered
+        // period". Rolling from the CURRENT expiry, not from today, so a late
+        // renewal does not quietly shorten the next period.
+        const next = new Date(`${vehicle.registrationExpiresOn}T00:00:00Z`);
+        next.setUTCMonth(next.getUTCMonth() + vehicle.registrationPeriodMonths);
+
+        return {
+          ...vehicle,
+          registrationExpiresOn: next.toISOString().slice(0, 10),
+          expenses: expense ? [toExpense(expense), ...vehicle.expenses] : vehicle.expenses,
+        };
+      });
     },
   };
 }

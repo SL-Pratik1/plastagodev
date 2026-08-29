@@ -94,8 +94,10 @@ export const DEMO_IDENTITIES: readonly DemoIdentity[] = [
     brandIds: ['easylift'],
     accountId: null,
     lastSignedInAt: '2026-08-25T05:55:00.000Z',
-    // Drivers are SMS-first (§9 A2) and belong in the separate driver PWA (§6A.5).
-    hint: 'SMS code — signs in to the driver app, not this one',
+    // Drivers are SMS-first (§9 A2). They sign in HERE now — the driver screens
+    // are `/driver/*` in this app rather than a separate build (§6A.5), which is
+    // what makes the Install button on their run sheet possible at all.
+    hint: 'SMS code — the run sheet, and the app you install on your phone',
   },
   {
     id: '66b3f0c1a2d4e5f6a7b8c906',

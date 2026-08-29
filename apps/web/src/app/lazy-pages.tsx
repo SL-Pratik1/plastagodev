@@ -181,3 +181,67 @@ export const PortalSupervisorsPage = lazy(async () => ({
 export const PortalAccountPage = lazy(async () => ({
   default: (await import('@/pages/portal/account')).PortalAccountPage,
 }));
+
+/*
+ * ── The driver surface (M4) ────────────────────────────────────────────────
+ *
+ * Split like everything else, but for the opposite reason and with an extra
+ * guarantee behind it.
+ *
+ * The office never opens these, so lazy keeps eleven screens out of the
+ * console's bundle. The driver, however, may open ANY of them for the first
+ * time standing in a greenfield estate with no coverage — and a lazily-loaded
+ * chunk that has never been fetched is a blank screen at the exact moment the
+ * app is supposed to prove itself.
+ *
+ * What reconciles the two is the service worker: `vite.config.ts` precaches
+ * these chunks at install time, so they are on the phone before the driver ever
+ * navigates. Lazy on the network, eager on disk.
+ *
+ * ⚠️ That guarantee lives in the workbox `globIgnores` list. If a driver screen
+ * ever starts pulling in a charting or table library, it will land in a chunk
+ * that is deliberately NOT precached and the offline promise quietly breaks.
+ */
+export const DriverRunSheetPage = lazy(async () => ({
+  default: (await import('@/pages/driver/run-sheet')).DriverRunSheetPage,
+}));
+
+export const DriverPreStartPage = lazy(async () => ({
+  default: (await import('@/pages/driver/pre-start')).DriverPreStartPage,
+}));
+
+export const DriverJobDetailPage = lazy(async () => ({
+  default: (await import('@/pages/driver/job-detail')).DriverJobDetailPage,
+}));
+
+export const DriverJobPhotosPage = lazy(async () => ({
+  default: (await import('@/pages/driver/job-photos')).DriverJobPhotosPage,
+}));
+
+export const DriverJobWeightsPage = lazy(async () => ({
+  default: (await import('@/pages/driver/job-weights')).DriverJobWeightsPage,
+}));
+
+export const DriverJobFutilePage = lazy(async () => ({
+  default: (await import('@/pages/driver/job-futile')).DriverJobFutilePage,
+}));
+
+export const DriverJobContaminationPage = lazy(async () => ({
+  default: (await import('@/pages/driver/job-contamination')).DriverJobContaminationPage,
+}));
+
+export const DriverJobRiskAssessmentPage = lazy(async () => ({
+  default: (await import('@/pages/driver/job-risk-assessment')).DriverJobRiskAssessmentPage,
+}));
+
+export const DriverTipOffPage = lazy(async () => ({
+  default: (await import('@/pages/driver/tip-off')).DriverTipOffPage,
+}));
+
+export const DriverReportDefectPage = lazy(async () => ({
+  default: (await import('@/pages/driver/report-defect')).DriverReportDefectPage,
+}));
+
+export const DriverMePage = lazy(async () => ({
+  default: (await import('@/pages/driver/me')).DriverMePage,
+}));

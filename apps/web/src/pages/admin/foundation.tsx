@@ -248,7 +248,7 @@ function TableSection() {
             total={total}
             onPageChange={controller.setPage}
             onPageSizeChange={controller.setPageSize}
-            pageSizeOptions={[5, 10, 25]}
+            pageSizeOptions={[5, 10, 15, 20]}
           />
         )}
       </Card>

@@ -23,6 +23,26 @@ export const CAPABILITIES = [
   // Surface entry
   'admin:access',
   'portal:access',
+  /**
+   * M4 — the driver surface, `/driver/*`.
+   *
+   * ── Why the driver holds exactly one capability and no more ────────────
+   * The console and the portal are broad surfaces where roles differ from one
+   * another *within* them: an allocator sees dispatch but not invoices, a
+   * supervisor sees sites but not pricing. That is what capabilities are for.
+   *
+   * The driver surface has no such variation. There is one driver role, every
+   * driver does every part of it, and the thing that varies is not WHICH
+   * screens they may open but WHICH RUN they are given — and that is data
+   * scoping the server does from the session, not a permission the browser
+   * checks. Inventing `driver:photos`, `driver:weights` and the rest would be a
+   * matrix with one row and no second opinion: pure ceremony.
+   *
+   * If a second driver role ever appears — a subcontractor who may not see the
+   * tip-off reconciliation, say — this is where it gets split, and the router
+   * already wraps the group so the split lands in one place.
+   */
+  'driver:access',
   /*
    * ── The portal's own capabilities (M5 Part 1) ───────────────────────────
    * Read straight off §12's two customer tables. The Site Supervisor has TEN
@@ -138,13 +158,60 @@ export const CAPABILITIES = [
 
 export type Capability = (typeof CAPABILITIES)[number];
 
-/** Everything a super admin holds — W1 "Global Administrator". */
-const ALL_CAPABILITIES: readonly Capability[] = CAPABILITIES;
+/**
+ * The capabilities that belong to somebody ELSE'S session, named once so the
+ * admin row can hold them out.
+ *
+ * ── Why "everything" cannot mean *everything* ─────────────────────────────
+ * `portal:*` is not a bigger permission than an admin one; it is a permission on
+ * a different surface, and that surface is defined by an account. Every read in
+ * the portal narrows to the signed-in user's `accountId` — that narrowing is the
+ * whole security model of M1.5, not a filter the UI asked for — so a staff
+ * session, which has `accountId: null` by definition, has nothing for those
+ * screens to scope to.
+ *
+ * Granting them to the super admin as part of a blanket `CAPABILITIES` was the
+ * bug behind "Your role does not allow that" on `/portal/*`: the route guard
+ * said yes, the shell rendered, and then every query failed FORBIDDEN at the
+ * service layer. The office does not read one customer's portal — it reads the
+ * console, which sees every account at once.
+ *
+ * ⚠️ `driver:access` is withheld for exactly the same reason, and it is the
+ * newer trap of the two. Now that the driver screens live in this app rather
+ * than a separate build, a blanket grant would put `/driver` within reach of
+ * every administrator — and every read there scopes to the signed-in DRIVER's
+ * run. A staff session has no run, so the shell would render and the run sheet
+ * behind it would be empty or forbidden. The office watches drivers through the
+ * dispatch board (M3), which sees every run at once; it does not borrow one.
+ */
+const OTHER_SURFACE_CAPABILITIES = new Set<Capability>([
+  'portal:access',
+  'portal:book',
+  'portal:sites',
+  'portal:invoices',
+  'portal:reports',
+  'portal:certificates',
+  'portal:supervisors',
+  'portal:account',
+  'driver:access',
+]);
+
+/**
+ * Everything a super admin holds — W1 "Global Administrator" — bar the surfaces
+ * that belong to someone else's session.
+ *
+ * Derived by subtraction rather than listed out, so a capability added to
+ * `CAPABILITIES` tomorrow reaches the administrator without anyone remembering
+ * to come back here. The other-surface set is the only thing ever withheld.
+ */
+const ALL_ADMIN_CAPABILITIES: readonly Capability[] = CAPABILITIES.filter(
+  (capability) => !OTHER_SURFACE_CAPABILITIES.has(capability),
+);
 
 export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
   // W1, W2, W3, W4, W5, W7, W8, W14, W15, W16. (W17 backups is automated
   // infrastructure, not a screen — so there is no capability for it.)
-  'super-admin': ALL_CAPABILITIES,
+  'super-admin': ALL_ADMIN_CAPABILITIES,
 
   /*
    * Matt's own seat. Everything operational and commercial; nothing that
@@ -231,8 +298,20 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'vehicles:manage',
   ],
 
-  // Drivers use the separate PWA (§6A.5). No console, no portal.
-  driver: [],
+  /*
+   * The driver (M4 · W123–W140).
+   *
+   * Their run sheet, the job screens behind it, the tip-off reconciliation and
+   * the defect report — reached at `/driver/*` in THIS app. They previously
+   * held nothing at all, because the driver screens were a separate Vite build
+   * and a driver signing in here landed on a page explaining they were at the
+   * wrong address.
+   *
+   * ⚠️ No `admin:access`, no `portal:access`, and no `pricing:view`. A driver
+   * sees the site, the load and the photos — never what the job is worth, and
+   * never another driver's run.
+   */
+  driver: ['driver:access'],
 
   /*
    * Customer Administrator — 14 of 15 workflows (W70–W84).
@@ -275,9 +354,11 @@ export function can(role: Role, capability: Capability): boolean {
  * Office and admin roles land on the console, customer roles on the portal.
  * Nobody chooses their surface from a menu; their role already decided it.
  *
- * A driver who follows a console link gets an explanation and a way across to
- * the driver app rather than a bare 403 — it is a separate Vite app on another
- * port, so "you're in the wrong place" is genuinely the answer.
+ * A driver lands on their run sheet. That used to be an explanation page saying
+ * they were in the wrong application — true while the driver screens were a
+ * separate build on another port, and the reason the whole surface was folded
+ * back in: a browser will only ever install the page it is already on, so an
+ * install button for the driver app could not exist anywhere else.
  */
 export function landingPathFor(role: Role): string {
   switch (ROLE_SURFACE[role]) {
@@ -286,6 +367,6 @@ export function landingPathFor(role: Role): string {
     case 'portal':
       return '/portal';
     case 'driver':
-      return '/auth/driver-app';
+      return '/driver';
   }
 }

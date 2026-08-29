@@ -72,6 +72,10 @@ export function createMockCustomerService(): CustomerService {
 
       const account: Account = {
         ...toListItem(fixture),
+        // Read from the mutable store, not the frozen fixture — the office can
+        // now toggle this, and `get` has to answer with what they set.
+        riskAssessmentRequired:
+          store.accountRiskAssessment.get(id) ?? fixture.riskAssessmentRequired,
         abn: fixture.abn,
         paymentTermsDays: fixture.paymentTermsDays,
         primaryZone: fixture.primaryZone,
@@ -125,6 +129,24 @@ export function createMockCustomerService(): CustomerService {
           defaultSort: (a, b) => b.jobNumber - a.jobNumber,
         },
       );
+    },
+
+    async setRiskAssessmentRequired(accountId, required) {
+      await latency();
+      const fixture = ACCOUNTS.find((account) => account.id === accountId);
+      if (!fixture) throw new ServiceError('NOT_FOUND', `No account ${accountId}`);
+
+      store.accountRiskAssessment.set(accountId, required);
+      return this.get(accountId);
+    },
+
+    async setSiteRiskAssessmentOverride(siteId, override) {
+      await latency();
+      const site = store.sites.find((candidate) => candidate.id === siteId);
+      if (!site) throw new ServiceError('NOT_FOUND', `No site ${siteId}`);
+
+      site.riskAssessmentOverride = override;
+      return { ...site };
     },
 
     async invoices(accountId, query) {

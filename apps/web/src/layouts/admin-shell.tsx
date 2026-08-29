@@ -16,13 +16,15 @@ import {
   ChevronDownIcon,
   LogOutIcon,
   MenuIcon,
-  PanelLeftIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
   UserIcon,
 } from 'lucide-react';
 import { useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
 import { NotificationsMenu } from '@/components/notifications-menu';
+import { InstallButton } from '@/components/pwa/install-button';
 import { SessionExpiry } from '@/features/auth/session-expiry';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import {
@@ -87,12 +89,16 @@ export function AdminShell() {
   const confirmSignOut = async () => {
     setSigningOut(true);
     try {
+      // Leave the guarded tree BEFORE the session goes. The moment `RequireAuth`
+      // sees an authenticated route without a session it stashes the current
+      // path as a `from` for whoever signs in next — and one person's last
+      // screen is not the next person's destination.
+      await navigate('/auth/sign-in', { replace: true, state: null });
       await signOut();
       setSignOutOpen(false);
       // A toast here earns its place: the page changes to the sign-in screen,
       // which on its own is ambiguous between "signed out" and "session expired".
       toast.success('You’ve been signed out');
-      await navigate('/auth/sign-in', { replace: true });
     } finally {
       setSigningOut(false);
     }
@@ -110,49 +116,59 @@ export function AdminShell() {
 
       <aside
         className={cn(
-          'sticky top-0 hidden h-dvh shrink-0 flex-col bg-sidebar text-sidebar-foreground transition-[width] duration-200 lg:flex',
+          'scrollbar-on-dark sticky top-0 hidden h-dvh shrink-0 flex-col bg-sidebar text-sidebar-foreground transition-[width] duration-200 lg:flex',
           collapsed ? 'w-[4.75rem]' : 'w-64',
         )}
       >
+        {/*
+          The toggle lives up here beside the wordmark rather than in a row at
+          the foot of the rail. It is the control that changes this panel, so it
+          belongs at the panel's head where the eye already is when reading the
+          logo — and it stops the rail ending in a permanent "Collapse" item that
+          looked like a navigation destination among the real ones.
+        */}
         <div
           className={cn(
             'flex h-16 shrink-0 items-center border-b border-sidebar-border',
-            collapsed ? 'justify-center px-2' : 'px-5',
+            // Collapsed, the rail is 4.75rem — room for the toggle centred, but
+            // not for the mark stacked above it inside a 4rem-tall header. The
+            // wordmark returns the moment the rail expands.
+            collapsed ? 'justify-center px-2' : 'justify-between gap-2 px-4',
           )}
         >
-          <NavLink to="/admin" className="focus-ring rounded" aria-label="PlastaGo admin console">
-            {collapsed ? (
-              <BrandMark tone="light" variant="mark" className="h-7" decorative />
-            ) : (
+          {!collapsed && (
+            <NavLink to="/admin" className="focus-ring rounded" aria-label="PlastaGo admin console">
               <BrandMark tone="light" className="h-6" />
-            )}
-          </NavLink>
-        </div>
+            </NavLink>
+          )}
 
-        <nav aria-label="Console" className="min-h-0 flex-1 overflow-y-auto px-2 py-4">
-          <NavGroups groups={groups} collapsed={collapsed} />
-        </nav>
-
-        <div className="shrink-0 border-t border-sidebar-border p-2">
           <button
             type="button"
             onClick={toggleCollapsed}
             aria-expanded={!collapsed}
-            className={cn(
-              'focus-ring flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
-              collapsed && 'justify-center px-0',
-            )}
+            aria-controls={NAV_ID}
+            title={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            className="focus-ring grid size-9 shrink-0 place-items-center rounded-md text-sidebar-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
           >
-            <PanelLeftIcon
-              aria-hidden
-              className={cn('size-4 shrink-0 transition-transform', collapsed && 'rotate-180')}
-            />
-            {!collapsed && <span>Collapse</span>}
+            {/*
+              Two distinct glyphs rather than one rotated 180°. A rotated panel
+              icon reads as the same control pointing somewhere; these two say
+              what will happen — the bar closes, or the bar opens.
+            */}
+            {collapsed ? (
+              <PanelLeftOpenIcon aria-hidden className="size-[1.15rem]" />
+            ) : (
+              <PanelLeftCloseIcon aria-hidden className="size-[1.15rem]" />
+            )}
             <span className="sr-only">
               {collapsed ? 'Expand navigation' : 'Collapse navigation'}
             </span>
           </button>
         </div>
+
+        <nav id={NAV_ID} aria-label="Console" className="min-h-0 flex-1 overflow-y-auto px-2 py-4">
+          <NavGroups groups={groups} collapsed={collapsed} />
+        </nav>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -223,6 +239,21 @@ export function AdminShell() {
               a badge it could not act on and a "View all" that 403s — so the
               bell follows the screen it belongs to.
             */}
+            {/*
+              Installing the console is worth offering, not just the driver app.
+              An allocator working the board all day gets it in its own window,
+              off the tab strip, with the brand in the title bar — and it is the
+              same one-tap install, because this is one app with one manifest.
+
+              Renders nothing once installed, and nothing on a browser that
+              cannot install, so no dead control ever appears here.
+            */}
+            <InstallButton
+              size="sm"
+              variant="ghost"
+              label="Install"
+              className="hidden sm:inline-flex"
+            />
             {can('notifications:read') && <NotificationsMenu />}
             <ThemeToggle />
 
@@ -292,7 +323,7 @@ export function AdminShell() {
         }}
         side="left"
         title="Navigation"
-        className="bg-sidebar text-sidebar-foreground"
+        className="scrollbar-on-dark bg-sidebar text-sidebar-foreground"
       >
         <nav
           aria-label="Console"
@@ -416,6 +447,9 @@ function NavGroups({ groups, collapsed }: { groups: readonly NavGroup[]; collaps
 
 /* ── Persisted shell preferences ───────────────────────────────────────────
    Guarded because `localStorage` throws outright when site data is blocked. */
+
+/** Ties the header toggle to the region it expands, for `aria-controls`. */
+const NAV_ID = 'console-nav';
 
 const COLLAPSE_KEY = 'plastago.nav.collapsed';
 

@@ -18,7 +18,7 @@ import { formatCountdown, useCountdown } from '@/lib/use-countdown';
 import { DEMO_OTP_CODE } from '@/services/mock/fixtures/identities';
 import { useAuth } from '@/features/auth/auth-context';
 import { codeSentHint, codeSentMessage, describeAuthError } from '@/features/auth/auth-messages';
-import { landingPathFor } from '@/features/auth/permissions';
+import { signInDestination } from '@/features/auth/route-access';
 
 /**
  * Step 2 of 2 — enter the code.
@@ -72,7 +72,7 @@ export function VerifyOtpPage() {
    * nothing". Checking `status` first is what separates the two cases.
    */
   if (status === 'authenticated' && user) {
-    return <Navigate to={from ?? landingPathFor(user.role)} replace />;
+    return <Navigate to={signInDestination(user.role, from)} replace />;
   }
 
   if (!challenge) return <Navigate to="/auth/sign-in" replace />;
@@ -87,7 +87,7 @@ export function VerifyOtpPage() {
 
     try {
       const session = await verifyCode(value);
-      const destination = from ?? landingPathFor(session.user.role);
+      const destination = signInDestination(session.user.role, from);
 
       toast.success(
         `Signed in as ${session.user.name}`,

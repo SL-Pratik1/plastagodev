@@ -7,6 +7,7 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  DatePicker,
   ErrorState,
   Field,
   Input,
@@ -215,7 +216,7 @@ function EditForm({ job }: { job: PortalJob }) {
                 hint="Moving this restarts the five-business-day collection window."
               >
                 {(control) => (
-                  <Input {...control} type="date" min={today} {...register('readyDate')} />
+                  <DatePicker {...control} min={today} {...register('readyDate')} />
                 )}
               </Field>
 

@@ -5,8 +5,8 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  DatePicker,
   ErrorState,
-  Input,
   Select,
   Skeleton,
   Spinner,
@@ -102,8 +102,7 @@ export function PortalReportsPage() {
         <CardContent className="flex flex-wrap items-end gap-3 pt-5">
           <label className="flex flex-col gap-1 text-xs text-muted-foreground">
             From
-            <Input
-              type="date"
+            <DatePicker
               value={filters.from}
               max={filters.to}
               onChange={(event) => {
@@ -114,8 +113,7 @@ export function PortalReportsPage() {
           </label>
           <label className="flex flex-col gap-1 text-xs text-muted-foreground">
             To
-            <Input
-              type="date"
+            <DatePicker
               value={filters.to}
               min={filters.from}
               onChange={(event) => {

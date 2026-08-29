@@ -1,4 +1,8 @@
-import { VEHICLE_EXPENSE_KIND_LABELS, VEHICLE_TYPE_LABELS } from '@plastago/shared';
+import {
+  VEHICLE_EXPENSE_KIND_LABELS,
+  VEHICLE_TYPE_LABELS,
+  type VehicleDefect,
+} from '@plastago/shared';
 import {
   Alert,
   Badge,
@@ -11,20 +15,44 @@ import {
   EmptyState,
   ErrorState,
   Skeleton,
+  Menu,
+  MenuItem,
+  MenuSeparator,
   Tabs,
   TabsList,
   TabsPanel,
   TabsTrigger,
   useToast,
 } from '@plastago/ui';
-import { RotateCcwIcon, TriangleAlertIcon, WrenchIcon } from 'lucide-react';
+import {
+  BanIcon,
+  CalendarClockIcon,
+  CheckIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
+  PlusIcon,
+  RotateCcwIcon,
+  TriangleAlertIcon,
+  UserIcon,
+  WrenchIcon,
+} from 'lucide-react';
 import { useState } from 'react';
 import { useParams, useSearchParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
 import { ExpiryBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
 import { StatCard } from '@/components/stat-card';
-import { useRenewRegistration, useResolveDefect, useVehicle } from '@/features/fleet/queries';
+import { RenewRegistrationDialog } from '@/features/fleet/components/renew-registration-dialog';
+import { ScheduleServiceDialog } from '@/features/fleet/components/schedule-service-dialog';
+import { VehicleExpenseDialog } from '@/features/fleet/components/vehicle-expense-dialog';
+import { VehicleFormDialog } from '@/features/fleet/components/vehicle-form-dialog';
+import { useDriverOptions } from '@/features/lookups/queries';
+import {
+  useAssignVehicleDriver,
+  useSetDefectState,
+  useSetVehicleActive,
+  useVehicle,
+} from '@/features/fleet/queries';
 import { describeError } from '@/lib/error-message';
 import { useAuth } from '@/features/auth/auth-context';
 import { formatDate, formatMoney } from '@/lib/format';
@@ -42,10 +70,17 @@ export function AdminVehicleDetailPage() {
 
   const { can } = useAuth();
   const { data: vehicle, error, isPending, refetch } = useVehicle(vehicleId);
-  const renewRegistration = useRenewRegistration();
-  const resolveDefect = useResolveDefect();
+  const setDefectState = useSetDefectState();
+  const setActive = useSetVehicleActive();
+  const assignDriver = useAssignVehicleDriver();
+  const drivers = useDriverOptions();
 
   const [renewOpen, setRenewOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [expenseOpen, setExpenseOpen] = useState(false);
+  const [expenseKind, setExpenseKind] = useState<'service' | 'other'>('other');
+  const [serviceOpen, setServiceOpen] = useState(false);
+  const [offRoadOpen, setOffRoadOpen] = useState(false);
 
   const visibleTabs: readonly TabKey[] = can('pricing:view')
     ? TABS
@@ -98,29 +133,52 @@ export function AdminVehicleDetailPage() {
     );
   }
 
-  const renew = async () => {
+  const moveDefect = async (defect: VehicleDefect, state: VehicleDefect['state']) => {
     try {
-      const updated = await renewRegistration.mutateAsync(vehicle.id);
+      await setDefectState.mutateAsync({ vehicleId: vehicle.id, defectId: defect.id, state });
       toast.success(
-        'Registration renewed',
-        `Now expires ${formatDate(updated.registrationExpiresOn)} — rolled forward ${String(vehicle.registrationPeriodMonths)} months.`,
+        state === 'resolved' ? 'Defect marked resolved' : 'Defect booked in',
+        state === 'scheduled' ? 'It stays on the open count until the work is done.' : undefined,
+      );
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  const changeActive = async (active: boolean) => {
+    try {
+      await setActive.mutateAsync({ id: vehicle.id, active });
+      toast.success(
+        active ? `${vehicle.rego} back in service` : `${vehicle.rego} taken off the road`,
+        active
+          ? 'It can be assigned work again.'
+          : 'Its history stays intact and you can put it back at any time.',
       );
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);
     } finally {
-      setRenewOpen(false);
+      setOffRoadOpen(false);
     }
   };
 
-  const resolve = async (defectId: string) => {
+  const changeDriver = async (driverName: string | null) => {
     try {
-      await resolveDefect.mutateAsync({ vehicleId: vehicle.id, defectId });
-      toast.success('Defect marked resolved');
+      await assignDriver.mutateAsync({ id: vehicle.id, driverName });
+      toast.success(
+        driverName === null ? `${vehicle.rego} unassigned` : `${vehicle.rego} → ${driverName}`,
+        'The drivers list shows the same pairing from the other side.',
+      );
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);
     }
+  };
+
+  const openExpense = (kind: 'service' | 'other') => {
+    setExpenseKind(kind);
+    setExpenseOpen(true);
   };
 
   const openDefects = vehicle.defects.filter((defect) => defect.state !== 'resolved');
@@ -150,16 +208,104 @@ export function AdminVehicleDetailPage() {
           </span>
         }
         actions={
-          vehicle.registrationState !== 'valid' ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {vehicle.registrationState !== 'valid' && (
+              <Button
+                onClick={() => {
+                  setRenewOpen(true);
+                }}
+              >
+                <RotateCcwIcon aria-hidden />
+                Log renewal
+              </Button>
+            )}
+            {seesPricing && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  openExpense('other');
+                }}
+              >
+                <PlusIcon aria-hidden />
+                Log expense
+              </Button>
+            )}
             <Button
+              variant="outline"
               onClick={() => {
-                setRenewOpen(true);
+                setEditOpen(true);
               }}
             >
-              <RotateCcwIcon aria-hidden />
-              Log renewal
+              <PencilIcon aria-hidden />
+              Edit
             </Button>
-          ) : undefined
+            {/*
+              ── Why assignment and off-the-road live on a menu ────────────────
+              Both are one-click decisions taken on their own, and neither has
+              anything to do with the make and model. Putting them in the edit
+              form would mean opening a ten-field dialog to park a broken truck;
+              putting them on the toolbar would give a read-mostly page five
+              competing buttons. A menu is the honest middle.
+            */}
+            <Menu
+              align="end"
+              triggerLabel={`More actions for ${vehicle.rego}`}
+              triggerClassName="grid size-9 place-items-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              trigger={<MoreHorizontalIcon aria-hidden className="size-4" />}
+            >
+              <MenuItem
+                icon={CalendarClockIcon}
+                onSelect={() => {
+                  setServiceOpen(true);
+                }}
+              >
+                {vehicle.nextServiceDueOn === null ? 'Book next service' : 'Change service date'}
+              </MenuItem>
+              <MenuSeparator />
+              <MenuItem
+                icon={UserIcon}
+                onSelect={() => {
+                  void changeDriver(null);
+                }}
+                disabled={vehicle.assignedDriverName === null}
+              >
+                Unassign driver
+              </MenuItem>
+              {(drivers.data ?? [])
+                .filter((option) => option.label !== vehicle.assignedDriverName)
+                .map((option) => (
+                  <MenuItem
+                    key={option.value}
+                    onSelect={() => {
+                      void changeDriver(option.label);
+                    }}
+                  >
+                    Assign to {option.label}
+                  </MenuItem>
+                ))}
+              <MenuSeparator />
+              {vehicle.active ? (
+                <MenuItem
+                  icon={BanIcon}
+                  tone="destructive"
+                  onSelect={() => {
+                    setOffRoadOpen(true);
+                  }}
+                >
+                  Take out of service
+                </MenuItem>
+              ) : (
+                <MenuItem
+                  icon={CheckIcon}
+                  onSelect={() => {
+                    void changeActive(true);
+                  }}
+                >
+                  Put back in service
+                </MenuItem>
+              )}
+            </Menu>
+          </div>
         }
       />
 
@@ -230,7 +376,10 @@ export function AdminVehicleDetailPage() {
                     { label: 'Make and model', value: `${vehicle.make} ${vehicle.model}` },
                     { label: 'Year', value: vehicle.year ?? '—' },
                     { label: 'Type', value: VEHICLE_TYPE_LABELS[vehicle.type] },
-                    { label: 'Assigned driver', value: vehicle.assignedDriverName ?? 'Unassigned' },
+                    {
+                      label: 'Assigned driver',
+                      value: vehicle.assignedDriverName ?? 'Unassigned',
+                    },
                     { label: 'Purchased', value: formatDate(vehicle.purchasedOn) },
                     {
                       label: 'Distance covered by expense log',
@@ -271,6 +420,29 @@ export function AdminVehicleDetailPage() {
                 ]}
               />
 
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setServiceOpen(true);
+                  }}
+                >
+                  <CalendarClockIcon aria-hidden />
+                  {vehicle.nextServiceDueOn === null ? 'Book next service' : 'Change service date'}
+                </Button>
+                {seesPricing && (
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      openExpense('service');
+                    }}
+                  >
+                    <PlusIcon aria-hidden />
+                    Log a service
+                  </Button>
+                )}
+              </div>
+
               {serviceExpenses.length === 0 ? (
                 <EmptyState
                   icon={WrenchIcon}
@@ -304,8 +476,17 @@ export function AdminVehicleDetailPage() {
         {/* ── Expenses ─────────────────────────────────────────────────── */}
         <TabsPanel value="expenses">
           <Card>
-            <CardHeader>
+            <CardHeader className="flex-row items-start justify-between gap-3">
               <CardTitle>Expense log</CardTitle>
+              <Button
+                size="sm"
+                onClick={() => {
+                  openExpense('other');
+                }}
+              >
+                <PlusIcon aria-hidden />
+                Log expense
+              </Button>
             </CardHeader>
             <CardContent>
               <div className="overflow-x-auto">
@@ -413,12 +594,31 @@ export function AdminVehicleDetailPage() {
                       <Badge variant={defect.state === 'resolved' ? 'success' : 'secondary'}>
                         {defect.state}
                       </Badge>
+                      {/*
+                        open → scheduled → resolved.
+                        "Booked in for Thursday" was the state with nowhere to
+                        live: the only button was Mark resolved, so a defect
+                        jumped from broken straight to fixed and anyone looking
+                        at the list could not tell the difference between "we
+                        have a plan" and "nobody has touched it".
+                      */}
+                      {defect.state === 'open' && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void moveDefect(defect, 'scheduled')}
+                          disabled={setDefectState.isPending}
+                        >
+                          <CalendarClockIcon aria-hidden />
+                          Book in
+                        </Button>
+                      )}
                       {defect.state !== 'resolved' && (
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => void resolve(defect.id)}
-                          disabled={resolveDefect.isPending}
+                          onClick={() => void moveDefect(defect, 'resolved')}
+                          disabled={setDefectState.isPending}
                         >
                           Mark resolved
                         </Button>
@@ -467,7 +667,6 @@ export function AdminVehicleDetailPage() {
                 onClick={() => {
                   setRenewOpen(true);
                 }}
-                disabled={renewRegistration.isPending}
               >
                 <RotateCcwIcon aria-hidden />
                 Log renewal
@@ -477,16 +676,58 @@ export function AdminVehicleDetailPage() {
         </TabsPanel>
       </Tabs>
 
-      <ConfirmDialog
+      <VehicleFormDialog
+        open={editOpen}
+        onClose={() => {
+          setEditOpen(false);
+        }}
+        vehicle={vehicle}
+      />
+
+      <VehicleExpenseDialog
+        open={expenseOpen}
+        onClose={() => {
+          setExpenseOpen(false);
+        }}
+        vehicle={vehicle}
+        defaultKind={expenseKind}
+      />
+
+      <ScheduleServiceDialog
+        open={serviceOpen}
+        onClose={() => {
+          setServiceOpen(false);
+        }}
+        vehicle={vehicle}
+      />
+
+      {/*
+        A full dialog rather than a ConfirmDialog, because the renewal rule is
+        invisible and counter-intuitive: it rolls forward from the OLD expiry,
+        so a late renewal does not lose the days already paid for. A yes/no box
+        would flip the badge to green and teach nobody why.
+      */}
+      <RenewRegistrationDialog
         open={renewOpen}
-        onCancel={() => {
+        onClose={() => {
           setRenewOpen(false);
         }}
-        onConfirm={() => void renew()}
-        title="Log the registration renewal?"
-        description={`The expiry will roll forward ${String(vehicle.registrationPeriodMonths)} months from ${formatDate(vehicle.registrationExpiresOn)}.`}
-        confirmLabel="Log renewal"
-        pending={renewRegistration.isPending}
+        vehicle={vehicle}
+      />
+
+      <ConfirmDialog
+        open={offRoadOpen}
+        onCancel={() => {
+          setOffRoadOpen(false);
+        }}
+        onConfirm={() => {
+          void changeActive(false);
+        }}
+        title={`Take ${vehicle.rego} out of service?`}
+        description="It stops being available for work. Its jobs, expenses and defects all stay, and you can put it back at any time."
+        confirmLabel="Take out of service"
+        tone="destructive"
+        pending={setActive.isPending}
       />
     </div>
   );

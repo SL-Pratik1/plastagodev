@@ -14,11 +14,11 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  DatePicker,
   Dialog,
   EmptyState,
   ErrorState,
   Field,
-  Input,
   Select,
   Skeleton,
   Tabs,
@@ -38,6 +38,8 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
+import { countComplianceGaps } from '@/components/jobs/compliance-gaps';
+import { ComplianceTab } from '@/components/jobs/compliance-tab';
 import { DetailList } from '@/components/detail-list';
 import {
   AtRiskBadge,
@@ -59,6 +61,7 @@ const TABS = [
   'photos',
   'documents',
   'comments',
+  'compliance',
   'invoice',
   'exceptions',
 ] as const;
@@ -162,6 +165,9 @@ export function AdminJobDetailPage() {
       </div>
     );
   }
+
+  // Only things someone has to ACT on. See the note on the tab trigger.
+  const complianceGaps = countComplianceGaps(job);
 
   const isTerminal = (TERMINAL as readonly string[]).includes(job.status);
   const atRisk =
@@ -274,6 +280,22 @@ export function AdminJobDetailPage() {
           </TabsTrigger>
           <TabsTrigger value="comments" badge={job.comments.length || undefined}>
             Comments
+          </TabsTrigger>
+          {/*
+            M4.8 — the safety record.
+
+            Ungated: every office role can read it, including the allocator who
+            holds no pricing capability. A compliance obligation is not
+            commercial information, and the person most likely to be asked "was
+            that truck checked" is the one who manages the drivers.
+
+            The badge fires only on a GAP — a required assessment that never
+            happened, an unsafe site, a failed pre-start item. A tab that always
+            carried a count would train everyone to ignore the one time it means
+            something.
+          */}
+          <TabsTrigger value="compliance" badge={complianceGaps || undefined}>
+            Compliance
           </TabsTrigger>
           {seesPricing && <TabsTrigger value="invoice">Invoice</TabsTrigger>}
           <TabsTrigger value="exceptions">Exceptions</TabsTrigger>
@@ -664,6 +686,11 @@ export function AdminJobDetailPage() {
         </TabsPanel>
 
         {/* ── Exceptions ───────────────────────────────────────────────── */}
+        {/* ── Compliance (M4.8) ────────────────────────────────────────── */}
+        <TabsPanel value="compliance">
+          <ComplianceTab job={job} />
+        </TabsPanel>
+
         <TabsPanel value="exceptions">
           <Card>
             <CardHeader>
@@ -726,9 +753,8 @@ export function AdminJobDetailPage() {
         <div className="py-2">
           <Field id="reschedule-date" label="New ready date" required>
             {(aria) => (
-              <Input
+              <DatePicker
                 {...aria}
-                type="date"
                 value={newReadyDate}
                 onChange={(event) => {
                   setNewReadyDate(event.target.value);

@@ -1,3 +1,5 @@
+import type { RiskAssessmentOverride } from '@plastago/shared';
+import type { DriverRunService } from './driver-run.types.js';
 import type {
   Account,
   AccountListItem,
@@ -32,6 +34,9 @@ import type {
   ReportFilters,
   Settings,
   Vehicle,
+  VehicleDefectState,
+  VehicleDraft,
+  VehicleExpenseDraft,
   VehicleListItem,
   ZoneVolumeReport,
   ExceptionReason,
@@ -167,6 +172,22 @@ export interface CustomerService {
   sites: (accountId: string, query: ListQuery) => Promise<ListResult<Site>>;
   jobs: (accountId: string, query: ListQuery) => Promise<ListResult<JobListItem>>;
   invoices: (accountId: string, query: ListQuery) => Promise<ListResult<InvoiceListItem>>;
+
+  /**
+   * M4.8b — whether this builder requires a Site Risk Assessment.
+   *
+   * Returns the updated account rather than `void` so the screen renders the
+   * server's answer, not its own optimistic guess. It matters here more than
+   * usual: this switch changes what a DRIVER is made to do at a fence, and a UI
+   * that shows "on" while the record says "off" is a compliance gap wearing a
+   * tick.
+   */
+  setRiskAssessmentRequired: (accountId: string, required: boolean) => Promise<Account>;
+  /** Per-site exception to the account's rule. See `Site.riskAssessmentOverride`. */
+  setSiteRiskAssessmentOverride: (
+    siteId: string,
+    override: RiskAssessmentOverride,
+  ) => Promise<Site>;
 }
 
 export interface JobService {
@@ -264,9 +285,41 @@ export interface DriverService {
 export interface VehicleService {
   list: (query: ListQuery) => Promise<ListResult<VehicleListItem>>;
   get: (id: string) => Promise<Vehicle>;
-  /** F43 — logging a renewal rolls the expiry forward by the period. */
-  renewRegistration: (id: string) => Promise<Vehicle>;
-  resolveDefect: (vehicleId: string, defectId: string) => Promise<Vehicle>;
+  create: (draft: VehicleDraft) => Promise<VehicleListItem>;
+  update: (id: string, draft: VehicleDraft) => Promise<Vehicle>;
+  /**
+   * In service / out of service. Never a delete — a truck that did 400 jobs
+   * last year has to stay attributable, the same rule as a suspended user.
+   */
+  setActive: (id: string, active: boolean) => Promise<Vehicle>;
+  /** `null` unassigns. The pairing is one-to-one and shows on both screens. */
+  assignDriver: (id: string, driverName: string | null) => Promise<Vehicle>;
+  /**
+   * F43 — the input side of cost per kilometre. Returns the whole vehicle
+   * because one expense moves the odometer, the totals, the cost per kilometre
+   * and — when it is a service — the maintenance history with it.
+   */
+  addExpense: (id: string, draft: VehicleExpenseDraft) => Promise<Vehicle>;
+  /**
+   * open → scheduled → resolved. `scheduled` is the state the UI was missing:
+   * "booked in for Thursday" is neither broken-and-ignored nor fixed.
+   */
+  setDefectState: (
+    vehicleId: string,
+    defectId: string,
+    state: VehicleDefectState,
+  ) => Promise<Vehicle>;
+  /** W113 — the allocator's job. `null` clears the booking. */
+  setNextService: (id: string, dueOn: string | null) => Promise<Vehicle>;
+  /**
+   * F43 — logging a renewal rolls the expiry forward by the period.
+   *
+   * The optional expense is why this is not two separate actions: `registration`
+   * is already an expense kind, and the moment someone renews is the only moment
+   * they have the amount in front of them. Making them come back later is asking
+   * for a cost per kilometre that quietly understates.
+   */
+  renewRegistration: (id: string, expense?: VehicleExpenseDraft | null) => Promise<Vehicle>;
 }
 
 /**
@@ -443,6 +496,8 @@ export interface AuditService {
   get: (id: string) => Promise<AuditEntry>;
 }
 
+export type { DriverRunService } from './driver-run.types.js';
+
 /**
  * The container the app resolves services from.
  *
@@ -466,4 +521,14 @@ export interface Services {
   readonly audit: AuditService;
   readonly queues: QueueService;
   readonly portal: CustomerPortalService;
+  /**
+   * M4 — the driver surface.
+   *
+   * Named `driverRun`, not `driver`, because `drivers` above is the office's
+   * view of the driver ROSTER (W103, W115 — performance, licences, allocation).
+   * This is the driver's own view of THEIR run, and the two are different
+   * enough that collapsing the names would be a standing invitation to reach
+   * for the wrong one.
+   */
+  readonly driverRun: DriverRunService;
 }

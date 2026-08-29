@@ -4,6 +4,7 @@ import { createMockAuthService } from './auth.mock.js';
 import { createMockCustomerService } from './customers.mock.js';
 import { createMockDashboardService } from './dashboard.mock.js';
 import { createMockDispatchService } from './dispatch.mock.js';
+import { createMockDriverRunService } from './driver.mock.js';
 import { createMockDriverService, createMockVehicleService } from './fleet.mock.js';
 import { createMockInvoiceService } from './invoices.mock.js';
 import { createMockJobService } from './jobs.mock.js';
@@ -26,6 +27,12 @@ import { createMockUserService } from './users.mock.js';
  * All the mocks share one in-memory store (`./store.ts`), so an action in one
  * domain is visible in the others: allocate a job on the board and the jobs grid
  * shows the driver.
+ *
+ * ⚠️ `driverRun` is the exception, and deliberately so. It reads `driver-store.ts`,
+ * a store of its own, because the driver surface holds a LOCAL DATABASE SEEDED
+ * BY SYNC (M4.12) — not a view over the office's tables. Wiring it into the
+ * shared store would model a relationship that cannot exist on a phone with no
+ * signal, which is the one thing this surface has to get right.
  */
 export function createMockServices(): Services {
   return {
@@ -45,5 +52,6 @@ export function createMockServices(): Services {
     audit: createMockAuditService(),
     queues: createMockQueueService(),
     portal: createMockPortalService(),
+    driverRun: createMockDriverRunService(),
   };
 }

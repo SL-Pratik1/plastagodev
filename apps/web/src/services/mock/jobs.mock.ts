@@ -1,4 +1,11 @@
-import type { Job, JobComment, JobDraft, PricePreview, PricePreviewLine } from '@plastago/shared';
+import {
+  requiresRiskAssessment,
+  type Job,
+  type JobComment,
+  type JobDraft,
+  type PricePreview,
+  type PricePreviewLine,
+} from '@plastago/shared';
 import { ServiceError } from '../service-error';
 import type { JobService } from '../types';
 import { applyListQuery, byDate, byNumber, byText } from './list-query';
@@ -215,6 +222,22 @@ export function createMockJobService(): JobService {
         invoicedAt: null,
         gst: centsToMoney(gstCents),
         totalIncGst: centsToMoney(subtotalCents + gstCents),
+        /*
+         * M4.8b — resolved AT CREATION and then frozen on the job.
+         *
+         * Not read live from the account later: a job booked today under
+         * today's rule must still show today's rule when it is audited next
+         * year. Re-deriving it would let a settings change rewrite the past and
+         * make a compliant job look like a gap.
+         */
+        compliance: {
+          riskAssessmentRequired: requiresRiskAssessment(
+            store.accountRiskAssessment.get(account.id) ?? account.riskAssessmentRequired,
+            site.riskAssessmentOverride,
+          ),
+          riskAssessment: null,
+          preStart: null,
+        },
       };
 
       store.jobs = [job, ...store.jobs];

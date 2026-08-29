@@ -1,6 +1,11 @@
 import {
+  PRE_START_ITEMS,
+  RISK_CONTROLS,
+  SITE_HAZARDS,
+  requiresRiskAssessment,
   type Job,
   type JobCharge,
+  type JobCompliance,
   type JobEvent,
   type JobListItem,
   type JobStatus,
@@ -591,10 +596,138 @@ function build(): Built {
       invoicedAt: invoiced ? atTime(addDays(readyDate, 1), 16, 0) : null,
       gst: centsToMoney(gstCents),
       totalIncGst: centsToMoney(subtotalCents + gstCents),
+      compliance: buildCompliance({
+        rng,
+        index,
+        readyDate,
+        driverName: driver?.name ?? null,
+        vehicleRego: driver?.vehicleRego ?? null,
+        reachedSite: onSiteMinutes !== null,
+        riskAssessmentRequired: requiresRiskAssessment(
+          account.riskAssessmentRequired,
+          site.riskAssessmentOverride,
+        ),
+      }),
     });
   }
 
   return { jobs, sites: SITES };
+}
+
+/**
+ * M4.8 — the safety record the office reads back on a job.
+ *
+ * ── Why the shapes here are deliberately uneven ───────────────────────────
+ * Both records are nullable, and they are null for DIFFERENT reasons that the
+ * compliance screen has to be able to tell apart:
+ *
+ *  • `preStart` is null on a job whose driver never started a run — nothing was
+ *    skipped, the day simply has not happened.
+ *  • `riskAssessment` is null on a job that never needed one, AND on one that
+ *    needed one and did not get it. Only the second is a gap, which is why
+ *    `riskAssessmentRequired` sits beside it rather than being inferred from
+ *    the record's presence.
+ *
+ * ── The distribution is chosen to make the gaps reachable ─────────────────
+ * A fixture set where every required assessment was completed would render a
+ * screen of green ticks that nobody could tell apart from a screen with no
+ * checking behind it. So roughly one in eight required assessments is missing,
+ * one in nine is marked unsafe, and a fraction of pre-starts carry a failed
+ * item — the states the office actually has to act on.
+ */
+function buildCompliance(input: {
+  rng: () => number;
+  index: number;
+  readyDate: Date;
+  driverName: string | null;
+  vehicleRego: string | null;
+  reachedSite: boolean;
+  riskAssessmentRequired: boolean;
+}): JobCompliance {
+  const { rng, readyDate, driverName, vehicleRego, reachedSite, riskAssessmentRequired } = input;
+
+  // No driver allocated yet means no run, so neither record can exist.
+  if (driverName === null) {
+    return { riskAssessmentRequired, riskAssessment: null, preStart: null };
+  }
+
+  /*
+   * The pre-start belongs to the RUN, not the job — one check covers every stop
+   * that driver makes that day. It is copied onto each job because the question
+   * "was this truck checked before it came to my site" is asked of the job, and
+   * an auditor should not have to reconstruct which run it belonged to.
+   */
+  const failedItem = rng() > 0.88 ? pick(rng, [...PRE_START_ITEMS]) : null;
+  const preStart = {
+    completedAt: atTime(readyDate, 5, 40 + Math.floor(rng() * 35)),
+    driverName,
+    vehicleRego: vehicleRego ?? '',
+    odometerKm: intBetween(rng, 180000, 460000),
+    failedItems:
+      failedItem === null
+        ? []
+        : [
+            {
+              key: failedItem.key,
+              label: failedItem.label,
+              note: pick(rng, [
+                'Worn to the bars on the nearside rear.',
+                'Beacon flickers when the engine is cold.',
+                'Park brake needs a hard pull to hold.',
+                'Strap frayed about a third of the way along.',
+              ]),
+            },
+          ],
+    itemsChecked: PRE_START_ITEMS.length,
+  };
+
+  // The assessment is filled in ON ARRIVAL, so a job the driver never reached
+  // cannot have one — and is not a gap either.
+  if (!riskAssessmentRequired || !reachedSite) {
+    return { riskAssessmentRequired, riskAssessment: null, preStart };
+  }
+
+  // The gap the screen exists to surface: required, arrived, never filled in.
+  if (rng() > 0.88) {
+    return { riskAssessmentRequired, riskAssessment: null, preStart };
+  }
+
+  const safeToProceed = rng() > 0.11;
+  const hazardPool = SITE_HAZARDS.filter((hazard) => hazard.key !== 'no-hazards');
+  const hazards =
+    rng() > 0.75
+      ? ['No significant hazards identified']
+      : [pick(rng, hazardPool).label, pick(rng, hazardPool).label];
+
+  return {
+    riskAssessmentRequired,
+    preStart,
+    riskAssessment: {
+      completedAt: atTime(readyDate, 9, 20 + Math.floor(rng() * 25)),
+      driverName,
+      // De-duplicated: picking twice from the same pool can land on one hazard,
+      // and a list that says "Uneven ground, Uneven ground" reads as a bug.
+      hazards: [...new Set(hazards)],
+      controls: safeToProceed
+        ? [...new Set([pick(rng, RISK_CONTROLS).label, pick(rng, RISK_CONTROLS).label])]
+        : ['Work stopped — unsafe to proceed'],
+      note: safeToProceed
+        ? pick(rng, ['', '', 'Kept the truck on the road side, slab still green.'])
+        : 'Powerlines directly over the only crane position. Rang the office.',
+      safeToProceed,
+      swmsVersion: 'SWMS-2026.1',
+      // Null where the site has no QR sign on the fence — a real and common case.
+      builderPortalCode: rng() > 0.3 ? `SITE-${String(intBetween(rng, 10000, 99999))}` : null,
+      /*
+       * The upload is the one step that talks to SOMEBODY ELSE'S system, so it
+       * is the step that fails. `queued` is the offline case — the driver was at
+       * a fence with no signal, which is the normal way this starts.
+       */
+      uploadState: safeToProceed
+        ? pick(rng, ['uploaded', 'uploaded', 'uploaded', 'queued', 'failed'] as const)
+        : 'uploaded',
+    },
+  };
 }
 
 const built = build();
@@ -620,6 +753,7 @@ export function toListItem(job: Job): JobListItem {
     invoicedAt: _invoicedAt,
     gst: _gst,
     totalIncGst: _totalIncGst,
+    compliance: _compliance,
     ...listItem
   } = job;
   return listItem;

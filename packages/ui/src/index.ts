@@ -5,18 +5,20 @@
  * with `npx shadcn@latest add <component>` from `packages/ui` — `components.json`
  * is already configured — then export it here.
  *
- * ── Why there is no Radix dependency ──────────────────────────────────────
- * The overlay primitives here (Dialog, Drawer, Menu, Tabs, Select, Checkbox,
- * Switch) are built on platform features instead: the native `<dialog>` element
- * for focus trapping and the top layer, a real `<select>` so phones get the
- * system picker, real `<input>`s so labels and form submission behave, and the
- * documented ARIA tab pattern for Tabs. Each carries a note explaining what the
- * platform gives us and where the limits are.
+ * ── Platform first, Radix where the platform shows through ────────────────
+ * Dialog, Drawer, Menu, Tabs, Checkbox and Switch are built on platform
+ * features: the native `<dialog>` element for focus trapping and the top layer,
+ * real `<input>`s so labels and form submission behave, and the documented ARIA
+ * tab pattern for Tabs. Each carries a note on what the platform gives us and
+ * where the limits are.
  *
- * If a future screen needs something the platform genuinely cannot do —
- * combobox with async search, virtualised listbox, anchored popover that flips
- * at the viewport edge — add `@radix-ui/*` for that one component rather than
- * rewriting these.
+ * `Select` and `DatePicker` are the exceptions, and for one shared reason: a
+ * native `<select>` and a native `<input type="date">` render their POPUP with
+ * the operating system's own widget. No amount of CSS reaches inside it, so the
+ * console showed a Windows-blue list and a Chrome calendar in the middle of an
+ * otherwise fully themed product. Both now draw the popup with Radix while
+ * keeping the native element underneath, hidden, as the value the form reads —
+ * so `register()`, submission and `event.target.value` behave exactly as before.
  */
 
 export { cn } from './lib/utils.js';
@@ -40,7 +42,9 @@ export { Separator, type SeparatorProps } from './components/separator.js';
 export { Input } from './components/input.js';
 export { Label } from './components/label.js';
 export { Textarea } from './components/textarea.js';
-export { Select } from './components/select.js';
+export { Select, type SelectProps } from './components/select.js';
+export { DatePicker, type DatePickerProps } from './components/date-picker.js';
+export { Calendar, type CalendarProps } from './components/calendar.js';
 export { Checkbox, type CheckboxProps } from './components/checkbox.js';
 export { Switch, type SwitchProps } from './components/switch.js';
 export { Field, type FieldProps, type FieldControlProps } from './components/field.js';
@@ -58,6 +62,13 @@ export {
   type MenuProps,
   type MenuItemProps,
 } from './components/menu.js';
+export {
+  Popover,
+  PopoverTrigger,
+  PopoverAnchor,
+  PopoverContent,
+  type PopoverContentProps,
+} from './components/popover.js';
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 export {

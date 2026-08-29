@@ -69,7 +69,7 @@ const CATEGORY_ICON = {
 
 export function AdminNotificationsPage() {
   const toast = useToast();
-  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 25 });
+  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = useNotificationList(controller.query);
   const summary = useNotificationSummary();
 
@@ -277,7 +277,7 @@ export function AdminNotificationsPage() {
             total={data.meta.total}
             onPageChange={controller.setPage}
             onPageSizeChange={controller.setPageSize}
-            pageSizeOptions={[10, 25, 50]}
+            pageSizeOptions={[5, 10, 15, 20]}
             disabled={isFetching}
           />
         )}

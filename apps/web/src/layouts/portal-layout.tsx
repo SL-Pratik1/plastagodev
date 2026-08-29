@@ -13,6 +13,7 @@ import { ChevronDownIcon, LogOutIcon, PhoneIcon } from 'lucide-react';
 import { useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
+import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { visiblePortalNav } from '@/config/portal-navigation';
 import { SessionExpiry } from '@/features/auth/session-expiry';
@@ -56,10 +57,14 @@ export function PortalLayout() {
   const confirmSignOut = async () => {
     setSigningOut(true);
     try {
+      // Leave the guarded tree BEFORE the session goes. The moment `RequireAuth`
+      // sees an authenticated route without a session it stashes the current
+      // path as a `from` for whoever signs in next — and one person's last
+      // screen is not the next person's destination.
+      await navigate('/auth/sign-in', { replace: true, state: null });
       await signOut();
       setSignOutOpen(false);
       toast.success('You’ve been signed out');
-      await navigate('/auth/sign-in', { replace: true });
     } finally {
       setSigningOut(false);
     }
@@ -143,6 +148,20 @@ export function PortalLayout() {
             >
               <PhoneIcon aria-hidden className="size-5" />
             </a>
+
+            {/*
+              A site supervisor lives on a phone as much as any driver does —
+              they book pickups standing on the slab. Installed, the portal opens
+              full screen from their home screen instead of through a bookmark.
+              Hidden on the narrowest widths only because this header is already
+              carrying a call button there.
+            */}
+            <InstallButton
+              size="sm"
+              variant="ghost"
+              label="Install"
+              className="hidden sm:inline-flex"
+            />
 
             <ThemeToggle />
 

@@ -7,6 +7,7 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  DatePicker,
   Field,
   Input,
   Select,
@@ -274,7 +275,7 @@ export function AdminJobCreatePage() {
                   error={errors.readyDate?.message}
                   hint="Target is this date plus 5 business days."
                 >
-                  {(aria) => <Input {...aria} {...register('readyDate')} type="date" />}
+                  {(aria) => <DatePicker {...aria} {...register('readyDate')} />}
                 </Field>
 
                 <Field

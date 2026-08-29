@@ -194,7 +194,7 @@ const COLUMNS: readonly DataTableColumn<LeadListItem>[] = [
 ];
 
 export function AdminQueueLeadsPage() {
-  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 25 });
+  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = useLeadList(controller.query);
 
   // Computed from the visible page only, and labelled as such — a "conversion

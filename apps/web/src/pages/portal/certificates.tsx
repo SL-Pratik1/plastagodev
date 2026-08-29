@@ -47,7 +47,7 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
 export function PortalCertificatesPage() {
   const toast = useToast();
   const scope = usePortalScope();
-  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 25 });
+  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = usePortalCertificates(controller.query);
   const requestPdf = usePortalCertificatePdf();
 

@@ -5,6 +5,7 @@ import { AppProviders } from '@/app/providers';
 import { router } from '@/app/router';
 import { env } from '@/config/env';
 import { createMockServices } from '@/services/mock/create-mock-services';
+import { registerServiceWorker } from '@/pwa/register-sw';
 import './styles/index.css';
 
 /**
@@ -50,4 +51,17 @@ void startMocks().then(() => {
       </AppProviders>
     </StrictMode>,
   );
+
+  /*
+   * After first paint, and after the mocks.
+   *
+   * After paint because pixels on screen matter more — to a driver standing in
+   * the sun and to an office user opening a grid — than pre-caching the shell a
+   * few hundred milliseconds sooner.
+   *
+   * After the mocks because MSW installs its own service worker in dev. Racing
+   * the two registrations is how one silently wins and the other never
+   * activates, which presents as "the offline shell works on some reloads".
+   */
+  registerServiceWorker();
 });

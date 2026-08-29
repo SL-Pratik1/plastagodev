@@ -98,6 +98,15 @@ export interface AccountFixture {
   notes: string;
   builders: readonly string[];
   contacts: Contact[];
+  /**
+   * M4.8b — this builder contractually requires a Site Risk Assessment.
+   *
+   * On for the two project-home builders and off for the rest, because that is
+   * how Matt described it — a rule some clients impose, not a PlastaGo policy.
+   * A demo where every account requires it would never exercise the far more
+   * common path of a driver arriving and simply starting work.
+   */
+  riskAssessmentRequired: boolean;
 }
 
 function contact(
@@ -141,6 +150,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: 'Weekdays 7am–2pm',
     notes: 'Largest account. Records m² only — weight is never captured.',
     builders: ['GJ Gardner', 'Fowler Homes', 'King Homes'],
+    riskAssessmentRequired: false,
     contacts: [
       contact(1, 1, 'Angela Fitzgerald', 'accounts', 'accounts@iplasta.com.au', null),
       contact(1, 2, 'Dave Nguyen', 'site', null, '0466778899'),
@@ -161,6 +171,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: 'PO required before invoicing. Additional charges need a separate PO.',
     builders: ['Clarendon Homes'],
+    riskAssessmentRequired: true,
     contacts: [
       contact(2, 1, 'Marcus Webb', 'accounts', 'ap@clarendonhomes.com.au', null),
       contact(2, 2, 'Sione Tupou', 'site', null, '0413556677'),
@@ -182,6 +193,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: 'Shares the Clarendon rate card.',
     builders: ['Domaine Homes'],
+    riskAssessmentRequired: true,
     contacts: [
       contact(3, 1, 'Julia Kefalas', 'accounts', 'accounts@domaine.com.au', null),
       contact(3, 2, 'Brett Sanders', 'site', null, '0421889001'),
@@ -202,6 +214,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: 'm² only.',
     builders: ['Fornari Group', 'Mirvac'],
+    riskAssessmentRequired: false,
     contacts: [contact(4, 1, 'Rosa Fornari', 'accounts', 'rosa@fornari.com.au', '0407221334')],
   },
   {
@@ -219,6 +232,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: 'Bespoke $20 "Fuel Levy — Wisdom" additional service applies.',
     builders: ['Wisdom Homes'],
+    riskAssessmentRequired: false,
     contacts: [contact(5, 1, 'Tom Ashworth', 'accounts', 'ap@wisdomhomes.com.au', null)],
   },
   {
@@ -236,6 +250,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: 'Services Mirvac and Sharwood sites.',
     builders: ['Mirvac', 'Sharwood'],
+    riskAssessmentRequired: false,
     contacts: [contact(6, 1, 'Nadia Haddad', 'accounts', 'accounts@durnco.com.au', null)],
   },
   {
@@ -253,6 +268,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: 'Mornings only',
     notes: 'EasyLift brand — crane work.',
     builders: ['Allam Homes'],
+    riskAssessmentRequired: false,
     contacts: [contact(7, 1, 'Craig Peterson', 'site', 'craig@lakesideint.com.au', '0455901223')],
   },
   {
@@ -270,6 +286,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: 'EasyLift brand.',
     builders: ['Rawson Homes'],
+    riskAssessmentRequired: false,
     contacts: [contact(8, 1, 'Petra Nowak', 'accounts', 'accounts@illawarralinings.com.au', null)],
   },
   {
@@ -287,6 +304,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: '',
     builders: ['Metricon'],
+    riskAssessmentRequired: false,
     contacts: [contact(9, 1, 'Ali Rahimi', 'site', null, '0432110987')],
   },
   {
@@ -304,6 +322,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: '',
     builders: ['Eden Brae Homes'],
+    riskAssessmentRequired: false,
     contacts: [contact(10, 1, 'Vince Marino', 'accounts', 'vince@southgateplaster.com.au', null)],
   },
   {
@@ -321,6 +340,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: 'Casual and one-off jobs are booked against this account by the office.',
     builders: ['—'],
+    riskAssessmentRequired: false,
     contacts: [],
   },
   {
@@ -338,6 +358,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
     preferredPickupWindow: null,
     notes: 'No jobs in the last 12 months.',
     builders: ['—'],
+    riskAssessmentRequired: false,
     contacts: [],
   },
 ];
@@ -435,6 +456,14 @@ export function buildSites(): Site[] {
           rng() > 0.25 ? `04${String(intBetween(rng, 10000000, 99999999))}`.slice(0, 10) : null,
         jobCount: intBetween(rng, 1, 22),
         status: account.status,
+        /*
+         * Almost every site follows its account, which is the point of the
+         * `inherit` default — but roughly one in twelve differs, so the
+         * override column has something to show and the "this one site is
+         * different" case is walkable in a demo rather than theoretical.
+         */
+        riskAssessmentOverride:
+          rng() > 0.92 ? (account.riskAssessmentRequired ? 'not-required' : 'required') : 'inherit',
       });
     }
   }

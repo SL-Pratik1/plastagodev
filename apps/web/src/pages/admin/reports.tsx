@@ -12,8 +12,8 @@ import {
   Button,
   Card,
   CardContent,
+  DatePicker,
   ErrorState,
-  Input,
   Pagination,
   Select,
   Skeleton,
@@ -140,8 +140,7 @@ export function AdminReportsPage() {
           <CardContent className="flex flex-wrap items-end gap-3 pt-5">
             <label className="flex flex-col gap-1 text-xs text-muted-foreground">
               From
-              <Input
-                type="date"
+              <DatePicker
                 value={filters.from}
                 onChange={(event) => {
                   setParam('from', event.target.value);
@@ -151,8 +150,7 @@ export function AdminReportsPage() {
             </label>
             <label className="flex flex-col gap-1 text-xs text-muted-foreground">
               To
-              <Input
-                type="date"
+              <DatePicker
                 value={filters.to}
                 onChange={(event) => {
                   setParam('to', event.target.value);
@@ -687,7 +685,7 @@ function CertificatesTab({
             total={data.meta.total}
             onPageChange={controller.setPage}
             onPageSizeChange={controller.setPageSize}
-            pageSizeOptions={[10, 25, 50]}
+            pageSizeOptions={[5, 10, 15, 20]}
           />
         )}
       </Card>

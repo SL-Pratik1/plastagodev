@@ -277,6 +277,90 @@ export const JobCommentDraftSchema = z
   })
   .meta({ id: 'JobCommentDraft' });
 
+/**
+ * M4.8b — where an assessment has got to in the five-step sequence.
+ *
+ * Declared in THIS module rather than beside the rest of the driver schemas,
+ * because `driver.ts` imports from here and the reverse would be a cycle.
+ */
+export const SRA_STEP_STATES = ['pending', 'queued', 'uploaded', 'failed'] as const;
+export const SraUploadStateSchema = z.enum(SRA_STEP_STATES).meta({ id: 'SraUploadState' });
+export type SraUploadState = z.infer<typeof SraUploadStateSchema>;
+
+/**
+ * M4.8 — the compliance record the office can READ BACK.
+ *
+ * ── Why this exists as its own block on the job ───────────────────────────
+ * The driver already fills in a pre-start checklist and, on some sites, a Site
+ * Risk Assessment. Both were write-only: the forms went into the outbox and
+ * there was no screen anywhere in the console that showed whether they had been
+ * done. For a Chain of Responsibility obligation that is the wrong way round —
+ * the record's whole purpose is being produced when someone asks for it.
+ *
+ * ── Why it is NOT in the timeline ─────────────────────────────────────────
+ * `events` answers "what happened, in order". This answers "was the obligation
+ * met", which is a different question asked by different people at different
+ * times — usually an auditor or a builder, months later. Burying it in a
+ * chronological feed would mean scrolling to prove a negative.
+ */
+export const JobPreStartRecordSchema = z
+  .object({
+    completedAt: IsoDateTimeSchema,
+    driverName: NonEmptyStringSchema,
+    vehicleRego: z.string(),
+    odometerKm: z.number().int().nonnegative(),
+    /**
+     * Only the items the driver marked FAIL, with their note.
+     *
+     * Deliberately not all fourteen: a wall of green ticks is noise, and the
+     * office is looking for the one line that says the brakes felt soft. The
+     * count of everything checked is `itemsChecked`.
+     */
+    failedItems: z.array(
+      z.object({
+        key: NonEmptyStringSchema,
+        label: NonEmptyStringSchema,
+        note: z.string(),
+      }),
+    ),
+    itemsChecked: z.number().int().nonnegative(),
+  })
+  .meta({ id: 'JobPreStartRecord' });
+
+export const JobRiskAssessmentRecordSchema = z
+  .object({
+    completedAt: IsoDateTimeSchema,
+    driverName: NonEmptyStringSchema,
+    /** Resolved to labels here — the office should not need the key table. */
+    hazards: z.array(NonEmptyStringSchema),
+    controls: z.array(NonEmptyStringSchema),
+    note: z.string(),
+    /** False means the driver judged the site unsafe and stopped. */
+    safeToProceed: z.boolean(),
+    swmsVersion: NonEmptyStringSchema,
+    /** Scanned off the site fence. Null where the site has no QR sign. */
+    builderPortalCode: z.string().nullable(),
+    /** Step 5 of the five-step workflow — the handoff to the builder's portal. */
+    uploadState: SraUploadStateSchema,
+  })
+  .meta({ id: 'JobRiskAssessmentRecord' });
+
+export const JobComplianceSchema = z
+  .object({
+    /**
+     * Resolved from the account default and the site's override at the moment
+     * the job was created — NOT read live.
+     *
+     * A job completed in March must still show the rule that applied in March;
+     * re-deriving it from today's settings would silently rewrite history and
+     * make a past job look non-compliant because a flag changed since.
+     */
+    riskAssessmentRequired: z.boolean(),
+    riskAssessment: JobRiskAssessmentRecordSchema.nullable(),
+    preStart: JobPreStartRecordSchema.nullable(),
+  })
+  .meta({ id: 'JobCompliance' });
+
 /** The grid row. Kept deliberately flat — a list must not need a join to render. */
 export const JobListItemSchema = z
   .object({
@@ -328,6 +412,8 @@ export const JobSchema = JobListItemSchema.extend({
   invoicedAt: IsoDateTimeSchema.nullable(),
   gst: MoneySchema,
   totalIncGst: MoneySchema,
+  /** M4.8 — the safety record, readable by the office. */
+  compliance: JobComplianceSchema,
 }).meta({ id: 'Job' });
 
 /**
@@ -394,6 +480,9 @@ export type JobComment = z.infer<typeof JobCommentSchema>;
 export type JobCommentDraft = z.infer<typeof JobCommentDraftSchema>;
 export type JobListItem = z.infer<typeof JobListItemSchema>;
 export type Job = z.infer<typeof JobSchema>;
+export type JobCompliance = z.infer<typeof JobComplianceSchema>;
+export type JobPreStartRecord = z.infer<typeof JobPreStartRecordSchema>;
+export type JobRiskAssessmentRecord = z.infer<typeof JobRiskAssessmentRecordSchema>;
 export type JobDraft = z.infer<typeof JobDraftSchema>;
 export type PricePreviewLine = z.infer<typeof PricePreviewLineSchema>;
 export type PricePreview = z.infer<typeof PricePreviewSchema>;

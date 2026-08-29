@@ -82,11 +82,16 @@ export function SignInPage() {
   };
 
   return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Sign in</CardTitle>
-          <CardDescription>
+    <div className="space-y-5">
+      {/*
+        This card is the only object on its half of the screen, so it carries a
+        deeper shadow than the app default — a dashboard tiles eight cards and
+        needs restraint, a sign-in panel is meant to float.
+      */}
+      <Card className="p-1.5 shadow-[0_1px_2px_rgb(16_24_16/0.04),0_12px_32px_-8px_rgb(16_24_16/0.12)]">
+        <CardHeader className="gap-1.5 p-5 pb-4">
+          <CardTitle className="text-xl tracking-tight">Sign in</CardTitle>
+          <CardDescription className="text-[0.9375rem]">
             We’ll send you a one-time code. No password to remember.
           </CardDescription>
         </CardHeader>
@@ -127,7 +132,10 @@ export function SignInPage() {
                     spellCheck={false}
                     enterKeyHint="send"
                     placeholder="you@company.com.au or 0412 345 678"
-                    className="pr-9"
+                    // Taller than the app's 36px default. This is the single
+                    // field on the screen and the first thing anyone touches on
+                    // a phone, where 36px is below the comfortable tap target.
+                    className="h-11 pr-10 text-[0.9375rem]"
                   />
                   {channel && (
                     <span

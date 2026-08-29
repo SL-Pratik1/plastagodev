@@ -762,6 +762,9 @@ export function createMockQueueService(): QueueService {
         siteContactMobile: lead.mobile,
         jobCount: 0,
         status: 'active',
+        // A site created by converting a lead follows its new account's rule.
+        // Anything else would silently exempt every customer we just won.
+        riskAssessmentOverride: 'inherit',
       });
 
       return { accountId, customerCode: input.customerCode };

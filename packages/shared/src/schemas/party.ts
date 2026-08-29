@@ -87,6 +87,26 @@ export const ACCOUNT_STATUSES = ['active', 'inactive'] as const;
 export const AccountStatusSchema = z.enum(ACCOUNT_STATUSES).meta({ id: 'AccountStatus' });
 export type AccountStatus = z.infer<typeof AccountStatusSchema>;
 
+/**
+ * M4.8b — how one site answers "is the risk form required here?".
+ *
+ * `inherit` is the default: the requirement is the builder's policy, so it
+ * belongs on the account and a site normally just follows it.
+ */
+export const RISK_ASSESSMENT_OVERRIDES = ['inherit', 'required', 'not-required'] as const;
+export const RiskAssessmentOverrideSchema = z
+  .enum(RISK_ASSESSMENT_OVERRIDES)
+  .meta({ id: 'RiskAssessmentOverride' });
+
+export const RISK_ASSESSMENT_OVERRIDE_LABELS: Record<
+  (typeof RISK_ASSESSMENT_OVERRIDES)[number],
+  string
+> = {
+  inherit: 'Follow the account',
+  required: 'Always required',
+  'not-required': 'Never required',
+};
+
 /** M8.4 — one contact per role, each with its own channel preferences. */
 export const CONTACT_ROLES = ['site', 'accounts', 'sustainability'] as const;
 export const ContactRoleSchema = z.enum(CONTACT_ROLES).meta({ id: 'ContactRole' });
@@ -141,8 +161,40 @@ export const SiteSchema = z
     siteContactMobile: z.string().nullable(),
     jobCount: z.number().int().nonnegative(),
     status: AccountStatusSchema,
+    /**
+     * M4.8b — does a driver have to complete a Site Risk Assessment here?
+     *
+     * `inherit` is the default and by far the common case: the requirement is
+     * a builder's policy, so it belongs on the account. This exists because
+     * Matt's words were "on certain sites", not "for certain builders" — one
+     * estate with overhead powerlines can demand it where the rest of the
+     * account does not, and one already-inducted site can be excused.
+     *
+     * ⚠️ Three states, not a boolean, and that is the point. A boolean cannot
+     * say "follow the account", so every site would freeze whatever the account
+     * happened to be on the day it was created — and turning the requirement on
+     * for a builder would then silently miss all their existing sites.
+     */
+    riskAssessmentOverride: RiskAssessmentOverrideSchema,
   })
   .meta({ id: 'Site' });
+
+/**
+ * Does THIS site need the risk form? The account's rule unless overridden.
+ *
+ * One function, exported, because the driver app, the job screen and the site
+ * grid all have to agree — and "required unless the site says otherwise" is
+ * exactly the kind of rule that gets reimplemented slightly differently in
+ * three places.
+ */
+export function requiresRiskAssessment(
+  accountDefault: boolean,
+  override: RiskAssessmentOverride,
+): boolean {
+  if (override === 'required') return true;
+  if (override === 'not-required') return false;
+  return accountDefault;
+}
 
 /** Row shape for the accounts grid — enough to filter and scan, no more. */
 export const AccountListItemSchema = z
@@ -162,6 +214,18 @@ export const AccountListItemSchema = z
   .meta({ id: 'AccountListItem' });
 
 export const AccountSchema = AccountListItemSchema.extend({
+  /**
+   * M4.8b — this builder requires a Site Risk Assessment before a driver starts.
+   *
+   * Lives on the ACCOUNT because it is a contractual term of theirs, not
+   * something PlastaGo decides per job. Individual sites can still differ —
+   * see `riskAssessmentOverride` on `Site`.
+   *
+   * ⚠️ Scope §Q36 is still open on whether this is ultimately per-account or
+   * per-site. Modelling it as "account default + site override" answers both
+   * readings without forcing the decision now, and without a migration later.
+   */
+  riskAssessmentRequired: z.boolean(),
   abn: z.string(),
   paymentTermsDays: z.number().int().positive(),
   primaryZone: ZoneSchema,
@@ -174,5 +238,6 @@ export const AccountSchema = AccountListItemSchema.extend({
 
 export type Contact = z.infer<typeof ContactSchema>;
 export type Site = z.infer<typeof SiteSchema>;
+export type RiskAssessmentOverride = z.infer<typeof RiskAssessmentOverrideSchema>;
 export type AccountListItem = z.infer<typeof AccountListItemSchema>;
 export type Account = z.infer<typeof AccountSchema>;

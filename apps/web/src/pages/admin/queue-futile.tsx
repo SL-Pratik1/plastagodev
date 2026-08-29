@@ -12,9 +12,9 @@ import {
   Badge,
   Button,
   Card,
+  DatePicker,
   Dialog,
   Field,
-  Input,
   Pagination,
   Select,
   Spinner,
@@ -507,9 +507,8 @@ function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogPr
                   error={fieldError ?? undefined}
                 >
                   {(control) => (
-                    <Input
+                    <DatePicker
                       {...control}
-                      type="date"
                       min={earliest}
                       value={newReadyDate}
                       onChange={(event) => {

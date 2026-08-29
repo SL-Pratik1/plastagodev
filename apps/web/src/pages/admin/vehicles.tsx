@@ -1,12 +1,14 @@
 import { VEHICLE_TYPE_LABELS, VEHICLE_TYPES, type VehicleListItem } from '@plastago/shared';
-import { Alert, Badge, Card, Pagination } from '@plastago/ui';
-import { WrenchIcon } from 'lucide-react';
+import { Alert, Badge, Button, Card, Pagination } from '@plastago/ui';
+import { PlusIcon, WrenchIcon } from 'lucide-react';
+import { useState } from 'react';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { ExpiryBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
+import { VehicleFormDialog } from '@/features/fleet/components/vehicle-form-dialog';
 import { useVehicleList } from '@/features/fleet/queries';
 import { useAuth } from '@/features/auth/auth-context';
 import { formatDate, formatMoney } from '@/lib/format';
@@ -123,6 +125,25 @@ const COLUMNS: readonly DataTableColumn<VehicleListItem>[] = [
     ),
   },
   {
+    /*
+     * Only rendered for a vehicle that is OFF the road.
+     *
+     * A column reading "In service" five times over is noise, and the filter
+     * already existed with nothing on the grid to confirm it had worked — so an
+     * out-of-service truck was invisible unless you opened it.
+     */
+    id: 'active',
+    header: '',
+    priority: 'secondary',
+    className: 'w-32',
+    cell: (row) =>
+      row.active ? null : (
+        <Badge variant="outline" className="whitespace-nowrap">
+          Out of service
+        </Badge>
+      ),
+  },
+  {
     id: 'odometerKm',
     header: 'Odometer',
     sortKey: 'odometerKm',
@@ -160,7 +181,8 @@ const COLUMNS: readonly DataTableColumn<VehicleListItem>[] = [
 
 export function AdminVehiclesPage() {
   const { can } = useAuth();
-  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 25 });
+  const [addOpen, setAddOpen] = useState(false);
+  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = useVehicleList(controller.query);
 
   // Cost per km is the commercial half of F43 (it feeds the margin figure,
@@ -181,6 +203,16 @@ export function AdminVehiclesPage() {
           seesPricing
             ? 'Odometer and expenses in, cost per kilometre out — plus a registration reminder that actually fires.'
             : 'Registration, servicing and driver-reported defects — with reminders that actually fire.'
+        }
+        actions={
+          <Button
+            onClick={() => {
+              setAddOpen(true);
+            }}
+          >
+            <PlusIcon aria-hidden />
+            Add vehicle
+          </Button>
         }
       />
 
@@ -223,6 +255,16 @@ export function AdminVehiclesPage() {
             icon: WrenchIcon,
             title: 'No vehicles yet',
             description: 'Add the fleet to start tracking cost per kilometre.',
+            action: (
+              <Button
+                onClick={() => {
+                  setAddOpen(true);
+                }}
+              >
+                <PlusIcon aria-hidden />
+                Add vehicle
+              </Button>
+            ),
           }}
         />
 
@@ -233,7 +275,7 @@ export function AdminVehiclesPage() {
             total={data.meta.total}
             onPageChange={controller.setPage}
             onPageSizeChange={controller.setPageSize}
-            pageSizeOptions={[10, 25, 50]}
+            pageSizeOptions={[5, 10, 15, 20]}
             disabled={isFetching}
           />
         )}
@@ -243,6 +285,13 @@ export function AdminVehiclesPage() {
         Deliberately simple: an expense is a date, an odometer reading, a description and a price.
         No parts-and-labour breakdown — that was explicitly not wanted.
       </p>
+
+      <VehicleFormDialog
+        open={addOpen}
+        onClose={() => {
+          setAddOpen(false);
+        }}
+      />
     </div>
   );
 }

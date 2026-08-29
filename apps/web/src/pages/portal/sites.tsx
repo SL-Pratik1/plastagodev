@@ -148,7 +148,7 @@ const COLUMNS: readonly DataTableColumn<PortalSite>[] = [
 ];
 
 export function PortalSitesPage() {
-  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 25 });
+  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = usePortalSites(controller.query);
 
   const missingNotes = (data?.data ?? []).filter((site) => !site.accessNotes).length;

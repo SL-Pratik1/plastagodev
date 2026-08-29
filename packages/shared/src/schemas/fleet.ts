@@ -272,3 +272,60 @@ export type VehicleExpense = z.infer<typeof VehicleExpenseSchema>;
 export type VehicleDefect = z.infer<typeof VehicleDefectSchema>;
 export type VehicleListItem = z.infer<typeof VehicleListItemSchema>;
 export type Vehicle = z.infer<typeof VehicleSchema>;
+
+/**
+ * Create/edit a vehicle (M9.7 · F43).
+ *
+ * ── What is deliberately NOT on here ──────────────────────────────────────
+ * `costPerKm`, `totalExpensesExGst`, `lastServiceOn`, `distanceSince…` and both
+ * `…State` badges are all **derived from the expense log**. Letting anyone type
+ * a cost per kilometre would be the fastest way to make the one number this
+ * screen exists to produce untrustworthy — Matt's own framing is that odometer
+ * and expenses go *in* and cost per kilometre comes *out*.
+ *
+ * `active` and `assignedDriverName` are absent for a different reason: they are
+ * decisions taken on their own, off a menu, on a day when nobody is editing the
+ * make and model. Folding them into this form would mean opening a nine-field
+ * dialog to take a truck off the road.
+ */
+export const VehicleDraftSchema = z
+  .object({
+    rego: z
+      .string()
+      .trim()
+      .min(2, 'Enter the registration plate')
+      .max(10)
+      .transform((value) => value.toUpperCase()),
+    label: z.string().trim().min(2, 'Describe the vehicle, e.g. Isuzu FVZ crane truck').max(60),
+    type: VehicleTypeSchema,
+    make: z.string().trim().max(40),
+    model: z.string().trim().max(40),
+    year: z.number().int().min(1980).max(2100).nullable(),
+    odometerKm: z.number().int().nonnegative(),
+    registrationExpiresOn: IsoDateSchema,
+    registrationPeriodMonths: z.number().int().positive(),
+    purchasedOn: IsoDateSchema.nullable(),
+    notes: z.string().trim().max(500),
+  })
+  .meta({ id: 'VehicleDraft' });
+
+/**
+ * One expense (F43).
+ *
+ * `odometerKm` is required, not optional, and that is the whole design: an
+ * expense without a reading contributes a cost with no distance to divide it
+ * by, which silently skews cost per kilometre rather than failing loudly.
+ */
+export const VehicleExpenseDraftSchema = z
+  .object({
+    incurredOn: IsoDateSchema,
+    odometerKm: z.number().int().nonnegative(),
+    kind: VehicleExpenseKindSchema,
+    description: z.string().trim().min(2, 'Say what it was for, e.g. “A service”').max(120),
+    amountExGst: MoneySchema,
+    supplier: z.string().trim().max(60).nullable(),
+  })
+  .meta({ id: 'VehicleExpenseDraft' });
+
+export type VehicleDraft = z.infer<typeof VehicleDraftSchema>;
+export type VehicleExpenseDraft = z.infer<typeof VehicleExpenseDraftSchema>;

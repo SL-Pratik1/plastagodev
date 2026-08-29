@@ -63,7 +63,7 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
 
 export function PortalJobsPage() {
   const scope = usePortalScope();
-  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 25 });
+  const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = usePortalJobs(controller.query);
   const sites = usePortalSites({ page: 1, pageSize: 200 });
 

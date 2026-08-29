@@ -7,9 +7,10 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  cn,
+  DatePicker,
   EmptyState,
   ErrorState,
-  Input,
   Menu,
   MenuItem,
   MenuLabel,
@@ -21,7 +22,6 @@ import {
   TabsList,
   TabsPanel,
   TabsTrigger,
-  cn,
   useToast,
 } from '@plastago/ui';
 import {
@@ -99,8 +99,7 @@ export function AdminDispatchPage() {
         actions={
           <label className="flex items-center gap-2 text-sm">
             <span className="text-muted-foreground">Date</span>
-            <Input
-              type="date"
+            <DatePicker
               value={date}
               onChange={(event) => {
                 setParam('date', event.target.value, todayIso());

@@ -22,14 +22,20 @@ npm install
 npm run dev          # everything, in parallel
 ```
 
-| Surface                         | URL                                |
-| ------------------------------- | ---------------------------------- |
-| API                             | http://localhost:4000/api/v1       |
-| API contract                    | http://localhost:4000/openapi.json |
-| Admin console + customer portal | http://localhost:5173              |
-| Driver PWA                      | http://localhost:5174              |
+| Surface                                       | URL                                |
+| --------------------------------------------- | ---------------------------------- |
+| API                                           | http://localhost:4000/api/v1       |
+| API contract                                  | http://localhost:4000/openapi.json |
+| Admin console + customer portal + driver app  | http://localhost:5173              |
+| Driver run sheet                              | http://localhost:5173/driver       |
+| _(legacy)_ standalone driver PWA              | http://localhost:5174              |
 
 Or one at a time: `npm run dev:api` · `npm run dev:web` · `npm run dev:driver`.
+
+> ⚠️ **`apps/driver` is superseded.** The driver screens now live in `apps/web`
+> under `/driver/*` and the standalone build is kept only until the change has
+> been reviewed. Nothing imports it and nothing links to it. See
+> _Why the driver app moved_ below.
 
 **MongoDB is required** (or the API boots degraded — see below). Redis is
 optional and off by default.
@@ -46,8 +52,9 @@ curl localhost:4000/readyz
 ```
 plastago-web/
 ├─ apps/
-│  ├─ web/       admin console + customer portal  (ONE Vite app, role-based routing)
-│  ├─ driver/    driver PWA                       (separate Vite app — own service worker)
+│  ├─ web/       admin console + customer portal + driver app  (ONE Vite app,
+│  │             role-based routing, one service worker, one manifest)
+│  ├─ driver/    SUPERSEDED — the standalone driver PWA, pending deletion
 │  └─ api/       Express 5 + BullMQ workers
 ├─ packages/
 │  ├─ shared/      Zod schemas → the single source of truth → generated OpenAPI
@@ -62,8 +69,25 @@ plastago-mobile/    SEPARATE repo — Flutter native driver app
 **Why admin and portal are one app:** they share auth, session and most
 components, so one app with role-based routing is simpler than two (§6A.5).
 
-**Why the driver PWA is separate:** its service worker and offline shell need
-their own build configuration.
+**Why the driver app moved into `apps/web`:** a browser will only ever offer to
+install the page it is already on. `beforeinstallprompt` is delivered to a
+document solely when that document's OWN manifest scope contains it, and there is
+no API anywhere in the platform for installing somebody else's app. While the
+driver screens were a separate build on another origin, an "Install the driver
+app" button could not be made to work from the console — which is what drivers
+signing in there were being asked to use.
+
+One app at `scope: '/'` makes that button ordinary, and a driver now signs in at
+the same address as everyone else, lands on `/driver`, and installs from the
+header or the Me screen.
+
+The separation existed because the service worker and offline shell needed their
+own build configuration. That is recovered rather than abandoned: `vite.config.ts`
+precaches the driver chunks and deliberately does **not** precache the console's
+(`OFFICE_ONLY_CHUNKS` — Recharts and React Hook Form), so a driver's phone never
+caches ~384 kB of charting library it will never run. The offline layer itself —
+Dexie, the outbox, the demo offline switch — moved across intact and is still
+the only write path on that surface.
 
 **Why `api-client` exists** (an addition to the documented layout): both browser
 apps need identical request, parse and error semantics. Copying it into two apps

@@ -1,3 +1,8 @@
+import type {
+  VehicleDefectState,
+  VehicleDraft,
+  VehicleExpenseDraft,
+} from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
 import { useServices } from '@/services/services-context';
@@ -63,12 +68,86 @@ function useFleetMutation<TInput, TResult>(mutationFn: (input: TInput) => Promis
 
 export function useRenewRegistration() {
   const { vehicles } = useServices();
-  return useFleetMutation((id: string) => vehicles.renewRegistration(id));
+  return useFleetMutation(
+    ({ id, expense }: { id: string; expense?: VehicleExpenseDraft | null }) =>
+      vehicles.renewRegistration(id, expense),
+  );
 }
 
-export function useResolveDefect() {
+/**
+ * open → scheduled → resolved.
+ *
+ * One hook rather than `useResolveDefect` plus `useScheduleDefect`, because the
+ * two differ only in the value they pass and a pair would drift the moment a
+ * fourth state appears.
+ */
+export function useSetDefectState() {
   const { vehicles } = useServices();
-  return useFleetMutation(({ vehicleId, defectId }: { vehicleId: string; defectId: string }) =>
-    vehicles.resolveDefect(vehicleId, defectId),
+  return useFleetMutation(
+    ({
+      vehicleId,
+      defectId,
+      state,
+    }: {
+      vehicleId: string;
+      defectId: string;
+      state: VehicleDefectState;
+    }) => vehicles.setDefectState(vehicleId, defectId, state),
+  );
+}
+
+export function useCreateVehicle() {
+  const { vehicles } = useServices();
+  return useFleetMutation((draft: VehicleDraft) => vehicles.create(draft));
+}
+
+export function useUpdateVehicle() {
+  const { vehicles } = useServices();
+  return useFleetMutation(({ id, draft }: { id: string; draft: VehicleDraft }) =>
+    vehicles.update(id, draft),
+  );
+}
+
+export function useSetVehicleActive() {
+  const { vehicles } = useServices();
+  return useFleetMutation(({ id, active }: { id: string; active: boolean }) =>
+    vehicles.setActive(id, active),
+  );
+}
+
+/**
+ * Invalidates the DRIVER list as well as the vehicle one.
+ *
+ * The assignment shows on both screens — "Vehicle" on the drivers grid, "Driver"
+ * on the vehicles grid — so refreshing only the side you happened to be looking
+ * at leaves the other one confidently wrong until something else happens to
+ * refetch it. Same reason dispatch is invalidated: a run sheet names the truck.
+ */
+export function useAssignVehicleDriver() {
+  const { vehicles } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id, driverName }: { id: string; driverName: string | null }) =>
+      vehicles.assignDriver(id, driverName),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.vehicles.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.drivers.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.dispatch.all });
+    },
+  });
+}
+
+export function useAddVehicleExpense() {
+  const { vehicles } = useServices();
+  return useFleetMutation(({ id, draft }: { id: string; draft: VehicleExpenseDraft }) =>
+    vehicles.addExpense(id, draft),
+  );
+}
+
+export function useSetNextService() {
+  const { vehicles } = useServices();
+  return useFleetMutation(({ id, dueOn }: { id: string; dueOn: string | null }) =>
+    vehicles.setNextService(id, dueOn),
   );
 }

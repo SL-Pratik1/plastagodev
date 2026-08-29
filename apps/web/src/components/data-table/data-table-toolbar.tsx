@@ -15,9 +15,9 @@ export interface DataTableToolbarProps {
 /**
  * Search, filters and list actions.
  *
- * Filters use native `<select>` rather than a custom popover: on a phone that
- * gives the full-height system picker, and on desktop it gives type-ahead for
- * free. A filter is a value being chosen, which is exactly what a select is for.
+ * Filters are `Select`s — a filter is a value being chosen, which is what a
+ * select is for. `Select` renders a themed Radix listbox over a hidden native
+ * element, so the popup matches the console instead of the operating system.
  *
  * The "Clear" affordance only appears once something is actually narrowing the
  * list, and the active count is shown next to it — a grid returning nothing
@@ -33,9 +33,21 @@ export function DataTableToolbar({
   const searchId = useId();
 
   return (
-    <div className="flex flex-col gap-3 border-b border-border p-3 lg:flex-row lg:items-center lg:justify-between">
-      <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
-        <div className="relative sm:max-w-xs sm:flex-1">
+    /*
+     * The filter row WRAPS.
+     *
+     * It used to be a single non-wrapping line. Jobs declares eight filters, so
+     * past about 1200px the row ran off the end of the card: the last filters
+     * were unreachable and the search box — the one flexible item — was squeezed
+     * to an empty square barely wider than its own icon. Wrapping puts the
+     * overflow on a second line instead of off-screen, and the fixed basis on
+     * search means it stops shrinking to make room.
+     */
+    <div className="flex flex-col gap-3 border-b border-border p-3 lg:flex-row lg:items-start lg:justify-between">
+      <div className="flex flex-1 flex-wrap items-center gap-2">
+        {/* 18rem fits the longest placeholder in the app — "Search job number,
+            account, site or PO…" — without truncating it to a fragment. */}
+        <div className="relative w-full min-w-[13rem] sm:w-[18rem] sm:flex-initial">
           <SearchIcon
             aria-hidden
             className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
@@ -69,7 +81,7 @@ export function DataTableToolbar({
         </div>
 
         {filters?.map((filter) => (
-          <div key={filter.key} className="sm:w-40">
+          <div key={filter.key} className="w-[calc(50%-0.25rem)] sm:w-44">
             <label htmlFor={`filter-${filter.key}`} className="sr-only">
               {filter.label}
             </label>

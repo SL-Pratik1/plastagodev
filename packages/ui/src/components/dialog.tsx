@@ -109,9 +109,16 @@ export function Dialog({
     >
       {/* Inner wrapper: the click-outside check above needs a child to hit. */}
       <div className="flex max-h-[calc(100dvh-2rem)] flex-col">
-        <div className="flex items-start gap-4 p-5 pb-3">
+        {/*
+          Header and footer are separated from the scrolling body by real rules.
+          Without them a long dialog just severed its content mid-element at the
+          top and bottom edges — a photo card sliced in half reads as a broken
+          layout, not as "there is more below". The rules turn the same clipping
+          into an obvious scroll region.
+        */}
+        <div className="flex shrink-0 items-start gap-4 border-b border-border p-5 pb-4">
           <div className="min-w-0 flex-1 space-y-1">
-            <h2 id={titleId} className="text-base font-semibold tracking-tight">
+            <h2 id={titleId} className="text-[0.9375rem] font-semibold tracking-tight">
               {title}
             </h2>
             {description && (
@@ -134,11 +141,18 @@ export function Dialog({
         </div>
 
         {children !== undefined && children !== null && (
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-1 text-sm">{children}</div>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 text-sm">
+            {children}
+          </div>
         )}
 
+        {/*
+          `bg-card` is not decoration here: the body scrolls underneath, and
+          without an opaque footer the last row of content shows through behind
+          the buttons.
+        */}
         {footer && (
-          <div className="flex flex-col-reverse gap-2 p-5 pt-4 sm:flex-row sm:justify-end">
+          <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border bg-card p-4 sm:flex-row sm:justify-end">
             {footer}
           </div>
         )}

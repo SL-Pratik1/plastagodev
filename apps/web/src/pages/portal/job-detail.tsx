@@ -3,20 +3,20 @@ import {
   Alert,
   Badge,
   Button,
+  buttonVariants,
   Card,
   CardContent,
   CardHeader,
   CardTitle,
+  DatePicker,
   Dialog,
   EmptyState,
   ErrorState,
   Field,
-  Input,
   Select,
   Skeleton,
   Spinner,
   Textarea,
-  buttonVariants,
   useToast,
 } from '@plastago/ui';
 import {
@@ -588,9 +588,8 @@ function ChangeRequestDialog({
             hint="We will confirm what is possible on the day's run."
           >
             {(control) => (
-              <Input
+              <DatePicker
                 {...control}
-                type="date"
                 min={today}
                 value={requestedDate}
                 onChange={(event) => {

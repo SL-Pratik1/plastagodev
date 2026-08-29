@@ -8,6 +8,7 @@ import {
   CardHeader,
   CardTitle,
   Checkbox,
+  DatePicker,
   ErrorState,
   Field,
   Input,
@@ -298,7 +299,7 @@ export function PortalBookPage() {
                 hint="We aim to collect within 5 business days of this date."
               >
                 {(control) => (
-                  <Input {...control} type="date" min={today} {...register('readyDate')} />
+                  <DatePicker {...control} min={today} {...register('readyDate')} />
                 )}
               </Field>
 

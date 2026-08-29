@@ -497,9 +497,16 @@ export const SiteRiskAssessmentSchema = DriverActionEnvelopeSchema.extend({
 }).meta({ id: 'SiteRiskAssessment' });
 
 /** Where an assessment has got to in the five-step sequence. */
-export const SRA_STEP_STATES = ['pending', 'queued', 'uploaded', 'failed'] as const;
-export const SraUploadStateSchema = z.enum(SRA_STEP_STATES).meta({ id: 'SraUploadState' });
-export type SraUploadState = z.infer<typeof SraUploadStateSchema>;
+/*
+ * ⚠️ `SRA_STEP_STATES` now lives in `jobs.ts` and is re-exported here.
+ *
+ * Not a tidy-up: the office's job compliance record needs the same enum, and
+ * this module already imports `jobs.ts`. Declaring it here and importing it
+ * there would have been a cycle — which with Zod means a schema evaluated
+ * before its dependency exists, i.e. a crash at module load rather than a type
+ * error. The definition sits in the module with no inbound edge.
+ */
+export { SRA_STEP_STATES, SraUploadStateSchema, type SraUploadState } from './jobs.js';
 
 /* ── Vehicle defects (M4.9 · F43, W33) ───────────────────────────────────── */
 

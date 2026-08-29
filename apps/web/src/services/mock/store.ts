@@ -70,6 +70,16 @@ export const store = {
   // collections that reference them.
   futileDecisions: new Map<string, FutileDecisionRecord>(),
   chases: new Map<string, ChaseRecord>(),
+  /*
+   * M4.8b — the office's overrides of each account's risk-assessment rule.
+   *
+   * A Map keyed by account id rather than a field mutated on the `ACCOUNTS`
+   * fixture, because those are `readonly` module constants shared by every
+   * mock: writing into one would leak a demo edit into the jobs, dispatch and
+   * portal fixtures that also read them. Per-SITE overrides do live on the row,
+   * since `store.sites` is already a mutable copy.
+   */
+  accountRiskAssessment: new Map<string, boolean>(),
   invoiceOverrides: new Map<string, InvoiceOverride>(),
   leads: buildLeads(),
   poExtractions: buildPoExtractions(),

@@ -74,13 +74,9 @@ const COLUMNS: readonly DataTableColumn<DriverListItem>[] = [
     header: 'Status',
     priority: 'secondary',
     cell: (row) => (
-      <span className="flex flex-wrap gap-1">
-        <Badge variant={row.active ? 'success' : 'outline'}>
-          {row.active ? 'Active' : 'Inactive'}
-        </Badge>
-        {/* Confirmed on Call 2: basically all of their drivers are subcontractors. */}
-        {row.employment === 'subcontractor' && <Badge variant="secondary">Subcontractor</Badge>}
-      </span>
+      <Badge variant={row.active ? 'success' : 'outline'}>
+        {row.active ? 'Active' : 'Inactive'}
+      </Badge>
     ),
   },
   {
@@ -200,7 +196,7 @@ export function AdminDriversPage() {
             total={data.meta.total}
             onPageChange={controller.setPage}
             onPageSizeChange={controller.setPageSize}
-            pageSizeOptions={[10, 25, 50]}
+            pageSizeOptions={[5, 10, 15, 20]}
             disabled={isFetching}
           />
         )}

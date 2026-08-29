@@ -2,15 +2,44 @@
 <html lang="en-AU">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      `viewport-fit=cover` so `env(safe-area-inset-*)` resolves to real values
+      once this is installed and running standalone — otherwise the driver's
+      fixed tab bar sits under an iPhone's home indicator.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <link rel="icon" type="image/png" href="/brand/plastago-mark.png" />
+    <!--
+      iOS ignores the web app manifest's icons entirely and reads this instead,
+      so the two must be kept in step — see `vite.config.ts`. A missing
+      apple-touch-icon is how an app added to a driver's home screen ends up as
+      a screenshot of the page rather than the brand mark.
+    -->
     <link rel="apple-touch-icon" href="/brand/plastago-mark.png" />
+    <!--
+      Also iOS-only, and also unread by the manifest: these are what make an
+      installed copy open full screen instead of inside Safari's chrome.
+    -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="PlastaGo" />
     <!-- The brand's deep forest green — matches the console's navigation rail. -->
     <meta name="theme-color" content="#1b3820" />
 
     <!--
-      Brand typography: Montserrat for headings and navigation, Open Sans for
-      body — the same pairing as plastago.com.au.
+      Brand typography: Montserrat for headings and navigation — the marketing
+      site's own display face, and what makes the console read as PlastaGo.
+
+      Body and UI text is Inter rather than the site's Open Sans. Open Sans is a
+      web-page face: wide, open-apertured, tuned for paragraphs. This console is
+      mostly 12–14px table cells, filter chips and numeric columns, where that
+      width costs horizontal room and the soft letterforms blur together. Inter
+      was drawn for screen UI at exactly those sizes and ships true tabular
+      figures, so money and m² columns align on the decimal without per-cell
+      overrides. Headings stay Montserrat, so the brand voice is unchanged.
 
       `preconnect` to both hosts because the stylesheet on fonts.googleapis.com
       then pulls the font files from fonts.gstatic.com; without the second hint
@@ -23,7 +52,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700&family=Open+Sans:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700&family=Inter:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
 

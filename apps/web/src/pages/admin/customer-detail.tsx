@@ -4,7 +4,11 @@ import {
   CONTACT_ROLE_LABELS,
   PO_POLICY_LABELS,
   RATE_CARD_LABELS,
+  RISK_ASSESSMENT_OVERRIDES,
+  RISK_ASSESSMENT_OVERRIDE_LABELS,
   ZONE_LABELS,
+  requiresRiskAssessment,
+  type Account,
   type InvoiceListItem,
   type JobListItem,
   type Site,
@@ -18,13 +22,23 @@ import {
   CardTitle,
   ErrorState,
   Pagination,
+  Select,
   Skeleton,
+  Switch,
   Tabs,
   TabsList,
   TabsPanel,
   TabsTrigger,
+  useToast,
 } from '@plastago/ui';
-import { BriefcaseIcon, MailIcon, MapPinIcon, ReceiptIcon, SmartphoneIcon } from 'lucide-react';
+import {
+  BriefcaseIcon,
+  MailIcon,
+  MapPinIcon,
+  ReceiptIcon,
+  ShieldCheckIcon,
+  SmartphoneIcon,
+} from 'lucide-react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
@@ -38,6 +52,8 @@ import {
   useCustomerInvoices,
   useCustomerJobs,
   useCustomerSites,
+  useSetRiskAssessmentRequired,
+  useSetSiteRiskAssessmentOverride,
 } from '@/features/customers/queries';
 import { describeError } from '@/lib/error-message';
 import { formatDate, formatMobile, formatMoney } from '@/lib/format';
@@ -230,7 +246,7 @@ export function AdminCustomerDetailPage() {
             />
             <DataTable
               caption={`Sites for ${account.name}`}
-              columns={SITE_COLUMNS}
+              columns={siteColumns(account.riskAssessmentRequired)}
               rows={sites.data?.data ?? []}
               getRowId={(row) => row.id}
               isPending={sites.isPending}
@@ -254,7 +270,7 @@ export function AdminCustomerDetailPage() {
                 total={sites.data.meta.total}
                 onPageChange={siteQuery.setPage}
                 onPageSizeChange={siteQuery.setPageSize}
-                pageSizeOptions={[10, 25, 50]}
+                pageSizeOptions={[5, 10, 15, 20]}
               />
             )}
           </Card>
@@ -343,7 +359,7 @@ export function AdminCustomerDetailPage() {
                 total={jobs.data.meta.total}
                 onPageChange={jobQuery.setPage}
                 onPageSizeChange={jobQuery.setPageSize}
-                pageSizeOptions={[10, 25, 50]}
+                pageSizeOptions={[5, 10, 15, 20]}
               />
             )}
           </Card>
@@ -378,7 +394,7 @@ export function AdminCustomerDetailPage() {
                 total={invoices.data.meta.total}
                 onPageChange={invoiceQuery.setPage}
                 onPageSizeChange={invoiceQuery.setPageSize}
-                pageSizeOptions={[10, 25, 50]}
+                pageSizeOptions={[5, 10, 15, 20]}
               />
             )}
           </Card>
@@ -386,7 +402,16 @@ export function AdminCustomerDetailPage() {
 
         {/* ── Preferences ──────────────────────────────────────────────── */}
         <TabsPanel value="preferences">
-          <Card>
+          {/*
+            M4.8b — the switch that decides what a DRIVER is made to do on site.
+
+            First on the tab, above the read-only service preferences, because it
+            is the only thing here that is both editable and a safety obligation.
+            Everything below it is a commercial setting someone glances at.
+          */}
+          <RiskAssessmentCard account={account} />
+
+          <Card className="mt-4">
             <CardHeader>
               <CardTitle>Service preferences</CardTitle>
             </CardHeader>
@@ -414,7 +439,147 @@ export function AdminCustomerDetailPage() {
   );
 }
 
-const SITE_COLUMNS: readonly DataTableColumn<Site>[] = [
+/**
+ * M4.8b — the account's Site Risk Assessment rule.
+ *
+ * ── Why this is a switch and not a read-only row ──────────────────────────
+ * Until now the requirement existed only as a flag baked into fixture data,
+ * with no screen anywhere that could set it. That made a contractual obligation
+ * of the CUSTOMER'S — Matt's words were "required by some clients" — into
+ * something only a developer could change, which is the wrong owner entirely.
+ *
+ * ── Why the copy names the consequence ────────────────────────────────────
+ * Turning this on adds a form a driver must complete standing at a fence,
+ * before they may start, on every job for this account. That is a real cost to
+ * someone who is not in the room, so the switch says so rather than reading as
+ * a preference.
+ */
+function RiskAssessmentCard({ account }: { account: Account }) {
+  const toast = useToast();
+  const setRequired = useSetRiskAssessmentRequired(account.id);
+
+  const toggle = async (next: boolean) => {
+    try {
+      await setRequired.mutateAsync(next);
+      toast.success(
+        next ? 'Risk assessment now required' : 'Risk assessment no longer required',
+        next
+          ? `Drivers must complete it on arrival at every ${account.name} site.`
+          : 'Sites with their own override are unaffected.',
+      );
+    } catch (error) {
+      toast.error(describeError(error).title, describeError(error).detail);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Site safety</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 gap-3">
+            <span className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full bg-accent text-accent-foreground">
+              <ShieldCheckIcon aria-hidden className="size-5" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Site Risk Assessment required</p>
+              <p className="text-sm text-muted-foreground">
+                {account.name} requires a written assessment before a driver may start. The form
+                opens by itself when the driver taps Arrived, and the job cannot be completed until
+                it is done.
+              </p>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                Individual sites can differ — set an exception on the Sites tab.
+              </p>
+            </div>
+          </div>
+
+          <Switch
+            checked={account.riskAssessmentRequired}
+            disabled={setRequired.isPending}
+            onCheckedChange={(next) => void toggle(next)}
+            aria-label="Site Risk Assessment required"
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * One site's exception to the account rule.
+ *
+ * Rendered inside the grid rather than behind a row action: the whole reason to
+ * open this tab is to see which sites differ, and a control you have to click
+ * into to read is not an answer to that question.
+ */
+function SiteRiskOverrideCell({ site, accountDefault }: { site: Site; accountDefault: boolean }) {
+  const toast = useToast();
+  const setOverride = useSetSiteRiskAssessmentOverride();
+  const effective = requiresRiskAssessment(accountDefault, site.riskAssessmentOverride);
+
+  return (
+    <span className="flex flex-col gap-1">
+      <Select
+        value={site.riskAssessmentOverride}
+        disabled={setOverride.isPending}
+        aria-label={`Risk assessment for ${site.name}`}
+        className="h-8 text-xs"
+        onChange={(event) => {
+          const override = event.target.value as Site['riskAssessmentOverride'];
+          void setOverride
+            .mutateAsync({ siteId: site.id, override })
+            .then(() => {
+              toast.success('Site updated', RISK_ASSESSMENT_OVERRIDE_LABELS[override]);
+            })
+            .catch((error: unknown) => {
+              toast.error(describeError(error).title, describeError(error).detail);
+            });
+        }}
+      >
+        {RISK_ASSESSMENT_OVERRIDES.map((value) => (
+          <option key={value} value={value}>
+            {RISK_ASSESSMENT_OVERRIDE_LABELS[value]}
+          </option>
+        ))}
+      </Select>
+      {/*
+        The resolved answer, spelled out. "Follow the account" is not something
+        anyone can act on without also remembering what the account says — and
+        the whole point of the override is that some rows do not match it.
+      */}
+      <span className="text-[11px] text-muted-foreground">
+        {effective ? 'Driver must complete it' : 'Not required here'}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Site columns, built per account.
+ *
+ * A function rather than a module constant because the risk-assessment column
+ * has to resolve each site against ITS ACCOUNT'S default — "Follow the account"
+ * means nothing without knowing what the account says. A static column list
+ * cannot see that, and reading it from a module-level variable would be a
+ * second source of truth for a value already on screen.
+ */
+function siteColumns(accountDefault: boolean): readonly DataTableColumn<Site>[] {
+  return [
+    ...BASE_SITE_COLUMNS,
+    {
+      id: 'riskAssessment',
+      header: 'Risk form',
+      priority: 'secondary',
+      className: 'w-48',
+      cell: (row) => <SiteRiskOverrideCell site={row} accountDefault={accountDefault} />,
+    },
+  ];
+}
+
+const BASE_SITE_COLUMNS: readonly DataTableColumn<Site>[] = [
   {
     id: 'name',
     header: 'Site',

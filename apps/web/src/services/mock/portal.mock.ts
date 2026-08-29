@@ -1,4 +1,4 @@
-import { PENDING_READINESS_STATUSES } from '@plastago/shared';
+import { PENDING_READINESS_STATUSES, requiresRiskAssessment } from '@plastago/shared';
 import type {
   Certificate,
   Job,
@@ -633,6 +633,17 @@ export function createMockPortalService(): CustomerPortalService {
         invoicedAt: null,
         gst: centsToMoney(gst),
         totalIncGst: centsToMoney(subtotal + gst),
+        // Resolved at creation and frozen — see the note on the office's
+        // `create` in `jobs.mock.ts`. A booking made through the portal is
+        // still a job a driver will be sent to, so the rule applies identically.
+        compliance: {
+          riskAssessmentRequired: requiresRiskAssessment(
+            store.accountRiskAssessment.get(account.id) ?? account.riskAssessmentRequired,
+            site.riskAssessmentOverride,
+          ),
+          riskAssessment: null,
+          preStart: null,
+        },
       };
 
       store.jobs = [...store.jobs, job];

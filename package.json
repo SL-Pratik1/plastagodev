@@ -13,6 +13,8 @@
   ],
   "scripts": {
     "dev": "turbo run dev",
+    "dev:clean": "node scripts/free-ports.mjs && turbo run dev",
+    "free-ports": "node scripts/free-ports.mjs",
     "dev:api": "turbo run dev --filter=@plastago/api",
     "dev:web": "turbo run dev --filter=@plastago/web",
     "dev:driver": "turbo run dev --filter=@plastago/driver",

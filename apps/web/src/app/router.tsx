@@ -7,7 +7,18 @@ import {
   DashboardPage,
   DispatchPage,
   DriverDetailPage,
+  DriverJobContaminationPage,
+  DriverJobDetailPage,
+  DriverJobFutilePage,
+  DriverJobPhotosPage,
+  DriverJobRiskAssessmentPage,
+  DriverJobWeightsPage,
+  DriverMePage,
+  DriverPreStartPage,
+  DriverReportDefectPage,
+  DriverRunSheetPage,
   DriversPage,
+  DriverTipOffPage,
   FoundationPage,
   InvoiceDetailPage,
   InvoicesPage,
@@ -46,9 +57,9 @@ import { RequireAuth } from '@/features/auth/require-auth';
 import { RequireCapability } from '@/features/auth/require-capability';
 import { AdminShell } from '@/layouts/admin-shell';
 import { AuthLayout } from '@/layouts/auth-layout';
+import { DriverShell } from '@/layouts/driver-shell';
 import { PlainLayout } from '@/layouts/plain-layout';
 import { PortalLayout } from '@/layouts/portal-layout';
-import { DriverAppPage } from '@/pages/auth/driver-app';
 import { ForbiddenPage } from '@/pages/auth/forbidden';
 import { RootRedirect } from '@/pages/auth/root-redirect';
 import { SignInPage } from '@/pages/auth/sign-in';
@@ -59,10 +70,20 @@ import { RouteError } from './route-error';
 /**
  * The whole route table, in one file.
  *
- * Role-based routing (§6A.5): `/admin/*` is the office console (M2, M3, M7, M9)
- * and `/portal/*` is the customer portal (M5) — one app, one session, two
- * shells. The driver app is a SEPARATE Vite app because its service worker and
- * offline shell need their own build configuration.
+ * Role-based routing (§6A.5): `/admin/*` is the office console (M2, M3, M7, M9),
+ * `/portal/*` is the customer portal (M5) and `/driver/*` is the driver app
+ * (M4) — one app, one session, three shells.
+ *
+ * ── Why the driver surface is here and not a separate build ───────────────
+ * It was a separate Vite app, for a real reason: the service worker and offline
+ * shell needed their own configuration. What overturned that is a browser rule,
+ * not a preference — a page can only ever offer to install ITSELF. While the
+ * driver screens lived on another origin, no "Install the driver app" button
+ * could exist in the console, because `beforeinstallprompt` is never delivered
+ * to a page outside the target manifest's scope. One app at `scope: '/'` makes
+ * that button ordinary. The offline configuration it cost is recovered in
+ * `vite.config.ts`, which precaches the driver chunks and deliberately does not
+ * precache the console's.
  *
  * ── How access is enforced ─────────────────────────────────────────────────
  * Guards wrap each route GROUP, never individual pages, exactly as this file has
@@ -107,8 +128,6 @@ export const router = createBrowserRouter([
         children: [
           { path: 'sign-in', element: <SignInPage /> },
           { path: 'verify', element: <VerifyOtpPage /> },
-          // A driver who signs in here has a valid account but the wrong app.
-          { path: 'driver-app', element: <DriverAppPage /> },
         ],
       },
 
@@ -297,6 +316,64 @@ export const router = createBrowserRouter([
                     element: <RequireCapability capability="portal:account" />,
                     children: [{ path: 'account', element: load(<PortalAccountPage />) }],
                   },
+                ],
+              },
+            ],
+          },
+
+          /*
+           * The driver app (M4).
+           *
+           * ── One capability for the whole surface, and why that is right ──
+           * The console and the portal gate screen groups individually because
+           * roles differ within them. The driver surface has one role who does
+           * all of it; what varies is which RUN they are given, and that is
+           * server-side data scoping, not a browser permission. So the boundary
+           * is guarded once, here, and nothing inside needs a second check.
+           *
+           * `onDenied="redirect"` because reaching `/driver` as an office user
+           * means being in the wrong application, not lacking a permission —
+           * the same judgement `/admin` and `/portal` already make.
+           *
+           * ⚠️ `DriverShell` is EAGER while its pages are lazy. On a phone with
+           * no signal the shell is what proves the app is alive; putting a
+           * suspense fallback in front of the header and its sync badge would
+           * mean a driver opening the app offline sees a blank screen first.
+           */
+          {
+            path: 'driver',
+            element: <RequireCapability capability="driver:access" onDenied="redirect" />,
+            children: [
+              {
+                element: <DriverShell />,
+                children: [
+                  { index: true, element: load(<DriverRunSheetPage />) },
+
+                  // M4.8a — before the run, and it blocks it.
+                  { path: 'pre-start', element: load(<DriverPreStartPage />) },
+
+                  // M4.1, M4.2 — the job, and the single next action on it.
+                  { path: 'jobs/:jobId', element: load(<DriverJobDetailPage />) },
+                  { path: 'jobs/:jobId/photos', element: load(<DriverJobPhotosPage />) },
+                  { path: 'jobs/:jobId/weights', element: load(<DriverJobWeightsPage />) },
+                  { path: 'jobs/:jobId/futile', element: load(<DriverJobFutilePage />) },
+                  {
+                    path: 'jobs/:jobId/contamination',
+                    element: load(<DriverJobContaminationPage />),
+                  },
+                  {
+                    path: 'jobs/:jobId/risk-assessment',
+                    element: load(<DriverJobRiskAssessmentPage />),
+                  },
+
+                  // M4.4 — end of run.
+                  { path: 'tip-off', element: load(<DriverTipOffPage />) },
+
+                  // M4.9 — the truck itself.
+                  { path: 'report', element: load(<DriverReportDefectPage />) },
+
+                  // M4.12 — the queue, and the driver's own details.
+                  { path: 'me', element: load(<DriverMePage />) },
                 ],
               },
             ],

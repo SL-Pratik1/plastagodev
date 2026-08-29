@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="PlastaGo">
+  <!--
+    Installed-app icon, drawn to be safe under a MASKABLE crop.
+
+    Android clips this to whatever shape the launcher uses — circle, squircle,
+    teardrop — and only guarantees the inner 80% (a circle of radius 205px about
+    the centre). So the background is deliberately full-bleed to the edges, and
+    the mark sits well inside that circle. An icon drawn edge-to-edge without
+    that margin gets its corners shaved off on exactly the devices drivers use.
+  -->
+  <rect width="512" height="512" fill="#1b3820"/>
+  <text x="256" y="322" font-family="system-ui,-apple-system,Segoe UI,sans-serif"
+        font-size="190" font-weight="700" fill="#ffffff" text-anchor="middle">PG</text>
+</svg>
