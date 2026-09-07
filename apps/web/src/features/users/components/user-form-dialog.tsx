@@ -7,6 +7,7 @@ import {
   ROLE_PRIMARY_CHANNEL,
   ROLES,
   type BrandId,
+  type Role,
   type User,
 } from '@plastago/shared';
 import {
@@ -24,6 +25,9 @@ import {
 import { useEffect } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import * as z from 'zod';
+import { CONFIGURED_BRAND_IDS, IS_MULTI_BRAND } from '@/config/brands';
+import { useAuth } from '@/features/auth/auth-context';
+import { assignableRoles, isCustomerRole as isCustomerRoleName } from '@/features/users/roles';
 import { useAccountOptions } from '@/features/lookups/queries';
 import { describeError } from '@/lib/error-message';
 import { isServiceError } from '@/services/service-error';
@@ -52,6 +56,15 @@ const FormSchema = z
     email: z.string().trim(),
     mobile: z.string().trim(),
     role: z.enum(ROLES),
+    /**
+     * The one dual-role case Matt confirmed: an allocator who also drives.
+     *
+     * 27:01: *"if we have a driver that calls in sick he'll take over for them
+     * for the day."* A checkbox rather than a multi-select, because he was
+     * equally clear that no other pairing is wanted (27:36) — a general role
+     * matrix would invite combinations nobody has asked for and nobody tests.
+     */
+    alsoDrives: z.boolean(),
     jobTitle: z.string().trim().max(80),
     brandIds: z.array(z.enum(BRAND_IDS)).min(1, 'Choose at least one brand'),
     accountId: z.string(),
@@ -119,6 +132,7 @@ const EMPTY: FormValues = {
   email: '',
   mobile: '',
   role: 'office-staff',
+  alsoDrives: false,
   jobTitle: '',
   brandIds: ['plastago'],
   accountId: '',
@@ -134,10 +148,30 @@ export interface UserFormDialogProps {
 
 export function UserFormDialog({ open, onClose, user }: UserFormDialogProps) {
   const toast = useToast();
+  const { can } = useAuth();
   const accounts = useAccountOptions();
   const createUser = useCreateUser();
   const updateUser = useUpdateUser();
   const editing = Boolean(user);
+
+  /**
+   * Which roles this seat may hand out.
+   *
+   * An operations seat holds `users:manage-customers`, so the dropdown offers
+   * the Customer Administrator and the Site Supervisor and nothing else — the
+   * restriction is visible in the control rather than discovered on submit.
+   *
+   * The edited user's own role is prepended when it is outside that set, which
+   * only happens if a staff record is somehow opened from a narrowed seat. A
+   * `<select>` whose value is not among its options silently reports the FIRST
+   * option instead, so saving would quietly re-role an office worker — a much
+   * worse outcome than showing a role that cannot be chosen fresh.
+   */
+  const canManageAll = can('users:manage');
+  const roleOptions: readonly Role[] = (() => {
+    const allowed = assignableRoles(canManageAll);
+    return user && !allowed.includes(user.role) ? [user.role, ...allowed] : allowed;
+  })();
 
   const {
     register,
@@ -163,14 +197,17 @@ export function UserFormDialog({ open, onClose, user }: UserFormDialogProps) {
             email: user.email ?? '',
             mobile: user.mobile ?? '',
             role: user.role,
+            alsoDrives: user.roles.includes('driver') && user.role !== 'driver',
             jobTitle: user.jobTitle ?? '',
             brandIds: user.brandIds,
             accountId: user.accountId ?? '',
             notes: user.notes,
           }
-        : EMPTY,
+        : // A seat that can only invite customers must not open on "Office
+          // staff" — the first thing they would do is change it, every time.
+          { ...EMPTY, role: canManageAll ? EMPTY.role : 'customer-administrator' },
     );
-  }, [open, user, reset]);
+  }, [open, user, reset, canManageAll]);
 
   const role = useWatch({ control, name: 'role' });
   const brandIds = useWatch({ control, name: 'brandIds' });
@@ -178,10 +215,24 @@ export function UserFormDialog({ open, onClose, user }: UserFormDialogProps) {
   const channel = ROLE_PRIMARY_CHANNEL[role];
 
   const onSubmit = async (values: FormValues) => {
+    // Belt and braces for the narrowed seat: the dropdown cannot offer a staff
+    // role, but a stale form or a devtools edit should fail on the field rather
+    // than reach the service.
+    if (!canManageAll && !isCustomerRoleName(values.role)) {
+      setError('role', {
+        type: 'manual',
+        message: 'You can invite customer administrators and site supervisors only',
+      });
+      return;
+    }
+
+    const { alsoDrives, ...rest } = values;
     const draft = {
-      ...values,
+      ...rest,
       accountId: values.accountId || null,
       brandIds: values.brandIds,
+      // Only meaningful for an allocator — see `alsoDrives`.
+      additionalRoles: alsoDrives && values.role === 'allocator' ? (['driver'] as const).slice() : [],
     };
 
     try {
@@ -224,11 +275,19 @@ export function UserFormDialog({ open, onClose, user }: UserFormDialogProps) {
     <Dialog
       open={open}
       onClose={isSubmitting ? () => undefined : onClose}
-      title={editing ? `Edit ${user?.name ?? 'user'}` : 'Invite a user'}
+      title={
+        editing
+          ? `Edit ${user?.name ?? 'user'}`
+          : canManageAll
+            ? 'Invite a user'
+            : 'Invite a customer user'
+      }
       description={
         editing
           ? 'Changes take effect the next time they sign in.'
-          : 'They will receive a one-time code. There are no passwords in this product.'
+          : canManageAll
+            ? 'They will receive a one-time code. There are no passwords in this product.'
+            : 'A customer administrator or a site supervisor, attached to their account. They will receive a one-time code — there are no passwords in this product.'
       }
       size="lg"
       dismissible={!isSubmitting}
@@ -268,7 +327,7 @@ export function UserFormDialog({ open, onClose, user }: UserFormDialogProps) {
           <Field id="user-role" label="Role" required error={errors.role?.message}>
             {(aria) => (
               <Select {...aria} {...register('role')}>
-                {ROLES.map((option) => (
+                {roleOptions.map((option) => (
                   <option key={option} value={option}>
                     {ROLE_LABELS[option]}
                   </option>
@@ -276,6 +335,27 @@ export function UserFormDialog({ open, onClose, user }: UserFormDialogProps) {
               </Select>
             )}
           </Field>
+
+          {/*
+            Allocators only.
+            Matt, 27:01, on his own driver manager: *"if we have a driver that
+            calls in sick he'll take over for them for the day, so yes, he can be
+            a driver and an allocator at the same time."* Nobody else needs a
+            second role (27:36), so the option only appears where it applies
+            rather than sitting on every user as a permanently-unticked box.
+          */}
+          {role === 'allocator' && (
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border p-3">
+              <input type="checkbox" className="mt-0.5 size-4 shrink-0" {...register('alsoDrives')} />
+              <span>
+                <span className="block text-sm font-medium">Also drives</span>
+                <span className="block text-xs text-muted-foreground">
+                  Gives them the driver app as well, so they can cover a shift. They switch between
+                  the two from the account menu.
+                </span>
+              </span>
+            </label>
+          )}
 
           <Field
             id="user-email"
@@ -341,35 +421,42 @@ export function UserFormDialog({ open, onClose, user }: UserFormDialogProps) {
           </Field>
         </div>
 
-        <fieldset className="space-y-2">
-          <legend className="flex items-center gap-1 text-sm font-medium">
-            Brands
-            <span aria-hidden className="text-destructive">
-              *
-            </span>
-          </legend>
-          <p className="text-xs text-muted-foreground">
-            Brand is a dimension on every account, job and invoice — not a setting.
-          </p>
-          <div className="flex flex-wrap gap-4">
-            {BRAND_IDS.map((brand) => (
-              <label key={brand} className="flex items-center gap-2 text-sm">
-                <Checkbox
-                  checked={brandIds.includes(brand)}
-                  onChange={() => {
-                    toggleBrand(brand);
-                  }}
-                />
-                {BRAND_LABELS[brand]}
-              </label>
-            ))}
-          </div>
-          {errors.brandIds && (
-            <p role="alert" className="text-xs font-medium text-destructive">
-              {errors.brandIds.message}
+        {/*
+          Hidden while one brand is configured: a checkbox you must tick is not
+          a choice. The value still goes with the submission — an existing user
+          keeps whatever brands their record already names.
+        */}
+        {IS_MULTI_BRAND && (
+          <fieldset className="space-y-2">
+            <legend className="flex items-center gap-1 text-sm font-medium">
+              Brands
+              <span aria-hidden className="text-destructive">
+                *
+              </span>
+            </legend>
+            <p className="text-xs text-muted-foreground">
+              Brand is a dimension on every account, job and invoice — not a setting.
             </p>
-          )}
-        </fieldset>
+            <div className="flex flex-wrap gap-4">
+              {CONFIGURED_BRAND_IDS.map((brand) => (
+                <label key={brand} className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={brandIds.includes(brand)}
+                    onChange={() => {
+                      toggleBrand(brand);
+                    }}
+                  />
+                  {BRAND_LABELS[brand]}
+                </label>
+              ))}
+            </div>
+            {errors.brandIds && (
+              <p role="alert" className="text-xs font-medium text-destructive">
+                {errors.brandIds.message}
+              </p>
+            )}
+          </fieldset>
+        )}
 
         <Field id="user-notes" label="Notes" error={errors.notes?.message}>
           {(aria) => (

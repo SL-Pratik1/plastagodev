@@ -388,8 +388,7 @@ function PickupDetail({ job }: { job: PortalJob }) {
                       ]
                     : []),
                   { label: 'Recycling bags', value: job.bagCount },
-                  { label: 'Your reference', value: job.reference ?? '—' },
-                  { label: 'Purchase order', value: job.poNumber ?? '—' },
+                  { label: 'PO / job reference', value: job.poNumber ?? '—' },
                   {
                     label: 'Driver',
                     value:

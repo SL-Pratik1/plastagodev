@@ -2,14 +2,12 @@ import {
   PRE_START_ITEMS,
   RISK_CONTROLS,
   SITE_HAZARDS,
-  requiresRiskAssessment,
   type Job,
   type JobCharge,
   type JobCompliance,
   type JobEvent,
   type JobListItem,
   type JobStatus,
-  type Site,
 } from '@plastago/shared';
 import {
   ACCOUNTS,
@@ -20,6 +18,7 @@ import {
   FUTILE_CENTS,
   ZONE_RATES,
   buildSites,
+  type AddressFixture,
   centsToMoney,
   createRng,
   intBetween,
@@ -47,6 +46,29 @@ import {
  *  • **Some jobs sit unallocated and past target date**, so the board and the
  *    at-risk counter have something to show.
  */
+
+/** Site supervisors who book their own pickups, for the "Booked by" column. */
+const BOOKED_BY_SUPERVISORS = [
+  'Matthew French',
+  'Sione Tupou',
+  'Brett Sanders',
+  'Dave Nguyen',
+  'Grant Whitely',
+] as const;
+
+/** Deterministic pick, so the demo reads the same on every reload. */
+function pickName(random: number): string {
+  return BOOKED_BY_SUPERVISORS[Math.floor(random * BOOKED_BY_SUPERVISORS.length)] ?? 'Site supervisor';
+}
+
+/**
+ * The demo Site Supervisor.
+ *
+ * Matches the identity in `identities.ts`, so jobs seeded as portal bookings are
+ * visible to the person the demo signs in as. A different id here would leave
+ * that account looking empty and the scoping looking broken.
+ */
+const DEMO_SUPERVISOR_ID = '66b3f0c1a2d4e5f6a7b8c907';
 
 const JOB_NUMBER_START = 61300;
 const TOTAL_JOBS = 240;
@@ -106,8 +128,7 @@ function statusForOffset(rng: () => number, offset: number): JobStatus {
   if (offset >= 0) {
     const roll = rng();
     if (roll < 0.2) return 'booked';
-    if (roll < 0.45) return 'assigned';
-    if (roll < 0.6) return 'acknowledged';
+    if (roll < 0.6) return 'assigned';
     if (roll < 0.72) return 'in-transit';
     if (roll < 0.84) return 'arrived';
     return 'completed';
@@ -130,7 +151,7 @@ const TERMINAL: readonly JobStatus[] = ['completed', 'admin-complete', 'futile',
 
 interface Built {
   jobs: Job[];
-  sites: Site[];
+  sites: AddressFixture[];
 }
 
 function build(): Built {
@@ -342,7 +363,6 @@ function build(): Built {
 
     const order: JobStatus[] = [
       'assigned',
-      'acknowledged',
       'in-transit',
       'arrived',
       'completed',
@@ -353,13 +373,12 @@ function build(): Built {
     if (status !== 'booked' && status !== 'cancelled') {
       const labels: Record<string, string> = {
         assigned: 'Allocated to driver',
-        acknowledged: 'Driver acknowledged',
         'in-transit': 'En route',
         arrived: 'Arrived on site',
         completed: 'Job completed',
         'admin-complete': 'Administration complete',
       };
-      const hours = [7, 7, 8, 9, 10, 15];
+      const hours = [7, 8, 9, 10, 15];
 
       const stopAt = isFutile ? order.indexOf('arrived') : reachedIndex;
       for (let step = 0; step <= stopAt && step < order.length; step += 1) {
@@ -413,10 +432,20 @@ function build(): Built {
     // against. The additional charges need their own, separate PO — that
     // second one lives on the additional-charges invoice, not here, which is
     // the whole reason cash for the pickup is never held up by it.
+    /*
+     * One reference field, filled from whichever the customer gives us.
+     *
+     * Matt, 9:08: *"they're really interchangeable — either a customer gives us
+     * a purchase order number or they'll give us a job reference number. They
+     * are one and the same."* A builder's real PO wins where there is one; a
+     * contractor's own REF- number takes the field otherwise.
+     */
     const poNumber =
       account.poPolicy === 'required-before-invoice' && rng() > 0.25
         ? `${String(intBetween(rng, 29910000, 29919999))}/${String(intBetween(rng, 100, 999))}`
-        : null;
+        : rng() > 0.2
+          ? `REF-${String(intBetween(rng, 10000, 99999))}`
+          : null;
 
     const pendingCharges = charges.some((charge) => charge.approvalState === 'pending');
 
@@ -457,11 +486,68 @@ function build(): Built {
       accountId: account.id,
       accountName: account.name,
       builderName: site.builderName,
-      siteId: site.id,
+      /*
+       * The address, inlined.
+       *
+       * `SITES` is still the generator — it produces plausible greenfield
+       * addresses — but nothing links back to it. The job carries its own copy,
+       * frozen at creation, which is what makes a completed job's address the
+       * one it actually had (Matt, 0:29).
+       */
       siteName: site.name,
+      lotNumber: site.lotNumber,
+      addressLine: site.addressLine,
       suburb: site.suburb,
+      postcode: site.postcode,
       zone,
-      customerReference: rng() > 0.2 ? `REF-${String(intBetween(rng, 10000, 99999))}` : null,
+      latitude: site.latitude,
+      longitude: site.longitude,
+      accessNotes: site.accessNotes,
+      gateHours: site.gateHours,
+      inductionRequired: site.inductionRequired,
+      craneAvailable: site.craneAvailable,
+      siteContactName: site.siteContactName,
+      siteContactMobile: site.siteContactMobile,
+      siteContactEmail: site.siteContactEmail,
+      /*
+       * Who raised it.
+       *
+       * Weighted towards the portal because that is the point of having one, but
+       * with a real share booked by the office — Matt's builders send call-ups
+       * by email and the office keys those in. Some older jobs carry null, which
+       * is what an unmigrated record looks like and what the column has to
+       * render without falling over.
+       */
+      ...(() => {
+        const roll = rng();
+        if (roll < 0.12) return { bookedByName: null, bookedByUserId: null, bookedBySource: null };
+        if (roll < 0.45) {
+          return {
+            bookedByName: 'Call-up email',
+            bookedByUserId: null,
+            bookedBySource: 'call-up' as const,
+          };
+        }
+        if (roll < 0.62) {
+          return {
+            bookedByName: 'Priya Raman',
+            bookedByUserId: null,
+            bookedBySource: 'office' as const,
+          };
+        }
+        /*
+         * Portal bookings carry the supervisor's id, which is their SCOPE.
+         *
+         * Pinned to the demo supervisor so the seeded data actually exercises
+         * the narrowing — signing in as them shows a believable subset of their
+         * account's work rather than an empty list.
+         */
+        return {
+          bookedByName: pickName(rng()),
+          bookedByUserId: DEMO_SUPERVISOR_ID,
+          bookedBySource: 'portal' as const,
+        };
+      })(),
       poNumber,
       readyDate: isoDate(readyDate),
       targetDate: isoDate(targetDate),
@@ -471,6 +557,15 @@ function build(): Built {
       expectedAreaM2,
       recoveredWeightKg:
         captureWeight && completed ? Math.round(expectedAreaM2 * 0.068 * 9.5) : null,
+      /*
+       * Bagged jobs were lifted onto the crane scale, so their weight is a
+       * measurement. Hand loads have no bag to lift — their figure came out of
+       * the tip-off share-out, so it is an estimate. That is exactly the split
+       * Matt described at 56:11, and it is why the basis tracks `bagCount`
+       * rather than being a random flag.
+       */
+      recoveredWeightBasis:
+        captureWeight && completed ? (bagCount > 0 ? 'actual' : 'estimated') : null,
       bagCount,
       totalExGst: centsToMoney(subtotalCents),
       invoiceStatus,
@@ -603,10 +698,9 @@ function build(): Built {
         driverName: driver?.name ?? null,
         vehicleRego: driver?.vehicleRego ?? null,
         reachedSite: onSiteMinutes !== null,
-        riskAssessmentRequired: requiresRiskAssessment(
-          account.riskAssessmentRequired,
-          site.riskAssessmentOverride,
-        ),
+        // The account's rule, and only the account's — the per-site exception
+        // went with the sites (Matt, 0:29).
+        riskAssessmentRequired: account.riskAssessmentRequired,
       }),
     });
   }
@@ -644,7 +738,12 @@ function buildCompliance(input: {
   reachedSite: boolean;
   riskAssessmentRequired: boolean;
 }): JobCompliance {
-  const { rng, readyDate, driverName, vehicleRego, reachedSite, riskAssessmentRequired } = input;
+  const { rng, index, readyDate, driverName, vehicleRego, reachedSite, riskAssessmentRequired } =
+    input;
+
+  // Same derivation as the job itself — the PDF is named after the job it is
+  // filed against, so a filename dropped into a builder's portal is traceable.
+  const jobNumber = JOB_NUMBER_START + index;
 
   // No driver allocated yet means no run, so neither record can exist.
   if (driverName === null) {
@@ -726,6 +825,20 @@ function buildCompliance(input: {
       uploadState: safeToProceed
         ? pick(rng, ['uploaded', 'uploaded', 'uploaded', 'queued', 'failed'] as const)
         : 'uploaded',
+      /*
+       * The PDF exists as soon as the assessment does — page 1 the assessment,
+       * page 2 the versioned SWMS. It is filed against the job independently of
+       * whether the builder-portal handoff succeeded, which is the point: the
+       * office copy is ours and does not depend on someone else's system being
+       * up.
+       */
+      document: {
+        documentId: objectId('sradoc', jobNumber),
+        fileName: `SRA-${String(jobNumber)}-${isoDate(readyDate)}.pdf`,
+        generatedAt: atTime(readyDate, 9, 26 + Math.floor(rng() * 25)),
+        pageCount: 2,
+        sizeBytes: intBetween(rng, 132_000, 196_000),
+      },
     },
   };
 }
@@ -733,7 +846,6 @@ function buildCompliance(input: {
 const built = build();
 
 export const JOBS: readonly Job[] = built.jobs;
-export const SITE_FIXTURES: readonly Site[] = built.sites;
 
 /** The grid projection. A list must never need a join to render. */
 export function toListItem(job: Job): JobListItem {

@@ -27,7 +27,8 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,cjs,json,md,css,yaml,yml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,cjs,json,md,css,yaml,yml}\"",
     "clean": "turbo run clean",
-    "clean:all": "turbo run clean && rm -rf node_modules .turbo"
+    "clean:all": "turbo run clean && rm -rf node_modules .turbo",
+    "driver:handover": "node scripts/capture-driver-handover.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -35,8 +36,9 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.4",
     "globals": "^17.11.0",
+    "playwright": "^1.62.1",
     "prettier": "^3.9.6",
-    "turbo": "^2.10.11",
+    "turbo": "2.8.17",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.68.0"
   },

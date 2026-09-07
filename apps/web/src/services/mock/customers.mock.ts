@@ -2,9 +2,9 @@ import type { Account, AccountListItem } from '@plastago/shared';
 import { ServiceError } from '../service-error';
 import type { CustomerService } from '../types';
 import { applyListQuery, byDate, byNumber, byText } from './list-query';
-import { ACCOUNTS } from './fixtures/reference';
+import { ACCOUNTS, objectId, type AccountFixture } from './fixtures/reference';
 import { latency } from './mock-transport';
-import { invoiceList, jobList, store } from './store';
+import { allAccounts, invoiceList, jobList, store, TERMS_VERSION } from './store';
 
 /**
  * Accounts (M2.8 · W8).
@@ -14,11 +14,10 @@ import { invoiceList, jobList, store } from './store';
  * row. A demo where the count next to a name is stale is a demo where every
  * number becomes suspect.
  */
-function toListItem(account: (typeof ACCOUNTS)[number]): AccountListItem {
-  const sites = store.sites.filter((site) => site.accountId === account.id);
+function toListItem(account: AccountFixture): AccountListItem {
   const jobs = jobList().filter((job) => job.accountId === account.id);
   const open = jobs.filter((job) =>
-    ['booked', 'assigned', 'acknowledged', 'in-transit', 'arrived'].includes(job.status),
+    ['booked', 'assigned', 'in-transit', 'arrived'].includes(job.status),
   );
   const lastJob = jobs
     .map((job) => job.createdAt)
@@ -31,10 +30,17 @@ function toListItem(account: (typeof ACCOUNTS)[number]): AccountListItem {
     name: account.name,
     brandId: account.brandId,
     rateCardId: account.rateCardId,
+    accountType: account.accountType,
     poPolicy: account.poPolicy,
     captureMode: account.captureMode,
+    /*
+     * Derived, never stored twice.
+     *
+     * An account is onboarded exactly when its terms acceptance exists — there
+     * is no second flag that could disagree with the record it describes.
+     */
+    onboardingState: store.termsAcceptance.has(account.id) ? 'complete' : 'awaiting-terms',
     status: account.status,
-    siteCount: sites.length,
     openJobCount: open.length,
     lastJobAt: lastJob ?? null,
   };
@@ -42,22 +48,106 @@ function toListItem(account: (typeof ACCOUNTS)[number]): AccountListItem {
 
 export function createMockCustomerService(): CustomerService {
   return {
+    /**
+     * Create an account directly — no lead (Matt, 6:10).
+     *
+     * Validated the same way the lead conversion is, because the two paths must
+     * not be able to produce different-shaped accounts. The customer code is the
+     * one thing checked against everything that already exists: it is what the
+     * office says on the phone and what appears on every invoice, and two
+     * accounts sharing one is a mess nobody untangles later.
+     */
+    async create(draft) {
+      await latency(520, 240);
+
+      const code = draft.customerCode.trim().toUpperCase();
+      if (allAccounts().some((account) => account.code === code)) {
+        throw new ServiceError('CONFLICT', `${code} is already in use`, {
+          fieldErrors: { customerCode: 'That customer code already belongs to another account' },
+        });
+      }
+
+      const created: AccountFixture = {
+        id: objectId('nac', store.createdAccounts.length + 1),
+        code,
+        name: draft.legalName.trim(),
+        accountType: draft.accountType,
+        brandId: draft.brandId,
+        rateCardId: draft.rateCardId,
+        poPolicy: draft.poPolicy,
+        captureMode: draft.captureMode,
+        status: 'active',
+        abn: draft.abn.trim(),
+        paymentTermsDays: draft.paymentTermsDays,
+        primaryZone: draft.primaryZone,
+        preferredPickupWindow: null,
+        notes: draft.notes.trim(),
+        // No sites yet, so no builders yet — the list is derived from work done.
+        builders: [],
+        /*
+         * Off by default.
+         *
+         * The account-level rule is a builder's contractual demand, not a
+         * PlastaGo policy (M4.8b). Defaulting it on would make every driver on a
+         * brand-new account fill in a form nobody asked for.
+         */
+        riskAssessmentRequired: false,
+        contacts:
+          draft.accountsContactName.trim() === ''
+            ? []
+            : [
+                {
+                  id: objectId('nct', store.createdAccounts.length + 1),
+                  name: draft.accountsContactName.trim(),
+                  role: 'accounts',
+                  email: draft.accountsContactEmail.trim() || null,
+                  mobile: null,
+                  notifyBySms: false,
+                  notifyByEmail: draft.accountsContactEmail.trim() !== '',
+                },
+              ],
+      };
+
+      store.createdAccounts = [...store.createdAccounts, created];
+
+      /*
+       * Terms are only outstanding if we are actually going to ask for them.
+       *
+       * Matt's large builders never see the self-serve flow — *"we'll just create
+       * the account for them"* (6:36) — and their terms live in a contract signed
+       * long before this screen existed. Leaving those accounts flagged
+       * "awaiting terms" forever would make the flag meaningless for the accounts
+       * where it does matter.
+       */
+      if (!draft.sendInvitation) {
+        store.termsAcceptance.set(created.id, {
+          acceptedAt: new Date().toISOString(),
+          acceptedByName: 'Agreed off-system',
+          acceptedByRole: 'Existing contract',
+          termsVersion: TERMS_VERSION,
+        });
+      }
+
+      return toListItem(created);
+    },
+
     async list(query) {
       await latency();
 
-      return applyListQuery(ACCOUNTS.map(toListItem), query, {
+      return applyListQuery(allAccounts().map(toListItem), query, {
         search: (account) => [account.name, account.code],
         filters: {
           status: (account, value) => account.status === value,
           brand: (account, value) => account.brandId === value,
           rateCard: (account, value) => account.rateCardId === value,
+          accountType: (account, value) => account.accountType === value,
+          onboarding: (account, value) => account.onboardingState === value,
           poPolicy: (account, value) => account.poPolicy === value,
           captureMode: (account, value) => account.captureMode === value,
         },
         sorters: {
           name: byText((account) => account.name),
           code: byText((account) => account.code),
-          siteCount: byNumber((account) => account.siteCount),
           openJobCount: byNumber((account) => account.openJobCount),
           lastJobAt: byDate((account) => account.lastJobAt),
         },
@@ -67,11 +157,22 @@ export function createMockCustomerService(): CustomerService {
 
     async get(id) {
       await latency();
-      const fixture = ACCOUNTS.find((account) => account.id === id);
+      const fixture = allAccounts().find((account) => account.id === id);
       if (!fixture) throw new ServiceError('NOT_FOUND', `No account ${id}`);
 
       const account: Account = {
         ...toListItem(fixture),
+        /*
+         * Falls back to the sustainability contact where the account has one.
+         *
+         * A certificate reaching the wrong internal team is recoverable; one
+         * that goes nowhere is not — so the fallback is deliberate rather than
+         * leaving it null and silently sending nothing.
+         */
+        certificateEmail:
+          store.accountCertificateEmail.get(id) ??
+          fixture.contacts.find((contact) => contact.role === 'sustainability')?.email ??
+          null,
         // Read from the mutable store, not the frozen fixture — the office can
         // now toggle this, and `get` has to answer with what they set.
         riskAssessmentRequired:
@@ -88,30 +189,6 @@ export function createMockCustomerService(): CustomerService {
       return account;
     },
 
-    async sites(accountId, query) {
-      await latency();
-
-      return applyListQuery(
-        store.sites.filter((site) => site.accountId === accountId),
-        query,
-        {
-          search: (site) => [site.name, site.suburb, site.builderName, site.lotNumber],
-          filters: {
-            zone: (site, value) => site.zone === value,
-            status: (site, value) => site.status === value,
-            builder: (site, value) => site.builderName === value,
-          },
-          sorters: {
-            name: byText((site) => site.name),
-            suburb: byText((site) => site.suburb),
-            builderName: byText((site) => site.builderName),
-            jobCount: byNumber((site) => site.jobCount),
-          },
-          defaultSort: byText((site) => site.suburb),
-        },
-      );
-    },
-
     async jobs(accountId, query) {
       await latency();
 
@@ -119,7 +196,7 @@ export function createMockCustomerService(): CustomerService {
         jobList().filter((job) => job.accountId === accountId),
         query,
         {
-          search: (job) => [job.jobNumber, job.siteName, job.suburb, job.customerReference],
+          search: (job) => [job.jobNumber, job.siteName, job.suburb, job.poNumber],
           filters: { status: (job, value) => job.status === value },
           sorters: {
             jobNumber: byNumber((job) => job.jobNumber),
@@ -138,15 +215,6 @@ export function createMockCustomerService(): CustomerService {
 
       store.accountRiskAssessment.set(accountId, required);
       return this.get(accountId);
-    },
-
-    async setSiteRiskAssessmentOverride(siteId, override) {
-      await latency();
-      const site = store.sites.find((candidate) => candidate.id === siteId);
-      if (!site) throw new ServiceError('NOT_FOUND', `No site ${siteId}`);
-
-      site.riskAssessmentOverride = override;
-      return { ...site };
     },
 
     async invoices(accountId, query) {

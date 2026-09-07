@@ -66,6 +66,10 @@ export const QueueLeadsPage = lazy(async () => ({
   default: (await import('@/pages/admin/queue-leads')).AdminQueueLeadsPage,
 }));
 
+export const QueueLeadCreatePage = lazy(async () => ({
+  default: (await import('@/pages/admin/queue-lead-create')).AdminQueueLeadCreatePage,
+}));
+
 export const QueueLeadDetailPage = lazy(async () => ({
   default: (await import('@/pages/admin/queue-lead-detail')).AdminQueueLeadDetailPage,
 }));
@@ -73,6 +77,10 @@ export const QueueLeadDetailPage = lazy(async () => ({
 // ── Commercial ──────────────────────────────────────────────────────────────
 export const CustomersPage = lazy(async () => ({
   default: (await import('@/pages/admin/customers')).AdminCustomersPage,
+}));
+
+export const CustomerCreatePage = lazy(async () => ({
+  default: (await import('@/pages/admin/customer-create')).AdminCustomerCreatePage,
 }));
 
 export const CustomerDetailPage = lazy(async () => ({
@@ -154,14 +162,6 @@ export const PortalJobEditPage = lazy(async () => ({
   default: (await import('@/pages/portal/job-edit')).PortalJobEditPage,
 }));
 
-export const PortalSitesPage = lazy(async () => ({
-  default: (await import('@/pages/portal/sites')).PortalSitesPage,
-}));
-
-export const PortalSiteDetailPage = lazy(async () => ({
-  default: (await import('@/pages/portal/site-detail')).PortalSiteDetailPage,
-}));
-
 export const PortalInvoicesPage = lazy(async () => ({
   default: (await import('@/pages/portal/invoices')).PortalInvoicesPage,
 }));
@@ -176,6 +176,11 @@ export const PortalCertificatesPage = lazy(async () => ({
 
 export const PortalSupervisorsPage = lazy(async () => ({
   default: (await import('@/pages/portal/supervisors')).PortalSupervisorsPage,
+}));
+
+/** Journey A.4 — shown once, before the account is active. */
+export const PortalWelcomePage = lazy(async () => ({
+  default: (await import('@/pages/portal/welcome')).PortalWelcomePage,
 }));
 
 export const PortalAccountPage = lazy(async () => ({
@@ -214,6 +219,11 @@ export const DriverJobDetailPage = lazy(async () => ({
   default: (await import('@/pages/driver/job-detail')).DriverJobDetailPage,
 }));
 
+/** I3 — navigation inside the app, so the run is never handed to another one. */
+export const DriverNavigatePage = lazy(async () => ({
+  default: (await import('@/pages/driver/navigate')).DriverNavigatePage,
+}));
+
 export const DriverJobPhotosPage = lazy(async () => ({
   default: (await import('@/pages/driver/job-photos')).DriverJobPhotosPage,
 }));
@@ -240,8 +250,4 @@ export const DriverTipOffPage = lazy(async () => ({
 
 export const DriverReportDefectPage = lazy(async () => ({
   default: (await import('@/pages/driver/report-defect')).DriverReportDefectPage,
-}));
-
-export const DriverMePage = lazy(async () => ({
-  default: (await import('@/pages/driver/me')).DriverMePage,
 }));

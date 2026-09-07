@@ -201,7 +201,15 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         to: '/admin/users',
         label: 'Users',
         icon: UsersIcon,
-        capability: 'users:manage',
+        /*
+         * The NARROWER of the two user capabilities, on purpose. Both the
+         * administrator (`users:manage`) and operations
+         * (`users:manage-customers`) open this screen; what differs is the
+         * scope inside it, which the page itself decides. Gating the link on
+         * the wider one would hide the screen from the seat that holds only
+         * the narrow grant.
+         */
+        capability: 'users:manage-customers',
         scope: 'M1.5 · W1, W2, W16 — roles, sessions, devices, login audit',
       },
       {

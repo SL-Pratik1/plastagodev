@@ -39,13 +39,19 @@ export function useDriverOptions() {
   });
 }
 
-/** Sites for one account. Disabled until an account is chosen. */
-export function useSiteOptions(accountId: string | null) {
+/**
+ * Address lookup (Matt, 7:25).
+ *
+ * Keyed by the query so each distinct set of keystrokes is cached separately —
+ * backspacing then retyping the same thing hits the cache rather than the
+ * service. The same long cache applies: the list of suburbs PlastaGo services
+ * does not change while somebody fills in a form.
+ */
+export function usePlaceOptions(query: string) {
   const { lookups } = useServices();
   return useQuery({
-    queryKey: queryKeys.lookups.sites(accountId ?? 'none'),
-    queryFn: () => lookups.sitesForAccount(accountId ?? ''),
-    enabled: accountId !== null && accountId !== '',
+    queryKey: queryKeys.lookups.places(query),
+    queryFn: () => lookups.places(query),
     ...REFERENCE_CACHE,
   });
 }

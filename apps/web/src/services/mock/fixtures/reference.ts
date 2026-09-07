@@ -1,11 +1,12 @@
 import type {
   AccountStatus,
+  AccountType,
   BrandId,
   CaptureMode,
   Contact,
+  Place,
   PoPolicy,
   RateCardId,
-  Site,
   Zone,
 } from '@plastago/shared';
 
@@ -86,6 +87,8 @@ export interface AccountFixture {
   id: string;
   code: string;
   name: string;
+  /** Builder or contractor — see `AccountTypeSchema`. Drives both journeys. */
+  accountType: AccountType;
   brandId: BrandId;
   rateCardId: RateCardId;
   poPolicy: PoPolicy;
@@ -138,6 +141,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 1),
     code: 'IPL001',
+    accountType: 'contractor',
     name: 'iPlasta Pty Ltd',
     brandId: 'plastago',
     rateCardId: 'tier-1',
@@ -159,6 +163,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 2),
     code: 'CLA001',
+    accountType: 'builder',
     name: 'Clarendon Homes',
     brandId: 'plastago',
     rateCardId: 'clarendon-domaine',
@@ -181,6 +186,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 3),
     code: 'DOM001',
+    accountType: 'builder',
     name: 'Domaine Homes',
     brandId: 'plastago',
     rateCardId: 'clarendon-domaine',
@@ -202,6 +208,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 4),
     code: 'FOR001',
+    accountType: 'contractor',
     name: 'Fornari Group',
     brandId: 'plastago',
     rateCardId: 'tier-2',
@@ -220,6 +227,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 5),
     code: 'WIS001',
+    accountType: 'builder',
     name: 'Wisdom Properties Group',
     brandId: 'plastago',
     rateCardId: 'wisdom',
@@ -238,6 +246,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 6),
     code: 'DUR001',
+    accountType: 'contractor',
     name: 'Durnco Group Pty Ltd',
     brandId: 'plastago',
     rateCardId: 'tier-2',
@@ -256,6 +265,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 7),
     code: 'ELF001',
+    accountType: 'contractor',
     name: 'Lakeside Interiors',
     brandId: 'easylift',
     rateCardId: 'tier-3',
@@ -274,6 +284,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 8),
     code: 'ELF002',
+    accountType: 'contractor',
     name: 'Illawarra Linings',
     brandId: 'easylift',
     rateCardId: 'tier-3',
@@ -292,6 +303,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 9),
     code: 'MET001',
+    accountType: 'contractor',
     name: 'Metroplast Interiors',
     brandId: 'plastago',
     rateCardId: 'tier-4',
@@ -310,6 +322,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 10),
     code: 'SGP001',
+    accountType: 'contractor',
     name: 'Southgate Plastering',
     brandId: 'plastago',
     rateCardId: 'default',
@@ -328,6 +341,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 11),
     code: 'PRE001',
+    accountType: 'contractor',
     name: 'PrePaid Customer',
     brandId: 'plastago',
     rateCardId: 'default',
@@ -346,6 +360,7 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   {
     id: objectId('ac', 12),
     code: 'HRB001',
+    accountType: 'contractor',
     name: 'Harbourline Fitouts',
     brandId: 'plastago',
     rateCardId: 'tier-4',
@@ -363,8 +378,19 @@ export const ACCOUNTS: readonly AccountFixture[] = [
   },
 ];
 
-/** Suburbs with real coordinates, weighted to the south-west growth corridor. */
-const SUBURBS: ReadonlyArray<{
+/**
+ * Suburbs with real coordinates, weighted to the south-west growth corridor.
+ *
+ * ⚠️ This started as fixture data for generating sites and is now the **address
+ * lookup itself** — the thing that answers "which zone is this, and where is
+ * it?" once a job carries its own address instead of pointing at a site record
+ * (Matt, 0:29). Adding a suburb here makes it bookable; removing one makes every
+ * job in it unpriceable. It is data, not decoration.
+ *
+ * Replaced wholesale by Google Places when a billed key exists — see
+ * `PlaceSchema`. The shape is already the shape that returns.
+ */
+export const SUBURBS: ReadonlyArray<{
   suburb: string;
   postcode: string;
   zone: Zone;
@@ -389,6 +415,67 @@ const SUBURBS: ReadonlyArray<{
   { suburb: 'Medowie', postcode: '2318', zone: 'newcastle', lat: -32.7444, lng: 151.8583 },
 ];
 
+/**
+ * A pin for an address typed by hand.
+ *
+ * ── Why a lookup table and not a geocoder ─────────────────────────────────
+ * Because M3.3 says every site carries a *confirmed* pin, and nothing typed on
+ * a form is confirmed. The real create flow will geocode and then ask someone to
+ * drag the marker; until that exists, a site registered by hand gets the centre
+ * of its suburb, which is close enough for the board to draw it and honest about
+ * being approximate. Guessing a precise-looking coordinate would be worse — a
+ * driver would follow it.
+ *
+ * Falls back to the first suburb in the site's zone when the suburb is one the
+ * table has never seen, which for a greenfield estate is the common case.
+ */
+/**
+ * Turn a chosen place id back into the place.
+ *
+ * ── Why the id and not the values ─────────────────────────────────────────
+ * The booking form sends `placeId`, and the service resolves it here. Sending
+ * the zone and the coordinate from the browser would let a caller nominate its
+ * own — and the zone decides the price (M6.3). A job priced at Sydney rates
+ * because someone edited a hidden field is not a bug anyone would notice until
+ * the month-end reconciliation.
+ *
+ * Returns null for an unknown id rather than a fallback: PlastaGo services three
+ * zones, and "we do not go there" is a real answer that the form has to be able
+ * to give.
+ */
+export function resolvePlace(placeId: string): Place | null {
+  const slug = placeId.trim().toLowerCase();
+  const match = SUBURBS.find(
+    (place) => place.suburb.toLowerCase().replace(/[^a-z0-9]+/g, '-') === slug,
+  );
+  if (!match) return null;
+
+  return {
+    id: slug,
+    suburb: match.suburb,
+    postcode: match.postcode,
+    state: 'NSW',
+    zone: match.zone,
+    latitude: match.lat,
+    longitude: match.lng,
+    label: `${match.suburb} NSW ${match.postcode}`,
+  };
+}
+
+export function geocodeSuburb(
+  suburb: string,
+  zone: Zone,
+): { latitude: number; longitude: number } {
+  const match =
+    SUBURBS.find((place) => place.suburb.toLowerCase() === suburb.trim().toLowerCase()) ??
+    SUBURBS.find((place) => place.zone === zone);
+
+  return {
+    latitude: Number((match?.lat ?? -33.8688).toFixed(6)),
+    longitude: Number((match?.lng ?? 151.2093).toFixed(6)),
+  };
+}
+
 const STREETS = [
   'Allambie Circuit',
   'Pilaster Street',
@@ -409,9 +496,40 @@ const STREETS = [
  * yet in a half-built estate — the real booking form's placeholder literally
  * pleads "Please use both Lot and Street Number where possible".
  */
-export function buildSites(): Site[] {
+/**
+ * A generated address, as the job fixtures consume it.
+ *
+ * ⚠️ Not a `Site` — there is no such record any more (Matt, 0:29). This is a
+ * generator that produces plausible greenfield addresses, and every field it
+ * emits is copied ONTO the job. Nothing links back to it, and nothing may: the
+ * whole point is that a job's address is frozen at creation.
+ */
+export interface AddressFixture {
+  id: string;
+  accountId: string;
+  builderName: string;
+  name: string;
+  lotNumber: string | null;
+  addressLine: string;
+  suburb: string;
+  postcode: string;
+  zone: Zone;
+  latitude: number;
+  longitude: number;
+  accessNotes: string;
+  gateHours: string | null;
+  inductionRequired: boolean;
+  craneAvailable: boolean;
+  siteContactName: string | null;
+  siteContactMobile: string | null;
+  siteContactEmail: string | null;
+  jobCount: number;
+  status: AccountStatus;
+}
+
+export function buildSites(): AddressFixture[] {
   const rng = createRng(20260825);
-  const sites: Site[] = [];
+  const sites: AddressFixture[] = [];
   let index = 0;
 
   for (const account of ACCOUNTS) {
@@ -454,16 +572,20 @@ export function buildSites(): Site[] {
           rng() > 0.25 ? pick(rng, ['Dave', 'Sione', 'Brett', 'Ali', 'Kelly']) : null,
         siteContactMobile:
           rng() > 0.25 ? `04${String(intBetween(rng, 10000000, 99999999))}`.slice(0, 10) : null,
+        /*
+         * The builder's own supervisor, on roughly half the sites.
+         *
+         * Deliberately sparser than the mobile, and on a DIFFERENT domain from
+         * the account: this is the case Matt described where iPlast's photos
+         * have to reach Clarendon's supervisor (14:16), and a fixture where the
+         * address always matches the account would never show it.
+         */
+        siteContactEmail:
+          rng() > 0.5
+            ? `site${String(intBetween(rng, 10, 99))}@${pick(rng, ['clarendonhomes', 'domaine', 'allamhomes'])}.com.au`
+            : null,
         jobCount: intBetween(rng, 1, 22),
         status: account.status,
-        /*
-         * Almost every site follows its account, which is the point of the
-         * `inherit` default — but roughly one in twelve differs, so the
-         * override column has something to show and the "this one site is
-         * different" case is walkable in a demo rather than theoretical.
-         */
-        riskAssessmentOverride:
-          rng() > 0.92 ? (account.riskAssessmentRequired ? 'not-required' : 'required') : 'inherit',
       });
     }
   }

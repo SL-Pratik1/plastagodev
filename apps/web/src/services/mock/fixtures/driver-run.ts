@@ -103,7 +103,7 @@ interface StopSeed {
   bagCount: number;
   loadType: RunStop['loadType'];
   capturesWeight: boolean;
-  customerReference: string | null;
+  poNumber: string | null;
   urgent: boolean;
   riskAssessmentRequired: boolean;
   accessNotes: string;
@@ -139,7 +139,7 @@ const SEEDS: readonly StopSeed[] = [
     bagCount: 3,
     loadType: 'bagged',
     capturesWeight: true,
-    customerReference: 'REF-40218',
+    poNumber: 'REF-40218',
     urgent: false,
     riskAssessmentRequired: false,
     accessNotes: 'Gate code 4417. Park on the verge, not the slab.',
@@ -157,7 +157,7 @@ const SEEDS: readonly StopSeed[] = [
   },
   {
     jobNumber: 61528,
-    status: 'acknowledged',
+    status: 'assigned',
     accountName: 'Domaine Homes',
     builderName: 'Domaine Homes',
     siteName: 'Lot 1097 (#46) Allambie Circuit',
@@ -171,7 +171,7 @@ const SEEDS: readonly StopSeed[] = [
     bagCount: 4,
     loadType: 'bagged',
     capturesWeight: true,
-    customerReference: 'REF-51882',
+    poNumber: 'REF-51882',
     urgent: false,
     riskAssessmentRequired: true,
     accessNotes: 'Second entrance off the roundabout — main gate is fenced off.',
@@ -207,7 +207,7 @@ const SEEDS: readonly StopSeed[] = [
     loadType: 'hand-load',
     // iPlasta records m² only — the weights screen must not ask for kg here.
     capturesWeight: false,
-    customerReference: null,
+    poNumber: null,
     urgent: true,
     riskAssessmentRequired: false,
     accessNotes: '',
@@ -234,7 +234,7 @@ const SEEDS: readonly StopSeed[] = [
     bagCount: 2,
     loadType: 'bagged',
     capturesWeight: false,
-    customerReference: 'REF-33901',
+    poNumber: 'REF-33901',
     urgent: false,
     riskAssessmentRequired: false,
     accessNotes: 'Site shares access with two other lots — call ahead.',
@@ -261,7 +261,7 @@ const SEEDS: readonly StopSeed[] = [
     bagCount: 0,
     loadType: 'hand-load',
     capturesWeight: true,
-    customerReference: 'REF-77120',
+    poNumber: 'REF-77120',
     urgent: false,
     riskAssessmentRequired: false,
     accessNotes: 'Crane window 7–11am only. Ring the supervisor 20 minutes out.',
@@ -288,7 +288,7 @@ const SEEDS: readonly StopSeed[] = [
     bagCount: 2,
     loadType: 'bagged',
     capturesWeight: true,
-    customerReference: null,
+    poNumber: null,
     urgent: false,
     riskAssessmentRequired: false,
     accessNotes: 'Access via rear lane. Tight turn for the 34T.',
@@ -315,7 +315,7 @@ const SEEDS: readonly StopSeed[] = [
     bagCount: 0,
     loadType: 'hand-load',
     capturesWeight: false,
-    customerReference: 'REF-19004',
+    poNumber: 'REF-19004',
     urgent: false,
     riskAssessmentRequired: false,
     accessNotes: '',
@@ -333,6 +333,33 @@ function objectId(prefix: string, index: number): string {
   const head = prefix.padEnd(6, '0').slice(0, 6);
   const hex = [...head].map((character) => (character.charCodeAt(0) % 16).toString(16)).join('');
   return `${hex}${index.toString(16).padStart(18, '0')}`;
+}
+
+/**
+ * Which run each seed belongs to.
+ *
+ * Two runs, because that is a normal day: *"he had three jobs down South Coast,
+ * he went and did that run and then tipped off"*, then the next one (Matt,
+ * 40:03). A one-run fixture would never exercise the case the whole run model
+ * exists for — two dockets on one date, each apportioned over its own stops.
+ */
+const RUN_PLAN = [
+  {
+    runId: objectId('drun', 1),
+    runName: 'South West run 1',
+    sequenceForDay: 1,
+    suburbs: ['Austral', 'Catherine Field', 'Box Hill', 'Leppington', 'Gregory Hills'],
+  },
+  {
+    runId: objectId('drun', 2),
+    runName: 'South Coast run 2',
+    sequenceForDay: 2,
+    suburbs: ['Figtree', 'Thornton'],
+  },
+] as const;
+
+function runFor(suburb: string): (typeof RUN_PLAN)[number] {
+  return RUN_PLAN.find((run) => (run.suburbs as readonly string[]).includes(suburb)) ?? RUN_PLAN[0];
 }
 
 export function buildRunSheet(): { day: RunSheetDay; jobs: DriverJob[] } {
@@ -373,7 +400,7 @@ export function buildRunSheet(): { day: RunSheetDay; jobs: DriverJob[] } {
       bagCount: seed.bagCount,
       loadType: seed.loadType,
       capturesWeight: seed.capturesWeight,
-      customerReference: seed.customerReference,
+      poNumber: seed.poNumber,
       urgent: seed.urgent,
       riskAssessmentRequired: seed.riskAssessmentRequired,
       riskAssessmentDoneAt: null,
@@ -388,12 +415,21 @@ export function buildRunSheet(): { day: RunSheetDay; jobs: DriverJob[] } {
       siteContactMobile: seed.siteContactMobile,
       notes: seed.notes,
       readyDate: RUN_DATE,
+      runId: runFor(seed.suburb).runId,
       arrivedAt: seed.arrivedAt ?? null,
       completedAt: seed.completedAt ?? null,
       photos,
       requiredPhotos: [...STANDARD_REQUIRED_PHOTOS],
       capturedAreaM2: seed.capturedAreaM2 ?? null,
       craneScaleKg: seed.craneScaleKg ?? null,
+      // Seeded from whichever quantity the stop already carries: a job that has
+      // a crane reading or a captured area is one the driver has already been
+      // through the weights screen for.
+      weightsRecordedAt:
+        seed.craneScaleKg === undefined && seed.capturedAreaM2 === undefined
+          ? null
+          : (seed.completedAt ?? seed.arrivedAt ?? null),
+      riskAssessment: null,
       messages: (seed.messages ?? []).map((message, messageIndex) => ({
         id: objectId('dm', seed.jobNumber * 10 + messageIndex),
         ...message,
@@ -401,17 +437,34 @@ export function buildRunSheet(): { day: RunSheetDay; jobs: DriverJob[] } {
     };
   });
 
+  const stops = jobs.map(toStop);
+
   const day: RunSheetDay = {
     date: RUN_DATE,
     driverId: objectId('dv', 1),
     driverName: DRIVER_IDENTITY?.name ?? 'Driver',
     vehicleRego: 'BQ44JT',
     vehicleLabel: 'Hino 500 — 10T crane truck',
-    stops: jobs.map(toStop),
+    runs: RUN_PLAN.map((plan) => {
+      const runStops = stops.filter((stop) => stop.runId === plan.runId);
+      return {
+        runId: plan.runId,
+        runName: plan.runName,
+        sequenceForDay: plan.sequenceForDay,
+        // Only the suburbs actually on the run, in stop order — the plan lists
+        // what the run *covers*, which is not the same as what it has today.
+        suburbs: [...new Set(runStops.map((stop) => stop.suburb))],
+        stops: runStops,
+        // Neither run has been to the tip yet: the reconciliation screen is the
+        // thing worth demonstrating, and a pre-filled one cannot be.
+        tipOffRecordedAt: null,
+        tipOffKg: null,
+      };
+    }),
+    stops,
     // Not done yet, so the pre-start prompt is the first thing the driver sees —
     // which is what a Chain of Responsibility obligation should feel like.
     preStartCompletedAt: null,
-    tipOffRecordedAt: null,
   };
 
   return { day, jobs };
@@ -438,12 +491,13 @@ export function toStop(job: DriverJob): RunStop {
     bagCount: job.bagCount,
     loadType: job.loadType,
     capturesWeight: job.capturesWeight,
-    customerReference: job.customerReference,
+    poNumber: job.poNumber,
     urgent: job.urgent,
     riskAssessmentRequired: job.riskAssessmentRequired,
     riskAssessmentDoneAt: job.riskAssessmentDoneAt,
     photoCount: job.photos.length,
     hasQueuedActions: job.hasQueuedActions,
+    runId: job.runId,
   };
 }
 

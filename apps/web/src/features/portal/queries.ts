@@ -1,9 +1,9 @@
 import type {
+  AccountOnboarding,
   PortalAccountUpdate,
   PortalBookingDraft,
   PortalChangeRequest,
   PortalJobEdit,
-  PortalSiteUpdate,
   PortalSupervisor,
   PortalSupervisorInvite,
   ReportFilters,
@@ -91,7 +91,11 @@ export function usePortalQuote(draft: PortalBookingDraft | null, enabled: boolea
   return useQuery({
     queryKey: queryKeys.portal.quote(draft),
     queryFn: () => portal.quote(draft as PortalBookingDraft),
-    enabled: enabled && draft !== null && draft.siteId !== '' && draft.expectedAreaM2 > 0,
+    // A builder's booking has no area to price against — the PO carries it, and
+    // the office prices the job. No area, no quote, rather than a quote of $0.
+    // The suburb carries the zone, and the zone is what prices the job — so
+    // there is nothing to quote until one is chosen.
+    enabled: enabled && draft !== null && draft.placeId !== '' && (draft.expectedAreaM2 ?? 0) > 0,
     staleTime: 30_000,
     // A failed quote must never block a booking — the price is informational
     // here, and the authoritative figure is on the invoice.
@@ -134,43 +138,6 @@ export function usePortalCertifyReadiness() {
       freeOfContaminants: true,
     }),
   );
-}
-
-/* ── Sites ────────────────────────────────────────────────────────────────── */
-
-export function usePortalSites(query: ListQuery) {
-  const { portal } = useServices();
-  return useQuery({
-    queryKey: queryKeys.portal.sites(query),
-    queryFn: () => portal.sites(query),
-    placeholderData: (previous) => previous,
-  });
-}
-
-export function usePortalSite(id: string | undefined) {
-  const { portal } = useServices();
-  return useQuery({
-    queryKey: queryKeys.portal.site(id ?? 'none'),
-    queryFn: () => portal.site(id ?? ''),
-    enabled: Boolean(id),
-  });
-}
-
-export function usePortalUpdateSite() {
-  const { portal } = useServices();
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: ({ id, input }: { id: string; input: PortalSiteUpdate }) =>
-      portal.updateSite(id, input),
-    onSuccess: () => {
-      // Also the admin side: the office reads these access notes on the run
-      // sheet, and stale gate hours are how a driver ends up at a locked gate.
-      void queryClient.invalidateQueries({ queryKey: queryKeys.portal.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.dispatch.all });
-    },
-  });
 }
 
 /* ── Commercial — Customer Administrator only ─────────────────────────────── */
@@ -247,17 +214,39 @@ export function usePortalSetSupervisorState() {
   );
 }
 
-export function usePortalSetSupervisorSites() {
-  const { portal } = useServices();
-  return useSupervisorMutation(
-    ({ id, siteIds }: { id: string; siteIds: readonly string[] | null }) =>
-      portal.setSupervisorSites(id, siteIds),
-  );
-}
-
 export function usePortalApproveSupervisor() {
   const { portal } = useServices();
   return useSupervisorMutation((id: string) => portal.approveSupervisor(id));
+}
+
+/**
+ * Journey A.4 — the invitation, and what has been signed against it.
+ *
+ * Read on every portal page load by the layout, so it decides whether the
+ * customer is sent to the welcome screen. Cheap and rarely changing, hence the
+ * long stale time: it changes exactly once in an account's life.
+ */
+export function useOnboardingInvite() {
+  const { portal } = useServices();
+  return useQuery({
+    queryKey: queryKeys.portal.onboarding(),
+    queryFn: () => portal.onboardingInvite(),
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+export function useCompleteOnboarding() {
+  const { portal } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: AccountOnboarding) => portal.completeOnboarding(input),
+    onSuccess: () => {
+      // The whole portal changes shape once the account is active — the gate
+      // lifts, so nothing cached from behind it is still right.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.portal.all });
+    },
+  });
 }
 
 export function usePortalAccount() {

@@ -23,8 +23,9 @@ import { AgeBadge } from '@/components/queues/age-badge';
 import { useRecordPo } from '@/features/invoices/queries';
 import { useAccountOptions } from '@/features/lookups/queries';
 import { useAwaitingPoChase, useAwaitingPoList } from '@/features/queues/queries';
+import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
-import { formatDateTime, formatMoney, formatRelative } from '@/lib/format';
+import { formatDateTime, formatInvoiceNumber, formatMoney, formatRelative } from '@/lib/format';
 
 /**
  * Approved charges awaiting a purchase order (M7.3).
@@ -108,6 +109,8 @@ export function AdminQueueAwaitingPoPage() {
     }
   };
 
+  const prefix = useSettings().data?.invoicing.invoiceNumberPrefix ?? '';
+
   const columns: readonly DataTableColumn<AwaitingPoItem>[] = [
     {
       id: 'invoiceNumber',
@@ -116,7 +119,9 @@ export function AdminQueueAwaitingPoPage() {
       priority: 'primary',
       cell: (row) => (
         <span className="block">
-          <span className="font-mono font-medium">#{row.invoiceNumber}</span>
+          <span className="font-mono font-medium">
+            {formatInvoiceNumber(row.invoiceNumber, prefix)}
+          </span>
           <span className="block text-xs text-muted-foreground">Additional charges</span>
         </span>
       ),

@@ -31,7 +31,7 @@ import { currentPosition } from '@/services/mock/create-mock-services';
  * *how much* makes it reportable and defensible — and it is what lets the office
  * identify repeat-offender sites rather than just absorbing the cost.
  *
- * The $90 charge goes into the approvals queue (M2.7), where somebody looks at
+ * The charge goes into the approvals queue (M2.7), where somebody looks at
  * the photo and says yes. That is why the photo is mandatory here: the approver's
  * entire decision is looking at the picture, and a charge with no picture is one
  * the customer disputes successfully.
@@ -147,7 +147,7 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
       });
       toast.success(
         'Reported',
-        'A $90 charge goes to the office for approval. Carry on with the pickup.',
+        'A charge goes to the office for approval. Carry on with the pickup.',
       );
       await navigate(`/jobs/${job.jobId}`);
     } catch {
@@ -172,7 +172,7 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
       </header>
 
       <Alert variant="warning" title="Take the load anyway">
-        Report it and carry on with the pickup. A $90 charge goes to the office for approval — this
+        Report it and carry on with the pickup. A charge goes to the office for approval — this
         does not stop the job.
       </Alert>
 

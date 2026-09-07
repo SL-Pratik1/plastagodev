@@ -71,8 +71,8 @@ export const InvoiceListItemSchema = z
     accountName: NonEmptyStringSchema,
     jobId: ObjectIdSchema.nullable(),
     jobNumber: z.number().int().positive().nullable(),
+    /** PO number or job reference — one field, printed as the PO (Matt, 9:56). */
     poNumber: z.string().nullable(),
-    customerReference: z.string().nullable(),
     issuedOn: IsoDateSchema.nullable(),
     /** 7-day terms — there is no slack in their cash cycle. */
     dueOn: IsoDateSchema.nullable(),

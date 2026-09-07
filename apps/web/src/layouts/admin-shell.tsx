@@ -18,6 +18,7 @@ import {
   MenuIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
+  RepeatIcon,
   UserIcon,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -35,7 +36,9 @@ import {
   type BrandSelection,
 } from '@/config/brands';
 import { visibleNav, type NavGroup } from '@/config/navigation';
+import { driverAppHref } from '@/config/driver-origin';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
+import { landingPathFor } from '@/features/auth/permissions';
 import { useQueueCounts } from '@/features/queues/queries';
 
 /**
@@ -60,7 +63,7 @@ import { useQueueCounts } from '@/features/queues/queries';
  */
 export function AdminShell() {
   const user = useCurrentUser();
-  const { can, signOut } = useAuth();
+  const { can, signOut, switchRole } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useToast();
@@ -283,6 +286,45 @@ export function AdminShell() {
                   {ROLE_LABELS[user.role]}
                 </Badge>
               </div>
+              {/*
+                Only for the rare user who holds more than one role.
+                Matt's driver manager is the case: *"if we have a driver that
+                calls in sick he'll take over for them for the day"* (27:01).
+                Switching leaves this application entirely — the driver surface
+                is a different app — so it navigates rather than re-rendering.
+              */}
+              {user.roles.length > 1 && (
+                <>
+                  <MenuSeparator />
+                  <MenuLabel>Switch role</MenuLabel>
+                  {user.roles
+                    .filter((held) => held !== user.role)
+                    .map((held) => (
+                      <MenuItem
+                        key={held}
+                        icon={RepeatIcon}
+                        onSelect={() => {
+                          switchRole(held);
+                          /*
+                           * The driver surface may be a different origin
+                           * (Matt, 29:04), so switching to it is a page load
+                           * rather than a route change. `driverAppHref` returns
+                           * null when both surfaces share an origin, which is
+                           * the case in development.
+                           */
+                          const external = held === 'driver' ? driverAppHref('/') : null;
+                          if (external !== null) {
+                            window.location.assign(external);
+                            return;
+                          }
+                          void navigate(landingPathFor(held));
+                        }}
+                      >
+                        Work as {ROLE_LABELS[held].toLowerCase()}
+                      </MenuItem>
+                    ))}
+                </>
+              )}
               <MenuSeparator />
               <MenuItem icon={UserIcon} disabled>
                 My profile (not built yet)

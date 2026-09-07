@@ -158,6 +158,26 @@ export const InvoiceTemplateSchema = z
 export const InvoicingSettingsSchema = z
   .object({
     templates: z.array(InvoiceTemplateSchema),
+    /**
+     * Printed in front of every invoice number — "PGA-104312".
+     *
+     * Matt, 7:07: *"customisable invoice number prefixes. In the settings of the
+     * app, select the prefix like, for example, if we had PGA, it would put PGA
+     * dash in front of the invoice number."*
+     *
+     * ── Why it is a prefix and not part of the number ─────────────────────
+     * The number itself is a sequence that must never collide or restart — it
+     * continues from ~104,100 (M1.4) and Xero matches on it. The prefix is
+     * presentation: changing it must not renumber a single existing invoice, and
+     * keeping the two apart is what guarantees that.
+     *
+     * Empty is valid and means bare numbers, which is what they use today.
+     */
+    invoiceNumberPrefix: z
+      .string()
+      .trim()
+      .max(8, 'Keep it short — it sits in front of every invoice number')
+      .regex(/^[A-Za-z0-9-]*$/, 'Letters, digits and hyphens only'),
     /** M7.2 — base invoice now, additional charges on their own PO later. */
     splitAdditionalCharges: z.boolean(),
     defaultPaymentTermsDays: z.number().int().min(0).max(90),

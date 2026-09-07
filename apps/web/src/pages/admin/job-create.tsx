@@ -1,5 +1,11 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { FREIGHT_ITEM_LABELS, FREIGHT_ITEMS, ZONE_LABELS, type JobDraft } from '@plastago/shared';
+import {
+  FREIGHT_ITEM_LABELS,
+  FREIGHT_ITEMS,
+  ZONE_LABELS,
+  type JobDraft,
+  type Place,
+} from '@plastago/shared';
 import {
   Alert,
   Button,
@@ -17,12 +23,13 @@ import {
   useToast,
 } from '@plastago/ui';
 import { CircleDollarSignIcon } from 'lucide-react';
-import { useEffect, useMemo } from 'react';
-import { useForm, useWatch } from 'react-hook-form';
+import { useMemo, useState } from 'react';
+import { Controller, useForm, useWatch } from 'react-hook-form';
 import { useNavigate } from 'react-router';
 import * as z from 'zod';
 import { PageHeader } from '@/components/page-header';
-import { useAccountOptions, useSiteOptions } from '@/features/lookups/queries';
+import { PlacePicker } from '@/components/place-picker';
+import { useAccountOptions } from '@/features/lookups/queries';
 import { useCreateJob, useJobPricePreview } from '@/features/jobs/queries';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
@@ -50,8 +57,20 @@ import { isServiceError } from '@/services/service-error';
  */
 const FormSchema = z.object({
   accountId: z.string().min(1, 'Choose the account being invoiced'),
-  siteId: z.string().min(1, 'Choose the site being serviced'),
-  customerReference: z.string().trim().max(60),
+  /* ── The address, typed on the job (Matt, 0:29) ───────────────────── */
+  siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120),
+  lotNumber: z.string().trim().max(30),
+  addressLine: z.string().trim().min(1, 'Enter the street address').max(160),
+  /** Picked, not typed — carries the zone that prices the job and the map pin. */
+  placeId: z.string().min(1, 'Choose the suburb from the list'),
+  builderName: z.string().trim().max(120),
+  accessNotes: z.string().trim().max(1000),
+  gateHours: z.string().trim().max(120),
+  inductionRequired: z.boolean(),
+  craneAvailable: z.boolean(),
+  siteContactName: z.string().trim().max(80),
+  siteContactMobile: z.string().trim().max(20),
+  siteContactEmail: z.string().trim().max(160),
   poNumber: z.string().trim().max(60),
   readyDate: z.string().min(1, 'Enter the date the customer says it will be ready'),
   serviceLevel: z.enum(['standard', 'urgent']),
@@ -84,15 +103,24 @@ export function AdminJobCreatePage() {
     register,
     handleSubmit,
     control,
-    setValue,
     setError,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(FormSchema),
     defaultValues: {
       accountId: '',
-      siteId: '',
-      customerReference: '',
+      siteName: '',
+      lotNumber: '',
+      addressLine: '',
+      placeId: '',
+      builderName: '',
+      accessNotes: '',
+      gateHours: '',
+      inductionRequired: false,
+      craneAvailable: false,
+      siteContactName: '',
+      siteContactMobile: '',
+      siteContactEmail: '',
       poNumber: '',
       readyDate: todayIso(),
       serviceLevel: 'standard',
@@ -105,20 +133,20 @@ export function AdminJobCreatePage() {
   });
 
   const accountId = useWatch({ control, name: 'accountId' });
-  const siteId = useWatch({ control, name: 'siteId' });
+  const placeId = useWatch({ control, name: 'placeId' });
+  /*
+   * The chosen suburb, held beside the form.
+   *
+   * The form field stores the id — that is what the service resolves, and what
+   * a caller cannot tamper with to change the zone. This holds the whole
+   * `Place` so the picker can show the label and the zone back.
+   */
+  const [place, setPlace] = useState<Place | null>(null);
   const expectedAreaM2 = useWatch({ control, name: 'expectedAreaM2' });
   const bagCount = useWatch({ control, name: 'bagCount' });
   const readyDate = useWatch({ control, name: 'readyDate' });
   const serviceLevel = useWatch({ control, name: 'serviceLevel' });
   const freightItem = useWatch({ control, name: 'freightItem' });
-
-  const sites = useSiteOptions(accountId || null);
-
-  // Changing the account invalidates the site: sites belong to one account, and
-  // silently keeping the old one would book a job at another customer's address.
-  useEffect(() => {
-    setValue('siteId', '');
-  }, [accountId, setValue]);
 
   /**
    * The draft handed to the pricing service.
@@ -127,11 +155,25 @@ export function AdminJobCreatePage() {
    * object and the preview refetches continuously.
    */
   const priceDraft = useMemo<JobDraft | null>(() => {
-    if (!accountId || !siteId) return null;
+    // The suburb carries the zone, and the zone is the price. No suburb, no quote.
+    if (!accountId || !placeId) return null;
     return {
       accountId,
-      siteId,
-      customerReference: '',
+      // Only the fields that move the figure are real; the rest are
+      // placeholders so the draft satisfies the contract without re-pricing
+      // every time somebody types an access note.
+      siteName: 'quote',
+      lotNumber: '',
+      addressLine: 'quote',
+      placeId,
+      builderName: '',
+      accessNotes: '',
+      gateHours: '',
+      inductionRequired: false,
+      craneAvailable: false,
+      siteContactName: '',
+      siteContactMobile: '',
+      siteContactEmail: '',
       poNumber: '',
       readyDate: readyDate || todayIso(),
       serviceLevel,
@@ -140,7 +182,7 @@ export function AdminJobCreatePage() {
       bagCount: Number(bagCount) || 0,
       notes: '',
     };
-  }, [accountId, siteId, readyDate, serviceLevel, freightItem, expectedAreaM2, bagCount]);
+  }, [accountId, placeId, readyDate, serviceLevel, freightItem, expectedAreaM2, bagCount]);
 
   const preview = useJobPricePreview(priceDraft);
 
@@ -205,58 +247,86 @@ export function AdminJobCreatePage() {
                   )}
                 </Field>
 
+                {/*
+                  The address, typed on the job — no site to pick from.
+                  Matt, 0:29: *"the job should just have the site on it as part
+                  of the details for the job."*
+                */}
                 <Field
-                  id="job-site"
-                  label="Site"
+                  id="job-site-name"
+                  label="Site name"
                   required
-                  error={errors.siteId?.message}
-                  hint={
-                    accountId
-                      ? 'Grouped by suburb. The builder comes from the site.'
-                      : 'Choose an account first.'
-                  }
+                  error={errors.siteName?.message}
+                  hint="What the office and the driver will call it."
                 >
                   {(aria) => (
-                    <Select
-                      {...aria}
-                      {...register('siteId')}
-                      disabled={!accountId || sites.isPending}
-                    >
-                      <option value="">
-                        {!accountId
-                          ? 'Choose an account first'
-                          : sites.isPending
-                            ? 'Loading sites…'
-                            : 'Choose a site…'}
-                      </option>
-                      {groupOptions(sites.data ?? []).map(([group, options]) => (
-                        <optgroup key={group} label={group}>
-                          {options.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </optgroup>
-                      ))}
-                    </Select>
+                    <Input {...aria} placeholder="Lot 214 Allambie Circuit" {...register('siteName')} />
                   )}
+                </Field>
+
+                <Field id="job-lot" label="Lot number" error={errors.lotNumber?.message}>
+                  {(aria) => <Input {...aria} placeholder="214" {...register('lotNumber')} />}
                 </Field>
 
                 <Field
-                  id="job-reference"
-                  label="Customer reference"
-                  error={errors.customerReference?.message}
+                  id="job-address"
+                  label="Street address"
+                  required
+                  error={errors.addressLine?.message}
                 >
                   {(aria) => (
-                    <Input {...aria} {...register('customerReference')} autoComplete="off" />
+                    <Input {...aria} placeholder="46 Allambie Circuit" {...register('addressLine')} />
                   )}
                 </Field>
 
+                {/*
+                  Picked, not typed: the suburb carries the zone that prices the
+                  job (M6.3) and the pin the board plots. Matt asked for the
+                  type-ahead at 7:25; this is also what replaces the site's
+                  stored zone.
+                */}
+                <Controller
+                  control={control}
+                  name="placeId"
+                  render={({ field }) => (
+                    <Field
+                      id="job-place"
+                      label="Suburb"
+                      required
+                      error={errors.placeId?.message}
+                      hint="Decides the zone, and the zone decides the rate."
+                    >
+                      {(aria) => (
+                        <PlacePicker
+                          {...aria}
+                          value={place}
+                          onChange={(next) => {
+                            setPlace(next);
+                            field.onChange(next?.id ?? '');
+                          }}
+                        />
+                      )}
+                    </Field>
+                  )}
+                />
+
+                <Field id="job-builder" label="Builder" error={errors.builderName?.message}>
+                  {(aria) => (
+                    <Input {...aria} placeholder="GJ Gardner" {...register('builderName')} />
+                  )}
+                </Field>
+
+                {/*
+                  One field, not two.
+                  Matt, 9:08: *"they are one and the same, we don't need both of
+                  them."* Kept under the PO name because that is what prints on
+                  the invoice (9:56).
+                */}
                 <Field
                   id="job-po"
-                  label="Purchase order"
+                  label="PO / job reference"
                   error={errors.poNumber?.message}
-                  hint="Can be added later if it has not arrived."
+                  hint="Whatever the customer quotes. Can be added later if it has not arrived."
                 >
                   {(aria) => <Input {...aria} {...register('poNumber')} autoComplete="off" />}
                 </Field>
@@ -459,18 +529,4 @@ export function AdminJobCreatePage() {
       </form>
     </div>
   );
-}
-
-/** Groups `LookupOption`s into `<optgroup>`s, preserving order. */
-function groupOptions(
-  options: ReadonlyArray<{ value: string; label: string; group?: string }>,
-): Array<[string, Array<{ value: string; label: string }>]> {
-  const groups = new Map<string, Array<{ value: string; label: string }>>();
-  for (const option of options) {
-    const key = option.group ?? 'Sites';
-    const bucket = groups.get(key) ?? [];
-    bucket.push({ value: option.value, label: option.label });
-    groups.set(key, bucket);
-  }
-  return [...groups.entries()];
 }

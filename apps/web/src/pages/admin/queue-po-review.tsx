@@ -124,6 +124,38 @@ const COLUMNS: readonly DataTableColumn<PoExtractionItem>[] = [
       ),
   },
   {
+    /*
+     * What the order actually specifies.
+     *
+     * This column is the reason the extraction is worth running: the reviewer
+     * can see the area, the bag allowance and the supervisor without opening the
+     * PDF (Matt, 25:40: *"it should pull out of the purchase order"*). "Fixed
+     * price" is a real answer, not a gap — Wisdom's orders carry no area at all
+     * (31:04), and saying so stops anyone hunting for a number that is not
+     * printed.
+     */
+    id: 'spec',
+    header: 'What it specifies',
+    priority: 'secondary',
+    cell: (row) => (
+      <span className="block min-w-0">
+        <span className="block truncate text-sm">
+          {row.extractedAreaM2 === null ? (
+            <span className="text-muted-foreground">Fixed price — no m²</span>
+          ) : (
+            <>
+              {row.extractedAreaM2.toLocaleString('en-AU')} m²
+              {row.extractedBagAllowance !== null && ` · ${String(row.extractedBagAllowance)} bags`}
+            </>
+          )}
+        </span>
+        <span className="block truncate text-xs text-muted-foreground">
+          {row.extractedSupervisorName ?? 'No supervisor named'}
+        </span>
+      </span>
+    ),
+  },
+  {
     id: 'match',
     header: 'Best match',
     sortKey: 'suggestedAccountName',

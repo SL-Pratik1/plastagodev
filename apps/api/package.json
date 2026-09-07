@@ -16,10 +16,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "openapi": "tsx src/scripts/generate-openapi.ts",
-    "clean": "rm -rf dist .turbo coverage openapi/openapi.json *.tsbuildinfo"
+    "clean": "rm -rf dist .turbo coverage openapi/openapi.json *.tsbuildinfo",
+    "seed:auth": "tsx src/scripts/seed-auth.ts",
+    "seed:settings": "tsx src/scripts/seed-settings.ts",
+    "seed:places": "tsx src/scripts/seed-places.ts"
   },
   "dependencies": {
+    "@azure/identity": "^4.13.2",
     "@plastago/shared": "*",
+    "better-auth": "^1.7.3",
     "bullmq": "^6.2.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
@@ -27,9 +32,11 @@
     "express-rate-limit": "^8.6.2",
     "helmet": "^8.3.0",
     "ioredis": "^6.0.0",
+    "mongodb": "^7.5.0",
     "mongoose": "^9.9.3",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
+    "twilio": "^6.1.0",
     "zod": "^4.4.3",
     "zod-openapi": "^6.0.1"
   },

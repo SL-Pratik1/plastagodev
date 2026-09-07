@@ -1,6 +1,5 @@
 import {
   ROLE_LABELS,
-  ROLES,
   USER_STATUS_LABELS,
   USER_STATUSES,
   type UserListItem,
@@ -30,7 +29,9 @@ import type { DataTableColumn, FilterDefinition } from '@/components/data-table/
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { UserStatusBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
+import { useAuth } from '@/features/auth/auth-context';
 import { UserFormDialog } from '@/features/users/components/user-form-dialog';
+import { assignableRoles } from '@/features/users/roles';
 import { useAccountOptions } from '@/features/lookups/queries';
 import { useResendInvite, useSetUserStatus, useUser, useUserList } from '@/features/users/queries';
 import { describeError } from '@/lib/error-message';
@@ -51,13 +52,31 @@ import { formatDateTime, formatMobile } from '@/lib/format';
  * booked jobs last year must still be attributable — deleting the row would
  * orphan that history. "Suspended" is the destructive action, and it is
  * reversible.
+ *
+ * ── Two seats, one screen ─────────────────────────────────────────────────
+ * The Administrator holds `users:manage` and sees all seven roles. Operations
+ * holds `users:manage-customers` and sees the same screen narrowed to customer
+ * users — because onboarding a customer includes getting their administrator
+ * and supervisors into the portal, while staff accounts stay with W1/W16.
+ *
+ * The narrowing is applied to the QUERY, not to the rendered rows: filtering a
+ * page of results after the fact leaves `meta.total` counting rows that are not
+ * on screen, and the pager then offers pages that come back empty.
  */
 const FILTER_KEYS = ['role', 'status', 'account'] as const;
 
 export function AdminUsersPage() {
   const toast = useToast();
+  const { can } = useAuth();
+  /** Full user administration, as opposed to the customer-only grant. */
+  const canManageAll = can('users:manage');
+
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultSort: 'name' });
-  const { data, error, isPending, isFetching, refetch } = useUserList(controller.query);
+  const { data, error, isPending, isFetching, refetch } = useUserList(
+    canManageAll
+      ? controller.query
+      : { ...controller.query, filters: { ...controller.query.filters, scope: 'customers' } },
+  );
   const accounts = useAccountOptions();
 
   const [formOpen, setFormOpen] = useState(false);
@@ -72,8 +91,13 @@ export function AdminUsersPage() {
     {
       key: 'role',
       label: 'Role',
-      allLabel: 'All roles',
-      options: ROLES.map((role) => ({ value: role, label: ROLE_LABELS[role] })),
+      // Offering the other five to a seat that cannot see them would be a
+      // filter whose every result is "no users found".
+      allLabel: canManageAll ? 'All roles' : 'All customer roles',
+      options: assignableRoles(canManageAll).map((role) => ({
+        value: role,
+        label: ROLE_LABELS[role],
+      })),
     },
     {
       key: 'status',
@@ -227,8 +251,12 @@ export function AdminUsersPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Users & access"
-        description="The seven roles, who holds them, and the record of who signed in from where."
+        title={canManageAll ? 'Users & access' : 'Customer users'}
+        description={
+          canManageAll
+            ? 'The seven roles, who holds them, and the record of who signed in from where.'
+            : 'Customer administrators and site supervisors, and the record of who signed in from where. Office and driver accounts are managed by the administrator.'
+        }
         actions={
           <Button
             onClick={() => {
@@ -237,7 +265,7 @@ export function AdminUsersPage() {
             }}
           >
             <UserPlusIcon aria-hidden />
-            Invite user
+            {canManageAll ? 'Invite user' : 'Invite customer user'}
           </Button>
         }
       />
@@ -250,7 +278,7 @@ export function AdminUsersPage() {
         />
 
         <DataTable
-          caption="Users and roles"
+          caption={canManageAll ? 'Users and roles' : 'Customer users and roles'}
           columns={columns}
           rows={data?.data ?? []}
           getRowId={(row) => row.id}
@@ -265,8 +293,10 @@ export function AdminUsersPage() {
           rowHref={(row) => `/admin/users/${row.id}`}
           empty={{
             icon: UsersIcon,
-            title: 'No users yet',
-            description: 'Invite your first user to get started.',
+            title: canManageAll ? 'No users yet' : 'No customer users yet',
+            description: canManageAll
+              ? 'Invite your first user to get started.'
+              : 'Invite a customer administrator or a site supervisor to get started.',
           }}
         />
 

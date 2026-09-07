@@ -7,20 +7,18 @@ import { CheckCircle2Icon, ClockIcon, TriangleAlertIcon, TruckIcon } from 'lucid
  *
  * ── Why not reuse `JobStatusBadge` ────────────────────────────────────────
  * Because the office and the customer are asking different questions of the same
- * field. "Acknowledged" and "Admin complete" are internal workflow states that
- * mean nothing to a site supervisor, and "Futile" is a term from PlastaGo's cost
- * model, not from the customer's day. The office needs the precise state; the
- * customer needs to know whether a truck is coming.
+ * field. "Admin complete" is an internal workflow state that means nothing to a
+ * site supervisor, and "Futile" is a term from PlastaGo's cost model, not from
+ * the customer's day. The office needs the precise state; the customer needs to
+ * know whether a truck is coming.
  *
- * So the nine statuses collapse to six sentences, and two of them merge
- * deliberately: `acknowledged` reads the same as `assigned` (the customer does
- * not care that the driver tapped a button), and `admin-complete` reads the same
- * as `completed` (invoicing is not their milestone).
+ * So the eight statuses collapse to six sentences, and two of them merge
+ * deliberately: `admin-complete` reads the same as `completed` (invoicing is not
+ * their milestone).
  */
 const PORTAL_STATUS: Record<JobStatus, { label: string; variant: BadgeProps['variant'] }> = {
   booked: { label: 'Booked', variant: 'outline' },
   assigned: { label: 'Scheduled', variant: 'secondary' },
-  acknowledged: { label: 'Scheduled', variant: 'secondary' },
   'in-transit': { label: 'Driver on the way', variant: 'default' },
   arrived: { label: 'Driver on site', variant: 'default' },
   completed: { label: 'Completed', variant: 'success' },

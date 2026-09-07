@@ -32,13 +32,13 @@ import {
   Textarea,
   useToast,
 } from '@plastago/ui';
-import { CheckIcon, PlugIcon, TriangleAlertIcon } from 'lucide-react';
+import { CheckIcon, ChevronDownIcon, PlugIcon, TriangleAlertIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
 import { PageHeader } from '@/components/page-header';
 import { UnsavedBar } from '@/components/unsaved-bar';
-import { ROLE_CAPABILITIES } from '@/features/auth/permissions';
+import { CAPABILITY_GROUPS, ROLE_CAPABILITIES, can } from '@/features/auth/permissions';
 import {
   useSaveCredentialTypes,
   useSaveGeneralSettings,
@@ -325,6 +325,9 @@ function RolesSection({ settings }: { settings: Settings }) {
   const save = useSaveCredentialTypes();
   const [types, setTypes] = useState(settings.credentialTypes);
 
+  /* Groups start open; the portal block is the one an office admin rarely needs. */
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(new Set());
+
   const dirty = JSON.stringify(types) !== JSON.stringify(settings.credentialTypes);
   useUnsavedChanges(dirty);
 
@@ -348,55 +351,135 @@ function RolesSection({ settings }: { settings: Settings }) {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/*
+            Read-only by design, and deliberately NOT checkboxes.
+
+            A checkbox is a promise that clicking it changes something. This
+            matrix is compiled into the build — the row a capability sits on is
+            reviewed in a pull request, not toggled at 6pm on a Friday — so a
+            checkbox here would be a control that silently does nothing, which
+            is worse than the bare count it replaced.
+
+            The count alone was the actual defect: "Operations — 18" cannot
+            answer the only question this card exists for, which is *why can the
+            allocator not see prices*. Reading down the "See prices" row answers
+            it in about two seconds.
+          */}
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <caption className="sr-only">Capabilities by role</caption>
+            <table className="w-full min-w-[46rem] text-sm">
+              <caption className="sr-only">
+                Capabilities by role. A tick means the role holds that capability; a dash means it
+                does not.
+              </caption>
               <thead>
                 <tr className="border-b border-border">
                   <th
                     scope="col"
-                    className="py-2 text-left text-xs font-semibold tracking-wide text-muted-foreground uppercase"
+                    className="w-[17rem] py-2 text-left text-xs font-semibold tracking-wide text-muted-foreground uppercase"
                   >
-                    Role
+                    Capability
                   </th>
-                  <th
-                    scope="col"
-                    className="py-2 text-right text-xs font-semibold tracking-wide text-muted-foreground uppercase"
-                  >
-                    Capabilities
-                  </th>
-                  <th
-                    scope="col"
-                    className="py-2 text-left text-xs font-semibold tracking-wide text-muted-foreground uppercase"
-                  >
-                    Reaches
-                  </th>
+                  {ROLES.map((role) => (
+                    <th
+                      key={role}
+                      scope="col"
+                      className="px-1 py-2 align-bottom text-center text-xs font-semibold text-muted-foreground"
+                    >
+                      {ROLE_LABELS[role]}
+                    </th>
+                  ))}
                 </tr>
               </thead>
-              <tbody>
-                {ROLES.map((role) => {
-                  const capabilities = ROLE_CAPABILITIES[role];
-                  return (
-                    <tr key={role} className="border-b border-border">
-                      <td className="py-2.5 font-medium">{ROLE_LABELS[role]}</td>
-                      <td className="py-2.5 text-right tabular-nums">{capabilities.length}</td>
-                      <td className="py-2.5 text-muted-foreground">
-                        {capabilities.length === 0
-                          ? 'Driver app only'
-                          : capabilities.includes('admin:access')
-                            ? 'Admin console'
-                            : 'Customer portal'}
-                      </td>
+              {CAPABILITY_GROUPS.map((group) => {
+                const collapsed = collapsedGroups.has(group.title);
+                return (
+                  <tbody key={group.title} className="border-b border-border last:border-b-0">
+                    <tr>
+                      <th
+                        scope="colgroup"
+                        colSpan={ROLES.length + 1}
+                        className="bg-muted/40 px-0 py-0 text-left"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = new Set(collapsedGroups);
+                            if (collapsed) next.delete(group.title);
+                            else next.add(group.title);
+                            setCollapsedGroups(next);
+                          }}
+                          aria-expanded={!collapsed}
+                          className="focus-ring flex w-full items-center gap-2 px-2 py-2 text-left"
+                        >
+                          <ChevronDownIcon
+                            className={`size-4 shrink-0 text-muted-foreground transition-transform ${
+                              collapsed ? '-rotate-90' : ''
+                            }`}
+                            aria-hidden
+                          />
+                          <span className="text-sm font-semibold">{group.title}</span>
+                          <span className="min-w-0 flex-1 truncate text-xs font-normal text-muted-foreground">
+                            {group.note}
+                          </span>
+                        </button>
+                      </th>
                     </tr>
-                  );
-                })}
-              </tbody>
+
+                    {!collapsed &&
+                      group.capabilities.map(({ capability, label }) => (
+                        <tr key={capability} className="border-t border-border/60">
+                          <th
+                            scope="row"
+                            className="py-2 pr-3 text-left font-normal"
+                            title={capability}
+                          >
+                            {label}
+                          </th>
+                          {ROLES.map((role) => {
+                            const held = can(role, capability);
+                            return (
+                              <td key={role} className="px-1 py-2 text-center">
+                                <span
+                                  className={
+                                    held ? 'font-medium text-primary' : 'text-muted-foreground/40'
+                                  }
+                                >
+                                  {held ? '✓' : '—'}
+                                </span>
+                                <span className="sr-only">
+                                  {ROLE_LABELS[role]}: {held ? 'yes' : 'no'}
+                                </span>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                  </tbody>
+                );
+              })}
+              <tfoot>
+                <tr className="border-t-2 border-border">
+                  <th scope="row" className="py-2 text-left text-xs font-semibold uppercase">
+                    Total capabilities
+                  </th>
+                  {ROLES.map((role) => (
+                    <td
+                      key={role}
+                      className="px-1 py-2 text-center text-sm font-medium tabular-nums"
+                    >
+                      {ROLE_CAPABILITIES[role].length}
+                    </td>
+                  ))}
+                </tr>
+              </tfoot>
             </table>
           </div>
 
           <Alert variant="neutral" title="Mirrors their existing security groups">
-            The seven roles match the groups they already use, so nothing has to be re-learned. To
-            change what one person can reach, change their role on{' '}
+            The seven roles match the groups they already use, so nothing has to be re-learned. This
+            table is a reference, not a control — the rows are fixed in the build so that a change
+            to what a role may reach is reviewed rather than clicked. To change what one person can
+            reach, change their role on{' '}
             <Link
               to="/admin/users"
               className="focus-ring rounded text-primary underline underline-offset-4"
@@ -834,6 +917,7 @@ function InvoicingSection({ settings }: { settings: Settings }) {
   const save = useSaveInvoicingSettings();
   const [draft, setDraft] = useState(settings.invoicing);
   const [termsError, setTermsError] = useState<string | null>(null);
+  const [prefixError, setPrefixError] = useState<string | null>(null);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings.invoicing);
   useUnsavedChanges(dirty);
@@ -844,6 +928,15 @@ function InvoicingSection({ settings }: { settings: Settings }) {
       return;
     }
     setTermsError(null);
+
+    // Letters, digits and hyphens only. A prefix with a slash or a space in it
+    // ends up in Xero and in a builder's accounts system, where it is somebody
+    // else's problem to unpick.
+    if (!/^[A-Za-z0-9-]*$/.test(draft.invoiceNumberPrefix.trim())) {
+      setPrefixError('Letters, digits and hyphens only');
+      return;
+    }
+    setPrefixError(null);
 
     try {
       await save.mutateAsync(draft);
@@ -877,6 +970,43 @@ function InvoicingSection({ settings }: { settings: Settings }) {
                 follow once their own PO arrives, so cash for the job is never delayed.
               </span>
             </label>
+          </div>
+
+          {/*
+            Matt, 7:07: *"customisable invoice number prefixes… select the prefix
+            like, for example, if we had PGA, it would put PGA dash in front of
+            the invoice number."*
+
+            Presentation only. The stored number is a bare sequence Xero matches
+            on, so changing this renumbers nothing.
+          */}
+          <div className="sm:max-w-xs">
+            <Field
+              id="invoice-prefix"
+              label="Invoice number prefix"
+              error={prefixError ?? undefined}
+              hint={
+                draft.invoiceNumberPrefix.trim() === ''
+                  ? 'Leave blank for plain numbers, e.g. #104312.'
+                  : `Invoices will read ${draft.invoiceNumberPrefix.trim()}-104312.`
+              }
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={draft.invoiceNumberPrefix}
+                  maxLength={8}
+                  placeholder="PGA"
+                  className="font-mono"
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(event) => {
+                    setDraft({ ...draft, invoiceNumberPrefix: event.target.value });
+                    setPrefixError(null);
+                  }}
+                />
+              )}
+            </Field>
           </div>
 
           <div className="sm:max-w-xs">

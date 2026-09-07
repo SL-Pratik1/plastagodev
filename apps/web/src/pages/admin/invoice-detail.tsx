@@ -28,8 +28,15 @@ import {
   useRetryXero,
   useSendInvoices,
 } from '@/features/invoices/queries';
+import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
-import { formatDate, formatDateTime, formatMoney, formatRelative } from '@/lib/format';
+import {
+  formatDate,
+  formatDateTime,
+  formatInvoiceNumber,
+  formatMoney,
+  formatRelative,
+} from '@/lib/format';
 
 /**
  * One invoice (M7).
@@ -50,6 +57,7 @@ export function AdminInvoiceDetailPage() {
   const toast = useToast();
 
   const { data: invoice, error, isPending, refetch } = useInvoice(invoiceId);
+  const prefix = useSettings().data?.invoicing.invoiceNumberPrefix ?? '';
   const sendInvoices = useSendInvoices();
   const recordPo = useRecordPo();
   const retryXero = useRetryXero();
@@ -93,7 +101,7 @@ export function AdminInvoiceDetailPage() {
     try {
       await sendInvoices.mutateAsync([invoice.id]);
       toast.success(
-        `Invoice #${String(invoice.invoiceNumber)} sent`,
+        `Invoice ${formatInvoiceNumber(invoice.invoiceNumber, prefix)} sent`,
         'Pushed to Xero and emailed.',
       );
     } catch (caught) {
@@ -138,7 +146,7 @@ export function AdminInvoiceDetailPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={`Invoice #${String(invoice.invoiceNumber)}`}
+        title={`Invoice ${formatInvoiceNumber(invoice.invoiceNumber, prefix)}`}
         breadcrumbs={breadcrumbs}
         description={`${invoice.accountName} · ${INVOICE_KIND_LABELS[invoice.kind]}`}
         badge={<InvoiceStatusBadge status={invoice.status} />}
@@ -321,7 +329,7 @@ export function AdminInvoiceDetailPage() {
                     ),
                   },
                   { label: 'Purchase order', value: invoice.poNumber ?? 'Not supplied' },
-                  { label: 'Customer reference', value: invoice.customerReference ?? '—' },
+                  { label: 'Customer reference', value: invoice.poNumber ?? '—' },
                   { label: 'Issued', value: formatDate(invoice.issuedOn) },
                   {
                     label: 'Due',

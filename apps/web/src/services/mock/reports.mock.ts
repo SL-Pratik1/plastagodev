@@ -37,7 +37,10 @@ function scoped(filters: ReportFilters) {
   return store.jobs.filter((job) => {
     if (job.readyDate < filters.from || job.readyDate > filters.to) return false;
     if (filters.accountId && job.accountId !== filters.accountId) return false;
-    if (filters.siteId && job.siteId !== filters.siteId) return false;
+    // Filtering by site is now filtering by SUBURB — with no site records
+    // there is nothing narrower to group on, and a suburb is what the office
+    // actually asks about ("how much came out of Kellyville last month?").
+    if (filters.suburb && job.suburb !== filters.suburb) return false;
     if (filters.zone && job.zone !== filters.zone) return false;
     if (filters.driverId && job.driverId !== filters.driverId) return false;
     return true;
@@ -59,12 +62,14 @@ export function createMockReportService(): ReportService {
         (OPEN_OR_DONE as readonly string[]).includes(job.status),
       );
 
-      const groupBySite = Boolean(filters.accountId);
+      // Drilling into one account groups by suburb rather than by site, for
+      // the reason above. Across all accounts it still groups by account.
+      const groupBySuburb = Boolean(filters.accountId);
       const buckets = new Map<string, VolumeRow>();
 
       for (const job of jobs) {
-        const key = groupBySite ? job.siteId : job.accountId;
-        const label = groupBySite ? `${job.siteName}, ${job.suburb}` : job.accountName;
+        const key = groupBySuburb ? job.suburb : job.accountId;
+        const label = groupBySuburb ? job.suburb : job.accountName;
         const existing = buckets.get(key) ?? {
           key,
           label,
@@ -78,7 +83,7 @@ export function createMockReportService(): ReportService {
         buckets.set(key, {
           ...existing,
           jobs: existing.jobs + 1,
-          areaM2: existing.areaM2 + job.expectedAreaM2,
+          areaM2: existing.areaM2 + (job.expectedAreaM2 ?? 0),
           // Only accumulate weight for accounts that capture it (M2.3). A zero
           // would read as "nothing recovered", which is a different claim.
           weightKg:
@@ -99,7 +104,7 @@ export function createMockReportService(): ReportService {
         const existing = months.get(month) ?? { jobs: 0, areaM2: 0 };
         months.set(month, {
           jobs: existing.jobs + 1,
-          areaM2: existing.areaM2 + job.expectedAreaM2,
+          areaM2: existing.areaM2 + (job.expectedAreaM2 ?? 0),
         });
       }
 
@@ -131,7 +136,7 @@ export function createMockReportService(): ReportService {
         return {
           zone,
           jobs: inZone.length,
-          areaM2: inZone.reduce((sum, job) => sum + job.expectedAreaM2, 0),
+          areaM2: inZone.reduce((sum, job) => sum + (job.expectedAreaM2 ?? 0), 0),
           revenueExGst: centsToMoney(revenue),
           averageJobValueExGst: centsToMoney(
             inZone.length === 0 ? 0 : Math.round(revenue / inZone.length),
@@ -237,19 +242,34 @@ export function createMockReportService(): ReportService {
      * something derived from the priced m², because these documents go into
      * Green Star submissions and have to survive an audit.
      *
-     * Jobs on m²-only accounts get an estimated tonnage flagged as such rather
-     * than a fabricated measurement.
+     * ── Only WEIGHED jobs get one ────────────────────────────────────────
+     * Matt, 32:11: *"this is only for weighed jobs. If it's an estimated job,
+     * we're **unable to provide a certificate** because it's an estimated weight
+     * and it doesn't meet compliance regulation."*
+     *
+     * So an estimated tonnage does not produce a certificate at all — not a
+     * certificate with a caveat on it. These documents go into Green Star
+     * submissions, and issuing one against a figure apportioned from a
+     * weighbridge total would be the single thing here that could fail an audit.
+     *
+     * The filter is on the weight BASIS, not on whether a number exists: every
+     * completed job has a tonnage after reconciliation, and roughly half of them
+     * are imputed rather than measured.
      */
     async certificates(query) {
       await latency(480, 220);
 
       const rows: Certificate[] = store.jobs
-        .filter((job) => job.status === 'admin-complete' || job.status === 'completed')
+        .filter(
+          (job) =>
+            (job.status === 'admin-complete' || job.status === 'completed') &&
+            job.recoveredWeightKg !== null &&
+            job.recoveredWeightBasis === 'actual',
+        )
         .slice(0, 90)
         .map((job, index) => {
-          const measured = job.recoveredWeightKg;
-          const tonnes =
-            measured === null ? (job.expectedAreaM2 * 0.068 * 9.5) / 1000 : measured / 1000;
+          // Non-null by the filter above; a certificate is never derived from m².
+          const tonnes = (job.recoveredWeightKg ?? 0) / 1000;
 
           return {
             id: `${job.id}-cert`,
@@ -263,7 +283,7 @@ export function createMockReportService(): ReportService {
             periodFrom: job.readyDate,
             periodTo: job.readyDate,
             jobs: 1,
-            areaM2: job.expectedAreaM2,
+            areaM2: (job.expectedAreaM2 ?? 0),
             tonnesDiverted: Number(tonnes.toFixed(2)),
             issuedAt: job.status === 'admin-complete' ? job.invoicedAt : null,
             issuedTo: job.status === 'admin-complete' ? job.accountName : null,
@@ -297,7 +317,7 @@ export function createMockReportService(): ReportService {
       // data points are fixed, so the mock issues a record rather than a PDF.
       const tonnes =
         job.recoveredWeightKg === null
-          ? (job.expectedAreaM2 * 0.068 * 9.5) / 1000
+          ? ((job.expectedAreaM2 ?? 0) * 0.068 * 9.5) / 1000
           : job.recoveredWeightKg / 1000;
 
       return {
@@ -312,7 +332,7 @@ export function createMockReportService(): ReportService {
         periodFrom: job.readyDate,
         periodTo: job.readyDate,
         jobs: 1,
-        areaM2: job.expectedAreaM2,
+        areaM2: (job.expectedAreaM2 ?? 0),
         tonnesDiverted: Number(tonnes.toFixed(2)),
         issuedAt: new Date().toISOString(),
         issuedTo: job.accountName,

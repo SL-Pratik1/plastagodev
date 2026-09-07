@@ -1,6 +1,5 @@
 import {
   AwardIcon,
-  BuildingIcon,
   ChartColumnIcon,
   ClipboardListIcon,
   HomeIcon,
@@ -10,6 +9,7 @@ import {
   UsersIcon,
   type LucideIcon,
 } from 'lucide-react';
+import type { AccountType } from '@plastago/shared';
 import type { Capability } from '@/features/auth/permissions';
 
 export interface PortalNavItem {
@@ -23,6 +23,15 @@ export interface PortalNavItem {
   end?: boolean;
   /** Promoted into the bottom tab bar on phones. */
   primary?: boolean;
+  /**
+   * Restricts this item to one kind of customer.
+   *
+   * Only site supervisors need it so far: they are a builder concept, and a
+   * contractor *"probably only needs an admin user"* (Matt, 20:09). Hiding the
+   * item is the whole feature — a contractor who never sees it never has to work
+   * out that it does not apply to them.
+   */
+  accountTypes?: readonly AccountType[];
   scope?: string;
 }
 
@@ -73,15 +82,6 @@ export const PORTAL_NAV: readonly PortalNavItem[] = [
     scope: 'M5.7, M5.8, M5.9 — live status, history, completion record + photos',
   },
   {
-    to: '/portal/sites',
-    label: 'Sites',
-    shortLabel: 'Sites',
-    icon: BuildingIcon,
-    capability: 'portal:sites',
-    primary: true,
-    scope: 'M5.3 · W87, W98 and M5.6 · F46 — access notes, gate hours, windows',
-  },
-  {
     to: '/portal/invoices',
     label: 'Invoices',
     shortLabel: 'Invoices',
@@ -111,6 +111,8 @@ export const PORTAL_NAV: readonly PortalNavItem[] = [
     shortLabel: 'People',
     icon: UsersIcon,
     capability: 'portal:supervisors',
+    // Builders only — see `accountTypes`.
+    accountTypes: ['builder'],
     scope: 'M5.14 · W70 — add, remove and scope your own supervisors',
   },
   {
@@ -123,6 +125,22 @@ export const PORTAL_NAV: readonly PortalNavItem[] = [
   },
 ];
 
-export function visiblePortalNav(can: (capability: Capability) => boolean): PortalNavItem[] {
-  return PORTAL_NAV.filter((item) => can(item.capability));
+/**
+ * The nav for one viewer.
+ *
+ * `accountType` is optional so a caller that has not resolved the scope yet
+ * still gets a sensible menu rather than an empty one — the type-restricted
+ * items simply stay hidden until it arrives, which is the safe direction to
+ * fail: showing a contractor a supervisors page is worse than showing a builder
+ * one screen a moment late.
+ */
+export function visiblePortalNav(
+  can: (capability: Capability) => boolean,
+  accountType?: AccountType,
+): PortalNavItem[] {
+  return PORTAL_NAV.filter((item) => {
+    if (!can(item.capability)) return false;
+    if (!item.accountTypes) return true;
+    return accountType !== undefined && item.accountTypes.includes(accountType);
+  });
 }

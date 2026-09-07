@@ -100,7 +100,8 @@ export function AdminReportsPage() {
       from: params.get('from') ?? firstOfMonthsAgo(2),
       to: params.get('to') ?? today(),
       accountId: params.get('account'),
-      siteId: params.get('site'),
+      // Narrowed by suburb now — there is no site record to key on (Matt, 0:29).
+      suburb: params.get('suburb'),
       zone: (params.get('zone') as Zone | null) ?? null,
       driverId: params.get('driver'),
     }),
@@ -214,7 +215,7 @@ export function AdminReportsPage() {
                 setParams(
                   (current) => {
                     const next = new URLSearchParams(current);
-                    for (const key of ['from', 'to', 'account', 'site', 'zone', 'driver']) {
+                    for (const key of ['from', 'to', 'account', 'suburb', 'zone', 'driver']) {
                       next.delete(key);
                     }
                     return next;
@@ -268,12 +269,12 @@ export function AdminReportsPage() {
               <Card className="overflow-hidden p-0">
                 <div className="border-b border-border px-4 py-3">
                   <p className="text-sm font-medium">
-                    {filters.accountId ? 'By site' : 'By customer'}
+                    {filters.accountId ? 'By suburb' : 'By customer'}
                   </p>
                   <p className="text-xs text-muted-foreground">
                     {filters.accountId
-                      ? 'Sites for the selected customer — the next question a customer asks.'
-                      : 'Select a customer above to break this down by site.'}
+                      ? 'Suburbs for the selected customer — the next question a customer asks.'
+                      : 'Select a customer above to break this down by suburb.'}
                   </p>
                 </div>
                 <SimpleTable<VolumeRow>
@@ -590,7 +591,7 @@ function CertificatesTab({
       header: 'm²',
       numeric: true,
       priority: 'detail',
-      cell: (row) => row.areaM2.toLocaleString('en-AU'),
+      cell: (row) => row.areaM2?.toLocaleString('en-AU') ?? '—',
     },
     {
       id: 'tonnes',

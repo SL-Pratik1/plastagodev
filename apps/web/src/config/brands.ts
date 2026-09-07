@@ -1,3 +1,5 @@
+import type { BrandId } from '@plastago/shared';
+
 /**
  * The brands the platform operates.
  *
@@ -9,9 +11,14 @@
  * Held as configuration for now because there is no brands domain yet. It moves
  * behind a `BrandService` when `/admin/brands` is built; the shell's brand
  * switcher reads from here so that swap touches one file.
+ *
+ * Only PlastaGo is listed while the platform trades single-brand. EasyLift and
+ * BrickGo stay in `BRAND_IDS` and in the fixtures, so records already carrying
+ * those ids keep their label and re-listing a brand here is a one-line change.
  */
 export interface BrandOption {
-  id: string;
+  /** A `BrandId`, so this list can only ever name a brand the schema knows. */
+  id: BrandId;
   name: string;
   /** Shown in the switcher so the scope of a filter is unambiguous. */
   description: string;
@@ -21,9 +28,24 @@ export interface BrandOption {
 
 export const BRANDS: readonly BrandOption[] = [
   { id: 'plastago', name: 'PlastaGo', description: 'Plasterboard recycling', status: 'live' },
-  { id: 'easylift', name: 'EasyLift', description: 'Crane and lift services', status: 'live' },
-  { id: 'brickgo', name: 'BrickGo', description: 'Registered April 2026', status: 'planned' },
 ];
+
+/**
+ * The ids a picker may offer — the configured subset of `BRAND_IDS`.
+ *
+ * Pickers read this rather than `BRAND_IDS` so that the set a user can *choose*
+ * follows this file, while the set the schema will *accept* stays wide enough
+ * for the records that already exist.
+ */
+export const CONFIGURED_BRAND_IDS: readonly BrandId[] = BRANDS.map((brand) => brand.id);
+
+/**
+ * False while one brand is configured.
+ *
+ * A picker with a single option is not a choice, it is a required click, so the
+ * forms hide theirs and submit the default instead.
+ */
+export const IS_MULTI_BRAND = BRANDS.length > 1;
 
 /** Sentinel for "don't filter" — the default for a super admin. */
 export const ALL_BRANDS = 'all' as const;
@@ -32,9 +54,9 @@ export const ALL_BRANDS = 'all' as const;
  * A brand id, or `ALL_BRANDS`.
  *
  * Just `string` rather than `typeof ALL_BRANDS | string`, which collapses to
- * `string` anyway. A literal union of the three ids would be tighter, but the
- * brand list becomes server data once `/admin/brands` is built, so pretending
- * the set is closed would be a type that has to be unwound.
+ * `string` anyway. A literal union of the configured ids would be tighter, but
+ * the brand list becomes server data once `/admin/brands` is built, so
+ * pretending the set is closed would be a type that has to be unwound.
  */
 export type BrandSelection = string;
 

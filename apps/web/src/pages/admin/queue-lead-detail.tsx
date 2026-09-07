@@ -1,5 +1,4 @@
 import {
-  BRAND_IDS,
   BRAND_LABELS,
   CAPTURE_MODES,
   CAPTURE_MODE_LABELS,
@@ -41,13 +40,28 @@ import {
   buttonVariants,
   useToast,
 } from '@plastago/ui';
-import { ArrowRightIcon, BuildingIcon, MailIcon, PhoneIcon, SproutIcon } from 'lucide-react';
-import { useState } from 'react';
+import {
+  ArrowRightIcon,
+  BuildingIcon,
+  FileTextIcon,
+  MailIcon,
+  PaperclipIcon,
+  PhoneIcon,
+  SproutIcon,
+} from 'lucide-react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
 import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
-import { useLead, useLeadConvert, useLeadUpdate } from '@/features/queues/queries';
+import { CONFIGURED_BRAND_IDS, IS_MULTI_BRAND } from '@/config/brands';
+import {
+  useLead,
+  useLeadAttach,
+  useLeadConvert,
+  useLeadDetach,
+  useLeadUpdate,
+} from '@/features/queues/queries';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDateTime, formatMobile } from '@/lib/format';
 
@@ -173,8 +187,8 @@ function LeadDetail({ lead }: { lead: Lead }) {
 
       {converted && (
         <Alert variant="success" title="Already converted">
-          This lead became an account. Pricing, terms and the first site were set during conversion
-          — change them on the account, not here.
+          This lead became an account. Pricing and terms were set during conversion — change them
+          on the account, not here.
         </Alert>
       )}
 
@@ -269,6 +283,8 @@ function LeadDetail({ lead }: { lead: Lead }) {
               )}
             </CardContent>
           </Card>
+
+          <LeadAttachments lead={lead} />
         </div>
 
         <Card>
@@ -347,7 +363,7 @@ function LeadDetail({ lead }: { lead: Lead }) {
 
             {!converted && status === 'won' && lead.status !== 'won' && (
               <Alert variant="info" title="Marking a lead won does not create the account">
-                Use Convert to account — that is where the rate card, terms and first site are set.
+                Use Convert to account — that is where the rate card and terms are set.
               </Alert>
             )}
           </CardContent>
@@ -377,8 +393,6 @@ interface ConvertForm {
   captureMode: CaptureMode;
   paymentTermsDays: string;
   primaryZone: Zone;
-  siteName: string;
-  siteSuburb: string;
   sendInvitation: boolean;
 }
 
@@ -425,8 +439,6 @@ function ConvertLeadDialog({
     captureMode: 'area-only',
     paymentTermsDays: '7',
     primaryZone: lead.zone ?? 'sydney',
-    siteName: '',
-    siteSuburb: lead.suburbs.split(',')[0]?.trim() ?? '',
     sendInvitation: true,
   }));
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -459,12 +471,6 @@ function ConvertLeadDialog({
     if (!Number.isInteger(terms) || terms < 0 || terms > 90) {
       next.paymentTermsDays = 'Whole days, 0 to 90. Their standard is 7.';
     }
-    if (!form.siteName.trim()) {
-      next.siteName = 'Name the first site — drivers navigate by it.';
-    }
-    if (!form.siteSuburb.trim()) {
-      next.siteSuburb = 'The suburb decides the zone, and the zone decides the rate.';
-    }
 
     setErrors(next);
     if (Object.keys(next).length > 0) return;
@@ -482,8 +488,6 @@ function ConvertLeadDialog({
           captureMode: form.captureMode,
           paymentTermsDays: terms,
           primaryZone: form.primaryZone,
-          siteName: form.siteName.trim(),
-          siteSuburb: form.siteSuburb.trim(),
           sendInvitation: form.sendInvitation,
         },
       });
@@ -581,23 +585,26 @@ function ConvertLeadDialog({
             )}
           </Field>
 
-          <Field id="convert-brand" label="Brand" hint="Which brand services them (M1.1).">
-            {(control) => (
-              <Select
-                {...control}
-                value={form.brandId}
-                onChange={(event) => {
-                  set('brandId', event.target.value as BrandId);
-                }}
-              >
-                {BRAND_IDS.map((id) => (
-                  <option key={id} value={id}>
-                    {BRAND_LABELS[id]}
-                  </option>
-                ))}
-              </Select>
-            )}
-          </Field>
+          {/* One configured brand is not a choice, so the form submits its default. */}
+          {IS_MULTI_BRAND && (
+            <Field id="convert-brand" label="Brand" hint="Which brand services them (M1.1).">
+              {(control) => (
+                <Select
+                  {...control}
+                  value={form.brandId}
+                  onChange={(event) => {
+                    set('brandId', event.target.value as BrandId);
+                  }}
+                >
+                  {CONFIGURED_BRAND_IDS.map((id) => (
+                    <option key={id} value={id}>
+                      {BRAND_LABELS[id]}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          )}
         </section>
 
         <section className="space-y-4 rounded-lg border border-border p-4">
@@ -723,48 +730,6 @@ function ConvertLeadDialog({
           </div>
         </section>
 
-        <section className="space-y-4">
-          <div>
-            <h3 className="text-sm font-semibold">First site</h3>
-            <p className="text-xs text-muted-foreground">
-              Sites are typed once and reused, so the first booking is fast. More can be added
-              later.
-            </p>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field
-              id="convert-site-name"
-              label="Site name"
-              required
-              error={errors.siteName}
-              hint="Use the lot AND street number where you have both — drivers get lost in greenfield estates."
-            >
-              {(control) => (
-                <Input
-                  {...control}
-                  value={form.siteName}
-                  placeholder="Lot 1097 (#46) Allambie Circuit"
-                  onChange={(event) => {
-                    set('siteName', event.target.value);
-                  }}
-                />
-              )}
-            </Field>
-
-            <Field id="convert-site-suburb" label="Suburb" required error={errors.siteSuburb}>
-              {(control) => (
-                <Input
-                  {...control}
-                  value={form.siteSuburb}
-                  onChange={(event) => {
-                    set('siteSuburb', event.target.value);
-                  }}
-                />
-              )}
-            </Field>
-          </div>
-        </section>
 
         <div className="flex items-start gap-3 rounded-lg border border-border p-3">
           <Checkbox
@@ -785,4 +750,144 @@ function ConvertLeadDialog({
       </div>
     </Dialog>
   );
+}
+
+/* ── Attachments (Matt, 5:53) ────────────────────────────────────────────── */
+
+/**
+ * PDF proposals filed against the lead.
+ *
+ * Matt, 5:53: *"if we're able to attach like a PDF file to those leads… we do
+ * generate PDF proposals for some builders and it would help us keep track of
+ * that."*
+ *
+ * ── Why it lives beside the notes and not on the account ──────────────────
+ * A proposal exists before an account does, and it is what the office reaches
+ * for when the builder rings back three weeks later asking what was quoted.
+ * Filing it against the account it *might* become would leave every lead that
+ * never converts with nowhere to keep it — and those are the ones you most often
+ * need to look up.
+ */
+function LeadAttachments({ lead }: { lead: Lead }) {
+  const toast = useToast();
+  const attach = useLeadAttach();
+  const detach = useLeadDetach();
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const upload = async (file: File) => {
+    try {
+      await attach.mutateAsync({ id: lead.id, file });
+      toast.success(`${file.name} attached`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error('Could not attach that file', described.detail ?? described.title);
+    }
+  };
+
+  const remove = async (attachmentId: string, fileName: string) => {
+    try {
+      await detach.mutateAsync({ id: lead.id, attachmentId });
+      toast.success(`${fileName} removed`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error('Could not remove that file', described.detail ?? described.title);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Attachments</CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Proposals and anything else sent to this lead. They stay with the lead whether or not it
+          converts.
+        </p>
+      </CardHeader>
+
+      <CardContent className="space-y-3">
+        {lead.attachments.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nothing attached yet.</p>
+        ) : (
+          <ul className="divide-y divide-border">
+            {lead.attachments.map((file) => (
+              <li key={file.id} className="flex items-center justify-between gap-3 py-2 first:pt-0">
+                <span className="flex min-w-0 items-center gap-2">
+                  <FileTextIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0">
+                    {/*
+                      A link only where there is genuinely something to open.
+                      A dead download teaches whoever clicks it that the feature
+                      does not work, which is worse than showing plain text.
+                    */}
+                    {file.url === null ? (
+                      <span className="block truncate text-sm font-medium">{file.fileName}</span>
+                    ) : (
+                      <a
+                        href={file.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="focus-ring block truncate rounded text-sm font-medium text-primary underline-offset-4 hover:underline"
+                      >
+                        {file.fileName}
+                      </a>
+                    )}
+                    <span className="block text-xs text-muted-foreground">
+                      {formatFileSize(file.sizeBytes)} · {file.uploadedBy} ·{' '}
+                      {formatDateTime(file.uploadedAt)}
+                    </span>
+                  </span>
+                </span>
+
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={detach.isPending}
+                  onClick={() => {
+                    void remove(file.id, file.fileName);
+                  }}
+                >
+                  Remove
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/*
+          A real file input, hidden behind a button. The native control cannot be
+          styled to match, and its "No file chosen" label is a lie on a list that
+          already shows what is attached.
+        */}
+        <input
+          ref={inputRef}
+          type="file"
+          accept="application/pdf,image/*"
+          className="sr-only"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void upload(file);
+            // Cleared so re-picking the same file fires change again.
+            event.target.value = '';
+          }}
+        />
+        <Button
+          variant="outline"
+          disabled={attach.isPending}
+          onClick={() => {
+            inputRef.current?.click();
+          }}
+        >
+          {attach.isPending ? <Spinner label="Attaching" /> : <PaperclipIcon aria-hidden />}
+          Attach a file
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** `148 KB`. Rounded hard — nobody needs the exact byte count of a proposal. */
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${String(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${String(Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

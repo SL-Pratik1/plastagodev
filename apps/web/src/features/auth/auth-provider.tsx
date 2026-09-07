@@ -1,4 +1,4 @@
-import type { OtpChallenge, Session } from '@plastago/shared';
+import type { OtpChallenge, Role, Session } from '@plastago/shared';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ServiceError } from '@/services/service-error';
 import { useServices } from '@/services/services-context';
@@ -107,6 +107,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIdentifier(null);
   }, [auth]);
 
+  /**
+   * Change the active role.
+   *
+   * Local to the session object: no network call, because in the real build the
+   * roles a user holds are already inside the signed token — switching chooses
+   * among them rather than asking for more. The server still authorises every
+   * request against the full set, so this cannot grant anything.
+   *
+   * Silently ignores a role the user does not hold. A caller passing one is a
+   * bug in the caller, and throwing here would take down the layout that renders
+   * the switcher.
+   */
+  const switchRole = useCallback((role: Role) => {
+    setSession((current) => {
+      if (!current) return current;
+      if (current.user.role === role) return current;
+      if (!current.user.roles.includes(role)) return current;
+      return { ...current, user: { ...current.user, role } };
+    });
+  }, []);
+
   const abandonChallenge = useCallback(() => {
     setChallenge(null);
     setIdentifier(null);
@@ -125,6 +146,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       resendCode,
       verifyCode,
       signOut,
+      switchRole,
       abandonChallenge,
       can: (capability: Capability) => (user ? can(user.role, capability) : false),
     };
@@ -137,6 +159,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     resendCode,
     verifyCode,
     signOut,
+    switchRole,
     abandonChallenge,
   ]);
 

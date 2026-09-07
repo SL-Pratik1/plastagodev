@@ -2,6 +2,7 @@ import type {
   ChargeDecision,
   FutileDecision,
   LeadConversion,
+  LeadCreate,
   LeadUpdate,
   PoConfirmation,
 } from '@plastago/shared';
@@ -185,10 +186,40 @@ export function useLead(id: string | undefined) {
   });
 }
 
+/**
+ * A.1 — take a lead by hand.
+ *
+ * Uses `useQueueMutation` like every other queue write, which is more
+ * invalidation than a new lead strictly causes — it touches no job and no
+ * invoice. That is deliberate: the alternative is a bespoke invalidation list
+ * per mutation, and the one thing a new lead MUST refresh is the nav badge,
+ * which is `queues.counts` and is exactly what the shared helper already gets
+ * right. Refetching a couple of idle queries is cheaper than a stale badge.
+ */
+export function useLeadCreate() {
+  const { queues } = useServices();
+  return useQueueMutation((input: LeadCreate) => queues.leadCreate(input));
+}
+
 export function useLeadUpdate() {
   const { queues } = useServices();
   return useQueueMutation(({ id, input }: { id: string; input: LeadUpdate }) =>
     queues.leadUpdate(id, input),
+  );
+}
+
+/** Attach a PDF proposal to a lead (Matt, 5:53). */
+export function useLeadAttach() {
+  const { queues } = useServices();
+  return useQueueMutation(({ id, file }: { id: string; file: File }) =>
+    queues.leadAttach(id, file),
+  );
+}
+
+export function useLeadDetach() {
+  const { queues } = useServices();
+  return useQueueMutation(({ id, attachmentId }: { id: string; attachmentId: string }) =>
+    queues.leadDetach(id, attachmentId),
   );
 }
 

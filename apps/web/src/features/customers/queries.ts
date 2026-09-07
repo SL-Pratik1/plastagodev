@@ -1,4 +1,4 @@
-import type { RiskAssessmentOverride } from '@plastago/shared';
+import type { AccountDraft } from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
 import { useServices } from '@/services/services-context';
@@ -29,13 +29,18 @@ export function useCustomer(id: string | undefined) {
  * six on mount would make opening an account four times slower than it needs to
  * be for the one tab the user actually wanted.
  */
-export function useCustomerSites(id: string | undefined, query: ListQuery, enabled: boolean) {
+/** Create an account directly — no lead (Matt, 6:10). */
+export function useCreateCustomer() {
   const { customers } = useServices();
-  return useQuery({
-    queryKey: queryKeys.customers.sites(id ?? 'none', query),
-    queryFn: () => customers.sites(id ?? '', query),
-    enabled: Boolean(id) && enabled,
-    placeholderData: (previous) => previous,
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (draft: AccountDraft) => customers.create(draft),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
+      // The account picker on job creation is one of these.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.lookups.all });
+    },
   });
 }
 
@@ -65,20 +70,6 @@ export function useSetRiskAssessmentRequired(accountId: string | undefined) {
   return useMutation({
     mutationFn: (required: boolean) =>
       customers.setRiskAssessmentRequired(accountId ?? '', required),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
-    },
-  });
-}
-
-/** The per-site exception. Same invalidation, same reason. */
-export function useSetSiteRiskAssessmentOverride() {
-  const { customers } = useServices();
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: ({ siteId, override }: { siteId: string; override: RiskAssessmentOverride }) =>
-      customers.setSiteRiskAssessmentOverride(siteId, override),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
     },

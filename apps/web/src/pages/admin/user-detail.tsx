@@ -7,6 +7,7 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  EmptyState,
   ErrorState,
   Skeleton,
   Tabs,
@@ -14,15 +15,17 @@ import {
   TabsPanel,
   TabsTrigger,
 } from '@plastago/ui';
-import { PencilIcon, SmartphoneIcon } from 'lucide-react';
+import { LockIcon, PencilIcon, SmartphoneIcon } from 'lucide-react';
 import { useState } from 'react';
-import { useParams, useSearchParams } from 'react-router';
+import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
 import { UserStatusBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
 import { UserFormDialog } from '@/features/users/components/user-form-dialog';
+import { useAuth } from '@/features/auth/auth-context';
 import { ROLE_CAPABILITIES } from '@/features/auth/permissions';
 import { useUser } from '@/features/users/queries';
+import { isCustomerRole } from '@/features/users/roles';
 import { describeError } from '@/lib/error-message';
 import { formatDateTime, formatMobile, formatRelative } from '@/lib/format';
 
@@ -39,6 +42,9 @@ export function AdminUserDetailPage() {
   const { userId } = useParams();
   const [params, setParams] = useSearchParams();
   const [editOpen, setEditOpen] = useState(false);
+  const navigate = useNavigate();
+  const { can } = useAuth();
+  const canManageAll = can('users:manage');
 
   const { data: user, error, isPending, refetch } = useUser(userId);
 
@@ -59,7 +65,9 @@ export function AdminUserDetailPage() {
     );
   };
 
-  const breadcrumbs = [{ label: 'Users & access', to: '/admin/users' }];
+  const breadcrumbs = [
+    { label: canManageAll ? 'Users & access' : 'Customer users', to: '/admin/users' },
+  ];
 
   if (error) {
     const described = describeError(error);
@@ -84,6 +92,34 @@ export function AdminUserDetailPage() {
         <Card className="p-5">
           <Skeleton className="h-4 w-40" />
           <Skeleton className="mt-4 h-32 w-full" />
+        </Card>
+      </div>
+    );
+  }
+
+  /*
+   * A narrowed seat (`users:manage-customers`) reaches this route by the same
+   * guard as the administrator, because both open the users screen. The grid
+   * never offers it a staff row — but a pasted link, a bookmark or the browser's
+   * back button can, and rendering an office worker's devices and sign-in
+   * history there would undo the whole narrowing. So the record is refused here,
+   * where the row's role is finally known.
+   */
+  if (!canManageAll && !isCustomerRole(user.role)) {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="User" breadcrumbs={breadcrumbs} />
+        <Card>
+          <EmptyState
+            icon={LockIcon}
+            title="This is a staff account"
+            description="You can view and manage customer administrators and site supervisors. Office, allocator and driver accounts are the administrator's."
+            action={
+              <Button variant="outline" onClick={() => navigate('/admin/users')}>
+                Back to customer users
+              </Button>
+            }
+          />
         </Card>
       </div>
     );
@@ -138,7 +174,15 @@ export function AdminUserDetailPage() {
                 items={[
                   { label: 'Email', value: user.email ?? '—' },
                   { label: 'Mobile', value: formatMobile(user.mobile) },
-                  { label: 'Role', value: ROLE_LABELS[user.role] },
+                  {
+                    label: user.roles.length > 1 ? 'Roles' : 'Role',
+                    // Both roles listed, main one first. A driver manager who
+                    // covers shifts holds two (Matt, 27:01) and the second one
+                    // is not a detail — it is why he can open the driver app.
+                    value: [user.role, ...user.roles.filter((held) => held !== user.role)]
+                      .map((held) => ROLE_LABELS[held])
+                      .join(' · '),
+                  },
                   { label: 'Account', value: user.accountName ?? 'Not tied to an account' },
                   {
                     label: 'Brands',
@@ -151,10 +195,6 @@ export function AdminUserDetailPage() {
                         ))}
                       </span>
                     ),
-                  },
-                  {
-                    label: 'Sites visible',
-                    value: user.siteCount === 0 ? 'All (staff role)' : user.siteCount,
                   },
                   { label: 'Last sign-in', value: formatDateTime(user.lastSignedInAt) },
                   { label: 'Invited by', value: user.invitedBy ?? '—' },

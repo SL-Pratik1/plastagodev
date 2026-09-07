@@ -16,13 +16,11 @@ import {
   PhoneIcon,
   ScaleIcon,
   TriangleAlertIcon,
-  UserIcon,
   type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
-import { SyncIndicator } from '@/components/driver/sync-indicator';
 import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
@@ -38,7 +36,7 @@ import { startOutboxSync } from '@/offline/outbox';
  *
  *  • **56px tab targets** — well past the 44px minimum, because the failure mode
  *    is a mis-tap that marks the wrong job complete.
- *  • **Four destinations, no more.** Run · Tip-off · Report · Me. Everything else
+ *  • **Three destinations, no more.** Run · Tip-off · Report. Everything else
  *    is reached from a job, because on site the question is always "this job".
  *  • **A fixed bottom bar**, thumb-height, clearing the home indicator.
  *
@@ -55,9 +53,9 @@ import { startOutboxSync } from '@/offline/outbox';
  * to full width would only put its chevrons a mouse-journey from its addresses.
  *
  * ── Still a third shell, not a variant of the other two ───────────────────
- * The chrome now rhymes with them, but the sync badge is load-bearing here and
- * meaningless there, the tab bar is four fixed destinations rather than a
- * capability-gated menu, and the touch targets are sized for gloves throughout.
+ * The chrome now rhymes with them, but the tab bar is three fixed destinations
+ * rather than a capability-gated menu, and the touch targets are sized for
+ * gloves throughout.
  * Folding this into `PortalLayout` would mean every future office affordance
  * needing a "…but not for drivers" branch, which is how a shell rots.
  */
@@ -73,7 +71,6 @@ const TABS: readonly Tab[] = [
   { to: '/driver', label: 'Run', icon: ClipboardListIcon, end: true },
   { to: '/driver/tip-off', label: 'Tip-off', icon: ScaleIcon },
   { to: '/driver/report', label: 'Report', icon: TriangleAlertIcon },
-  { to: '/driver/me', label: 'Me', icon: UserIcon },
 ];
 
 export function DriverShell() {
@@ -194,14 +191,6 @@ export function DriverShell() {
 
           <div className="ml-auto flex items-center gap-1 sm:gap-2">
             {/*
-              Sync state is in the header on EVERY screen and at every width,
-              never behind a menu. M4.12 requires the driver to see what has and
-              has not synced, and with no error-tracking vendor (§6A.8) they are
-              the only person who can tell us the queue is stuck.
-            */}
-            <SyncIndicator />
-
-            {/*
               Icon-only on a phone, where the word "Install" would push the
               driver's name into an ellipsis; labelled from `sm` up where there
               is room for it to say what it does. Renders nothing at all once the
@@ -218,15 +207,14 @@ export function DriverShell() {
             <ThemeToggle />
 
             {/*
-              Desktop only. On a phone signing out lives on the Me screen, where
-              it sits beneath the sync queue on purpose — a driver with unsent
-              work is warned before they can leave, and a menu item tucked in the
-              header would route around that check.
+              Shown at every width. With the Me screen gone this is the only way
+              out, so it cannot be a desktop affordance — the confirm dialog still
+              warns a driver that unsent work stays on the device.
             */}
             <Menu
               align="end"
               triggerLabel="Account menu"
-              triggerClassName="hidden items-center gap-2 rounded-md py-1 pr-2 pl-1 transition-colors hover:bg-muted md:flex"
+              triggerClassName="flex items-center gap-2 rounded-md py-1 pr-2 pl-1 transition-colors hover:bg-muted"
               trigger={
                 <>
                   <Avatar name={driver.name} size="sm" />

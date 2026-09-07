@@ -280,6 +280,30 @@ export function buildLeads(): Lead[] {
       convertedAccountId: seed.status === 'won' ? objectId('ac', 90 + index) : null,
       heardAbout: seed.heardAbout,
       notes,
+      /*
+       * A proposal on the leads that have been quoted.
+       *
+       * Only the ones past first contact carry one, because that is when a
+       * proposal exists — Matt, 5:53: *"we do generate PDF proposals for some
+       * builders."* Seeded with a null url: these are fixture records, not real
+       * uploads, and a link that 404s is worse than one the UI knows is pending.
+       */
+      attachments:
+        seed.status === 'quoted' || seed.status === 'won'
+          ? [
+              {
+                id: objectId('lat', 900 + index),
+                fileName: `Proposal - ${seed.company}.pdf`,
+                sizeBytes: 148_000 + index * 9_400,
+                contentType: 'application/pdf',
+                uploadedAt: createdAt,
+                // A lead can be unowned; the file it carries was still put
+                // there by someone, so the office is the honest fallback.
+                uploadedBy: seed.owner ?? 'Operations',
+                url: null,
+              },
+            ]
+          : [],
     };
   });
 }
@@ -430,12 +454,30 @@ const EXTRACTION_SEEDS: readonly ExtractionSeed[] = [
   },
 ];
 
+/**
+ * Every field Matt read off the Domain PO at 28:12, in the order it appears on
+ * the page — so a reviewer checking the extraction against the document beside
+ * it reads top to bottom rather than hunting.
+ */
+/** Site supervisor names, so an extraction has a plausible one to offer. */
+const SUPERVISORS = [
+  'Matthew French',
+  'Sione Tupou',
+  'Brett Sanders',
+  'Dave Nguyen',
+  'Grant Whitely',
+] as const;
+
 const FIELD_ORDER = [
   { key: 'poNumber', label: 'PO number' },
   { key: 'accountName', label: 'Account' },
   { key: 'siteAddress', label: 'Site address' },
-  { key: 'customerReference', label: 'Customer reference' },
+  { key: 'lotNumber', label: 'Lot number' },
+  { key: 'poNumber', label: 'Customer reference' },
   { key: 'areaM2', label: 'Area (m²)' },
+  { key: 'bagAllowance', label: 'Recycling bags allowed' },
+  { key: 'siteSupervisorName', label: 'Site supervisor' },
+  { key: 'siteSupervisorMobile', label: 'Supervisor mobile' },
   { key: 'amountExGst', label: 'Amount ex GST' },
   { key: 'issuedOn', label: 'PO date' },
 ] as const;
@@ -452,15 +494,31 @@ export function buildPoExtractions(): PoExtraction[] {
     ).slice(0, 4);
     const suggestedJob = seed.reason === 'no-job-match' ? null : (jobsForAccount[0] ?? null);
     const receivedAt = new Date(Date.now() - seed.ageHours * 3600_000).toISOString();
-    const areaM2 = 400 + Math.round(rng() * 1600);
-    const amountCents = 22000 + Math.round(areaM2 * 16);
+    /*
+     * Wisdom is fixed-price and its orders carry no area at all.
+     *
+     * Matt, 31:04: *"they don't actually give us square metres… they just give
+     * us a line item."* Seeding one such order is the point — it is the case
+     * that breaks any code assuming an area is always there, and it must reach
+     * the review queue as "no area on this PO", not as a failed read.
+     */
+    const fixedPrice = seed.accountCode === 'WIS001';
+    const areaM2 = fixedPrice ? null : 400 + Math.round(rng() * 1600);
+    // Their own rule of thumb: roughly one bag per 500 m² (Matt, 28:12).
+    const bagAllowance = areaM2 === null ? null : Math.max(1, Math.round(areaM2 / 500));
+    const amountCents = 22000 + Math.round((areaM2 ?? 900) * 16);
+    const supervisorName = SUPERVISORS[index % SUPERVISORS.length] ?? null;
+    const supervisorMobile = supervisorName === null ? null : `04${String(12000000 + index * 111111)}`;
 
     const values: Record<(typeof FIELD_ORDER)[number]['key'], string | null> = {
       poNumber: seed.poNumber,
       accountName: account?.name ?? seed.from.split('@')[1] ?? null,
       siteAddress: suggestedJob ? `${suggestedJob.siteName}, ${suggestedJob.suburb}` : null,
-      customerReference: suggestedJob?.customerReference ?? null,
-      areaM2: String(areaM2),
+      lotNumber: suggestedJob ? String(100 + index) : null,
+      areaM2: areaM2 === null ? null : String(areaM2),
+      bagAllowance: bagAllowance === null ? null : String(bagAllowance),
+      siteSupervisorName: supervisorName,
+      siteSupervisorMobile: supervisorMobile,
       amountExGst: `${String(Math.floor(amountCents / 100))}.${String(amountCents % 100).padStart(2, '0')}`,
       issuedOn: receivedAt.slice(0, 10),
     };
@@ -478,6 +536,15 @@ export function buildPoExtractions(): PoExtraction[] {
       suggestedJobId: suggestedJob?.id ?? null,
       suggestedJobNumber: suggestedJob?.jobNumber ?? null,
       amountExGst: values.amountExGst,
+
+      // The job spec, which is the half of a PO the system used to discard.
+      extractedAreaM2: areaM2,
+      extractedBagAllowance: bagAllowance,
+      extractedSiteAddress: values.siteAddress,
+      extractedLotNumber: values.lotNumber,
+      extractedSupervisorName: supervisorName,
+      extractedSupervisorMobile: supervisorMobile,
+
       overallConfidence: seed.overall,
       reason: seed.reason,
       state: 'needs-review' as const,
@@ -490,12 +557,19 @@ export function buildPoExtractions(): PoExtraction[] {
         `Issued:          ${values.issuedOn ?? '—'}`,
         `Account:         ${values.accountName ?? '—'}`,
         `Delivery site:   ${values.siteAddress ?? '— not legible —'}`,
-        `Reference:       ${values.customerReference ?? '—'}`,
+        `Lot:             ${values.lotNumber ?? '—'}`,
+        `Reference:       ${values.poNumber ?? '—'}`,
         '',
         'Description                              Qty        Amount',
-        `Plasterboard recycling pickup            ${String(areaM2)} m²   $${values.amountExGst ?? '—'}`,
+        // A fixed-price order genuinely prints a line item and no quantity.
+        areaM2 === null
+          ? `Plasterboard recycling pickup            —          $${values.amountExGst ?? '—'}`
+          : `Plasterboard recycling pickup            ${String(areaM2)} m²   $${values.amountExGst ?? '—'}`,
+        `Recycling bags allowed                   ${bagAllowance === null ? '—' : String(bagAllowance)}`,
         '',
         `TOTAL EX GST                                        $${values.amountExGst ?? '—'}`,
+        '',
+        `Site supervisor: ${supervisorName ?? '—'}  ${supervisorMobile ?? ''}`,
         '',
         `— extracted from ${seed.attachment} (${String(seed.pages)} page${seed.pages === 1 ? '' : 's'}) —`,
         seed.note,

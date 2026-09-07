@@ -11,11 +11,12 @@ import {
 } from '@plastago/ui';
 import { ChevronDownIcon, LogOutIcon, PhoneIcon } from 'lucide-react';
 import { useState } from 'react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
+import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
 import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { visiblePortalNav } from '@/config/portal-navigation';
+import { useOnboardingInvite } from '@/features/portal/queries';
 import { SessionExpiry } from '@/features/auth/session-expiry';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
 import { usePortalScope } from '@/features/portal/queries';
@@ -51,7 +52,26 @@ export function PortalLayout() {
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
-  const items = visiblePortalNav(can);
+  // Site supervisors are a builder concept, so the item is hidden for a
+  // contractor rather than shown and explained (Matt, 20:09).
+  const items = visiblePortalNav(can, scope.data?.accountType);
+
+  /*
+   * Journey A.4 — an account with no accepted terms goes to the welcome screen.
+   *
+   * Until the terms are accepted there is no director's guarantee on file, which
+   * is the only reason Matt's paper form exists (7:49). So the rest of the portal
+   * waits.
+   *
+   * Only for an administrator. A site supervisor cannot bind their employer and
+   * must not be presented with a page implying they can — they see the portal as
+   * normal and their administrator gets the prompt.
+   */
+  const onboarding = useOnboardingInvite();
+  const needsTerms =
+    user.role === 'customer-administrator' &&
+    onboarding.data?.state === 'awaiting-terms' &&
+    !location.pathname.startsWith('/portal/welcome');
   const tabs = items.filter((item) => item.primary);
 
   const confirmSignOut = async () => {
@@ -69,6 +89,8 @@ export function PortalLayout() {
       setSigningOut(false);
     }
   };
+
+  if (needsTerms) return <Navigate to="/portal/welcome" replace />;
 
   return (
     <div className="flex min-h-dvh bg-canvas">

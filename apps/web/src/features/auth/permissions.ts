@@ -57,7 +57,6 @@ export const CAPABILITIES = [
    * example almost word for word.
    */
   'portal:book',
-  'portal:sites',
   'portal:invoices',
   'portal:reports',
   'portal:certificates',
@@ -131,6 +130,27 @@ export const CAPABILITIES = [
   'pricing:view',
   // Fleet and people
   'users:manage',
+  /**
+   * M1.5 — invite and manage CUSTOMER users only: the Customer Administrator
+   * and the Site Supervisor.
+   *
+   * ── Why a second capability instead of widening `users:manage` ──────────
+   * Because Operations onboards customers and does not administer the office.
+   * Matt's seat needs to get a builder's administrator and their supervisors
+   * into the portal without waiting on the Administrator — that is the same
+   * onboarding job `leads:manage` and `accounts:manage` already sit with. What
+   * it must NOT gain is the ability to mint another staff account or change an
+   * office worker's role, which is W1/W16 and stays with the Administrator.
+   *
+   * So the screen is shared and the *scope* differs: this capability opens
+   * `/admin/users` narrowed to customer users, `users:manage` opens all seven
+   * roles. The narrowing is stated once here and read by the nav, the guard,
+   * the grid and the invite form.
+   *
+   * ⚠️ UI scoping, not a security boundary — the server must apply the same
+   * narrowing to the list and reject a staff-role invite from this seat.
+   */
+  'users:manage-customers',
   'drivers:manage',
   'vehicles:manage',
   /**
@@ -187,7 +207,6 @@ export type Capability = (typeof CAPABILITIES)[number];
 const OTHER_SURFACE_CAPABILITIES = new Set<Capability>([
   'portal:access',
   'portal:book',
-  'portal:sites',
   'portal:invoices',
   'portal:reports',
   'portal:certificates',
@@ -215,8 +234,13 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
 
   /*
    * Matt's own seat. Everything operational and commercial; nothing that
-   * configures the system itself — users, brands, integrations, notification
-   * templates and settings are W1/W3/W5/W7/W16, which are the Administrator's.
+   * configures the system itself — brands, integrations, notification
+   * templates and settings are W3/W5/W7, which are the Administrator's.
+   *
+   * The one people row here is `users:manage-customers`: onboarding a customer
+   * means getting their administrator and supervisors into the portal, and that
+   * sits beside `leads:manage` and `accounts:manage` rather than with W1/W16.
+   * Staff accounts and role changes remain the Administrator's.
    */
   operations: [
     'admin:access',
@@ -234,6 +258,7 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'certificates:manage',
     'leads:manage',
     'pricing:view',
+    'users:manage-customers',
     'drivers:manage',
     'vehicles:manage',
     'audit:read',
@@ -323,7 +348,6 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
   'customer-administrator': [
     'portal:access',
     'portal:book',
-    'portal:sites',
     'portal:invoices',
     'portal:reports',
     'portal:certificates',
@@ -341,7 +365,7 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
    * The site narrowing is data scoping the SERVER does on the session; this row
    * only decides which screens exist for them.
    */
-  'customer-site-supervisor': ['portal:access', 'portal:book', 'portal:sites'],
+  'customer-site-supervisor': ['portal:access', 'portal:book'],
 };
 
 export function can(role: Role, capability: Capability): boolean {
@@ -370,3 +394,100 @@ export function landingPathFor(role: Role): string {
       return '/driver';
   }
 }
+
+/**
+ * The matrix, arranged for reading rather than for checking.
+ *
+ * ── Why this lives here and not in the settings page ──────────────────────
+ * `ROLE_CAPABILITIES` above is the source of truth; this is the same data with
+ * a human name and a heading attached. Keeping the two in one file is the point
+ * — a capability added to the matrix and not to a group here shows up as a gap
+ * in one place, not as a silently missing row on a screen nobody re-reads.
+ *
+ * ⚠️ Labels are what an administrator would call the thing, not the capability
+ * string. `queues:action` means nothing to Matt; "Work the exception queues"
+ * does. The capability string stays available as the row's title attribute for
+ * whoever is actually debugging a guard.
+ */
+export const CAPABILITY_GROUPS: ReadonlyArray<{
+  title: string;
+  /** Shown under the heading — why these belong together. */
+  note: string;
+  capabilities: ReadonlyArray<{ capability: Capability; label: string }>;
+}> = [
+  {
+    title: 'Where they sign in',
+    note: 'A role reaches exactly one surface. This is the first thing to check when someone lands on the wrong screen.',
+    capabilities: [
+      { capability: 'admin:access', label: 'Admin console' },
+      { capability: 'portal:access', label: 'Customer portal' },
+      { capability: 'driver:access', label: 'Driver app' },
+    ],
+  },
+  {
+    title: 'Jobs and dispatch',
+    note: 'The operational half of the console.',
+    capabilities: [
+      { capability: 'ops:dashboard', label: 'Operations dashboard' },
+      { capability: 'jobs:read', label: 'View jobs' },
+      { capability: 'jobs:create', label: 'Create a job' },
+      { capability: 'jobs:manage', label: 'Edit, cancel and reschedule jobs' },
+      { capability: 'dispatch:manage', label: 'Dispatch board and run sheets' },
+      { capability: 'queues:action', label: 'Work the exception queues' },
+      { capability: 'driver-comms', label: 'Message drivers on a job' },
+    ],
+  },
+  {
+    title: 'Money',
+    note: 'Withheld from the allocator on purpose: allocation is a logistics decision, so the board shows the job and never what it is worth.',
+    capabilities: [
+      { capability: 'pricing:view', label: 'See prices, rates and job totals' },
+      { capability: 'invoices:read', label: 'Invoices' },
+      { capability: 'accounts:manage', label: 'Customer accounts' },
+      { capability: 'reports:read', label: 'Reports' },
+      { capability: 'certificates:manage', label: 'Compliance certificates' },
+      { capability: 'leads:manage', label: 'Leads and onboarding' },
+    ],
+  },
+  {
+    title: 'Fleet and people',
+    note: 'The allocator manages drivers and vehicles because performance and maintenance are their workflows. Only the administrator manages staff accounts; operations can invite customer users, because that is part of onboarding a customer.',
+    capabilities: [
+      { capability: 'users:manage', label: 'Users and roles — all seven' },
+      { capability: 'users:manage-customers', label: 'Invite customer users only' },
+      { capability: 'drivers:manage', label: 'Drivers' },
+      { capability: 'vehicles:manage', label: 'Vehicles' },
+      { capability: 'notifications:read', label: 'Notification centre and bell' },
+    ],
+  },
+  {
+    title: 'Configuration',
+    note: 'The administrator alone. These change how the system behaves for everybody, which is why they are one row and not four.',
+    capabilities: [
+      { capability: 'brands:manage', label: 'Brands' },
+      { capability: 'integrations:manage', label: 'Integrations' },
+      { capability: 'notifications:manage', label: 'Notification rules' },
+      { capability: 'settings:manage', label: 'Settings' },
+    ],
+  },
+  {
+    title: 'System',
+    note: 'Read-only oversight, plus the design-system showcase.',
+    capabilities: [
+      { capability: 'audit:read', label: 'Audit log' },
+      { capability: 'foundation:view', label: 'Design foundation' },
+    ],
+  },
+  {
+    title: 'Customer portal screens',
+    note: 'M1.5 word for word: a site supervisor books and views their own site’s jobs but cannot see pricing, other sites, or another builder’s work.',
+    capabilities: [
+      { capability: 'portal:book', label: 'Book a pickup' },
+      { capability: 'portal:invoices', label: 'Invoices' },
+      { capability: 'portal:reports', label: 'Reports' },
+      { capability: 'portal:certificates', label: 'Certificates' },
+      { capability: 'portal:supervisors', label: 'Manage supervisors' },
+      { capability: 'portal:account', label: 'Account preferences' },
+    ],
+  },
+];

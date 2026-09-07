@@ -3,6 +3,8 @@ import {
   EXCEPTION_REASON_LABELS,
   EXCEPTION_REASONS,
   FREIGHT_ITEM_LABELS,
+  WEIGHT_BASIS_HINTS,
+  WEIGHT_BASIS_LABELS,
   ZONE_LABELS,
   type ExceptionReason,
 } from '@plastago/shared';
@@ -326,7 +328,7 @@ export function AdminJobDetailPage() {
                     { label: 'Builder on site', value: job.builderName },
                     { label: 'Site', value: `${job.siteName}, ${job.suburb}` },
                     { label: 'Zone', value: ZONE_LABELS[job.zone] },
-                    { label: 'Customer reference', value: job.customerReference ?? '—' },
+                    { label: 'Customer reference', value: job.poNumber ?? '—' },
                     { label: 'Purchase order', value: job.poNumber ?? 'Not supplied' },
                     { label: 'Ready date', value: formatDate(job.readyDate) },
                     {
@@ -363,7 +365,34 @@ export function AdminJobDetailPage() {
                         ? [
                             {
                               label: 'Recovered weight',
-                              value: formatWeight(job.recoveredWeightKg),
+                              /*
+                               * The basis sits ON the number, not beside it.
+                               *
+                               * Matt, 56:11: a driver-weighed job records an
+                               * "actual weight"; one derived from the weighbridge
+                               * total records an "estimated weight". This figure
+                               * ends up on a diversion certificate that goes into
+                               * a Green Star submission, so anyone reading it has
+                               * to be able to tell a measurement from a share-out
+                               * without opening the tip-off record to find out.
+                               */
+                              value: (
+                                <span className="flex flex-wrap items-center gap-1.5">
+                                  <span>{formatWeight(job.recoveredWeightKg)}</span>
+                                  {job.recoveredWeightBasis !== null && (
+                                    <Badge
+                                      variant={
+                                        job.recoveredWeightBasis === 'actual'
+                                          ? 'success'
+                                          : 'secondary'
+                                      }
+                                      title={WEIGHT_BASIS_HINTS[job.recoveredWeightBasis]}
+                                    >
+                                      {WEIGHT_BASIS_LABELS[job.recoveredWeightBasis]}
+                                    </Badge>
+                                  )}
+                                </span>
+                              ),
                             },
                           ]
                         : []),

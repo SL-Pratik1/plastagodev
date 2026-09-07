@@ -28,7 +28,14 @@ export const ReportFiltersSchema = z
     from: IsoDateSchema,
     to: IsoDateSchema,
     accountId: ObjectIdSchema.nullable(),
-    siteId: ObjectIdSchema.nullable(),
+    /**
+     * Narrow to one suburb.
+     *
+     * Was `siteId` until sites were removed (Matt, 0:29). A suburb is the
+     * closest thing left, and it is what the office actually asks about — "how
+     * much came out of Kellyville last month" rather than "out of lot 214".
+     */
+    suburb: z.string().nullable(),
     zone: ZoneSchema.nullable(),
     driverId: ObjectIdSchema.nullable(),
   })
@@ -166,7 +173,12 @@ export const CertificateSchema = z
     periodFrom: IsoDateSchema,
     periodTo: IsoDateSchema,
     jobs: z.number().int().nonnegative(),
-    areaM2: z.number().nonnegative(),
+    /**
+     * Null where no job in scope has a recorded area — a fixed-price builder's
+     * POs carry none (Matt, 31:04). The certificate is still valid: the figure
+     * that matters on it is `tonnesDiverted`, which comes from the weighbridge.
+     */
+    areaM2: z.number().nonnegative().nullable(),
     /** From the tip-off reconciliation, not from the priced m². */
     tonnesDiverted: z.number().nonnegative(),
     issuedAt: IsoDateTimeSchema.nullable(),

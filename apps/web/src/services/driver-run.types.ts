@@ -74,7 +74,8 @@ export interface DriverRunService {
    * committing it — a wildly wrong imputed figure almost always means a mistyped
    * crane weight, and they are still standing at the weighbridge.
    */
-  previewTipOff: (date: string, totalKg: number) => Promise<TipOffReconciliation>;
+  /** Keyed by RUN — a driver tips off twice on a two-run day (Matt, 43:50). */
+  previewTipOff: (runId: string, totalKg: number) => Promise<TipOffReconciliation>;
   recordTipOff: (input: TipOffEntry) => Promise<void>;
 
   // ── M4.9 · vehicle defects ─────────────────────────────────────────────

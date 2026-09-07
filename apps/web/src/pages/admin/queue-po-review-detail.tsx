@@ -107,7 +107,14 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
       next.poNumber = 'That is longer than any PO number we have seen. Check for a pasted line.';
     }
     if (!accountId) next.accountId = 'Choose the account this purchase order belongs to.';
-    if (!jobId) next.jobId = 'Choose the job to attach it to.';
+    /*
+     * The job is optional, deliberately.
+     *
+     * A builder's order lands three to four months before the work (Matt,
+     * 28:40), so there is usually no job to attach it to yet — the call-up email
+     * a week out is what creates one. Requiring a job here would make the
+     * reviewer pick a wrong one to get past the form.
+     */
 
     setErrors(next);
     if (Object.keys(next).length > 0) return;
@@ -118,13 +125,24 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
         input: {
           poNumber: poNumber.trim(),
           accountId,
-          jobId,
+          jobId: jobId || null,
+          // The spec as extracted. Sent back even unchanged: the correction rate
+          // is the accuracy metric, and it needs the accepted values too.
+          expectedAreaM2: extraction.extractedAreaM2,
+          bagAllowance: extraction.extractedBagAllowance,
+          lotNumber: extraction.extractedLotNumber,
+          addressLine: extraction.extractedSiteAddress,
+          suburb: null,
+          siteSupervisorName: extraction.extractedSupervisorName,
+          siteSupervisorMobile: extraction.extractedSupervisorMobile,
           amountExGst: extraction.amountExGst,
         },
       });
       toast.success(
-        `PO ${poNumber.trim()} attached`,
-        'Anything that was waiting on this purchase order has been released.',
+        `PO ${poNumber.trim()} confirmed`,
+        jobId
+          ? 'Anything that was waiting on this purchase order has been released.'
+          : 'Held against the account. The call-up email will turn it into a job.',
       );
       await navigate('/admin/queues/po-review');
     } catch (caught) {

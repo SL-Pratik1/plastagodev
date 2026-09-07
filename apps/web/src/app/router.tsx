@@ -2,6 +2,7 @@ import { Suspense, type ReactNode } from 'react';
 import { createBrowserRouter } from 'react-router';
 import {
   AuditLogPage,
+  CustomerCreatePage,
   CustomerDetailPage,
   CustomersPage,
   DashboardPage,
@@ -11,9 +12,9 @@ import {
   DriverJobDetailPage,
   DriverJobFutilePage,
   DriverJobPhotosPage,
+  DriverNavigatePage,
   DriverJobRiskAssessmentPage,
   DriverJobWeightsPage,
-  DriverMePage,
   DriverPreStartPage,
   DriverReportDefectPage,
   DriverRunSheetPage,
@@ -35,12 +36,12 @@ import {
   PortalJobEditPage,
   PortalJobsPage,
   PortalReportsPage,
-  PortalSiteDetailPage,
-  PortalSitesPage,
+  PortalWelcomePage,
   PortalSupervisorsPage,
   QueueApprovalsPage,
   QueueAwaitingPoPage,
   QueueFutilePage,
+  QueueLeadCreatePage,
   QueueLeadDetailPage,
   QueueLeadsPage,
   QueuePoReviewDetailPage,
@@ -184,6 +185,12 @@ export const router = createBrowserRouter([
                     element: <RequireCapability capability="leads:manage" />,
                     children: [
                       { path: 'queues/leads', element: load(<QueueLeadsPage />) },
+                      // Before the :leadId route. React Router ranks a static
+                      // segment above a dynamic one regardless of order, so this
+                      // is for the human reader rather than the matcher — but a
+                      // lead whose id is literally "new" is the kind of thing
+                      // that only ever gets discovered in production.
+                      { path: 'queues/leads/new', element: load(<QueueLeadCreatePage />) },
                       { path: 'queues/leads/:leadId', element: load(<QueueLeadDetailPage />) },
                     ],
                   },
@@ -193,6 +200,11 @@ export const router = createBrowserRouter([
                     element: <RequireCapability capability="accounts:manage" />,
                     children: [
                       { path: 'customers', element: load(<CustomersPage />) },
+                      /*
+                        Before the :customerId route, or "new" is read as an id.
+                        Matt, 6:10 — an account can be created without a lead.
+                      */
+                      { path: 'customers/new', element: load(<CustomerCreatePage />) },
                       { path: 'customers/:customerId', element: load(<CustomerDetailPage />) },
                     ],
                   },
@@ -210,7 +222,9 @@ export const router = createBrowserRouter([
 
                   // People & fleet
                   {
-                    element: <RequireCapability capability="users:manage" />,
+                    // The narrower grant opens the screen; the page narrows what
+                    // it shows for anyone who lacks full `users:manage`.
+                    element: <RequireCapability capability="users:manage-customers" />,
                     children: [
                       { path: 'users', element: load(<UsersPage />) },
                       { path: 'users/:userId', element: load(<UserDetailPage />) },
@@ -279,6 +293,14 @@ export const router = createBrowserRouter([
                   { index: true, element: load(<PortalDashboardPage />) },
 
                   // Pickups — both customer roles.
+                  /*
+                    Journey A.4 — outside the capability guards on purpose.
+                    An account waiting on its terms has to be able to reach the
+                    one screen that lifts that wait; gating it behind the same
+                    checks as the rest of the portal would lock the customer out
+                    of the only door available to them.
+                  */
+                  { path: 'welcome', element: load(<PortalWelcomePage />) },
                   { path: 'jobs', element: load(<PortalJobsPage />) },
                   { path: 'jobs/:jobId', element: load(<PortalJobDetailPage />) },
                   { path: 'jobs/:jobId/edit', element: load(<PortalJobEditPage />) },
@@ -286,13 +308,6 @@ export const router = createBrowserRouter([
                   {
                     element: <RequireCapability capability="portal:book" />,
                     children: [{ path: 'book', element: load(<PortalBookPage />) }],
-                  },
-                  {
-                    element: <RequireCapability capability="portal:sites" />,
-                    children: [
-                      { path: 'sites', element: load(<PortalSitesPage />) },
-                      { path: 'sites/:siteId', element: load(<PortalSiteDetailPage />) },
-                    ],
                   },
 
                   // Commercial — Customer Administrator only.
@@ -354,6 +369,7 @@ export const router = createBrowserRouter([
 
                   // M4.1, M4.2 — the job, and the single next action on it.
                   { path: 'jobs/:jobId', element: load(<DriverJobDetailPage />) },
+                  { path: 'jobs/:jobId/navigate', element: load(<DriverNavigatePage />) },
                   { path: 'jobs/:jobId/photos', element: load(<DriverJobPhotosPage />) },
                   { path: 'jobs/:jobId/weights', element: load(<DriverJobWeightsPage />) },
                   { path: 'jobs/:jobId/futile', element: load(<DriverJobFutilePage />) },
@@ -373,7 +389,6 @@ export const router = createBrowserRouter([
                   { path: 'report', element: load(<DriverReportDefectPage />) },
 
                   // M4.12 — the queue, and the driver's own details.
-                  { path: 'me', element: load(<DriverMePage />) },
                 ],
               },
             ],

@@ -19,10 +19,17 @@ import { formatArea, formatDate, formatWeight } from '@/lib/format';
  *
  * ── These documents go into Green Star submissions ────────────────────────
  * Which is why the tonnage on them is the *recovered* weight from the tip-off
- * reconciliation, not something derived from the priced square metres. On an
- * m²-only account the figure is an estimate, and this screen says so on the row
- * rather than in a footnote: a certificate that quietly presents an estimate as
- * a measurement is the one thing here that could fail an audit.
+ * reconciliation, never something derived from the priced square metres.
+ *
+ * ── An estimated job produces no certificate at all ───────────────────────
+ * Matt, 32:11: *"this is only for weighed jobs. If it's an estimated job, we're
+ * unable to provide a certificate because it's an estimated weight and it
+ * doesn't meet compliance regulation."*
+ *
+ * This screen used to flag estimated tonnage with a warning on the row. It no
+ * longer needs to, because such rows never arrive — the service filters them
+ * out. What the screen owes the customer instead is an explanation of why their
+ * completed job is not listed, which is the alert at the foot.
  *
  * ── Per job now, per project later ────────────────────────────────────────
  * M5.12 offers "a project, a period or a job". The scope of a certificate is a
@@ -113,8 +120,8 @@ export function PortalCertificatesPage() {
       cell: (row) => (
         <span className="block">
           <span className="block tabular-nums">{formatWeight(row.tonnesDiverted * 1000)}</span>
-          {/* Stated on the row, not buried: these go into Green Star. */}
-          {!capturesWeight && <span className="block text-xs text-warning">Estimated from m²</span>}
+          {/* Every row here is measured — estimated jobs get no certificate. */}
+          <span className="block text-xs text-muted-foreground">Weighed at the tip</span>
         </span>
       ),
     },
@@ -174,7 +181,7 @@ export function PortalCertificatesPage() {
         <StatCard
           label="Diverted from landfill"
           value={totalTonnes > 0 ? formatWeight(totalTonnes * 1000) : '—'}
-          hint={capturesWeight ? 'Measured at the tip' : 'Estimated from square metres'}
+          hint="Measured at the tip"
           tone="positive"
           isPending={isPending}
         />
@@ -234,13 +241,15 @@ export function PortalCertificatesPage() {
           makes it defensible in a Green Star submission.
         </Alert>
       ) : (
-        <Alert variant="warning" title="Your tonnage figures are estimates">
-          Your account records square metres, so the diverted weight shown here is estimated from
-          the area collected. If you need measured tonnage for a submission, call the office on{' '}
+        <Alert variant="warning" title="Your account does not have certificates yet">
+          A certificate can only be issued for a pickup we <strong>weighed</strong> — an estimated
+          weight does not meet the compliance standard these documents are used under, so we do not
+          issue one rather than issue one you cannot rely on. Your account currently records square
+          metres only. To start receiving certificates, call the office on{' '}
           <a href="tel:1300395438" className="font-medium underline underline-offset-4">
             1300 395 438
           </a>{' '}
-          and we will start recording weight at the tip for your pickups.
+          and we will record weight at the tip for your pickups.
         </Alert>
       )}
     </div>

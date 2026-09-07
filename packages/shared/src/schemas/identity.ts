@@ -156,6 +156,21 @@ export const OtpVerifySchema = z
  * `brandIds` is present because brand is a first-class dimension, not a setting
  * (M1.1) — EasyLift is operationally live today. `accountId` is set only for the
  * two customer roles: it scopes the portal to one account (M1.5).
+ *
+ * ── One person, several roles ─────────────────────────────────────────────
+ * Matt, 27:01: *"if we have a driver that calls in sick he'll take over for them
+ * for the day, so **yes, he can be a driver and an allocator at the same
+ * time**."*
+ *
+ * So `roles` is everything this person may do and `role` is what they are doing
+ * right now. Two fields rather than one because the surfaces are mutually
+ * exclusive: an allocator's board and a driver's run sheet are different
+ * applications, and rendering both at once is not a coherent screen. The active
+ * role decides which one they are looking at; switching is explicit.
+ *
+ * ⚠️ `role` must always be a member of `roles` — see `hasRole`. Permission
+ * checks read `role`, so a stale active role is a privilege bug, not a display
+ * bug.
  */
 export const AuthenticatedUserSchema = z
   .object({
@@ -163,7 +178,10 @@ export const AuthenticatedUserSchema = z
     name: z.string().min(1),
     email: z.email().nullable(),
     mobile: z.string().nullable(),
+    /** What they are doing right now. Always one of `roles`. */
     role: RoleSchema,
+    /** Everything they are allowed to do. Usually one entry. */
+    roles: z.array(RoleSchema).min(1),
     jobTitle: z.string().nullable(),
     brandIds: z.array(z.string().min(1)),
     accountId: ObjectIdSchema.nullable(),

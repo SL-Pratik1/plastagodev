@@ -2,12 +2,16 @@ import * as z from 'zod';
 import {
   IsoDateSchema,
   IsoDateTimeSchema,
-  MoneySchema,
   NonEmptyStringSchema,
   ObjectIdSchema,
 } from './primitives.js';
 import { ZoneSchema } from './party.js';
-import { ExceptionReasonSchema, JobStatusSchema } from './jobs.js';
+import {
+  ExceptionReasonSchema,
+  JobStatusSchema,
+  SraDocumentSchema,
+  SraUploadStateSchema,
+} from './jobs.js';
 
 /**
  * The driver app (M4).
@@ -108,17 +112,58 @@ export const RunStopSchema = z
     loadType: LoadTypeSchema,
     /** M2.3 — only ask for weight where the account records it. */
     capturesWeight: z.boolean(),
-    customerReference: z.string().nullable(),
+    /** The customer's PO or job reference — one field (Matt, 9:08). */
+    poNumber: z.string().nullable(),
     urgent: z.boolean(),
-    /** M4.8b — some builders require the SRA before work may start. */
+    /**
+     * M4.8b — some builders require the SRA before work may start.
+     *
+     * ⚠️ "Required" gates the automatic prompt on arrival and the completion
+     * blocker. It does NOT gate access. Matt, 1:07:26: *"it needs to be an option
+     * that we won't say, oh, this site needs this or that site needs this. It
+     * just needs to be an option that the driver can always fill one out if
+     * necessary… the driver will know which ones he needs to do it for or not."*
+     */
     riskAssessmentRequired: z.boolean(),
     riskAssessmentDoneAt: IsoDateTimeSchema.nullable(),
     photoCount: z.number().int().nonnegative(),
     /** True while any action for this stop is still sitting in the outbox. */
     hasQueuedActions: z.boolean(),
+    /** Which run this stop is on — a driver commonly has two in a day. */
+    runId: ObjectIdSchema,
   })
   .meta({ id: 'RunStop' });
 
+/**
+ * One run on the driver's phone.
+ *
+ * A driver does two of these on a busy day: *"South Coast… he went and did that
+ * run and then tipped off"*, then Sydney in the afternoon (Matt, 40:03). Each
+ * ends at the weighbridge, and **each docket belongs to its own run** (43:50) —
+ * which is why `tipOffRecordedAt` lives here and not on the day.
+ */
+export const DriverRunSchema = z
+  .object({
+    runId: ObjectIdSchema,
+    runName: NonEmptyStringSchema,
+    /** 1 is the morning trip. Drives the "Run 1 of 2" heading. */
+    sequenceForDay: z.number().int().positive(),
+    suburbs: z.array(NonEmptyStringSchema),
+    stops: z.array(RunStopSchema),
+    /** M4.4 — set once THIS run's load has been tipped off and reconciled. */
+    tipOffRecordedAt: IsoDateTimeSchema.nullable(),
+    /** The weighbridge figure for this run, once recorded. */
+    tipOffKg: z.number().nonnegative().nullable(),
+  })
+  .meta({ id: 'DriverRun' });
+
+/**
+ * The driver's day.
+ *
+ * `runs` is the real structure; `stops` is the flattened view kept because most
+ * screens want "the next job" without caring which run it came from. Every stop
+ * carries its `runId`, so nothing has to infer the grouping.
+ */
 export const RunSheetDaySchema = z
   .object({
     date: IsoDateSchema,
@@ -126,11 +171,14 @@ export const RunSheetDaySchema = z
     driverName: NonEmptyStringSchema,
     vehicleRego: z.string().nullable(),
     vehicleLabel: z.string().nullable(),
+    runs: z.array(DriverRunSchema),
     stops: z.array(RunStopSchema),
-    /** M4.8a — the pre-start blocks the run, so its state belongs here. */
+    /**
+     * M4.8a — the pre-start blocks the whole day, not one run: it is a check on
+     * the vehicle, and the vehicle does not change between the morning and the
+     * afternoon trip. So this one stays on the day.
+     */
     preStartCompletedAt: IsoDateTimeSchema.nullable(),
-    /** M4.4 — set once the load has been tipped off and reconciled. */
-    tipOffRecordedAt: IsoDateTimeSchema.nullable(),
   })
   .meta({ id: 'RunSheetDay' });
 
@@ -154,6 +202,23 @@ export const DriverJobSchema = RunStopSchema.extend({
   /** M4.3 — what has been captured so far. */
   capturedAreaM2: z.number().nonnegative().nullable(),
   craneScaleKg: z.number().nonnegative().nullable(),
+  /** Set the moment the weights screen is saved, even on a hand load. */
+  weightsRecordedAt: IsoDateTimeSchema.nullable(),
+  /**
+   * M4.8b — the assessment this driver filled in, and the PDF it produced.
+   *
+   * Present whether or not the site required one: since 1:07:26 the form is an
+   * option on every job, so its outcome is a normal part of a stop rather than
+   * something that only exists on flagged sites.
+   */
+  riskAssessment: z
+    .object({
+      completedAt: IsoDateTimeSchema,
+      safeToProceed: z.boolean(),
+      uploadState: SraUploadStateSchema,
+      document: SraDocumentSchema.nullable(),
+    })
+    .nullable(),
   /** M8.6 · W102 — the office ↔ driver thread for this job. */
   messages: z.array(
     z.object({
@@ -171,17 +236,20 @@ export const DriverJobSchema = RunStopSchema.extend({
 /**
  * The status transitions the driver app can make.
  *
- * The six in production plus `arrived`, which TransVirtual has no equivalent for
- * and Matt's workflow depends on: it triggers the Site Risk Assessment (M4.8) and
- * starts the on-site clock that the Extra Load Time charge is computed from.
- * `admin-complete` is deliberately absent — that is an office action.
+ * `arrived` has no TransVirtual equivalent but Matt's workflow depends on it: it
+ * triggers the Site Risk Assessment (M4.8) and starts the on-site clock that the
+ * Extra Load Time charge is computed from.
+ *
+ * `admin-complete` is deliberately absent — that is an office action. So is
+ * `acknowledged`, which is absent for a different reason: it existed only to back
+ * an "Accept job" button on a job the driver had already been dispatched, so the
+ * first thing they do on a stop is now `in-transit`.
  */
-export const DRIVER_TRANSITIONS = ['acknowledged', 'in-transit', 'arrived', 'completed'] as const;
+export const DRIVER_TRANSITIONS = ['in-transit', 'arrived', 'completed'] as const;
 export const DriverTransitionSchema = z.enum(DRIVER_TRANSITIONS).meta({ id: 'DriverTransition' });
 export type DriverTransition = z.infer<typeof DriverTransitionSchema>;
 
 export const DRIVER_TRANSITION_LABELS: Record<DriverTransition, string> = {
-  acknowledged: 'Accept job',
   'in-transit': 'Start driving',
   arrived: 'Arrived on site',
   completed: 'Complete job',
@@ -227,16 +295,22 @@ export const StatusUpdateSchema = DriverActionEnvelopeSchema.extend({
 /**
  * M4.3 — m² and kg are two different quantities, not two units.
  *
- *  • `areaM2` is the board installed in the house. It is what gets **priced**,
- *    and it is usually known before the pickup from the builder's order.
+ *  • The square metres are the board installed in the house. They are what gets
+ *    **priced**, and they are known from the builder's order before the truck
+ *    leaves — so they are set on the job in the office, not here.
  *  • `craneScaleKg` is the waste actually **recovered**, weighed on the day.
+ *
+ * ⚠️ There is deliberately no `areaM2` field. Matt, 55:32: *"they won't enter the
+ * square meter information — that will be entered in the admin side before the
+ * job, because we bill based on square meters but we issue certificates based on
+ * weight."* A driver looking at a pile cannot tell its area, so asking trained
+ * them to type whatever got them past the field, and that figure was priced.
  *
  * `craneScaleKg` is null on a hand-load job — not zero. There is no bag to lift,
  * so no measurement exists, and a zero would enter the tip-off reconciliation as
  * "we collected nothing" and skew every imputed weight on the run.
  */
 export const WeightCaptureSchema = DriverActionEnvelopeSchema.extend({
-  areaM2: z.number().positive('Enter the square metres collected').max(100000),
   bagCount: z.number().int().min(0).max(200),
   loadType: LoadTypeSchema,
   craneScaleKg: z.number().positive().max(20000).nullable(),
@@ -251,8 +325,20 @@ export const WeightCaptureSchema = DriverActionEnvelopeSchema.extend({
  * **server-side** — it is an accounting calculation that feeds diversion
  * certificates (M9.5 · F52) and EPA RRO14 records, and it must produce the same
  * answer for the PWA and the Flutter app.
+ *
+ * ── Scoped to a RUN, not to a date ────────────────────────────────────────
+ * Matt, 43:50: *"sometimes the driver will do two runs. He'll go to the tip in
+ * between… we add the weighbridge ticket **against that run**. So we know that
+ * run tipped off at 2.7 ton."*
+ *
+ * A driver with a morning South Coast trip and an afternoon Sydney one produces
+ * two dockets on one date. Keyed by date, the second overwrites the first or the
+ * two are summed — and either way the remainder can no longer be apportioned,
+ * because the jobs it belongs to are no longer identifiable. The date stays as a
+ * denormalised convenience for the day's reports; the run is the key.
  */
 export const TipOffEntrySchema = DriverActionEnvelopeSchema.extend({
+  runId: ObjectIdSchema,
   date: IsoDateSchema,
   totalKg: z
     .number()
@@ -266,8 +352,17 @@ export const TipOffEntrySchema = DriverActionEnvelopeSchema.extend({
 /**
  * The reconciliation, as the driver sees it before confirming.
  *
- * Matt's own worked example: 5 jobs, 3 bagged @ 200 kg, tip-off 846 kg →
- * `846 − 600 = 246 ÷ 2 hand-load jobs = 123 kg each`.
+ * ── The remainder is split by job SIZE, not per head ──────────────────────
+ * Matt, 56:11: *"we want to split the remaining weight left over over those two
+ * jobs **based on how big they are**. So let's say one's 1000 square meters and
+ * one's 500 square meters. We want to give 2/3 of the weight left over to that
+ * 1000 square meter job and 1/3 of that weight left over to the 500 square meter
+ * job."*
+ *
+ * So each hand-load job takes `remainder × (its m² ÷ total hand-load m²)`, and
+ * there is no single "kg each" figure — the per-job shares differ. An equal
+ * split would put the same tonnage on a garage and a two-storey house, and that
+ * tonnage is printed on a diversion certificate.
  *
  * Shown to the driver rather than computed silently, because a wildly wrong
  * imputed figure usually means a mistyped crane weight — and the driver is
@@ -275,14 +370,17 @@ export const TipOffEntrySchema = DriverActionEnvelopeSchema.extend({
  */
 export const TipOffReconciliationSchema = z
   .object({
+    /** The run this docket closes — see `TipOffEntrySchema`. */
+    runId: ObjectIdSchema,
+    runName: NonEmptyStringSchema,
     date: IsoDateSchema,
     totalKg: z.number().nonnegative(),
     /** Sum of the crane-scale weights actually measured on bagged jobs. */
     measuredKg: z.number().nonnegative(),
     remainderKg: z.number(),
     handLoadJobCount: z.number().int().nonnegative(),
-    /** `remainderKg ÷ handLoadJobCount`, or null when there are none. */
-    imputedKgPerHandLoadJob: z.number().nullable(),
+    /** The denominator of the proportional split — total m² across hand loads. */
+    handLoadAreaM2: z.number().nonnegative(),
     /**
      * True when the remainder is negative or implausible — measured weights
      * exceeding the weighbridge total means something was typed wrong, and
@@ -296,8 +394,13 @@ export const TipOffReconciliationSchema = z
         jobNumber: z.number().int().positive(),
         siteName: NonEmptyStringSchema,
         loadType: LoadTypeSchema,
+        /** The job's size — the weight it is priced on and split against. */
+        areaM2: z.number().nonnegative(),
         measuredKg: z.number().nonnegative().nullable(),
+        /** This job's share of the remainder, proportional to `areaM2`. */
         imputedKg: z.number().nonnegative().nullable(),
+        /** `imputedKg ÷ remainderKg`, for the "2/3 of the leftover" readout. */
+        shareOfRemainder: z.number().nonnegative().nullable(),
       }),
     ),
   })
@@ -534,15 +637,30 @@ export const CompletionSchema = DriverActionEnvelopeSchema.extend({
   note: z.string().trim().max(1000),
 }).meta({ id: 'Completion' });
 
-/** What a completed job is worth in exception charges — shown as confirmation. */
+/**
+ * What a completed job raised in exception charges — shown as confirmation.
+ *
+ * ── No amount, deliberately ───────────────────────────────────────────────
+ * Matt, 7:52: *"we don't really want drivers seeing those financial
+ * information."*
+ *
+ * The figure is REMOVED FROM THE PAYLOAD, not hidden in the UI. A role check on
+ * the screen still ships the number to the device, where it sits in the offline
+ * cache and in any crash report — and a driver's phone is the least controlled
+ * surface in the product. What a driver needs is to know a charge was raised, so
+ * that is what this carries.
+ *
+ * The office keeps the money: `ChargeApprovalItem` (M2.7) and the invoice both
+ * hold the amount, and both are behind `pricing:view`.
+ */
 export const DriverChargeNoticeSchema = z
   .object({
     code: NonEmptyStringSchema,
     label: NonEmptyStringSchema,
-    amountExGst: MoneySchema,
   })
   .meta({ id: 'DriverChargeNotice' });
 
+export type DriverRun = z.infer<typeof DriverRunSchema>;
 export type RequiredPhoto = z.infer<typeof RequiredPhotoSchema>;
 export type DriverPhoto = z.infer<typeof DriverPhotoSchema>;
 export type RunStop = z.infer<typeof RunStopSchema>;

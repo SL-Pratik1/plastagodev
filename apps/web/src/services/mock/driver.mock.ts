@@ -57,18 +57,25 @@ const mockTransport = async (request: OutboxRequest): Promise<void> => {
 /* ── M4.4 · the deduct-and-average reconciliation ─────────────────────────── */
 
 /**
- * Matt's algorithm, verbatim:
+ * Matt's algorithm, as he restated it at 56:11:
  *
  * ```
  *   tip_off_total_kg                     weighbridge, per run
  * − Σ crane_scale_weight (bagged jobs)   actually measured
  * = remainder_kg
- * ÷ count(hand-load jobs on that run)
- * = imputed_weight_kg per hand-load job
+ * × (this job's m² ÷ Σ hand-load m²)     PROPORTIONAL, not per head
+ * = imputed_weight_kg for that job
  * ```
  *
- * His worked example: 5 jobs, 3 bagged @ 200 kg, tip-off 846 kg →
- * `846 − 600 = 246 ÷ 2 = 123 kg each`.
+ * His worked example: *"one's 1000 square meters and one's 500 square meters. We
+ * want to give 2/3 of the weight left over to that 1000 square meter job and 1/3
+ * of that weight left over to the 500 square meter job."*
+ *
+ * ⚠️ This replaced an equal `remainder ÷ count` split. The difference is not
+ * cosmetic: an equal split puts identical tonnage on a garage and a two-storey
+ * house, and that tonnage is what gets printed on each customer's own diversion
+ * certificate. Splitting by size is the only version that survives a customer
+ * comparing their certificate with their neighbour's.
  *
  * ⚠️ Computed here as the stand-in for the server, and it must stay there. This
  * number IS the tonnes-diverted figure on a diversion certificate (M9.5 · F52),
@@ -76,9 +83,22 @@ const mockTransport = async (request: OutboxRequest): Promise<void> => {
  * Flutter app must produce the same answer. A second implementation on a phone
  * would be a second thing to keep correct.
  */
-function reconcile(totalKg: number): TipOffReconciliation {
+function reconcile(runId: string, totalKg: number): TipOffReconciliation {
+  const run = driverStore.day.runs.find((candidate) => candidate.runId === runId);
+  const onThisRun = new Set(run?.stops.map((stop) => stop.jobId) ?? []);
+
+  /*
+   * Only the stops on THIS run.
+   *
+   * The docket in the driver's hand is for one trip (Matt, 43:50). Reconciling
+   * a morning weighbridge figure against the whole day's completed jobs would
+   * hand the afternoon's stops a share of weight that was never on the truck —
+   * and that share is what gets printed on a diversion certificate.
+   */
   const collected = driverStore.jobs.filter(
-    (job) => job.status === 'completed' || job.status === 'admin-complete',
+    (job) =>
+      onThisRun.has(job.jobId) &&
+      (job.status === 'completed' || job.status === 'admin-complete'),
   );
 
   const bagged = collected.filter((job) => job.loadType === 'bagged');
@@ -86,8 +106,27 @@ function reconcile(totalKg: number): TipOffReconciliation {
 
   const measuredKg = bagged.reduce((sum, job) => sum + (job.craneScaleKg ?? 0), 0);
   const remainderKg = Math.round((totalKg - measuredKg) * 10) / 10;
-  const imputed =
-    handLoad.length === 0 ? null : Math.round((remainderKg / handLoad.length) * 10) / 10;
+
+  const handLoadAreaM2 = handLoad.reduce((sum, job) => sum + job.expectedAreaM2, 0);
+
+  /*
+   * Each hand-load job's share of the leftover, weighted by its size.
+   *
+   * The zero-area fallback is an equal split rather than a crash or a null: a
+   * job with no recorded m² is a data gap in the office, and the driver at the
+   * weighbridge cannot fix it. Dropping the weight entirely would lose recovered
+   * tonnage out of the mass balance, which is worse than distributing it evenly.
+   */
+  const shareFor = (areaM2: number): number | null => {
+    if (handLoad.length === 0) return null;
+    const fraction = handLoadAreaM2 > 0 ? areaM2 / handLoadAreaM2 : 1 / handLoad.length;
+    return Math.round(remainderKg * fraction * 10) / 10;
+  };
+
+  const largestShare = handLoad.reduce(
+    (max, job) => Math.max(max, shareFor(job.expectedAreaM2) ?? 0),
+    0,
+  );
 
   /*
    * A negative remainder means the crane weights already exceed the weighbridge
@@ -95,33 +134,45 @@ function reconcile(totalKg: number): TipOffReconciliation {
    * figure. Flagged rather than committed, because the driver is standing at the
    * weighbridge and can still fix it; a bad number here corrupts a certificate
    * that ends up in a Green Star submission.
+   *
+   * The implausibility check is on the LARGEST share, not an average: with a
+   * proportional split one oversized job can absorb most of the remainder while
+   * the mean still looks reasonable.
    */
-  const looksWrong = remainderKg < 0 || (imputed !== null && imputed > 2000);
+  const looksWrong = remainderKg < 0 || largestShare > 2000;
 
   return {
+    runId,
+    runName: run?.runName ?? 'This run',
     date: RUN_DATE,
     totalKg,
     measuredKg,
     remainderKg,
     handLoadJobCount: handLoad.length,
-    imputedKgPerHandLoadJob: imputed,
+    handLoadAreaM2,
     looksWrong,
     warning:
       remainderKg < 0
         ? 'The weights you entered on bagged jobs already add up to more than this tip-off figure. Check the docket and the crane readings before saving.'
-        : imputed !== null && imputed > 2000
-          ? 'That works out to more than two tonnes per hand-load job, which is unusually high. Worth a second look.'
+        : largestShare > 2000
+          ? 'That works out to more than two tonnes on one hand-load job, which is unusually high. Worth a second look.'
           : handLoad.length === 0 && remainderKg > 50
             ? 'Every job on this run was weighed, so this remainder has nowhere to go. It will be recorded against the run rather than a job.'
             : null,
-    lines: collected.map((job) => ({
-      jobId: job.jobId,
-      jobNumber: job.jobNumber,
-      siteName: job.siteName,
-      loadType: job.loadType,
-      measuredKg: job.loadType === 'bagged' ? job.craneScaleKg : null,
-      imputedKg: job.loadType === 'hand-load' ? imputed : null,
-    })),
+    lines: collected.map((job) => {
+      const imputedKg = job.loadType === 'hand-load' ? shareFor(job.expectedAreaM2) : null;
+      return {
+        jobId: job.jobId,
+        jobNumber: job.jobNumber,
+        siteName: job.siteName,
+        loadType: job.loadType,
+        areaM2: job.expectedAreaM2,
+        measuredKg: job.loadType === 'bagged' ? job.craneScaleKg : null,
+        imputedKg,
+        shareOfRemainder:
+          imputedKg === null || remainderKg <= 0 ? null : imputedKg / remainderKg,
+      };
+    }),
   };
 }
 
@@ -188,13 +239,16 @@ export function createMockDriverRunService(): DriverRunService {
 
       updateJob(jobId, (job) => ({
         ...job,
-        capturedAreaM2: input.areaM2,
+        // The m² are NOT touched here. They were set in the office from the
+        // builder's order before the run and the driver never sees a field for
+        // them — 55:32, "that will be entered in the admin side before the job".
         bagCount: input.bagCount,
         loadType: input.loadType,
         // Null, never zero, on a hand load: there is no bag to lift, so no
         // measurement exists — and a zero would enter the reconciliation as
         // "we collected nothing" and skew every imputed weight on the run.
         craneScaleKg: input.loadType === 'bagged' ? input.craneScaleKg : null,
+        weightsRecordedAt: input.occurredAt,
         hasQueuedActions: true,
       }));
     },
@@ -283,18 +337,49 @@ export function createMockDriverRunService(): DriverRunService {
       updateJob(input.jobId, (job) => ({
         ...job,
         riskAssessmentDoneAt: input.occurredAt,
+        /*
+         * The PDF is stamped here so the driver has something to hand off with.
+         *
+         * Matt, 1:03:25: *"once it generates the PDF, just attaches it to that
+         * job and gives the driver a copy he can upload onto the builder's
+         * site."* Real generation is server-side — page 1 the assessment, page 2
+         * the versioned SWMS — so what is modelled is the *record* of it, not
+         * the bytes. The document appears immediately and offline, because a
+         * driver standing at a fence with no signal still needs to know the copy
+         * is coming and that they are not expected to wait for it.
+         */
+        riskAssessment: {
+          completedAt: input.occurredAt,
+          safeToProceed: input.safeToProceed,
+          uploadState: 'queued' as const,
+          document: {
+            documentId: crypto.randomUUID(),
+            fileName: `SRA-${String(job.jobNumber)}-${input.occurredAt.slice(0, 10)}.pdf`,
+            generatedAt: input.occurredAt,
+            pageCount: 2,
+            sizeBytes: 148_000 + Math.round(Math.random() * 40_000),
+          },
+        },
         hasQueuedActions: true,
       }));
     },
 
-    async previewTipOff(_date, totalKg) {
+    async previewTipOff(runId, totalKg) {
       await latency(280, 140);
-      return reconcile(totalKg);
+      return reconcile(runId, totalKg);
     },
 
     async recordTipOff(input) {
       await enqueue({ method: 'POST', path: '/api/v1/driver/tip-off', body: input });
-      updateDay((day) => ({ ...day, tipOffRecordedAt: input.occurredAt }));
+      // Recorded against the run the docket belongs to, not against the day.
+      updateDay((day) => ({
+        ...day,
+        runs: day.runs.map((run) =>
+          run.runId === input.runId
+            ? { ...run, tipOffRecordedAt: input.occurredAt, tipOffKg: input.totalKg }
+            : run,
+        ),
+      }));
     },
 
     async reportDefect(input) {
@@ -400,8 +485,8 @@ export function currentPosition(): Promise<{
 }
 
 /** Exposed so a screen can show what the run currently adds up to. */
-export function previewReconciliation(totalKg: number): TipOffReconciliation {
-  return reconcile(totalKg);
+export function previewReconciliation(runId: string, totalKg: number): TipOffReconciliation {
+  return reconcile(runId, totalKg);
 }
 
 /** Exposed for the run-sheet screen's "next stop" logic. */

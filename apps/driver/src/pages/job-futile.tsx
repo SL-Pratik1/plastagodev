@@ -22,7 +22,7 @@ import { currentPosition } from '@/services/mock/create-mock-services';
  * ── This is the money loop, and the form is built like it ──────────────────
  * The customer certified at booking that the job was ready and accessible
  * (M5.2). A photo, a GPS fix and a timestamp at the point of failure turn a
- * disputed phone call into a $120 invoice line that survives challenge — so:
+ * disputed phone call into an invoice line that survives challenge — so:
  *
  *  • **The reason is structured, never free text.** M2.5: it has to be reportable
  *    at month end (*"14 delays: 6 × site not ready, 4 × access blocked…"*) and
@@ -31,7 +31,7 @@ import { currentPosition } from '@/services/mock/create-mock-services';
  *    until there is one. This is the single guard on the whole screen, because a
  *    futile charge with no picture is the one the customer wins.
  *  • **The fee is stated before the tap**, not discovered afterwards. The driver
- *    is about to cost the customer $120 and should know that is what they are
+ *    is about to cost the customer money and should know that is what they are
  *    doing.
  */
 
@@ -168,7 +168,8 @@ function FutileForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>[
         </p>
       </header>
 
-      <Alert variant="warning" title="This charges the customer $120">
+      {/* No figure — Matt, 7:52. The consequence, not the price. */}
+      <Alert variant="warning" title="This will be charged to the customer">
         They confirmed at booking that the job would be ready and a truck could get to it. Your
         photo, position and the time are what make the charge stand up.
       </Alert>

@@ -1,4 +1,12 @@
-import { ZONE_LABELS, type MapPin, type RunSheet } from '@plastago/shared';
+import {
+  RUN_STATUS_LABELS,
+  ZONE_LABELS,
+  type AllocationBoard,
+  type MapPin,
+  type Run,
+  type RunSheet,
+  type UnallocatedJob,
+} from '@plastago/shared';
 import {
   Alert,
   Badge,
@@ -9,8 +17,11 @@ import {
   CardTitle,
   cn,
   DatePicker,
+  Dialog,
   EmptyState,
   ErrorState,
+  Field,
+  Input,
   Menu,
   MenuItem,
   MenuLabel,
@@ -23,15 +34,20 @@ import {
   TabsPanel,
   TabsTrigger,
   useToast,
+  type BadgeProps,
 } from '@plastago/ui';
 import {
+  ChevronDownIcon,
+  ChevronUpIcon,
   MapIcon,
   MapPinIcon,
   MoreHorizontalIcon,
   NavigationIcon,
   PackageIcon,
   PhoneIcon,
+  PlusIcon,
   PrinterIcon,
+  RouteIcon,
   TruckIcon,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -39,15 +55,19 @@ import { Link, useSearchParams } from 'react-router';
 import { AtRiskBadge, JobStatusBadge, UrgentBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
 import {
+  useAddJobToRun,
   useAllocationBoard,
-  useAssignJob,
-  useDrivers,
+  useAssignRun,
+  useCreateRun,
+  useDeleteRun,
   useMapPins,
+  useOptimiseRun,
+  useRemoveJobFromRun,
   useRunSheet,
-  useUnassignJob,
+  useUnassignRun,
 } from '@/features/dispatch/queries';
 import { describeError } from '@/lib/error-message';
-import { formatArea, formatDate, formatMobile } from '@/lib/format';
+import { formatArea, formatDate, formatDateTime, formatMobile } from '@/lib/format';
 
 const TABS = ['board', 'run-sheet', 'map'] as const;
 type TabKey = (typeof TABS)[number];
@@ -56,19 +76,35 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+const RUN_STATUS_VARIANT: Record<Run['status'], BadgeProps['variant']> = {
+  planning: 'outline',
+  assigned: 'secondary',
+  'in-progress': 'default',
+  'tipped-off': 'success',
+  closed: 'secondary',
+};
+
 /**
  * Allocation & dispatch (M3).
  *
- * Three views of one day's work, sharing a date: the board (who gets what), the
- * run sheet (what a driver actually takes with them), and the map (where it all
- * is).
+ * Three views of one day's work, sharing a date: the board (which runs exist and
+ * who is on them), the run sheet (what a driver takes with them), and the map
+ * (where it all is).
  *
- * ── Deliberately manual ────────────────────────────────────────────────────
- * There is no auto-assign and no route optimisation. Both are explicitly out of
- * scope, and with two active drivers and ~7 jobs a day manual allocation is
- * faster, safer and more transparent than a rules engine. The map exists for
- * *visual clustering to support a human decision* — six jobs in Oran Park and one
- * in Newcastle is 80% of the value at 5% of the cost — not to compute a route.
+ * ── The board allocates RUNS, not jobs ─────────────────────────────────────
+ * Matt, 39:41: *"I create a run and we are able to add jobs to that run… assign
+ * that whole run to a driver rather than assigning jobs to the driver."*
+ *
+ * So this screen is a run *builder* first and an assignment board second, in
+ * that order — the allocator shapes the day, then staffs it (44:50). Jobs are
+ * offered grouped by suburb because that is how a run gets assembled: *"you
+ * might have Kellyville, Box Hill — four or five suburbs close together, you'll
+ * put them on one run"* (41:17).
+ *
+ * ── What is still a human decision ─────────────────────────────────────────
+ * Which jobs belong together. Google Route Optimization orders the stops inside
+ * a run once it exists (I11), but it has no view on whether a builder will
+ * complain about a Thursday, and the allocator does.
  */
 export function AdminDispatchPage() {
   const [params, setParams] = useSearchParams();
@@ -95,7 +131,7 @@ export function AdminDispatchPage() {
     <div className="space-y-6">
       <PageHeader
         title="Dispatch"
-        description="Allocate the day, produce the run sheets, and see where the work is."
+        description="Build the day into runs, put a driver on each, and see where the work is."
         actions={
           <label className="flex items-center gap-2 text-sm">
             <span className="text-muted-foreground">Date</span>
@@ -117,7 +153,7 @@ export function AdminDispatchPage() {
         }}
       >
         <TabsList label="Dispatch views">
-          <TabsTrigger value="board">Allocation board</TabsTrigger>
+          <TabsTrigger value="board">Runs</TabsTrigger>
           <TabsTrigger value="run-sheet">Run sheet</TabsTrigger>
           <TabsTrigger value="map">Map</TabsTrigger>
         </TabsList>
@@ -136,38 +172,40 @@ export function AdminDispatchPage() {
   );
 }
 
-/* ── A. Allocation board ────────────────────────────────────────────────── */
+/* ── A. The run board ───────────────────────────────────────────────────── */
 
 function AllocationBoardView({ date }: { date: string }) {
   const toast = useToast();
   const { data, error, isPending, isFetching, refetch } = useAllocationBoard(date);
-  const assign = useAssignJob();
-  const unassign = useUnassignJob();
 
-  const doAssign = async (
-    jobId: string,
-    jobNumber: number,
-    driverId: string,
-    driverName: string,
-  ) => {
+  const createRun = useCreateRun();
+  const addJob = useAddJobToRun();
+  const [creating, setCreating] = useState(false);
+  /** Set when "New run" was opened from a job card, so it seeds with that job. */
+  const [seedJob, setSeedJob] = useState<UnallocatedJob | null>(null);
+
+  const doAddJob = async (runId: string, runName: string, job: UnallocatedJob) => {
     try {
-      await assign.mutateAsync({ jobId, driverId, date });
-      toast.success(`Job #${String(jobNumber)} allocated`, `${driverName} · ${formatDate(date)}`);
+      await addJob.mutateAsync({ runId, jobId: job.id });
+      toast.success(`Job #${String(job.jobNumber)} added to ${runName}`);
     } catch (caught) {
-      // Capacity is a real constraint, so this failure is expected and must be
-      // explained rather than swallowed.
+      // Capacity and double-booking are real constraints, so these failures are
+      // expected and have to be explained rather than swallowed.
       const described = describeError(caught);
-      toast.error('Could not allocate that job', described.detail ?? described.title);
+      toast.error('Could not add that job', described.detail ?? described.title);
     }
   };
 
-  const doUnassign = async (jobId: string, jobNumber: number) => {
+  const doCreateRun = async (name: string, driverId: string | null) => {
+    const jobIds = seedJob ? [seedJob.id] : [];
     try {
-      await unassign.mutateAsync(jobId);
-      toast.success(`Job #${String(jobNumber)} returned to unallocated`);
+      const run = await createRun.mutateAsync({ name, date, driverId, jobIds });
+      toast.success(`${run.name} created`, seedJob ? `Job #${String(seedJob.jobNumber)} added` : undefined);
+      setCreating(false);
+      setSeedJob(null);
     } catch (caught) {
       const described = describeError(caught);
-      toast.error('Could not unallocate that job', described.detail ?? described.title);
+      toast.error('Could not create that run', described.detail ?? described.title);
     }
   };
 
@@ -198,256 +236,641 @@ function AllocationBoardView({ date }: { date: string }) {
     );
   }
 
-  const drivers = data.drivers;
-
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
-          {data.unallocated.length === 0
-            ? 'Everything for this day is allocated.'
-            : `${String(data.unallocated.length)} job${data.unallocated.length === 1 ? '' : 's'} to allocate.`}
+          {data.runs.length === 0
+            ? 'No runs yet for this day.'
+            : `${String(data.runs.length)} run${data.runs.length === 1 ? '' : 's'}`}
+          {data.unallocated.length > 0 &&
+            ` · ${String(data.unallocated.length)} job${data.unallocated.length === 1 ? '' : 's'} still to place`}
         </p>
-        {isFetching && <Spinner label="Refreshing board" />}
+        <div className="flex items-center gap-3">
+          {isFetching && <Spinner label="Refreshing board" />}
+          <Button
+            onClick={() => {
+              setSeedJob(null);
+              setCreating(true);
+            }}
+          >
+            <PlusIcon aria-hidden />
+            New run
+          </Button>
+        </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
-        {/* Unallocated, ordered urgent → at-risk → soonest target date. */}
-        <Card className="flex flex-col lg:col-span-1">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-2">
-                <PackageIcon aria-hidden className="size-4 text-muted-foreground" />
-                Unallocated
-              </span>
-              <Badge variant={data.unallocated.length > 0 ? 'warning' : 'secondary'}>
-                {data.unallocated.length}
-              </Badge>
-            </CardTitle>
-          </CardHeader>
+        <UnallocatedColumn
+          board={data}
+          onAddToRun={(runId, runName, job) => void doAddJob(runId, runName, job)}
+          onNewRunWith={(job) => {
+            setSeedJob(job);
+            setCreating(true);
+          }}
+        />
 
-          <CardContent className="flex-1">
-            {data.unallocated.length === 0 ? (
+        <div className="space-y-4 lg:col-span-2">
+          {data.runs.length === 0 ? (
+            <Card>
               <EmptyState
-                title="Nothing waiting"
-                description="Every job with this ready date has a driver."
-              />
-            ) : (
-              <ul className="space-y-2">
-                {data.unallocated.map((job) => (
-                  <li
-                    key={job.id}
-                    className={cn(
-                      'rounded-lg border p-3',
-                      job.atRisk ? 'border-destructive/40 bg-destructive/5' : 'border-border',
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <Link
-                          to={`/admin/jobs/${job.id}`}
-                          className="focus-ring rounded font-mono text-sm font-medium text-primary underline-offset-4 hover:underline"
-                        >
-                          #{job.jobNumber}
-                        </Link>
-                        <p className="truncate text-sm font-medium">{job.accountName}</p>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {job.siteName} · {job.suburb}
-                        </p>
-                      </div>
-
-                      <Menu
-                        align="end"
-                        triggerLabel={`Allocate job ${String(job.jobNumber)}`}
-                        triggerClassName="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                        trigger={<MoreHorizontalIcon aria-hidden className="size-4" />}
-                      >
-                        <MenuLabel>Allocate to</MenuLabel>
-                        {drivers.map((driver) => (
-                          <MenuItem
-                            key={driver.driverId}
-                            icon={TruckIcon}
-                            disabled={driver.assignedCount >= driver.capacity}
-                            onSelect={() => {
-                              void doAssign(
-                                job.id,
-                                job.jobNumber,
-                                driver.driverId,
-                                driver.driverName,
-                              );
-                            }}
-                          >
-                            {driver.driverName} ({driver.assignedCount}/{driver.capacity})
-                          </MenuItem>
-                        ))}
-                      </Menu>
-                    </div>
-
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      {job.serviceLevel === 'urgent' && <UrgentBadge />}
-                      {job.atRisk && <AtRiskBadge label={`Target ${formatDate(job.targetDate)}`} />}
-                      <Badge variant="outline">{formatArea(job.expectedAreaM2)}</Badge>
-                      <Badge variant="secondary">{ZONE_LABELS[job.zone]}</Badge>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* One column per driver. */}
-        {drivers.map((driver) => {
-          const full = driver.assignedCount >= driver.capacity;
-
-          return (
-            <Card key={driver.driverId} className="flex flex-col">
-              <CardHeader>
-                <CardTitle className="flex items-center justify-between gap-2">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <TruckIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="truncate">{driver.driverName}</span>
-                  </span>
-                  <Badge variant={full ? 'warning' : 'secondary'}>
-                    {driver.assignedCount}/{driver.capacity}
-                  </Badge>
-                </CardTitle>
-                {/* M3.4 — a simple capacity indicator, not a scheduling engine. */}
-                <div
-                  aria-hidden
-                  className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted"
-                >
-                  <div
-                    className={cn('h-full rounded-full', full ? 'bg-warning' : 'bg-brand-500')}
-                    style={{
-                      width: `${String(Math.min(100, (driver.assignedCount / driver.capacity) * 100))}%`,
+                icon={RouteIcon}
+                title="No runs for this day"
+                description="Create a run, drop the jobs for one area onto it, then put a driver on the whole run."
+                action={
+                  <Button
+                    onClick={() => {
+                      setSeedJob(null);
+                      setCreating(true);
                     }}
-                  />
-                </div>
-              </CardHeader>
+                  >
+                    <PlusIcon aria-hidden />
+                    New run
+                  </Button>
+                }
+              />
+            </Card>
+          ) : (
+            data.runs.map((run) => <RunCard key={run.id} run={run} board={data} />)
+          )}
+        </div>
+      </div>
 
-              <CardContent className="flex-1">
-                {driver.jobs.length === 0 ? (
-                  <EmptyState
-                    title="No jobs yet"
-                    description="Allocate from the unallocated column."
-                  />
-                ) : (
-                  <ol className="space-y-2">
-                    {driver.jobs.map((job) => (
-                      <li
-                        key={job.id}
-                        className={cn(
-                          'rounded-lg border p-3',
-                          job.atRisk ? 'border-destructive/40' : 'border-border',
-                        )}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p className="flex items-center gap-2">
-                              <span className="grid size-5 shrink-0 place-items-center rounded bg-accent text-[10px] font-semibold text-accent-foreground">
-                                {job.sequence}
-                              </span>
+      <Alert variant="neutral" title="A run is the unit of work">
+        Jobs go onto a run, and the <strong>run</strong> goes to a driver — a driver often takes two
+        in a day, tipping off between them. The weighbridge docket is recorded against the run, which
+        is what makes per-job weights reconcilable afterwards.
+      </Alert>
+
+      <NewRunDialog
+        open={creating}
+        date={date}
+        drivers={data.drivers}
+        seedJob={seedJob}
+        pending={createRun.isPending}
+        onClose={() => {
+          setCreating(false);
+          setSeedJob(null);
+        }}
+        onCreate={(name, driverId) => void doCreateRun(name, driverId)}
+      />
+    </div>
+  );
+}
+
+/**
+ * Jobs waiting to be placed, bucketed by suburb.
+ *
+ * Suburb is the heading rather than a line of detail because it is what the
+ * allocator groups on (Matt, 41:17). A flat list forces them to hold the
+ * geography in their head; this puts "Kellyville — 3 jobs" on screen and lets
+ * them build that run in one pass.
+ */
+function UnallocatedColumn({
+  board,
+  onAddToRun,
+  onNewRunWith,
+}: {
+  board: AllocationBoard;
+  onAddToRun: (runId: string, runName: string, job: UnallocatedJob) => void;
+  onNewRunWith: (job: UnallocatedJob) => void;
+}) {
+  // Every bucket open by default: an allocator planning a day wants to see the
+  // whole board, and collapsing is for getting a long one out of the way.
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+
+  const toggle = (suburb: string) => {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(suburb)) next.delete(suburb);
+      else next.add(suburb);
+      return next;
+    });
+  };
+
+  return (
+    <Card className="flex flex-col lg:col-span-1">
+      <CardHeader>
+        <CardTitle className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <PackageIcon aria-hidden className="size-4 text-muted-foreground" />
+            To place
+          </span>
+          <Badge variant={board.unallocated.length > 0 ? 'warning' : 'secondary'}>
+            {board.unallocated.length}
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+
+      <CardContent className="flex-1">
+        {board.unallocatedBySuburb.length === 0 ? (
+          <EmptyState
+            title="Nothing waiting"
+            description="Every job with this ready date is on a run."
+          />
+        ) : (
+          <div className="space-y-4">
+            {board.unallocatedBySuburb.map((bucket) => {
+              const isCollapsed = collapsed.has(bucket.suburb);
+
+              return (
+                <section key={bucket.suburb}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      toggle(bucket.suburb);
+                    }}
+                    aria-expanded={!isCollapsed}
+                    className="focus-ring flex w-full items-center justify-between gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted"
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      {isCollapsed ? (
+                        <ChevronDownIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                      ) : (
+                        <ChevronUpIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                      )}
+                      <span className="truncate font-display text-sm font-semibold">
+                        {bucket.suburb}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      {bucket.atRiskCount > 0 && (
+                        <Badge variant="destructive">{bucket.atRiskCount} at risk</Badge>
+                      )}
+                      <Badge variant="secondary">{bucket.jobs.length}</Badge>
+                    </span>
+                  </button>
+
+                  {!isCollapsed && (
+                    <ul className="mt-2 space-y-2">
+                      {bucket.jobs.map((job) => (
+                        <li
+                          key={job.id}
+                          className={cn(
+                            'rounded-lg border p-3',
+                            job.atRisk ? 'border-destructive/40 bg-destructive/5' : 'border-border',
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
                               <Link
                                 to={`/admin/jobs/${job.id}`}
-                                className="focus-ring rounded font-mono text-sm text-primary underline-offset-4 hover:underline"
+                                className="focus-ring rounded font-mono text-sm font-medium text-primary underline-offset-4 hover:underline"
                               >
                                 #{job.jobNumber}
                               </Link>
-                            </p>
-                            <p className="mt-1 truncate text-sm font-medium">{job.accountName}</p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {job.siteName} · {job.suburb}
-                            </p>
-                          </div>
+                              <p className="truncate text-sm font-medium">{job.accountName}</p>
+                              <p className="truncate text-xs text-muted-foreground">
+                                {job.siteName}
+                              </p>
+                            </div>
 
-                          <Menu
-                            align="end"
-                            triggerLabel={`Change allocation for job ${String(job.jobNumber)}`}
-                            triggerClassName="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                            trigger={<MoreHorizontalIcon aria-hidden className="size-4" />}
-                          >
-                            <MenuLabel>Move to</MenuLabel>
-                            {drivers
-                              .filter((other) => other.driverId !== driver.driverId)
-                              .map((other) => (
+                            <Menu
+                              align="end"
+                              triggerLabel={`Place job ${String(job.jobNumber)} on a run`}
+                              triggerClassName="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                              trigger={<MoreHorizontalIcon aria-hidden className="size-4" />}
+                            >
+                              <MenuLabel>Add to run</MenuLabel>
+                              {board.runs.map((run) => (
                                 <MenuItem
-                                  key={other.driverId}
-                                  icon={TruckIcon}
-                                  disabled={other.assignedCount >= other.capacity}
+                                  key={run.id}
+                                  icon={RouteIcon}
+                                  disabled={run.status !== 'planning' && run.status !== 'assigned'}
                                   onSelect={() => {
-                                    void doAssign(
-                                      job.id,
-                                      job.jobNumber,
-                                      other.driverId,
-                                      other.driverName,
-                                    );
+                                    onAddToRun(run.id, run.name, job);
                                   }}
                                 >
-                                  {other.driverName} ({other.assignedCount}/{other.capacity})
+                                  {run.name} ({run.stops.length})
                                 </MenuItem>
                               ))}
-                            <MenuSeparator />
-                            <MenuItem
-                              tone="destructive"
-                              onSelect={() => {
-                                void doUnassign(job.id, job.jobNumber);
-                              }}
-                            >
-                              Return to unallocated
-                            </MenuItem>
-                          </Menu>
-                        </div>
+                              {board.runs.length > 0 && <MenuSeparator />}
+                              <MenuItem
+                                icon={PlusIcon}
+                                onSelect={() => {
+                                  onNewRunWith(job);
+                                }}
+                              >
+                                New run with this job
+                              </MenuItem>
+                            </Menu>
+                          </div>
 
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                          <JobStatusBadge status={job.status} />
-                          {job.serviceLevel === 'urgent' && <UrgentBadge />}
-                          <Badge variant="outline">{formatArea(job.expectedAreaM2)}</Badge>
-                        </div>
-                      </li>
-                    ))}
-                  </ol>
+                          {/*
+                            Ready date earns its place here on Matt's own note
+                            (45:46) — the allocator groups by what is ready in a
+                            window, not by what exists.
+                          */}
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            {job.serviceLevel === 'urgent' && <UrgentBadge />}
+                            {job.atRisk && (
+                              <AtRiskBadge label={`Target ${formatDate(job.targetDate)}`} />
+                            )}
+                            <Badge variant="outline">Ready {formatDate(job.readyDate)}</Badge>
+                            <Badge variant="outline">{formatArea(job.expectedAreaM2)}</Badge>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** One run: its stops, who is on it, and the two actions that change either. */
+function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
+  const toast = useToast();
+  const assignRun = useAssignRun();
+  const unassignRun = useUnassignRun();
+  const removeJob = useRemoveJobFromRun();
+  const deleteRun = useDeleteRun();
+  const optimise = useOptimiseRun();
+
+  const editable = run.status === 'planning' || run.status === 'assigned';
+
+  const guard = async (action: () => Promise<unknown>, failure: string) => {
+    try {
+      await action();
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(failure, described.detail ?? described.title);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-start justify-between gap-2">
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="flex min-w-0 items-center gap-2">
+              <RouteIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+              <span className="truncate">{run.name}</span>
+              <Badge variant={RUN_STATUS_VARIANT[run.status]}>
+                {RUN_STATUS_LABELS[run.status]}
+              </Badge>
+            </span>
+            {/* Suburbs, not job names, describe a run at a glance. */}
+            <span className="flex flex-wrap items-center gap-1 text-xs font-normal text-muted-foreground">
+              {run.suburbs.length === 0 ? 'No stops yet' : run.suburbs.join(' → ')}
+            </span>
+          </span>
+
+          <span className="flex shrink-0 items-center gap-1.5">
+            <Badge variant="secondary">
+              {run.stops.length} stop{run.stops.length === 1 ? '' : 's'}
+            </Badge>
+            <Badge variant="secondary">{formatArea(run.totalExpectedAreaM2)}</Badge>
+
+            <Menu
+              align="end"
+              triggerLabel={`Actions for ${run.name}`}
+              triggerClassName="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              trigger={<MoreHorizontalIcon aria-hidden className="size-4" />}
+            >
+              <MenuLabel>Driver</MenuLabel>
+              {board.drivers.map((driver) => (
+                <MenuItem
+                  key={driver.driverId}
+                  icon={TruckIcon}
+                  disabled={driver.driverId === run.driverId || !editable}
+                  onSelect={() => {
+                    void guard(
+                      () =>
+                        assignRun
+                          .mutateAsync({ runId: run.id, driverId: driver.driverId })
+                          .then(() => {
+                            toast.success(`${run.name} → ${driver.driverName}`);
+                          }),
+                      'Could not assign that run',
+                    );
+                  }}
+                >
+                  {driver.driverName} ({driver.assignedCount}/{driver.capacity})
+                </MenuItem>
+              ))}
+
+              <MenuSeparator />
+              <MenuItem
+                icon={RouteIcon}
+                disabled={run.stops.length < 2}
+                onSelect={() => {
+                  void guard(
+                    () =>
+                      optimise.mutateAsync(run.id).then(() => {
+                        toast.success('Route optimised', `${run.name} reordered by Google`);
+                      }),
+                    'Could not optimise that run',
+                  );
+                }}
+              >
+                Optimise route
+              </MenuItem>
+
+              {run.driverId !== null && (
+                <MenuItem
+                  disabled={!editable}
+                  onSelect={() => {
+                    void guard(
+                      () =>
+                        unassignRun.mutateAsync(run.id).then(() => {
+                          toast.success(`${run.name} is back in planning`);
+                        }),
+                      'Could not take that run off the driver',
+                    );
+                  }}
+                >
+                  Take off driver
+                </MenuItem>
+              )}
+
+              <MenuSeparator />
+              <MenuItem
+                tone="destructive"
+                disabled={!editable}
+                onSelect={() => {
+                  void guard(
+                    () =>
+                      deleteRun.mutateAsync(run.id).then(() => {
+                        toast.success(`${run.name} deleted`, 'Its jobs went back to the list');
+                      }),
+                    'Could not delete that run',
+                  );
+                }}
+              >
+                Delete run
+              </MenuItem>
+            </Menu>
+          </span>
+        </CardTitle>
+
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+          {run.driverName === null ? (
+            <Badge variant="warning">No driver yet</Badge>
+          ) : (
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <TruckIcon aria-hidden className="size-3.5" />
+              {run.driverName}
+              {run.sequenceForDay !== null && (
+                <Badge variant="outline">Run {run.sequenceForDay} of the day</Badge>
+              )}
+            </span>
+          )}
+          {run.optimisedAt !== null && (
+            <Badge variant="outline">Route optimised {formatDateTime(run.optimisedAt)}</Badge>
+          )}
+          {/* The docket belongs to the run — this is the figure weights divide. */}
+          {run.tipOff !== null && (
+            <Badge variant="success">
+              Tipped off {run.tipOff.netKg.toLocaleString('en-AU')} kg
+            </Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent>
+        {run.stops.length === 0 ? (
+          <EmptyState title="No stops yet" description="Add jobs from the list on the left." />
+        ) : (
+          <ol className="space-y-2">
+            {run.stops.map((stop, index) => (
+              <li key={stop.id}>
+                {/*
+                  A suburb heading whenever the run crosses into a new one.
+                  Runs are built by area — *"you might have Kellyville, Box Hill,
+                  four or five suburbs close together, you'll put them on one
+                  run"* (Matt, 41:17) — so once the route is ordered, the point
+                  at which the suburb changes is the shape of the driver's day.
+                  Only rendered on change: a heading above every stop on a
+                  single-suburb run is noise.
+                */}
+                {run.stops[index - 1]?.suburb !== stop.suburb && (
+                  <p className="mt-3 mb-1.5 flex items-center gap-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase first:mt-0">
+                    <MapPinIcon aria-hidden className="size-3" />
+                    {stop.suburb}
+                  </p>
                 )}
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
+                <div
+                  className={cn(
+                    'flex items-start justify-between gap-2 rounded-lg border p-3',
+                    stop.atRisk ? 'border-destructive/40' : 'border-border',
+                  )}
+                >
+                <div className="min-w-0">
+                  <p className="flex items-center gap-2">
+                    <span className="grid size-5 shrink-0 place-items-center rounded bg-accent text-[10px] font-semibold text-accent-foreground">
+                      {stop.sequence}
+                    </span>
+                    <Link
+                      to={`/admin/jobs/${stop.id}`}
+                      className="focus-ring rounded font-mono text-sm text-primary underline-offset-4 hover:underline"
+                    >
+                      #{stop.jobNumber}
+                    </Link>
+                    <span className="truncate text-sm font-medium">{stop.accountName}</span>
+                  </p>
+                  <p className="mt-1 truncate text-xs text-muted-foreground">
+                    {stop.siteName} · {stop.suburb}
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <JobStatusBadge status={stop.status} />
+                    {stop.serviceLevel === 'urgent' && <UrgentBadge />}
+                    <Badge variant="outline">Ready {formatDate(stop.readyDate)}</Badge>
+                    <Badge variant="outline">{formatArea(stop.expectedAreaM2)}</Badge>
+                  </div>
+                </div>
 
-      <Alert variant="neutral" title="Allocation is a human decision">
-        Jobs are ordered urgent first, then closest to breaching target date. Automatic assignment
-        and route optimisation are both out of scope — with two drivers, a person clustering by
-        suburb on the map is faster and easier to explain.
-      </Alert>
-    </div>
+                <Menu
+                  align="end"
+                  triggerLabel={`Actions for job ${String(stop.jobNumber)}`}
+                  triggerClassName="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  trigger={<MoreHorizontalIcon aria-hidden className="size-4" />}
+                >
+                  <MenuLabel>Move to</MenuLabel>
+                  {board.runs
+                    .filter((other) => other.id !== run.id)
+                    .map((other) => (
+                      <MenuItem
+                        key={other.id}
+                        icon={RouteIcon}
+                        onSelect={() => {
+                          void guard(
+                            () =>
+                              removeJob
+                                .mutateAsync({ runId: run.id, jobId: stop.id })
+                                .then(() => {
+                                  toast.success(`Moved off ${run.name}`, `Add it to ${other.name}`);
+                                }),
+                            'Could not move that job',
+                          );
+                        }}
+                      >
+                        {other.name}
+                      </MenuItem>
+                    ))}
+                  <MenuSeparator />
+                  <MenuItem
+                    tone="destructive"
+                    onSelect={() => {
+                      void guard(
+                        () =>
+                          removeJob.mutateAsync({ runId: run.id, jobId: stop.id }).then(() => {
+                            toast.success(`Job #${String(stop.jobNumber)} taken off ${run.name}`);
+                          }),
+                        'Could not take that job off the run',
+                      );
+                    }}
+                  >
+                    Take off this run
+                  </MenuItem>
+                </Menu>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Creating a run.
+ *
+ * The driver is optional here on purpose. Matt builds the shape of the day
+ * before he knows who is driving it (44:50), and forcing a driver at creation
+ * would make the allocator invent one and correct it later.
+ */
+function NewRunDialog({
+  open,
+  date,
+  drivers,
+  seedJob,
+  pending,
+  onClose,
+  onCreate,
+}: {
+  open: boolean;
+  date: string;
+  drivers: AllocationBoard['drivers'];
+  seedJob: UnallocatedJob | null;
+  pending: boolean;
+  onClose: () => void;
+  onCreate: (name: string, driverId: string | null) => void;
+}) {
+  // Seeded from the job that opened the dialog: naming a run after the suburb
+  // it serves is what Matt actually does ("Newcastle run 1").
+  const [name, setName] = useState('');
+  const [driverId, setDriverId] = useState('');
+
+  const suggested = seedJob ? `${seedJob.suburb} run 1` : '';
+  const value = name || suggested;
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="New run"
+      description={`${formatDate(date)}${seedJob ? ` · starting with job #${String(seedJob.jobNumber)}` : ''}`}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => {
+              onCreate(value, driverId || null);
+              setName('');
+              setDriverId('');
+            }}
+            disabled={pending || value.trim().length === 0}
+          >
+            {pending ? <Spinner label="Creating" /> : 'Create run'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <Field
+          id="run-name"
+          label="Run name"
+          hint="Drivers and dispatch both call it by name — the area plus which trip of the day."
+        >
+          {(control) => (
+            <Input
+              {...control}
+              value={value}
+              placeholder="Newcastle run 1"
+              onChange={(event) => {
+                setName(event.target.value);
+              }}
+            />
+          )}
+        </Field>
+
+        <Field id="run-driver" label="Driver" hint="Optional — a run can be built before it is staffed.">
+          {(control) => (
+            <Select
+              {...control}
+              value={driverId}
+              onChange={(event) => {
+                setDriverId(event.target.value);
+              }}
+            >
+              <option value="">Leave unassigned</option>
+              {drivers.map((driver) => (
+                <option key={driver.driverId} value={driver.driverId}>
+                  {driver.driverName} ({driver.assignedCount}/{driver.capacity})
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      </div>
+    </Dialog>
   );
 }
 
 /* ── B. Run sheet ───────────────────────────────────────────────────────── */
 
+/**
+ * The sheet for ONE run.
+ *
+ * The selector lists runs rather than drivers, because a driver working a
+ * morning South Coast trip and an afternoon Sydney one has two sheets and two
+ * tip-offs — picking "Dave" would have to guess which.
+ */
 function RunSheetView({ date }: { date: string }) {
-  const drivers = useDrivers();
-  const active = (drivers.data ?? []).filter((driver) => driver.status !== 'off');
-  const [driverId, setDriverId] = useState<string | null>(null);
-  const selected = driverId ?? active[0]?.id ?? null;
+  const board = useAllocationBoard(date);
+  const runs = board.data?.runs ?? [];
 
-  const { data, error, isPending, refetch } = useRunSheet(selected, date);
+  const [runId, setRunId] = useState<string | null>(null);
+  const selected = runId ?? runs[0]?.id ?? null;
+
+  const { data, error, isPending, refetch } = useRunSheet(selected);
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <label className="flex items-center gap-2 text-sm">
-          <span className="text-muted-foreground">Driver</span>
+          <span className="text-muted-foreground">Run</span>
           <Select
             value={selected ?? ''}
             onChange={(event) => {
-              setDriverId(event.target.value);
+              setRunId(event.target.value);
             }}
             className="w-auto"
+            disabled={runs.length === 0}
           >
-            {active.map((driver) => (
-              <option key={driver.id} value={driver.id}>
-                {driver.name}
+            {runs.length === 0 && <option value="">No runs for this day</option>}
+            {runs.map((run) => (
+              <option key={run.id} value={run.id}>
+                {run.name} — {run.driverName ?? 'unassigned'}
               </option>
             ))}
           </Select>
@@ -465,7 +888,15 @@ function RunSheetView({ date }: { date: string }) {
         </Button>
       </div>
 
-      {error ? (
+      {runs.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={RouteIcon}
+            title="No runs for this day"
+            description="Build one on the Runs tab and it appears here."
+          />
+        </Card>
+      ) : error ? (
         <Card>
           <ErrorState
             title={describeError(error).title}
@@ -491,8 +922,8 @@ function RunSheetCard({ runSheet }: { runSheet: RunSheet }) {
       <Card>
         <EmptyState
           icon={TruckIcon}
-          title={`Nothing allocated to ${runSheet.driverName}`}
-          description="Allocate jobs on the board and they appear here in order."
+          title={`Nothing on ${runSheet.runName} yet`}
+          description="Add jobs to this run on the Runs tab and they appear here in order."
         />
       </Card>
     );
@@ -502,8 +933,15 @@ function RunSheetCard({ runSheet }: { runSheet: RunSheet }) {
     <Card>
       <CardHeader>
         <CardTitle className="flex flex-wrap items-center justify-between gap-2">
-          <span>
-            {runSheet.driverName} · {formatDate(runSheet.date)}
+          <span className="flex flex-col gap-1">
+            <span>
+              {runSheet.runName} · {formatDate(runSheet.date)}
+            </span>
+            <span className="text-sm font-normal text-muted-foreground">
+              {runSheet.driverName ?? 'No driver assigned'}
+              {runSheet.sequenceForDay !== null &&
+                ` · run ${String(runSheet.sequenceForDay)} of the day`}
+            </span>
           </span>
           <span className="flex flex-wrap items-center gap-2 text-sm font-normal text-muted-foreground">
             {runSheet.vehicleLabel && <Badge variant="outline">{runSheet.vehicleLabel}</Badge>}
@@ -553,9 +991,9 @@ function RunSheetCard({ runSheet }: { runSheet: RunSheet }) {
                   </p>
 
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                    <span>{formatArea(stop.expectedAreaM2)} expected</span>
+                    <span>{formatArea(stop.expectedAreaM2, 'Area not on the PO')} expected</span>
                     {stop.bagCount > 0 && <span>{stop.bagCount} bags</span>}
-                    {stop.customerReference && <span>Ref {stop.customerReference}</span>}
+                    {stop.poNumber && <span>Ref {stop.poNumber}</span>}
                     {stop.craneAvailable && <Badge variant="secondary">Crane</Badge>}
                     {stop.inductionRequired && <Badge variant="warning">Induction</Badge>}
                   </div>
@@ -685,8 +1123,9 @@ function MapView({ date }: { date: string }) {
                       <span className="min-w-0 flex-1 truncate text-muted-foreground">
                         {pin.suburb}
                       </span>
+                      {/* The run, not the driver — that is the unit the board deals in. */}
                       <span className="shrink-0 text-muted-foreground">
-                        {pin.driverName ?? 'Unallocated'}
+                        {pin.runName ?? 'Not on a run'}
                       </span>
                     </li>
                   ))}
@@ -762,12 +1201,12 @@ function PinScatter({ pins }: { pins: readonly MapPin[] }) {
               <Link
                 to={`/admin/jobs/${pin.id}`}
                 // The title is the tooltip for a mark with no room for a label.
-                title={`#${String(pin.jobNumber)} · ${pin.accountName} · ${pin.suburb} · ${pin.driverName ?? 'Unallocated'}`}
+                title={`#${String(pin.jobNumber)} · ${pin.accountName} · ${pin.suburb} · ${pin.runName ?? 'Not on a run'}${pin.driverName ? ` · ${pin.driverName}` : ''}`}
                 className={cn(
                   'focus-ring grid size-6 place-items-center rounded-full border-2 border-card text-[9px] font-semibold shadow-sm transition-transform hover:scale-125',
                   pin.atRisk
                     ? 'bg-destructive text-destructive-foreground'
-                    : pin.driverName === null
+                    : pin.runId === null
                       ? 'bg-warning text-warning-foreground'
                       : 'bg-brand-600 text-white',
                 )}
@@ -785,11 +1224,11 @@ function PinScatter({ pins }: { pins: readonly MapPin[] }) {
       <ul className="absolute bottom-2 left-2 flex flex-wrap gap-3 rounded-md bg-card/90 px-2 py-1 text-xs backdrop-blur">
         <li className="flex items-center gap-1.5">
           <span aria-hidden className="size-2.5 rounded-full bg-brand-600" />
-          Allocated
+          On a run
         </li>
         <li className="flex items-center gap-1.5">
           <span aria-hidden className="size-2.5 rounded-full bg-warning" />
-          Unallocated
+          Not on a run
         </li>
         <li className="flex items-center gap-1.5">
           <span aria-hidden className="size-2.5 rounded-full bg-destructive" />

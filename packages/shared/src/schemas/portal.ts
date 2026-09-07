@@ -6,7 +6,12 @@ import {
   NonEmptyStringSchema,
   ObjectIdSchema,
 } from './primitives.js';
-import { ZoneSchema } from './party.js';
+import {
+  AccountTypeSchema,
+  OnboardingStateSchema,
+  TermsAcceptanceSchema,
+  ZoneSchema,
+} from './party.js';
 import { JobPhotoSchema, JobStatusSchema, ServiceLevelSchema, type JobStatus } from './jobs.js';
 
 /**
@@ -36,25 +41,52 @@ import { JobPhotoSchema, JobStatusSchema, ServiceLevelSchema, type JobStatus } f
 /**
  * Resolved from the session, on every portal page load.
  *
- * `siteIds` is `null` for a Customer Administrator — meaning *all of this
- * account's sites* — and an explicit list for a Site Supervisor. Null and empty
- * are deliberately different: empty means "no sites yet", which is a real state
- * for a freshly invited supervisor and needs its own empty screen.
+ * `visibility` is what narrows a Site Supervisor. It used to be a list of sites
+ * assigned to them (M1.5); with the Sites module gone (Matt, 0:29) the boundary
+ * is the jobs they raised themselves — the visibility Matt described anyway at
+ * 18:15: *"site supervisors can submit their jobs and be able to see the jobs
+ * they've submitted."*
  */
 export const PortalScopeSchema = z
   .object({
     accountId: ObjectIdSchema,
     accountName: NonEmptyStringSchema,
     customerCode: NonEmptyStringSchema,
+    /**
+     * Builder or contractor — the two journeys Matt described at 21:55.
+     *
+     * A builder gets site supervisors and a short booking form, because the area
+     * and bag count already came off the purchase order. A contractor gets one
+     * login, no supervisors, and a form that asks for everything, because that
+     * form IS the authorisation — *"they're just going to fill out the form"*
+     * (22:53).
+     */
+    accountType: AccountTypeSchema,
     /** Whether this account records recovered weight as well as area (M2.3). */
     capturesWeight: z.boolean(),
     /** M2.10 — whether their invoices need a PO. Changes the booking form. */
     poRequired: z.boolean(),
+    /**
+     * The office's invoice number prefix (Matt, 7:07).
+     *
+     * Carried on the scope because the customer has to quote the same number
+     * back when they pay, and the portal cannot read office settings. Empty
+     * means plain numbers.
+     */
+    invoiceNumberPrefix: z.string(),
     /** M1.5 — false for every site supervisor. */
     canSeePricing: z.boolean(),
-    /** `null` = every site on the account. */
-    siteIds: z.array(ObjectIdSchema).nullable(),
-    siteCount: z.number().int().nonnegative(),
+    /**
+     * How much of the account this viewer sees.
+     *
+     * `account` for an administrator — everything. `own-jobs` for a site
+     * supervisor, who sees only what they raised.
+     *
+     * ⚠️ Replaces the site-list scoping from M1.5, which is gone with the sites
+     * (Matt, 0:29). The narrowing is still done by the SERVER; this field only
+     * tells the UI what to say about it.
+     */
+    visibility: z.enum(['account', 'own-jobs']),
   })
   .meta({ id: 'PortalScope' });
 
@@ -107,15 +139,23 @@ export const PortalJobListItemSchema = z
     id: ObjectIdSchema,
     jobNumber: z.number().int().positive(),
     status: JobStatusSchema,
-    siteId: ObjectIdSchema,
     siteName: NonEmptyStringSchema,
     suburb: NonEmptyStringSchema,
-    reference: z.string().nullable(),
+    /**
+     * The customer's PO number or job reference — one field.
+     *
+     * Matt, 9:08: *"they're really interchangeable… they are one and the same,
+     * we don't need both of them."* Kept under the PO name because that is what
+     * has to appear on the invoice (9:56).
+     */
     poNumber: z.string().nullable(),
+    /** Who raised it — see `bookedByName` on `Job`. */
+    bookedByName: z.string().nullable(),
     readyDate: IsoDateSchema,
     targetDate: IsoDateSchema,
     serviceLevel: ServiceLevelSchema,
-    expectedAreaM2: z.number().nonnegative(),
+    /** Null on a builder's job until the office reads it off the PO. */
+    expectedAreaM2: z.number().nonnegative().nullable(),
     recoveredWeightKg: z.number().nonnegative().nullable(),
     bagCount: z.number().int().nonnegative(),
     /** ⚠️ Null for a site supervisor. Nulled by the SERVER, not the client. */
@@ -181,7 +221,6 @@ export const PortalJobSchema = PortalJobListItemSchema.extend({
 export const PENDING_READINESS_STATUSES: readonly JobStatus[] = [
   'booked',
   'assigned',
-  'acknowledged',
 ];
 
 /* ── Booking (M5.1 · F9, F21, W88 + M5.2 · W86) ───────────────────────────── */
@@ -221,16 +260,53 @@ export const ReadinessCertificationSchema = z
  */
 export const PortalBookingDraftSchema = z
   .object({
-    siteId: ObjectIdSchema.refine((value) => value.length > 0, 'Choose the site'),
+    /* ── Where the pickup is ──────────────────────────────────────────
+     *
+     * Typed, not chosen from a saved list. There are no saved sites any more
+     * (Matt, 0:29) — *"we don't ever really visit a site more than once."*
+     *
+     * ⚠️ The SUBURB is still chosen. It carries the zone that prices the job and
+     * the pin that plots it, and neither survives free text. Everything else is
+     * a house that did not exist last year.
+     */
+    siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120),
+    lotNumber: z.string().trim().max(30),
+    addressLine: z.string().trim().min(1, 'Enter the street address').max(160),
+    /** From the suburb picker — supplies suburb, postcode, zone and the pin. */
+    placeId: z.string().trim().min(1, 'Choose the suburb from the list'),
+    builderName: z.string().trim().max(120),
+
+    /* ── Getting a truck in ───────────────────────────────────────────── */
+    accessNotes: z.string().trim().max(1000),
+    gateHours: z.string().trim().max(120),
+    inductionRequired: z.boolean(),
+    craneAvailable: z.boolean(),
+    siteContactName: z.string().trim().max(80),
+    siteContactMobile: z.string().trim().max(20),
+    /** Often the builder's own supervisor, who has no login (Matt, 14:16). */
+    siteContactEmail: z.string().trim().max(160),
+
     readyDate: IsoDateSchema,
+    /**
+     * Null when the figure comes off a purchase order instead.
+     *
+     * A builder's site supervisor books a pickup without knowing the area —
+     * *"they're running the site, they're not going to know it's 823.4 square
+     * metres"* (Matt, 29:21). Null says *"the PO has it"*; zero would say the job
+     * is empty, and the difference is what the job gets invoiced at.
+     */
     expectedAreaM2: z
       .number({ error: 'Enter the expected square metres' })
       .positive('Must be more than zero')
-      .max(100000, 'That is larger than any job on record — check the figure'),
+      .max(100000, 'That is larger than any job on record — check the figure')
+      .nullable(),
     bagCount: z.number().int().min(0).max(200),
     serviceLevel: ServiceLevelSchema,
-    reference: z.string().trim().max(60),
-    /** Required only where the account's PO policy demands it (M2.10). */
+    /**
+     * PO number or job reference — one field (Matt, 9:08).
+     *
+     * Required only where the account's PO policy demands it (M2.10).
+     */
     poNumber: z.string().trim().max(60),
     notes: z.string().trim().max(1000),
     certification: ReadinessCertificationSchema,
@@ -244,7 +320,7 @@ export const PortalJobEditSchema = z
     expectedAreaM2: z.number().positive().max(100000),
     bagCount: z.number().int().min(0).max(200),
     serviceLevel: ServiceLevelSchema,
-    reference: z.string().trim().max(60),
+    /** PO number or job reference — one field (Matt, 9:08). */
     poNumber: z.string().trim().max(60),
     notes: z.string().trim().max(1000),
   })
@@ -259,53 +335,6 @@ export const PortalChangeRequestSchema = z
   })
   .meta({ id: 'PortalChangeRequest' });
 
-/* ── Sites (M5.3 · W87, W98 + M5.6 · F46, W92) ────────────────────────────── */
-
-export const PortalSiteSchema = z
-  .object({
-    id: ObjectIdSchema,
-    name: NonEmptyStringSchema,
-    lotNumber: z.string().nullable(),
-    addressLine: NonEmptyStringSchema,
-    suburb: NonEmptyStringSchema,
-    postcode: z.string(),
-    zone: ZoneSchema,
-    builderName: z.string(),
-    /** M5.3 — the fields the supervisor maintains themselves. */
-    accessNotes: z.string(),
-    gateHours: z.string().nullable(),
-    inductionRequired: z.boolean(),
-    craneAvailable: z.boolean(),
-    siteContactName: z.string().nullable(),
-    siteContactMobile: z.string().nullable(),
-    /** M5.6 · F46 — preferred windows and blackout times, per site. */
-    preferredWindow: z.string().nullable(),
-    blackoutNote: z.string().nullable(),
-    openJobCount: z.number().int().nonnegative(),
-    totalJobCount: z.number().int().nonnegative(),
-    lastJobAt: IsoDateTimeSchema.nullable(),
-    /**
-     * B.1 — every site carries a shareable booking link. This is expected to be
-     * the DOMINANT route in: pasted into a site WhatsApp group, tapped, SMS
-     * code, booking — under a minute, on a phone, on site.
-     */
-    bookingLink: NonEmptyStringSchema,
-  })
-  .meta({ id: 'PortalSite' });
-
-export const PortalSiteUpdateSchema = z
-  .object({
-    accessNotes: z.string().trim().max(1000),
-    gateHours: z.string().trim().max(120),
-    inductionRequired: z.boolean(),
-    craneAvailable: z.boolean(),
-    siteContactName: z.string().trim().max(80),
-    siteContactMobile: z.string().trim().max(20),
-    preferredWindow: z.string().trim().max(120),
-    blackoutNote: z.string().trim().max(300),
-  })
-  .meta({ id: 'PortalSiteUpdate' });
-
 /* ── Invoices (M5.10 · W72, W73) ──────────────────────────────────────────── */
 
 export const PortalInvoiceSchema = z
@@ -317,7 +346,7 @@ export const PortalInvoiceSchema = z
     jobId: ObjectIdSchema.nullable(),
     jobNumber: z.number().int().positive().nullable(),
     siteName: z.string().nullable(),
-    reference: z.string().nullable(),
+    /** PO number or job reference — one field (Matt, 9:08). */
     poNumber: z.string().nullable(),
     issuedOn: IsoDateSchema.nullable(),
     dueOn: IsoDateSchema.nullable(),
@@ -349,9 +378,6 @@ export const PortalSupervisorSchema = z
     email: z.string().nullable(),
     mobile: z.string().nullable(),
     state: PortalSupervisorStateSchema,
-    /** `null` = every site. Otherwise the specific sites they may book for. */
-    siteIds: z.array(ObjectIdSchema).nullable(),
-    siteNames: z.array(z.string()),
     invitedAt: IsoDateTimeSchema,
     lastSignedInAt: IsoDateTimeSchema.nullable(),
     /** B.2 — set when they joined by customer code and need approving. */
@@ -372,8 +398,14 @@ export const PortalSupervisorInviteSchema = z
     name: z.string().trim().min(1, 'Enter their name').max(80),
     email: z.string().trim().max(160),
     mobile: z.string().trim().max(20),
-    /** Empty array = all sites. */
-    siteIds: z.array(ObjectIdSchema),
+    /*
+     * No site assignment.
+     *
+     * A supervisor used to be scoped by a list of sites chosen here. With the
+     * Sites module gone (Matt, 0:29) they are scoped by the jobs they raise
+     * themselves — see `PortalScope.visibility` — so there is nothing to pick
+     * at the point of inviting them.
+     */
   })
   .refine((value) => value.email.length > 0 || value.mobile.length > 0, {
     error: 'Give a mobile or an email — a mobile is usually faster on site',
@@ -425,6 +457,102 @@ export const PortalAccountUpdateSchema = z
   })
   .meta({ id: 'PortalAccountUpdate' });
 
+
+/* ── Account onboarding (Journey A.4 · Matt, 7:32–9:24) ──────────────────── */
+
+/**
+ * What the customer fills in for themselves after being invited.
+ *
+ * ── Why the customer completes their own account ──────────────────────────
+ * Matt has an account application form his customers fill in on paper today. It
+ * exists for a legal reason, not an administrative one — 7:49: *"it's a
+ * contractual thing where some customers require them to give a **director's
+ * guarantee**… it's more of a legal precedent that they have to sign off on
+ * those account terms and conditions."*
+ *
+ * Chirag proposed replacing it with an invite, and Matt agreed twice: *"send them
+ * the invite for them to complete this part"* (9:07) and, on the terms checkbox,
+ * *"yeah, beautiful"* (9:24).
+ *
+ * ── What the office keeps ─────────────────────────────────────────────────
+ * The office still sets the rate card, the PO policy and the payment terms at
+ * conversion — those are a negotiation, not something a customer picks. This
+ * form is only the details the customer is the authority on, plus the tick.
+ *
+ * ⚠️ Nothing here is a commercial term. If a field on this form could change
+ * what a job costs, it is on the wrong form.
+ */
+export const AccountOnboardingSchema = z
+  .object({
+    legalName: z.string().trim().min(2, 'Enter the registered company name').max(120),
+    tradingName: z.string().trim().max(120),
+    abn: z
+      .string()
+      .trim()
+      .regex(/^\d{11}$/, 'An ABN is 11 digits — check it on ABN Lookup'),
+    addressLine: z.string().trim().min(1, 'Enter the registered business address').max(160),
+    suburb: z.string().trim().min(1, 'Enter the suburb').max(80),
+    postcode: z.string().trim().regex(/^\d{4}$/, 'Four digits'),
+
+    /* ── Who to contact, by department ───────────────────────────────── */
+    accountsContactName: z.string().trim().min(2, 'Who handles your invoices?').max(80),
+    accountsContactEmail: z.email('Enter a valid email address'),
+    /**
+     * Where diversion certificates go — often a different team entirely.
+     *
+     * Matt, 31:04: *"invoices get sent to the accounts department… and I need a
+     * section where we could say that certificates are sent to this specific
+     * email address."* Asked here because the customer knows the answer and the
+     * office does not.
+     */
+    certificateEmail: z
+      .string()
+      .trim()
+      .max(160)
+      .refine(
+        (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
+        'Enter a valid email address, or leave it blank',
+      ),
+
+    /* ── The legal part ──────────────────────────────────────────────── */
+    /**
+     * The name of the person accepting, typed by them.
+     *
+     * Not taken from the session: a director's guarantee is given by a named
+     * individual, and the person logged in may be an accounts clerk acting on
+     * their behalf. Asking makes who signed an explicit answer rather than an
+     * inference from whose password was used.
+     */
+    acceptedByName: z.string().trim().min(2, 'Type the full name of the person accepting').max(80),
+    acceptedByRole: z.string().trim().min(2, 'Their position — Director, Owner, Accounts Manager').max(80),
+    /**
+     * The tick. Refuses anything but \`true\` — this is the record Matt currently
+     * chases as a signed PDF, and an account without it is not enforceable.
+     */
+    termsAccepted: z
+      .literal(true, { error: 'The terms and conditions must be accepted to activate the account' }),
+  })
+  .meta({ id: 'AccountOnboarding' });
+
+export type AccountOnboarding = z.infer<typeof AccountOnboardingSchema>;
+
+/** What the welcome screen needs to render before anything is filled in. */
+export const OnboardingInviteSchema = z
+  .object({
+    accountId: ObjectIdSchema,
+    customerCode: NonEmptyStringSchema,
+    /** The name the office typed at conversion — the customer may correct it. */
+    suggestedLegalName: NonEmptyStringSchema,
+    accountType: AccountTypeSchema,
+    state: OnboardingStateSchema,
+    /** Set once accepted; null while outstanding. */
+    acceptance: TermsAcceptanceSchema.nullable(),
+    termsVersion: NonEmptyStringSchema,
+  })
+  .meta({ id: 'OnboardingInvite' });
+
+export type OnboardingInvite = z.infer<typeof OnboardingInviteSchema>;
+
 export type PortalScope = z.infer<typeof PortalScopeSchema>;
 export type PortalDashboard = z.infer<typeof PortalDashboardSchema>;
 export type PortalJobListItem = z.infer<typeof PortalJobListItemSchema>;
@@ -434,8 +562,6 @@ export type ReadinessCertification = z.infer<typeof ReadinessCertificationSchema
 export type PortalBookingDraft = z.infer<typeof PortalBookingDraftSchema>;
 export type PortalJobEdit = z.infer<typeof PortalJobEditSchema>;
 export type PortalChangeRequest = z.infer<typeof PortalChangeRequestSchema>;
-export type PortalSite = z.infer<typeof PortalSiteSchema>;
-export type PortalSiteUpdate = z.infer<typeof PortalSiteUpdateSchema>;
 export type PortalInvoice = z.infer<typeof PortalInvoiceSchema>;
 export type PortalSupervisor = z.infer<typeof PortalSupervisorSchema>;
 export type PortalSupervisorInvite = z.infer<typeof PortalSupervisorInviteSchema>;

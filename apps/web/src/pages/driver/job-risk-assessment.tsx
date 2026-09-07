@@ -151,8 +151,8 @@ function RiskForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['d
         safe ? 'Risk assessment saved' : 'Unsafe site reported',
         safe
           ? online
-            ? 'The PDF goes to the builder’s portal now.'
-            : 'It uploads to the builder’s portal when you have signal.'
+            ? 'Your PDF copy is on the job — share it to the builder’s portal.'
+            : 'Your PDF copy appears on the job when you have signal.'
           : 'The office has been alerted. Do not start until they call you.',
       );
       await navigate(`/driver/jobs/${job.jobId}`);
@@ -191,6 +191,21 @@ function RiskForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['d
           {job.siteName}, {job.suburb} · {job.accountName}
         </p>
       </header>
+
+      {/*
+       * Whose idea this form was.
+       *
+       * Matt, 1:07:40: *"I'd say make it optional because the driver will know
+       * which ones he needs to do it for or not."* On a site nobody flagged, the
+       * driver has chosen to fill one in — saying so out loud is the difference
+       * between a tool they reach for and a form they assume is a mistake.
+       */}
+      {!job.riskAssessmentRequired && (
+        <Alert variant="info" title="Not required here — you have chosen to do one">
+          {job.accountName} do not ask for an assessment on this site. Fill it in anyway if the site
+          warrants it; it is filed against the job either way.
+        </Alert>
+      )}
 
       <Alert variant="info" title="Works with no signal">
         Fill it in here at the fence. If you have no coverage it saves on the phone and goes to the
@@ -322,14 +337,19 @@ function RiskForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['d
         <ol className="mt-1.5 ml-4 list-decimal space-y-0.5">
           <li>This assessment becomes page 1 of a PDF.</li>
           <li>Our standard SWMS ({SWMS_VERSION}) is attached as page 2.</li>
+          <li>The PDF is filed against job #{job.jobNumber} for the office.</li>
           <li>
-            The PDF goes to {job.accountName}&rsquo;s portal
-            {online ? '' : ' as soon as you have signal'}.
+            You get your own copy to share
+            {online ? '' : ' — it appears as soon as you have signal'}.
+          </li>
+          <li>
+            It also goes to {job.accountName}&rsquo;s portal
+            {online ? '' : ' when you are back in coverage'}.
           </li>
         </ol>
         <p className="mt-1.5 flex items-center gap-1.5">
           <UploadCloudIcon aria-hidden className="size-3.5 shrink-0" />
-          PDF and upload are handled by the office system, not on this phone.
+          Generation and the portal upload happen in the office system, not on this phone.
         </p>
       </div>
 

@@ -1,14 +1,14 @@
-import { Badge, cn } from '@plastago/ui';
+import { Badge, cn, useToast } from '@plastago/ui';
 import {
   ClipboardListIcon,
+  LogOutIcon,
   ScaleIcon,
   TriangleAlertIcon,
-  UserIcon,
   type LucideIcon,
 } from 'lucide-react';
-import { NavLink, Outlet, useLocation } from 'react-router';
-import { SyncIndicator } from '@/components/sync-indicator';
-import { useDriver } from '@/features/auth/auth-context';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
+import { useAuth, useDriver } from '@/features/auth/auth-context';
+import { useOutboxSummary } from '@/offline/use-offline-state';
 
 /**
  * The driver shell.
@@ -19,12 +19,12 @@ import { useDriver } from '@/features/auth/auth-context';
  *
  *  • **56px tab targets** — well past the 44px minimum, because the failure mode
  *    is a mis-tap that marks the wrong job complete.
- *  • **Sync state is in the header on every screen**, never behind a menu. M4.12
- *    requires the driver to see what has and has not synced, and with no
- *    error-tracking vendor (§6A.8) they are the only person who can tell us the
- *    queue is stuck.
- *  • **Four destinations, no more.** Run · Weights · Report · Me. Everything else
+ *  • **Three destinations, no more.** Run · Tip-off · Report. Everything else
  *    is reached from a job, because on site the question is always "this job".
+ *  • **Sign out lives in the header**, because with the Me screen gone it is the
+ *    only way out. It keeps the unsent-work guard that screen carried: a driver
+ *    with a queue is warned before they can leave, because signing out with work
+ *    still on the phone is how site evidence gets lost.
  *  • **`max-w-md` on a wide screen.** It is a phone app; looking narrow on a
  *    desktop browser is the correct trade, not a bug.
  */
@@ -40,12 +40,29 @@ const TABS: readonly Tab[] = [
   { to: '/', label: 'Run', icon: ClipboardListIcon, end: true },
   { to: '/tip-off', label: 'Tip-off', icon: ScaleIcon },
   { to: '/report', label: 'Report', icon: TriangleAlertIcon },
-  { to: '/me', label: 'Me', icon: UserIcon },
 ];
 
 export function DriverLayout() {
   const driver = useDriver();
   const location = useLocation();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const { signOut } = useAuth();
+  const { pending, failed } = useOutboxSummary();
+
+  const leave = async () => {
+    // Blocked, not warned. Photos, positions and timestamps taken on site cannot
+    // be recreated, and a signed-out phone is where they would stay.
+    if (pending > 0 || failed > 0) {
+      toast.error(
+        'You still have work to send',
+        'Stay signed in until it has all gone through, or it stays on this phone.',
+      );
+      return;
+    }
+    await signOut();
+    await navigate('/sign-in', { replace: true });
+  };
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-md flex-col bg-canvas">
@@ -66,9 +83,14 @@ export function DriverLayout() {
             {driver.jobTitle ?? 'Driver'}
           </span>
         </span>
-        <div className="ml-auto shrink-0">
-          <SyncIndicator />
-        </div>
+        <button
+          type="button"
+          onClick={() => void leave()}
+          aria-label="Sign out"
+          className="focus-ring ml-auto grid size-11 shrink-0 place-items-center rounded-lg text-muted-foreground"
+        >
+          <LogOutIcon aria-hidden className="size-5" />
+        </button>
       </header>
 
       <main

@@ -100,7 +100,7 @@ function driverListItem(index: number): DriverListItem {
     (job) =>
       job.driverId === driver.id &&
       job.readyDate === today &&
-      ['booked', 'assigned', 'acknowledged', 'in-transit', 'arrived'].includes(job.status),
+      ['booked', 'assigned', 'in-transit', 'arrived'].includes(job.status),
   ).length;
 
   return {

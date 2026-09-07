@@ -34,8 +34,15 @@ import { currentPosition } from '@/services/mock/driver.mock';
  * ```
  *   tip-off total          weighbridge
  * − measured crane weights bagged jobs
- * = remainder ÷ hand-load jobs = imputed weight each
+ * = remainder × (this job's m² ÷ total hand-load m²) = its imputed weight
  * ```
+ *
+ * ── Why the split is by size and not per head ─────────────────────────────
+ * Matt, 56:11: *"split the remaining weight left over over those two jobs based
+ * on how big they are… 2/3 of the weight left over to that 1000 square meter job
+ * and 1/3 to the 500 square meter job."* So there is no single "kg each" figure
+ * to show — the per-job shares differ, and the table below is the answer rather
+ * than a breakdown of one.
  *
  * ── Why the driver sees the arithmetic ────────────────────────────────────
  * Matt's purpose for this is explicitly **not billing** — it is costing, mass
@@ -57,12 +64,26 @@ export function DriverTipOffPage() {
   const [docket, setDocket] = useState('');
   const [docketPhotoId, setDocketPhotoId] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [chosenRunId, setChosenRunId] = useState<string | null>(null);
+
+  /*
+   * Which run is being weighed off.
+   *
+   * Defaults to the first run that has not been tipped off yet, because that is
+   * almost always the one the driver is standing at the weighbridge for — he
+   * does the morning run, tips off, then does the afternoon one (Matt, 40:03).
+   * The selector exists for the case where it is not.
+   */
+  const runs = day?.runs ?? [];
+  const outstanding = runs.filter((run) => run.tipOffRecordedAt === null);
+  const activeRunId = chosenRunId ?? outstanding[0]?.runId ?? null;
+  const activeRun = runs.find((run) => run.runId === activeRunId) ?? null;
 
   const parsed = Number(totalKg);
   const valid = Number.isFinite(parsed) && parsed > 0;
-  const preview = useTipOffPreview(RUN_DATE, valid ? parsed : 0, valid);
+  const preview = useTipOffPreview(activeRunId, valid ? parsed : 0, valid);
 
-  const alreadyDone = day?.tipOffRecordedAt !== null && day?.tipOffRecordedAt !== undefined;
+  const alreadyDone = runs.length > 0 && outstanding.length === 0;
 
   const save = async () => {
     const next: Record<string, string> = {};
@@ -91,12 +112,18 @@ export function DriverTipOffPage() {
       await record.mutateAsync({
         occurredAt: new Date().toISOString(),
         position,
+        runId: activeRunId ?? '',
         date: RUN_DATE,
         totalKg: parsed,
         docketReference: docket.trim(),
         docketPhotoId,
       });
-      toast.success('Tip-off recorded', 'That is the run finished.');
+      toast.success(
+        'Tip-off recorded',
+        outstanding.length > 1
+          ? `${activeRun?.runName ?? 'That run'} is finished — one more to go.`
+          : 'That is the run finished.',
+      );
       await navigate('/driver');
     } catch {
       toast.error('Could not save that', 'Try again — nothing was lost.');
@@ -124,8 +151,9 @@ export function DriverTipOffPage() {
     return (
       <div className="space-y-4">
         <h1 className="font-display text-lg font-semibold tracking-tight">Tip-off</h1>
-        <Alert variant="success" title="Already recorded for today">
-          The load has been weighed off and the weights spread across the run. Nothing else to do.
+        <Alert variant="success" title="Every run weighed off">
+          Each run has its own weighbridge docket, and both are recorded. The weights have been
+          spread across the stops on each. Nothing else to do.
         </Alert>
         <Link to="/driver" className={`${buttonVariants({ variant: 'outline' })} min-h-14 w-full`}>
           Back to the run
@@ -139,9 +167,57 @@ export function DriverTipOffPage() {
       <header>
         <h1 className="font-display text-lg font-semibold tracking-tight">Tip-off</h1>
         <p className="text-sm text-muted-foreground">
-          Weigh the whole load off, then enter the weighbridge figure.
+          Weigh this run&rsquo;s load off, then enter the weighbridge figure.
         </p>
       </header>
+
+      {/*
+        One docket per run, not per day.
+        Matt, 43:50: *"sometimes the driver will do two runs. He'll go to the tip
+        in between… we add the weighbridge ticket against that run."* With two
+        runs outstanding the driver has to say which one is on the scales — the
+        wrong choice would spread this weight over the wrong stops.
+      */}
+      {outstanding.length > 1 ? (
+        <fieldset className="rounded-xl border border-warning/50 bg-warning/5 p-3">
+          <legend className="px-1 text-sm font-medium">Which run is this docket for?</legend>
+          <div className="mt-1 space-y-2">
+            {outstanding.map((run) => (
+              <label
+                key={run.runId}
+                className={cn(
+                  'flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border p-3',
+                  run.runId === activeRunId ? 'border-primary bg-card' : 'border-border',
+                )}
+              >
+                <input
+                  type="radio"
+                  name="tipoff-run"
+                  className="size-5 shrink-0"
+                  checked={run.runId === activeRunId}
+                  onChange={() => {
+                    setChosenRunId(run.runId);
+                  }}
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium">{run.runName}</span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {run.stops.length} stop{run.stops.length === 1 ? '' : 's'} ·{' '}
+                    {run.suburbs.join(', ')}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ) : (
+        activeRun !== null && (
+          <p className="rounded-lg bg-muted px-3 py-2 text-sm">
+            Weighing off <strong>{activeRun.runName}</strong> — {activeRun.stops.length} stop
+            {activeRun.stops.length === 1 ? '' : 's'}.
+          </p>
+        )
+      )}
 
       <Field
         id="tipoff-total"
@@ -244,16 +320,28 @@ export function DriverTipOffPage() {
                 </div>
                 <div className="flex justify-between">
                   <dt className="text-muted-foreground">
-                    Split across {preview.data.handLoadJobCount} hand-load job
-                    {preview.data.handLoadJobCount === 1 ? '' : 's'}
+                    Shared across {preview.data.handLoadJobCount} hand-load job
+                    {preview.data.handLoadJobCount === 1 ? '' : 's'}, by size
                   </dt>
                   <dd className="font-display text-base font-semibold tabular-nums">
-                    {preview.data.imputedKgPerHandLoadJob === null
+                    {preview.data.handLoadJobCount === 0
                       ? '—'
-                      : `${preview.data.imputedKgPerHandLoadJob.toLocaleString('en-AU')} kg each`}
+                      : `${preview.data.handLoadAreaM2.toLocaleString('en-AU')} m² total`}
                   </dd>
                 </div>
               </dl>
+
+              {/*
+               * Stated in words because the driver is being asked to sanity-check
+               * the arithmetic, and "by size" is the part that is surprising if
+               * you expected the old equal split.
+               */}
+              {preview.data.handLoadJobCount > 1 && (
+                <p className="text-xs text-muted-foreground">
+                  A bigger job takes a bigger share — each one gets the leftover in proportion to
+                  its square metres.
+                </p>
+              )}
 
               {preview.data.warning !== null && (
                 <Alert
@@ -270,7 +358,7 @@ export function DriverTipOffPage() {
                     <TableHeader>
                       <TableRow>
                         <TableHead>Job</TableHead>
-                        <TableHead>Load</TableHead>
+                        <TableHead>Basis</TableHead>
                         <TableHead numeric>kg</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -280,12 +368,24 @@ export function DriverTipOffPage() {
                           <TableCell>
                             <span className="block text-xs font-medium">#{line.jobNumber}</span>
                             <span className="block truncate text-[11px] text-muted-foreground">
-                              {line.siteName}
+                              {line.siteName} · {line.areaM2.toLocaleString('en-AU')} m²
                             </span>
                           </TableCell>
                           <TableCell>
-                            <span className="text-xs">
-                              {line.loadType === 'bagged' ? 'Weighed' : 'Worked out'}
+                            {/*
+                             * The words Matt used, on the row that carries the
+                             * number: "actual" where the driver weighed it,
+                             * "estimated" where it came out of this split.
+                             */}
+                            <span className="block text-xs">
+                              {line.loadType === 'bagged' ? 'Actual' : 'Estimated'}
+                            </span>
+                            <span className="block text-[11px] text-muted-foreground">
+                              {line.loadType === 'bagged'
+                                ? 'Crane scale'
+                                : line.shareOfRemainder === null
+                                  ? 'Share of leftover'
+                                  : `${String(Math.round(line.shareOfRemainder * 100))}% of leftover`}
                             </span>
                           </TableCell>
                           <TableCell numeric>

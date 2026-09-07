@@ -1,23 +1,28 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { AuthIdentifierSchema, channelForIdentifier, ROLE_LABELS } from '@plastago/shared';
+import type { Surface } from '@plastago/shared';
 import {
-  Alert,
-  Badge,
+  AuthIdentifierSchema,
+  channelForIdentifier,
+  ROLE_LABELS,
+  ROLE_SURFACE,
+} from '@plastago/shared';
+import {
   Button,
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
+  cn,
   Field,
   Input,
   Spinner,
 } from '@plastago/ui';
 import { ArrowRightIcon, MailIcon, SmartphoneIcon } from 'lucide-react';
-import { useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { useLocation, useNavigate } from 'react-router';
 import * as z from 'zod';
+import type { DemoIdentity } from '@/services/mock/fixtures/identities';
 import { DEMO_IDENTITIES, DEMO_OTP_CODE } from '@/services/mock/fixtures/identities';
 import { useAuth } from '@/features/auth/auth-context';
 import { describeAuthError } from '@/features/auth/auth-messages';
@@ -43,7 +48,6 @@ export function SignInPage() {
   const { requestCode } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [showDemo, setShowDemo] = useState(false);
 
   // Carried by RequireAuth so a deep link survives the round trip through here.
   const from = (location.state as { from?: string } | null)?.from;
@@ -53,6 +57,8 @@ export function SignInPage() {
     handleSubmit,
     control,
     setError,
+    setValue,
+    setFocus,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(FormSchema),
@@ -68,6 +74,22 @@ export function SignInPage() {
   // value.
   const identifier = useWatch({ control, name: 'identifier' });
   const channel = identifier.trim() ? channelForIdentifier(identifier) : null;
+
+  /**
+   * Tap-to-fill: the demo panel writes into the one field rather than signing
+   * in behind the user's back. The flow being demonstrated is the one-time-code
+   * flow, so jumping straight to the code screen would show something the
+   * product does not do — and would hide which identifier a role actually uses,
+   * which is the whole point of a driver and a supervisor being on mobile.
+   */
+  const fillIdentifier = (identity: DemoIdentity) => {
+    setValue('identifier', identity.email ?? identity.mobile ?? '', {
+      shouldValidate: true,
+      shouldDirty: true,
+      shouldTouch: true,
+    });
+    setFocus('identifier');
+  };
 
   const onSubmit = async (values: FormValues) => {
     try {
@@ -180,7 +202,7 @@ export function SignInPage() {
         </a>
       </p>
 
-      <DemoIdentityPanel open={showDemo} onToggle={setShowDemo} />
+      <DemoIdentityPanel onPick={fillIdentifier} />
     </div>
   );
 }
@@ -190,49 +212,73 @@ export function SignInPage() {
  *
  * A UI-only build has no directory to authenticate against, so without this
  * nobody — including the client in the demo meeting — can get past this screen.
+ * Tapping a role fills the field above rather than signing in, so what is being
+ * demonstrated stays the real one-time-code flow.
+ *
  * It is deliberately conspicuous and clearly labelled so it cannot be mistaken
  * for product, and it is the single thing to delete when the real auth endpoints
  * land: this panel, and the `mocks/fixtures` folder it reads from.
  */
-function DemoIdentityPanel({
-  open,
-  onToggle,
-}: {
-  open: boolean;
-  onToggle: (open: boolean) => void;
-}) {
+
+/**
+ * Dot colour by surface, not by role.
+ *
+ * Seven colours for seven roles is a legend nobody reads. Three say the thing
+ * that actually changes when you tap: which application you land in.
+ */
+const SURFACE_DOT: Record<Surface, string> = {
+  admin: 'bg-brand-600',
+  portal: 'bg-info',
+  driver: 'bg-warning',
+};
+
+function DemoIdentityPanel({ onPick }: { onPick: (identity: DemoIdentity) => void }) {
   return (
-    <Alert variant="warning" title="Demo build — no backend connected">
-      <p>
-        Sign in as any role below. The code is{' '}
-        <code className="rounded bg-warning/15 px-1 py-0.5 font-mono font-semibold text-foreground">
+    <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgb(16_24_16/0.04)]">
+      <p className="text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+        Demo accounts — tap to fill
+      </p>
+
+      <ul className="mt-3 flex flex-wrap gap-2">
+        {DEMO_IDENTITIES.map((identity) => {
+          const identifier = identity.email ?? identity.mobile ?? '';
+          return (
+            <li key={identity.id}>
+              <button
+                type="button"
+                onClick={() => {
+                  onPick(identity);
+                }}
+                // The identifier is what the tap actually does, so it belongs in
+                // the accessible name — the chip only has room for the role, and
+                // a screen reader would otherwise hear seven buttons that differ
+                // by a colour it cannot see.
+                aria-label={`Fill ${identifier} — ${identity.name}, ${ROLE_LABELS[identity.role]}`}
+                title={`${identity.name} · ${identifier}`}
+                className="focus-ring flex items-center gap-2 rounded-full border border-border bg-background py-1.5 pr-3.5 pl-3 text-xs font-medium text-foreground transition-colors hover:border-primary hover:bg-accent"
+              >
+                <span
+                  aria-hidden
+                  className={cn(
+                    'size-2 shrink-0 rounded-full',
+                    SURFACE_DOT[ROLE_SURFACE[identity.role]],
+                  )}
+                />
+                {ROLE_LABELS[identity.role]}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+
+      <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
+        Demo build — no backend connected. Tap a role to fill the field above, then send the code.
+        Every account accepts{' '}
+        <code className="rounded bg-muted px-1 py-0.5 font-mono font-semibold text-foreground">
           {DEMO_OTP_CODE}
         </code>
         .
       </p>
-
-      <button
-        type="button"
-        onClick={() => {
-          onToggle(!open);
-        }}
-        className="focus-ring mt-2 rounded text-xs font-medium text-foreground underline underline-offset-4"
-        aria-expanded={open}
-      >
-        {open ? 'Hide demo sign-ins' : 'Show demo sign-ins'}
-      </button>
-
-      {open && (
-        <ul className="mt-3 space-y-2 border-t border-warning/25 pt-3">
-          {DEMO_IDENTITIES.map((identity) => (
-            <li key={identity.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-              <code className="font-mono text-foreground">{identity.email ?? identity.mobile}</code>
-              <Badge variant="outline">{ROLE_LABELS[identity.role]}</Badge>
-              <span className="text-muted-foreground">{identity.hint}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Alert>
+    </div>
   );
 }

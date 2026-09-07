@@ -1,8 +1,9 @@
-import type { RiskAssessmentOverride } from '@plastago/shared';
 import type { DriverRunService } from './driver-run.types.js';
 import type {
   Account,
+  AccountDraft,
   AccountListItem,
+  AccountOnboarding,
   AllocationBoard,
   AuditEntry,
   AwaitingPoItem,
@@ -10,11 +11,14 @@ import type {
   ChargeApprovalDetail,
   ChargeApprovalItem,
   ChargeDecision,
+  CreateRunInput,
   FutileDecision,
   FutileReview,
   FutileReviewItem,
   Lead,
+  LeadAttachment,
   LeadConversion,
+  LeadCreate,
   LeadListItem,
   LeadUpdate,
   PoConfirmation,
@@ -61,15 +65,15 @@ import type {
   PortalJobEdit,
   PortalJobListItem,
   PortalScope,
-  PortalSite,
-  PortalSiteUpdate,
   PortalSupervisor,
   PortalSupervisorInvite,
+  Place,
   PricePreview,
+  OnboardingInvite,
   ReadinessCertification,
+  Run,
   RunSheet,
   Session,
-  Site,
   User,
   UserDraft,
   UserListItem,
@@ -144,7 +148,14 @@ export interface LookupService {
   accounts: () => Promise<LookupOption[]>;
   builders: () => Promise<LookupOption[]>;
   drivers: () => Promise<LookupOption[]>;
-  sitesForAccount: (accountId: string) => Promise<LookupOption[]>;
+  /**
+   * Address lookup (Matt, 7:25) — matches on suburb name or postcode.
+   *
+   * Returns at most a handful: this feeds a type-ahead, and a list longer than
+   * the screen is a list nobody reads to the bottom of. An empty query returns
+   * the whole (small) set, so the control can open with something in it.
+   */
+  places: (query: string) => Promise<Place[]>;
 }
 
 /** M1.5 · W1, W2, W16. */
@@ -169,7 +180,15 @@ export interface UserService {
 export interface CustomerService {
   list: (query: ListQuery) => Promise<ListResult<AccountListItem>>;
   get: (id: string) => Promise<Account>;
-  sites: (accountId: string, query: ListQuery) => Promise<ListResult<Site>>;
+  /**
+   * Create an account with no lead behind it (Matt, 6:10).
+   *
+   * The lead queue stays the door for enquiries; this is the door for a
+   * relationship that was already negotiated — *"for the larger builders like
+   * Clarendon Homes, they won't go through… we'll just create the account for
+   * them."*
+   */
+  create: (draft: AccountDraft) => Promise<AccountListItem>;
   jobs: (accountId: string, query: ListQuery) => Promise<ListResult<JobListItem>>;
   invoices: (accountId: string, query: ListQuery) => Promise<ListResult<InvoiceListItem>>;
 
@@ -183,11 +202,15 @@ export interface CustomerService {
    * tick.
    */
   setRiskAssessmentRequired: (accountId: string, required: boolean) => Promise<Account>;
-  /** Per-site exception to the account's rule. See `Site.riskAssessmentOverride`. */
-  setSiteRiskAssessmentOverride: (
-    siteId: string,
-    override: RiskAssessmentOverride,
-  ) => Promise<Site>;
+  /*
+   * The per-site exception is gone with the sites (Matt, 0:29).
+   *
+   * A site could previously override its account's rule — one estate with
+   * overhead powerlines demanding an assessment the rest of the account did
+   * not. That override lived on the site record, and a job is now created once
+   * and never revisited, so there is nowhere for a standing exception to live.
+   * The account-level rule above is the only knob.
+   */
 }
 
 export interface JobService {
@@ -224,9 +247,36 @@ export interface JobService {
  */
 export interface DispatchService {
   board: (date: string) => Promise<AllocationBoard>;
-  assign: (jobId: string, driverId: string, date: string) => Promise<void>;
-  unassign: (jobId: string) => Promise<void>;
-  runSheet: (driverId: string, date: string) => Promise<RunSheet>;
+
+  /* ── Building a run ───────────────────────────────────────────────────
+   * The allocator shapes the day before staffing it (Matt, 44:50), so
+   * creating, filling and assigning are three separate calls rather than one
+   * "allocate" that does all three. A run with no driver on it is a valid,
+   * saveable thing.
+   */
+  createRun: (input: CreateRunInput) => Promise<Run>;
+  renameRun: (runId: string, name: string) => Promise<void>;
+  deleteRun: (runId: string) => Promise<void>;
+  /** Adds a job to the end of a run. Moving between runs is add-then-remove. */
+  addJobToRun: (runId: string, jobId: string) => Promise<void>;
+  removeJobFromRun: (runId: string, jobId: string) => Promise<void>;
+  /** Reorder by hand. `jobIds` must be a permutation of the run's stops. */
+  reorderRun: (runId: string, jobIds: readonly string[]) => Promise<void>;
+  /**
+   * I11 — Google Route Optimization orders the stops (Matt, 42:06).
+   * Overwrites any hand-ordering, which is why the UI confirms first.
+   */
+  optimiseRun: (runId: string) => Promise<Run>;
+
+  /* ── Staffing it ──────────────────────────────────────────────────────
+   * A driver takes whole runs, and normally two of them in a day — morning
+   * South Coast, tip off, afternoon Sydney (Matt, 40:03).
+   */
+  assignRun: (runId: string, driverId: string) => Promise<void>;
+  unassignRun: (runId: string) => Promise<void>;
+
+  /** One run's sheet — NOT one driver's day. See `RunSheet`. */
+  runSheet: (runId: string) => Promise<RunSheet>;
   /** M3.3 — pins for visual clustering, not a computed route. */
   mapPins: (date: string) => Promise<MapPin[]>;
   drivers: () => Promise<Driver[]>;
@@ -355,7 +405,7 @@ export interface SettingsService {
 /**
  * The customer portal (M5 Part 1).
  *
- * ── Not one method here takes an accountId or a siteId filter ─────────────
+ * ── Not one method here takes an accountId filter ─────────────────────────
  * Every call is scoped from the SESSION, server-side. A `list({ accountId })`
  * signature would put the authorisation decision in the browser, where it can be
  * changed by editing a URL — and this is the surface where that matters most,
@@ -404,10 +454,14 @@ export interface CustomerPortalService {
   /** M5.2 · W86 — certify readiness on a job booked without it, or re-confirm. */
   certifyReadiness: (id: string, input: ReadinessCertification) => Promise<PortalJobListItem>;
 
-  // M5.3 · W87, W98 and M5.6 · F46 — sites the signed-in user may see.
-  sites: (query: ListQuery) => Promise<ListResult<PortalSite>>;
-  site: (id: string) => Promise<PortalSite>;
-  updateSite: (id: string, input: PortalSiteUpdate) => Promise<PortalSite>;
+  /*
+   * No site methods.
+   *
+   * M5.3, M5.6 and the whole sites surface are gone (Matt, 0:29): *"we don't
+   * ever really visit a site more than once… the job should just have the site
+   * on it as part of the details for the job."* The address is typed on the
+   * booking and lives on the job.
+   */
 
   // M5.10 · W72, W73 — Customer Administrator only.
   invoices: (query: ListQuery) => Promise<ListResult<PortalInvoice>>;
@@ -425,12 +479,20 @@ export interface CustomerPortalService {
   inviteSupervisor: (input: PortalSupervisorInvite) => Promise<PortalSupervisor>;
   /** Suspend or reactivate. Never a hard delete — the bookings they made stand. */
   setSupervisorState: (id: string, state: PortalSupervisor['state']) => Promise<PortalSupervisor>;
-  setSupervisorSites: (id: string, siteIds: readonly string[] | null) => Promise<PortalSupervisor>;
   /** B.2 — approve a join-by-customer-code on accounts that require it. */
   approveSupervisor: (id: string) => Promise<PortalSupervisor>;
 
   // M5.15 · F29, W71, W81.
   account: () => Promise<PortalAccount>;
+
+  /* ── Journey A.4 — the customer completes their own account ───────────
+   * Matt, 9:07: *"send them the invite for them to complete this part."* The
+   * office sets the rate card and terms at conversion; the customer supplies
+   * their own details and accepts the conditions, which is the director's
+   * guarantee he chases on paper today (7:49).
+   */
+  onboardingInvite: () => Promise<OnboardingInvite>;
+  completeOnboarding: (input: AccountOnboarding) => Promise<void>;
   updateAccount: (input: PortalAccountUpdate) => Promise<PortalAccount>;
 }
 
@@ -477,7 +539,27 @@ export interface QueueService {
   // M5 · Journey A — leads and onboarding.
   leadList: (query: ListQuery) => Promise<ListResult<LeadListItem>>;
   leadGet: (id: string) => Promise<Lead>;
+  /**
+   * A.1 — take a lead by hand (phone, referral, walk-up).
+   *
+   * Returns the full `Lead` rather than a `LeadListItem` because the caller goes
+   * straight to the detail screen to keep working it — handing back the list
+   * shape would mean a second round trip to render the page we just navigated
+   * to, and the notes thread we may have just written the first entry of.
+   */
+  leadCreate: (input: LeadCreate) => Promise<Lead>;
   leadUpdate: (id: string, input: LeadUpdate) => Promise<LeadListItem>;
+  /**
+   * Attach a PDF proposal to a lead (Matt, 5:53).
+   *
+   * Takes a `File` rather than a url because the browser is where the file is —
+   * the adapter will multipart it, and pretending the caller already has a
+   * hosted url would push that problem into every screen.
+   */
+  leadAttach: (leadId: string, file: File) => Promise<LeadAttachment>;
+  /** Remove an attachment. Deliberately a hard delete — a wrong file is noise. */
+  leadDetach: (leadId: string, attachmentId: string) => Promise<void>;
+
   /** A.4 — creates the account, the first site, and sends the invitation. */
   leadConvert: (
     id: string,

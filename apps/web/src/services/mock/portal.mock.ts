@@ -1,4 +1,4 @@
-import { PENDING_READINESS_STATUSES, requiresRiskAssessment } from '@plastago/shared';
+import { PENDING_READINESS_STATUSES } from '@plastago/shared';
 import type {
   Certificate,
   Job,
@@ -9,25 +9,31 @@ import type {
   PortalJob,
   PortalJobListItem,
   PortalScope,
-  PortalSite,
   PortalSupervisor,
   PricePreview,
   Session,
-  Site,
   VolumeRow,
 } from '@plastago/shared';
 import { ServiceError } from '../service-error';
 import type { CustomerPortalService } from '../types';
 import { applyListQuery, byDate, byNumber, byText } from './list-query';
-import { ACCOUNTS, BAG_RATE_CENTS, ZONE_RATES, centsToMoney, objectId } from './fixtures/reference';
+import {
+  ACCOUNTS,
+  BAG_RATE_CENTS,
+  ZONE_RATES,
+  centsToMoney,
+  objectId,
+  resolvePlace,
+} from './fixtures/reference';
 import { MOCK_SESSION_KEY, latency, readStored } from './mock-transport';
-import { invoiceList, store, todayIso } from './store';
+import { invoiceNumberPrefix } from './settings.mock';
+import { invoiceList, store, TERMS_VERSION, todayIso } from './store';
 
 /**
  * The customer portal (M5 Part 1).
  *
  * ── The scoping is the feature ─────────────────────────────────────────────
- * Every read below runs through `scopedJobs()` / `scopedSites()`, which narrow
+ * Every read below runs through `scopedJobs()`, which narrows
  * to the signed-in user's account and — for a site supervisor — to their own
  * sites. That narrowing is not a filter the UI asked for; it is the whole
  * security model of this surface (M1.5), and it lives in one place here for the
@@ -48,10 +54,10 @@ import { invoiceList, store, todayIso } from './store';
 
 interface Viewer {
   accountId: string;
+  /** Their own id — a supervisor is scoped to the jobs THEY raised. */
+  userId: string;
   name: string;
   isAdministrator: boolean;
-  /** `null` for an administrator: every site on the account. */
-  siteIds: string[] | null;
 }
 
 /**
@@ -71,33 +77,11 @@ function viewer(): Viewer {
 
   const isAdministrator = user.role === 'customer-administrator';
 
-  /*
-   * ── The supervisor's site list ─────────────────────────────────────────
-   * In the real model this is a join: a user is attached to specific sites, set
-   * by their Customer Administrator (M5.14) or by the site booking link they
-   * came in on (B.1). There is no such table in the fixtures, so the demo
-   * supervisor is scoped to the first two sites on their account.
-   *
-   * Two, not one, on purpose: with a single site the "which site?" picker and
-   * the site filter would never exercise, and the screens would look simpler
-   * than they are. Two is the smallest number that proves the scoping works —
-   * their account has more, and they can see none of the others.
-   */
-  const siteIds = isAdministrator
-    ? null
-    : store.sites
-        .filter((site) => site.accountId === user.accountId)
-        .slice(0, 2)
-        .map((site) => site.id);
-
   return {
     accountId: user.accountId,
+    userId: user.id,
     name: user.name,
     isAdministrator,
-    // A supervisor attached to nothing still gets an empty array, never `null`:
-    // "no sites yet" is a real state for a freshly invited person and must not
-    // be mistaken for "all sites".
-    siteIds,
   };
 }
 
@@ -107,26 +91,36 @@ function accountFor(accountId: string) {
   return account;
 }
 
-function scopedSites(view: Viewer): Site[] {
-  return store.sites.filter(
-    (site) =>
-      site.accountId === view.accountId &&
-      (view.siteIds === null || view.siteIds.includes(site.id)),
-  );
-}
 
+/**
+ * What this viewer is allowed to see.
+ *
+ * ── The site-scoping boundary, replaced ───────────────────────────────────
+ * M1.5 scoped a site supervisor by the list of sites assigned to them. With the
+ * Sites module gone (Matt, 0:29) there is no such list, so the boundary is now
+ * the jobs they raised themselves — which is the visibility Matt described
+ * anyway: *"I just want to make sure site supervisors can submit their jobs and
+ * be able to see the jobs they've submitted"* (18:15, earlier call).
+ *
+ * ⚠️ An administrator still sees the whole account. A supervisor sees strictly
+ * less than before, not more: a job with no `bookedByUserId` — anything keyed in
+ * by the office, or booked before this existed — is invisible to them. That is
+ * the safe direction to be wrong in, and it is the one open question worth
+ * putting back to Matt: he may want a supervisor to see the office-booked jobs
+ * for their own sites too, which would need a second discriminator on the job.
+ */
 function scopedJobs(view: Viewer): Job[] {
-  const allowed = view.siteIds;
-  return store.jobs.filter(
-    (job) => job.accountId === view.accountId && (allowed === null || allowed.includes(job.siteId)),
-  );
+  return store.jobs.filter((job) => {
+    if (job.accountId !== view.accountId) return false;
+    if (view.isAdministrator) return true;
+    return job.bookedByUserId === view.userId;
+  });
 }
 
 /* ── Projections ──────────────────────────────────────────────────────────── */
 
 const ON_RUN_SHEET: readonly string[] = [
   'assigned',
-  'acknowledged',
   'in-transit',
   'arrived',
   'completed',
@@ -159,8 +153,8 @@ function readiness(job: Job): { at: string | null; by: string | null } {
 
   if (job.jobNumber % 4 === 0) return { at: null, by: null };
 
-  const site = store.sites.find((candidate) => candidate.id === job.siteId);
-  return { at: job.createdAt, by: site?.siteContactName ?? 'Site contact' };
+  // The contact is on the job now, not looked up from a site.
+  return { at: job.createdAt, by: job.siteContactName ?? 'Site contact' };
 }
 
 function toPortalJob(job: Job, view: Viewer): PortalJobListItem {
@@ -170,10 +164,9 @@ function toPortalJob(job: Job, view: Viewer): PortalJobListItem {
     id: job.id,
     jobNumber: job.jobNumber,
     status: job.status,
-    siteId: job.siteId,
     siteName: job.siteName,
     suburb: job.suburb,
-    reference: job.customerReference,
+    bookedByName: job.bookedByName,
     poNumber: job.poNumber,
     readyDate: job.readyDate,
     targetDate: job.targetDate,
@@ -217,55 +210,7 @@ const CUSTOMER_STEP_LABELS: Record<string, string> = {
   completed: 'Pickup completed',
 };
 
-function toPortalSite(site: Site, view: Viewer): PortalSite {
-  const jobs = store.jobs.filter((job) => job.siteId === site.id);
-  const open = jobs.filter((job) =>
-    ['booked', 'assigned', 'acknowledged', 'in-transit', 'arrived'].includes(job.status),
-  );
-  const last = jobs
-    .map((job) => job.completedAt ?? job.createdAt)
-    .sort((a, b) => b.localeCompare(a))[0];
 
-  return {
-    id: site.id,
-    name: site.name,
-    lotNumber: site.lotNumber,
-    addressLine: site.addressLine,
-    suburb: site.suburb,
-    postcode: site.postcode,
-    zone: site.zone,
-    builderName: site.builderName,
-    accessNotes: site.accessNotes,
-    gateHours: site.gateHours,
-    inductionRequired: site.inductionRequired,
-    craneAvailable: site.craneAvailable,
-    siteContactName: site.siteContactName,
-    siteContactMobile: site.siteContactMobile,
-    preferredWindow:
-      siteOverrides.get(site.id)?.preferredWindow ??
-      accountFor(view.accountId).preferredPickupWindow,
-    blackoutNote: siteOverrides.get(site.id)?.blackoutNote ?? null,
-    openJobCount: open.length,
-    totalJobCount: jobs.length,
-    lastJobAt: last ?? null,
-    // B.1 — the shareable link. Short and pasteable, because its destiny is a
-    // site WhatsApp group, not a bookmark bar.
-    bookingLink: `https://book.plastago.com.au/s/${site.id.slice(-8)}`,
-  };
-}
-
-/**
- * Site fields the customer maintains, held apart from the shared fixtures.
- *
- * The office and the portal edit overlapping but not identical fields, and the
- * portal-only ones (preferred window, blackout) have no home on `Site` yet —
- * they arrive with the real schema. Overriding rather than widening the fixture
- * keeps that honest.
- */
-const siteOverrides = new Map<
-  string,
-  { preferredWindow: string | null; blackoutNote: string | null }
->();
 
 /* ── Service ──────────────────────────────────────────────────────────────── */
 
@@ -280,13 +225,16 @@ export function createMockPortalService(): CustomerPortalService {
         accountId: account.id,
         accountName: account.name,
         customerCode: account.code,
+        accountType: account.accountType,
         capturesWeight: account.captureMode === 'area-and-weight',
         poRequired: account.poPolicy === 'required-before-invoice',
+        // From office settings — the customer quotes the same number back.
+        invoiceNumberPrefix: invoiceNumberPrefix(),
         // M1.5's worked example, implemented: a site supervisor cannot see
         // pricing. This is the one field the whole surface branches on.
         canSeePricing: view.isAdministrator,
-        siteIds: view.siteIds,
-        siteCount: scopedSites(view).length,
+        // Replaces the site-list scoping from M1.5 — see `scopedJobs`.
+        visibility: view.isAdministrator ? 'account' : 'own-jobs',
       };
       return scope;
     },
@@ -300,7 +248,7 @@ export function createMockPortalService(): CustomerPortalService {
       const monthStart = `${today.slice(0, 7)}-01`;
 
       const open = jobs.filter((job) =>
-        ['booked', 'assigned', 'acknowledged', 'in-transit', 'arrived'].includes(job.status),
+        ['booked', 'assigned', 'in-transit', 'arrived'].includes(job.status),
       );
 
       // The next pickup is the soonest OPEN job, not the soonest job — a
@@ -340,7 +288,7 @@ export function createMockPortalService(): CustomerPortalService {
           : null,
         atRiskJobs: open.filter((job) => job.targetDate <= today).length,
         completedThisMonth: completedThisMonth.length,
-        areaThisMonthM2: completedThisMonth.reduce((sum, job) => sum + job.expectedAreaM2, 0),
+        areaThisMonthM2: completedThisMonth.reduce((sum, job) => sum + (job.expectedAreaM2 ?? 0), 0),
         // Null on m²-only accounts. A zero would read as "nothing recovered",
         // which is a different and wrong claim (M2.3).
         tonnesThisMonth:
@@ -372,19 +320,21 @@ export function createMockPortalService(): CustomerPortalService {
       const rows = scopedJobs(view).map((job) => toPortalJob(job, view));
 
       return applyListQuery(rows, query, {
-        search: (row) => [row.jobNumber, row.siteName, row.suburb, row.reference, row.poNumber],
+        search: (row) => [row.jobNumber, row.siteName, row.suburb, row.poNumber],
         filters: {
           // "Open" and "Completed" rather than nine raw statuses: the customer
           // asks two questions, not nine.
           state: (row, value) =>
             value === 'open'
-              ? ['booked', 'assigned', 'acknowledged', 'in-transit', 'arrived'].includes(row.status)
+              ? ['booked', 'assigned', 'in-transit', 'arrived'].includes(row.status)
               : value === 'completed'
                 ? row.status === 'completed' || row.status === 'admin-complete'
                 : value === 'futile'
                   ? row.status === 'futile'
                   : row.status === 'cancelled',
-          site: (row, value) => row.siteId === value,
+          // Filtering by place is filtering by SUBURB now — there is no site
+          // record left to key on (Matt, 0:29).
+          suburb: (row, value) => row.suburb === value,
           urgent: (row, value) =>
             value === 'urgent' ? row.serviceLevel === 'urgent' : row.serviceLevel === 'standard',
           /*
@@ -392,7 +342,7 @@ export function createMockPortalService(): CustomerPortalService {
            * A completed job that nobody certified is history: the truck has
            * been and gone, and there is no action left. Matching it here made
            * the filter disagree with the badge — which only renders on
-           * booked/assigned/acknowledged rows — so "not yet confirmed" returned
+           * booked/assigned rows — so "not yet confirmed" returned
            * rows showing "—", and the count on the dashboard (which correctly
            * looks at open jobs only) disagreed with the list it linked to.
            *
@@ -415,7 +365,7 @@ export function createMockPortalService(): CustomerPortalService {
         // order a customer reads: what is coming, then what happened.
         defaultSort: (a, b) => {
           const openish = (row: PortalJobListItem) =>
-            ['booked', 'assigned', 'acknowledged', 'in-transit', 'arrived'].includes(row.status)
+            ['booked', 'assigned', 'in-transit', 'arrived'].includes(row.status)
               ? 0
               : 1;
           const byOpen = openish(a) - openish(b);
@@ -479,10 +429,17 @@ export function createMockPortalService(): CustomerPortalService {
         );
       }
 
-      const site = scopedSites(view).find((candidate) => candidate.id === draft.siteId);
-      if (!site) throw new ServiceError('VALIDATION_FAILED', 'Choose one of your sites');
+      /*
+       * The zone comes from the chosen suburb, not from a site.
+       *
+       * With sites gone (Matt, 0:29) this is the only thing between a typed
+       * address and a priced job — which is why the suburb is picked from a
+       * list. See `PlaceSchema`.
+       */
+      const place = resolvePlace(draft.placeId);
+      if (!place) throw new ServiceError('VALIDATION_FAILED', 'Choose the suburb from the list');
 
-      const rates = ZONE_RATES[site.zone];
+      const rates = ZONE_RATES[place.zone];
       const account = accountFor(view.accountId);
       const lines = [
         {
@@ -492,13 +449,24 @@ export function createMockPortalService(): CustomerPortalService {
           unitRate: centsToMoney(rates.serviceCents),
           amount: centsToMoney(rates.serviceCents),
         },
-        {
-          code: 'area-charge' as const,
-          description: 'Plasterboard recycling (per m²)',
-          quantity: draft.expectedAreaM2,
-          unitRate: centsToMoney(rates.perM2Cents),
-          amount: centsToMoney(draft.expectedAreaM2 * rates.perM2Cents),
-        },
+        /*
+         * No area, no area line.
+         *
+         * A builder's booking carries none — the PO does (Matt, 25:19) — so the
+         * quote shows the call-out fee and says the rest is priced from the
+         * order. A zero-quantity line reading "$0.00" would look like a promise.
+         */
+        ...(draft.expectedAreaM2 === null
+          ? []
+          : [
+              {
+                code: 'area-charge' as const,
+                description: 'Plasterboard recycling (per m²)',
+                quantity: draft.expectedAreaM2,
+                unitRate: centsToMoney(rates.perM2Cents),
+                amount: centsToMoney(draft.expectedAreaM2 * rates.perM2Cents),
+              },
+            ]),
         ...(draft.bagCount > 0
           ? [
               {
@@ -516,7 +484,7 @@ export function createMockPortalService(): CustomerPortalService {
       const gst = Math.round(subtotal / 10);
 
       const preview: PricePreview = {
-        zone: site.zone,
+        zone: place.zone,
         rateCardLabel: account.rateCardId,
         lines,
         subtotalExGst: centsToMoney(subtotal),
@@ -533,10 +501,13 @@ export function createMockPortalService(): CustomerPortalService {
       const view = viewer();
       const account = accountFor(view.accountId);
 
-      const site = scopedSites(view).find((candidate) => candidate.id === draft.siteId);
-      if (!site) {
-        throw new ServiceError('VALIDATION_FAILED', 'Choose one of your sites', {
-          fieldErrors: { siteId: 'Choose a site' },
+      // The suburb carries the zone that prices the job (M6.3) and the pin the
+      // board plots — see `PlaceSchema`. Nothing else about the address can be
+      // wrong in a way that costs money.
+      const place = resolvePlace(draft.placeId);
+      if (!place) {
+        throw new ServiceError('VALIDATION_FAILED', 'Choose the suburb from the list', {
+          fieldErrors: { placeId: 'Choose the suburb from the list' },
         });
       }
 
@@ -557,10 +528,12 @@ export function createMockPortalService(): CustomerPortalService {
 
       const now = new Date().toISOString();
       const jobNumber = Math.max(...store.jobs.map((job) => job.jobNumber)) + 1;
-      const rates = ZONE_RATES[site.zone];
+      const rates = ZONE_RATES[place.zone];
+      // An unknown area prices at the call-out fee here; the office completes it
+      // from the purchase order before the job is invoiced.
       const subtotal =
         rates.serviceCents +
-        draft.expectedAreaM2 * rates.perM2Cents +
+        (draft.expectedAreaM2 ?? 0) * rates.perM2Cents +
         draft.bagCount * BAG_RATE_CENTS;
       const gst = Math.round(subtotal / 10);
 
@@ -571,13 +544,39 @@ export function createMockPortalService(): CustomerPortalService {
         brandId: account.brandId,
         accountId: account.id,
         accountName: account.name,
-        builderName: site.builderName,
-        siteId: site.id,
-        siteName: site.name,
-        suburb: site.suburb,
-        zone: site.zone,
-        customerReference: draft.reference || null,
+        builderName: draft.builderName.trim(),
+
+        /* The address, typed on the job — there is no site behind it. */
+        siteName: draft.siteName.trim(),
+        lotNumber: draft.lotNumber.trim() || null,
+        addressLine: draft.addressLine.trim(),
+        suburb: place.suburb,
+        postcode: place.postcode,
+        zone: place.zone,
+        latitude: place.latitude,
+        longitude: place.longitude,
+        accessNotes: draft.accessNotes.trim(),
+        gateHours: draft.gateHours.trim() || null,
+        inductionRequired: draft.inductionRequired,
+        craneAvailable: draft.craneAvailable,
+        siteContactName: draft.siteContactName.trim() || null,
+        siteContactMobile: draft.siteContactMobile.trim() || null,
+        siteContactEmail: draft.siteContactEmail.trim() || null,
+
         poNumber: draft.poNumber || null,
+        /*
+         * The person who actually pressed the button.
+         *
+         * Matt, 18:15: *"I just want to make sure site supervisors can submit
+         * their jobs and be able to see the jobs they've submitted."* Taken from
+         * the session rather than a form field, so it cannot be typed wrong or
+         * left blank.
+         */
+        bookedByName: view.name,
+        // The supervisor's scope. See `scopedJobs` — this is what they will be
+        // able to see afterwards, so it must be set at creation or not at all.
+        bookedByUserId: view.userId,
+        bookedBySource: 'portal',
         readyDate: draft.readyDate,
         targetDate: addBusinessDays(draft.readyDate, 5),
         serviceLevel: draft.serviceLevel,
@@ -585,6 +584,8 @@ export function createMockPortalService(): CustomerPortalService {
         driverName: null,
         expectedAreaM2: draft.expectedAreaM2,
         recoveredWeightKg: null,
+        // No collection yet, so no weight and no basis to describe.
+        recoveredWeightBasis: null,
         bagCount: draft.bagCount,
         totalExGst: centsToMoney(subtotal),
         invoiceStatus: 'not-invoiced',
@@ -637,10 +638,10 @@ export function createMockPortalService(): CustomerPortalService {
         // `create` in `jobs.mock.ts`. A booking made through the portal is
         // still a job a driver will be sent to, so the rule applies identically.
         compliance: {
-          riskAssessmentRequired: requiresRiskAssessment(
+          // The account's rule, and only the account's — the per-site exception
+          // went with the sites. Frozen at creation, as before.
+          riskAssessmentRequired:
             store.accountRiskAssessment.get(account.id) ?? account.riskAssessmentRequired,
-            site.riskAssessmentOverride,
-          ),
           riskAssessment: null,
           preStart: null,
         },
@@ -686,7 +687,7 @@ export function createMockPortalService(): CustomerPortalService {
         expectedAreaM2: input.expectedAreaM2,
         bagCount: input.bagCount,
         serviceLevel: input.serviceLevel,
-        customerReference: input.reference || null,
+        // One reference field now (Matt, 9:08) — whichever the customer gave.
         poNumber: input.poNumber || null,
         notes: input.notes,
         totalExGst: centsToMoney(subtotal),
@@ -809,71 +810,6 @@ export function createMockPortalService(): CustomerPortalService {
       return toPortalJob(updated, view);
     },
 
-    async sites(query) {
-      await latency();
-      const view = viewer();
-      const rows = scopedSites(view).map((site) => toPortalSite(site, view));
-
-      return applyListQuery(rows, query, {
-        search: (row) => [row.name, row.suburb, row.lotNumber, row.builderName, row.addressLine],
-        filters: {
-          activity: (row, value) =>
-            value === 'active' ? row.openJobCount > 0 : row.openJobCount === 0,
-          induction: (row, value) =>
-            value === 'required' ? row.inductionRequired : !row.inductionRequired,
-          crane: (row, value) => (value === 'yes' ? row.craneAvailable : !row.craneAvailable),
-        },
-        sorters: {
-          name: byText((row) => row.name),
-          suburb: byText((row) => row.suburb),
-          openJobCount: byNumber((row) => row.openJobCount),
-          lastJobAt: byDate((row) => row.lastJobAt),
-        },
-        // Sites with work in progress first — that is what a supervisor opens
-        // this screen to deal with.
-        defaultSort: (a, b) => b.openJobCount - a.openJobCount || a.name.localeCompare(b.name),
-      });
-    },
-
-    async site(id) {
-      await latency();
-      const view = viewer();
-      const site = scopedSites(view).find((candidate) => candidate.id === id);
-      if (!site) throw new ServiceError('NOT_FOUND', 'Site not found');
-      return toPortalSite(site, view);
-    },
-
-    async updateSite(id, input) {
-      await latency(560, 240);
-      const view = viewer();
-      const index = store.sites.findIndex(
-        (candidate) =>
-          candidate.id === id &&
-          candidate.accountId === view.accountId &&
-          (view.siteIds === null || view.siteIds.includes(candidate.id)),
-      );
-      const site = store.sites[index];
-      if (index === -1 || !site) throw new ServiceError('NOT_FOUND', 'Site not found');
-
-      store.sites[index] = {
-        ...site,
-        accessNotes: input.accessNotes,
-        gateHours: input.gateHours || null,
-        inductionRequired: input.inductionRequired,
-        craneAvailable: input.craneAvailable,
-        siteContactName: input.siteContactName || null,
-        siteContactMobile: input.siteContactMobile || null,
-      };
-      siteOverrides.set(id, {
-        preferredWindow: input.preferredWindow || null,
-        blackoutNote: input.blackoutNote || null,
-      });
-
-      const updated = store.sites[index];
-      if (!updated) throw new ServiceError('UNEXPECTED', 'Site update failed');
-      return toPortalSite(updated, view);
-    },
-
     async invoices(query) {
       await latency();
       const view = viewer();
@@ -896,7 +832,6 @@ export function createMockPortalService(): CustomerPortalService {
             jobId: invoice.jobId,
             jobNumber: invoice.jobNumber,
             siteName: job ? `${job.siteName}, ${job.suburb}` : null,
-            reference: invoice.customerReference,
             poNumber: invoice.poNumber,
             issuedOn: invoice.issuedOn,
             dueOn: invoice.dueOn,
@@ -912,7 +847,6 @@ export function createMockPortalService(): CustomerPortalService {
           row.invoiceNumber,
           row.jobNumber,
           row.poNumber,
-          row.reference,
           row.siteName,
         ],
         filters: {
@@ -962,27 +896,32 @@ export function createMockPortalService(): CustomerPortalService {
           (job.status === 'completed' || job.status === 'admin-complete') &&
           job.readyDate >= filters.from &&
           job.readyDate <= filters.to &&
-          (!filters.siteId || job.siteId === filters.siteId),
+          (!filters.suburb || job.suburb === filters.suburb),
       );
 
-      // Grouped by SITE, always. The admin console groups by account because it
-      // serves many; a customer has one account and many sites, so "which of my
-      // sites produced this" is the only grouping that answers a question.
+      /*
+       * Grouped by SUBURB, always.
+       *
+       * The admin console groups by account because it serves many. A customer
+       * has one account, so the question that matters to them is which AREA
+       * their volume came out of — which is also the finest grouping left now
+       * that jobs no longer share a site record (Matt, 0:29).
+       */
       const buckets = new Map<string, VolumeRow>();
       for (const job of jobs) {
-        const existing = buckets.get(job.siteId) ?? {
-          key: job.siteId,
-          label: `${job.siteName}, ${job.suburb}`,
+        const existing = buckets.get(job.suburb) ?? {
+          key: job.suburb,
+          label: job.suburb,
           jobs: 0,
           areaM2: 0,
           weightKg: null,
           bags: 0,
           chargesExGst: '0.00',
         };
-        buckets.set(job.siteId, {
+        buckets.set(job.suburb, {
           ...existing,
           jobs: existing.jobs + 1,
-          areaM2: existing.areaM2 + job.expectedAreaM2,
+          areaM2: existing.areaM2 + (job.expectedAreaM2 ?? 0),
           weightKg:
             job.recoveredWeightKg === null
               ? existing.weightKg
@@ -1002,7 +941,7 @@ export function createMockPortalService(): CustomerPortalService {
         const existing = months.get(month) ?? { jobs: 0, areaM2: 0 };
         months.set(month, {
           jobs: existing.jobs + 1,
-          areaM2: existing.areaM2 + job.expectedAreaM2,
+          areaM2: existing.areaM2 + (job.expectedAreaM2 ?? 0),
         });
       }
 
@@ -1032,15 +971,28 @@ export function createMockPortalService(): CustomerPortalService {
       }
       const account = accountFor(view.accountId);
 
+      /*
+       * Only jobs whose weight was actually measured.
+       *
+       * Matt, 32:11: *"this is only for weighed jobs. If it's an estimated job,
+       * we're unable to provide a certificate because it's an estimated weight
+       * and **it doesn't meet compliance regulation**."*
+       *
+       * So an estimated job produces no certificate here rather than one carrying
+       * a caveat. The customer seeing nothing is the correct outcome: the
+       * document does not exist, and offering a flagged version would invite it
+       * into a Green Star submission it cannot support.
+       */
       const rows: Certificate[] = scopedJobs(view)
-        .filter((job) => job.status === 'admin-complete' || job.status === 'completed')
+        .filter(
+          (job) =>
+            (job.status === 'admin-complete' || job.status === 'completed') &&
+            job.recoveredWeightKg !== null &&
+            job.recoveredWeightBasis === 'actual',
+        )
         .map((job) => {
-          const measured = job.recoveredWeightKg;
-          // Estimated where the account is m²-only, and flagged as such by the
-          // screen — these go into Green Star submissions and have to survive
-          // an audit, so a fabricated measurement is the one unacceptable thing.
-          const tonnes =
-            measured === null ? (job.expectedAreaM2 * 0.068 * 9.5) / 1000 : measured / 1000;
+          // Non-null by the filter above; never derived from the priced m².
+          const tonnes = (job.recoveredWeightKg ?? 0) / 1000;
 
           return {
             id: `${job.id}-cert`,
@@ -1054,7 +1006,7 @@ export function createMockPortalService(): CustomerPortalService {
             periodFrom: job.readyDate,
             periodTo: job.readyDate,
             jobs: 1,
-            areaM2: job.expectedAreaM2,
+            areaM2: (job.expectedAreaM2 ?? 0),
             tonnesDiverted: Number(tonnes.toFixed(2)),
             issuedAt: job.status === 'admin-complete' ? job.invoicedAt : null,
             issuedTo: job.status === 'admin-complete' ? account.name : null,
@@ -1088,7 +1040,7 @@ export function createMockPortalService(): CustomerPortalService {
 
       const rows = supervisorsFor(view.accountId);
       return applyListQuery(rows, query, {
-        search: (row) => [row.name, row.email, row.mobile, ...row.siteNames],
+        search: (row) => [row.name, row.email, row.mobile],
         filters: {
           state: (row, value) => row.state === value,
           approval: (row, value) =>
@@ -1128,21 +1080,12 @@ export function createMockPortalService(): CustomerPortalService {
         throw new ServiceError('CONFLICT', 'Someone with those details is already invited');
       }
 
-      const siteNames = store.sites
-        .filter((site) => input.siteIds.includes(site.id))
-        .map((site) => `${site.name}, ${site.suburb}`);
-
       const supervisor: PortalSupervisor = {
         id: objectId('sv', existing.length + 40),
         name: input.name.trim(),
         email: email || null,
         mobile: mobile || null,
         state: 'invited',
-        // An empty selection means every site, which is the common case for a
-        // small builder. Modelling it as `null` rather than "all ids" keeps the
-        // meaning stable when a new site is added later.
-        siteIds: input.siteIds.length === 0 ? null : [...input.siteIds],
-        siteNames: input.siteIds.length === 0 ? [] : siteNames,
         invitedAt: new Date().toISOString(),
         lastSignedInAt: null,
         awaitingApproval: false,
@@ -1157,21 +1100,6 @@ export function createMockPortalService(): CustomerPortalService {
       return mutateSupervisor(id, (row) => ({ ...row, state }));
     },
 
-    async setSupervisorSites(id, siteIds) {
-      await latency(520, 220);
-      const names =
-        siteIds === null
-          ? []
-          : store.sites
-              .filter((site) => siteIds.includes(site.id))
-              .map((site) => `${site.name}, ${site.suburb}`);
-      return mutateSupervisor(id, (row) => ({
-        ...row,
-        siteIds: siteIds === null ? null : [...siteIds],
-        siteNames: names,
-      }));
-    },
-
     async approveSupervisor(id) {
       await latency(560, 240);
       return mutateSupervisor(id, (row) => ({
@@ -1179,6 +1107,63 @@ export function createMockPortalService(): CustomerPortalService {
         awaitingApproval: false,
         state: 'active',
       }));
+    },
+
+    /* ── Journey A.4 — the customer completes their own account ─────── */
+
+    async onboardingInvite() {
+      await latency(180, 90);
+      const view = viewer();
+      const account = accountFor(view.accountId);
+
+      return {
+        accountId: account.id,
+        customerCode: account.code,
+        suggestedLegalName: account.name,
+        accountType: account.accountType,
+        state: store.termsAcceptance.has(account.id) ? 'complete' : 'awaiting-terms',
+        acceptance: store.termsAcceptance.get(account.id) ?? null,
+        termsVersion: TERMS_VERSION,
+      };
+    },
+
+    async completeOnboarding(input) {
+      await latency(620, 280);
+      const view = viewer();
+
+      /*
+       * Only an administrator can accept.
+       *
+       * A director's guarantee is a commitment by the business (Matt, 7:49). A
+       * site supervisor works on a building site and has no authority to bind
+       * their employer, so the check is here rather than only in the routing —
+       * a guard that lives only in the UI is not a guard.
+       */
+      if (!view.isAdministrator) {
+        throw new ServiceError(
+          'FORBIDDEN',
+          'Only an account administrator can accept the terms and conditions',
+        );
+      }
+
+      const account = accountFor(view.accountId);
+
+      // Accepting twice is not an error, but it must not rewrite the record: the
+      // date and the person on it are the evidence.
+      if (store.termsAcceptance.has(account.id)) return;
+
+      store.termsAcceptance.set(account.id, {
+        acceptedAt: new Date().toISOString(),
+        acceptedByName: input.acceptedByName.trim(),
+        acceptedByRole: input.acceptedByRole.trim(),
+        termsVersion: TERMS_VERSION,
+      });
+
+      // Where the certificates go is the customer's answer, not the office's
+      // (Matt, 31:04), so it is captured here and not at conversion.
+      if (input.certificateEmail.trim() !== '') {
+        store.accountCertificateEmail.set(account.id, input.certificateEmail.trim());
+      }
     },
 
     async account() {
@@ -1258,20 +1243,32 @@ function supervisorsFor(accountId: string): PortalSupervisor[] {
   const existing = supervisorState.get(accountId);
   if (existing) return existing;
 
-  const sites = store.sites.filter((site) => site.accountId === accountId);
   const account = ACCOUNTS.find((candidate) => candidate.id === accountId);
 
-  const seeded: PortalSupervisor[] = sites
-    .filter((site) => site.siteContactName !== null)
+  /*
+   * Seeded from the people who have actually booked something.
+   *
+   * Was the site-contact list, which is gone with the sites (Matt, 0:29). The
+   * jobs are a better source anyway: a supervisor who has raised a pickup is one
+   * who genuinely uses the portal, which is what this screen is for.
+   */
+  const bookers = new Map<string, { name: string; mobile: string | null }>();
+  for (const job of store.jobs) {
+    if (job.accountId !== accountId) continue;
+    if (job.bookedBySource !== 'portal' || job.bookedByName === null) continue;
+    if (!bookers.has(job.bookedByName)) {
+      bookers.set(job.bookedByName, { name: job.bookedByName, mobile: job.siteContactMobile });
+    }
+  }
+
+  const seeded: PortalSupervisor[] = [...bookers.values()]
     .slice(0, 6)
-    .map((site, index) => ({
+    .map((booker, index) => ({
       id: objectId('sv', index + 1),
-      name: site.siteContactName ?? 'Site contact',
+      name: booker.name,
       email: null,
-      mobile: site.siteContactMobile,
+      mobile: booker.mobile,
       state: index === 4 ? ('suspended' as const) : ('active' as const),
-      siteIds: [site.id],
-      siteNames: [`${site.name}, ${site.suburb}`],
       invitedAt: new Date(Date.now() - (30 + index * 9) * 86_400_000).toISOString(),
       lastSignedInAt:
         index === 4 ? null : new Date(Date.now() - (index + 1) * 3600_000).toISOString(),
@@ -1289,8 +1286,6 @@ function supervisorsFor(accountId: string): PortalSupervisor[] {
       email: headOffice.email,
       mobile: headOffice.mobile,
       state: 'active',
-      siteIds: null,
-      siteNames: [],
       invitedAt: new Date(Date.now() - 180 * 86_400_000).toISOString(),
       lastSignedInAt: new Date(Date.now() - 2 * 3600_000).toISOString(),
       awaitingApproval: false,

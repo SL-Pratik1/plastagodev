@@ -3,11 +3,13 @@ import type {
   InvoiceListItem,
   Job,
   JobListItem,
-  Site,
+  RunStatus,
+  RunTipOff,
+  TermsAcceptance,
   User,
 } from '@plastago/shared';
-import { ACCOUNTS } from './fixtures/reference';
-import { JOBS, SITE_FIXTURES, toListItem } from './fixtures/jobs';
+import { ACCOUNTS, objectId, type AccountFixture } from './fixtures/reference';
+import { JOBS, toListItem } from './fixtures/jobs';
 import { buildLeads, buildPoExtractions } from './fixtures/queues';
 import { USERS } from './fixtures/users';
 
@@ -58,10 +60,43 @@ export interface InvoiceOverride {
  * State lives for the page session only. A reload restores the fixtures, which
  * is the right behaviour for a demo: any experiment is one refresh from undone.
  */
+/**
+ * A run, as the mock holds it (M3.1).
+ *
+ * Deliberately thin: an ordered list of job ids plus who is on it. Everything
+ * the board and the run sheet render — suburbs, totals, at-risk counts — is
+ * derived from the jobs at read time, so a job edited anywhere cannot leave a
+ * run quoting a stale figure.
+ *
+ * The ORDER of `jobIds` is the stop sequence. Route optimisation rewrites this
+ * array rather than writing a separate sequence field, because two sources of
+ * order is how a driver ends up with a printed run sheet that disagrees with
+ * the one on his phone.
+ */
+export interface RunRecord {
+  id: string;
+  runNumber: number;
+  name: string;
+  date: string;
+  /** Null while the run is still being built — a run is shaped before it is staffed. */
+  driverId: string | null;
+  status: RunStatus;
+  jobIds: string[];
+  optimisedAt: string | null;
+  /** The weighbridge docket that closed this run. One docket, one run (Matt, 43:50). */
+  tipOff: RunTipOff | null;
+}
+
 export const store = {
   jobs: JOBS.map((job) => ({ ...job })) as Job[],
-  sites: SITE_FIXTURES.map((site) => ({ ...site })) as Site[],
   users: USERS.map((user) => ({ ...user })) as User[],
+  /**
+   * M3.1 — runs are the unit of allocation (Matt, 39:41).
+   *
+   * Seeded below from whatever the job fixtures already put a driver on, so the
+   * board opens on a day that looks worked rather than on an empty column.
+   */
+  runs: [] as RunRecord[],
 
   // ── Queue state (M2.6, M7.3, M2.12, M5 · Journey A) ────────────────────
   // Futile decisions and chases are keyed rather than stored on the job,
@@ -77,10 +112,36 @@ export const store = {
    * fixture, because those are `readonly` module constants shared by every
    * mock: writing into one would leak a demo edit into the jobs, dispatch and
    * portal fixtures that also read them. Per-SITE overrides do live on the row,
-   * since `store.sites` is already a mutable copy.
+   * since the jobs themselves are already a mutable copy.
    */
   accountRiskAssessment: new Map<string, boolean>(),
   invoiceOverrides: new Map<string, InvoiceOverride>(),
+  /**
+   * Journey A.4 — accounts whose customer has accepted the terms.
+   *
+   * A Map keyed by account id rather than a field on the `ACCOUNTS` fixture,
+   * for the same reason as `accountRiskAssessment`: those are readonly module
+   * constants shared by every mock, and writing into one would leak a demo edit
+   * into the jobs, dispatch and portal fixtures that read them too.
+   */
+  termsAcceptance: new Map<string, TermsAcceptance>(),
+  /**
+   * Where each account's diversion certificates are emailed (Matt, 31:04).
+   *
+   * Set by the customer during onboarding, because they are the ones who know
+   * which of their teams reads them — the office only knows the accounts inbox.
+   */
+  accountCertificateEmail: new Map<string, string>(),
+  /**
+   * Accounts created during the session, with no lead behind them (Matt, 6:10).
+   *
+   * A separate list rather than a mutable copy of `ACCOUNTS`, because that
+   * fixture is a readonly module constant that the jobs, dispatch, portal and
+   * report fixtures all read at import time — replacing it would mean rebuilding
+   * every one of them. Readers use `allAccounts()`, which is the only place the
+   * two are joined.
+   */
+  createdAccounts: [] as AccountFixture[],
   leads: buildLeads(),
   poExtractions: buildPoExtractions(),
 };
@@ -143,7 +204,6 @@ export function invoiceList(): InvoiceListItem[] {
         jobId: job.id,
         jobNumber: job.jobNumber,
         poNumber: null,
-        customerReference: job.customerReference,
         issuedOn: null,
         dueOn: null,
         subtotalExGst: subtotal.toFixed(2),
@@ -171,7 +231,6 @@ export function invoiceList(): InvoiceListItem[] {
       jobId: job.id,
       jobNumber: job.jobNumber,
       poNumber: job.poNumber,
-      customerReference: job.customerReference,
       issuedOn,
       dueOn,
       subtotalExGst: job.totalExGst,
@@ -213,3 +272,141 @@ export function isAtRisk(job: Pick<Job, 'targetDate' | 'status'>): boolean {
   tomorrow.setDate(tomorrow.getDate() + 1);
   return job.targetDate <= tomorrow.toISOString().slice(0, 10);
 }
+
+/* ── Runs (M3.1) ────────────────────────────────────────────────────────── */
+
+let runSequence = 0;
+
+/**
+ * Name a run the way the allocator would.
+ *
+ * Matt's own example is *"Newcastle run 1"* (39:41) — the area, then which trip
+ * of the day it is. Naming it after the dominant suburb rather than the zone
+ * keeps two Sydney runs distinguishable, which "Sydney run 1 / 2" does not once
+ * one of them is Kellyville and the other is Cronulla.
+ */
+function nameRun(suburb: string, ordinal: number): string {
+  return `${suburb} run ${String(ordinal)}`;
+}
+
+/** Create a run. Exported so the dispatch mock and the seeder share one path. */
+export function addRun(input: {
+  name: string;
+  date: string;
+  driverId: string | null;
+  jobIds: string[];
+}): RunRecord {
+  runSequence += 1;
+  const run: RunRecord = {
+    id: objectId('run', runSequence),
+    runNumber: 400 + runSequence,
+    name: input.name.trim(),
+    date: input.date,
+    driverId: input.driverId,
+    // A run with nobody on it is still being built, whatever else is true of it.
+    status: input.driverId === null ? 'planning' : 'assigned',
+    jobIds: [...input.jobIds],
+    optimisedAt: null,
+    tipOff: null,
+  };
+  store.runs = [...store.runs, run];
+  return run;
+}
+
+/**
+ * Build the opening set of runs from the job fixtures.
+ *
+ * Groups each driver's jobs for a date by suburb, because that is how a run is
+ * actually assembled (Matt, 41:17). One driver with jobs in two areas therefore
+ * opens with two runs — which is the case worth seeing on the board, since it is
+ * the one the old job-per-driver model could not express.
+ */
+function seedRuns(): RunRecord[] {
+  const open = store.jobs.filter(
+    (job) =>
+      job.driverId !== null &&
+      !['completed', 'admin-complete', 'futile', 'cancelled'].includes(job.status),
+  );
+
+  const byDriverDate = new Map<string, Job[]>();
+  for (const job of open) {
+    const key = `${String(job.driverId)}|${job.readyDate}`;
+    byDriverDate.set(key, [...(byDriverDate.get(key) ?? []), job]);
+  }
+
+  for (const [key, jobs] of byDriverDate) {
+    const [driverId, date] = key.split('|');
+
+    const bySuburb = new Map<string, Job[]>();
+    for (const job of jobs) {
+      bySuburb.set(job.suburb, [...(bySuburb.get(job.suburb) ?? []), job]);
+    }
+
+    let ordinal = 0;
+    for (const [suburb, group] of bySuburb) {
+      ordinal += 1;
+      addRun({
+        name: nameRun(suburb, ordinal),
+        date: date ?? todayIso(),
+        driverId: driverId ?? null,
+        jobIds: group
+          .sort((a, b) => a.jobNumber - b.jobNumber)
+          .map((job) => job.id),
+      });
+    }
+  }
+
+  return store.runs;
+}
+
+/* ── Onboarding (Journey A.4) ───────────────────────────────────────────── */
+
+/** The terms as they stand. Bumped whenever the wording changes. */
+export const TERMS_VERSION = '2026-02';
+
+/**
+ * Seed the terms acceptances.
+ *
+ * Every established account has signed — they have been trading for years, and
+ * a demo where twelve customers all look unsigned would make the state
+ * meaningless. The two most recently won accounts are left outstanding, because
+ * an account sitting in `awaiting-terms` is the case the office needs to see and
+ * chase: no director's guarantee on file yet.
+ */
+function seedTermsAcceptance(): void {
+  const outstanding = new Set(['PRE001', 'HAR001']);
+
+  for (const account of ACCOUNTS) {
+    if (outstanding.has(account.code)) continue;
+    store.termsAcceptance.set(account.id, {
+      acceptedAt: '2025-07-14T03:22:00.000Z',
+      acceptedByName: account.contacts[0]?.name ?? 'Director',
+      acceptedByRole: 'Director',
+      termsVersion: TERMS_VERSION,
+    });
+  }
+}
+
+seedTermsAcceptance();
+
+/**
+ * Every account: the fixtures plus anything created this session.
+ *
+ * One accessor, so a screen cannot accidentally read only the seeded twelve and
+ * leave a just-created customer invisible on its own detail page.
+ */
+export function allAccounts(): readonly AccountFixture[] {
+  return [...ACCOUNTS, ...store.createdAccounts];
+}
+
+/** Which run a job is on, if any. */
+export function runForJob(jobId: string): RunRecord | undefined {
+  return store.runs.find((run) => run.jobIds.includes(jobId));
+}
+
+/**
+ * Runs live behind a function call rather than an initialiser because
+ * `seedRuns` reads `store.jobs`, which does not exist until the object literal
+ * above has finished evaluating.
+ */
+seedRuns();

@@ -5,9 +5,9 @@ import { JobContaminationPage } from '@/pages/job-contamination';
 import { JobDetailPage } from '@/pages/job-detail';
 import { JobFutilePage } from '@/pages/job-futile';
 import { JobPhotosPage } from '@/pages/job-photos';
+import { DriverNavigatePage } from '@/pages/navigate';
 import { JobRiskAssessmentPage } from '@/pages/job-risk-assessment';
 import { JobWeightsPage } from '@/pages/job-weights';
-import { MePage } from '@/pages/me';
 import { PreStartPage } from '@/pages/pre-start';
 import { ReportDefectPage } from '@/pages/report-defect';
 import { RunSheetPage } from '@/pages/run-sheet';
@@ -26,7 +26,7 @@ import { RouteError } from './route-error';
  * screen at the exact moment the app is supposed to prove itself.
  *
  * So the whole app ships in the shell the service worker pre-caches. It is small
- * — ten screens with no charts and no data grid — and "works with no signal"
+ * — eleven screens with no charts and no data grid — and "works with no signal"
  * (M4.12) means every screen, not the ones you happened to visit first.
  *
  * ── Every route is a two-place change ─────────────────────────────────────
@@ -56,6 +56,7 @@ export const router = createBrowserRouter([
 
               // M4.1, M4.2 — the job, and the single next action on it.
               { path: 'jobs/:jobId', element: <JobDetailPage /> },
+              { path: 'jobs/:jobId/navigate', element: <DriverNavigatePage /> },
               { path: 'jobs/:jobId/photos', element: <JobPhotosPage /> },
               { path: 'jobs/:jobId/weights', element: <JobWeightsPage /> },
               { path: 'jobs/:jobId/futile', element: <JobFutilePage /> },
@@ -67,9 +68,6 @@ export const router = createBrowserRouter([
 
               // M4.9 — the truck itself.
               { path: 'report', element: <ReportDefectPage /> },
-
-              // M4.12 — the queue, and the driver's own details.
-              { path: 'me', element: <MePage /> },
             ],
           },
         ],

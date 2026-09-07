@@ -8,8 +8,9 @@ import {
   type LeadListItem,
   type LeadStatus,
 } from '@plastago/shared';
-import { Alert, Badge, Card, Pagination, type BadgeProps } from '@plastago/ui';
-import { SproutIcon } from 'lucide-react';
+import { Alert, Badge, Card, Pagination, buttonVariants, type BadgeProps } from '@plastago/ui';
+import { PlusIcon, SproutIcon } from 'lucide-react';
+import { Link } from 'react-router';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
@@ -212,6 +213,14 @@ export function AdminQueueLeadsPage() {
         title="Leads"
         description="Enquiries from the public form and the phone. Nothing here is a job — a lead becomes bookable only once an account exists, with a rate card and terms agreed."
         badge={open > 0 ? <Badge variant="warning">{open} open</Badge> : undefined}
+        // No capability check on the action: reaching this page at all requires
+        // `leads:manage`, so a guard here could never be false.
+        actions={
+          <Link to="/admin/queues/leads/new" className={buttonVariants()}>
+            <PlusIcon aria-hidden />
+            New lead
+          </Link>
+        }
       />
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -253,7 +262,7 @@ export function AdminQueueLeadsPage() {
             icon: SproutIcon,
             title: 'No enquiries yet',
             description:
-              'Leads arrive from the public enquiry form on plastago.com.au and by phone.',
+              'Leads arrive from the public enquiry form on plastago.com.au. Took one by phone? Add it with “New lead”.',
           }}
         />
 

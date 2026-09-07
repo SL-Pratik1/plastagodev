@@ -152,28 +152,50 @@ export function DriverRunSheetPage() {
         </section>
       )}
 
-      {/* ── M4.4 — the tip-off, once there is something to reconcile ──── */}
-      {remaining.length === 0 && data.tipOffRecordedAt === null && (
-        <Alert variant="info" title="Run finished — record the tip-off">
-          <p>
-            Weigh the load off at the facility and enter the weighbridge figure. It is what the
-            diversion certificates are built from.
-          </p>
-          <Link to="/driver/tip-off" className={buttonVariants({ size: 'sm' })}>
-            <ScaleIcon aria-hidden />
-            Record the tip-off
-          </Link>
-        </Alert>
-      )}
+      {/*
+        ── M4.4 — the tip-off, per RUN ──────────────────────────────────
+        A driver tips off between runs, not once at the end of the day (Matt,
+        43:50), so each run prompts for its own docket as soon as its own stops
+        are done — the afternoon run being untouched must not hold up recording
+        the morning's weighbridge figure.
+      */}
+      {data.runs.map((run) => {
+        const runDone = run.stops.every(
+          (stop) => stop.status === 'completed' || stop.status === 'admin-complete',
+        );
+        if (run.stops.length === 0) return null;
 
-      {data.tipOffRecordedAt !== null && (
-        <Card>
-          <CardContent className="flex items-center gap-2 py-4 text-sm">
-            <CheckCircle2Icon aria-hidden className="size-4 shrink-0 text-success" />
-            Tip-off recorded. Nothing else to do today.
-          </CardContent>
-        </Card>
-      )}
+        if (run.tipOffRecordedAt !== null) {
+          return (
+            <Card key={run.runId}>
+              <CardContent className="flex items-center gap-2 py-4 text-sm">
+                <CheckCircle2Icon aria-hidden className="size-4 shrink-0 text-success" />
+                {run.runName} tipped off
+                {run.tipOffKg !== null && ` at ${run.tipOffKg.toLocaleString('en-AU')} kg`}.
+              </CardContent>
+            </Card>
+          );
+        }
+
+        if (!runDone) return null;
+
+        return (
+          <Alert
+            key={run.runId}
+            variant="info"
+            title={`${run.runName} finished — record the tip-off`}
+          >
+            <p>
+              Weigh this run&rsquo;s load off at the facility and enter the weighbridge figure. It
+              is what the diversion certificates are built from.
+            </p>
+            <Link to="/driver/tip-off" className={buttonVariants({ size: 'sm' })}>
+              <ScaleIcon aria-hidden />
+              Record the tip-off
+            </Link>
+          </Alert>
+        );
+      })}
     </div>
   );
 }

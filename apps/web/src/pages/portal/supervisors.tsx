@@ -8,12 +8,10 @@ import {
   Badge,
   Button,
   Card,
-  Checkbox,
   ConfirmDialog,
   Dialog,
   Field,
   Input,
-  Label,
   Menu,
   MenuItem,
   MenuSeparator,
@@ -32,7 +30,6 @@ import {
   usePortalApproveSupervisor,
   usePortalInviteSupervisor,
   usePortalSetSupervisorState,
-  usePortalSites,
 } from '@/features/portal/queries';
 import { usePortalSupervisors } from '@/features/portal/queries';
 import { describeError } from '@/lib/error-message';
@@ -92,7 +89,6 @@ export function PortalSupervisorsPage() {
   const toast = useToast();
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = usePortalSupervisors(controller.query);
-  const sites = usePortalSites({ page: 1, pageSize: 200 });
 
   const approve = usePortalApproveSupervisor();
   const setState = usePortalSetSupervisorState();
@@ -160,21 +156,6 @@ export function PortalSupervisorsPage() {
           {row.awaitingApproval && <Badge variant="warning">Needs approval</Badge>}
         </span>
       ),
-    },
-    {
-      id: 'sites',
-      header: 'Can book for',
-      priority: 'detail',
-      cell: (row) =>
-        // `null` means every site — a real and common configuration for head
-        // office staff, so it gets words rather than an empty cell.
-        row.siteIds === null ? (
-          <Badge variant="outline">All sites</Badge>
-        ) : row.siteNames.length === 0 ? (
-          <span className="text-xs text-warning">No sites assigned</span>
-        ) : (
-          <span className="line-clamp-2 text-sm">{row.siteNames.join(' · ')}</span>
-        ),
     },
     {
       id: 'lastSignedInAt',
@@ -322,10 +303,6 @@ export function PortalSupervisorsPage() {
         onClose={() => {
           setInviteOpen(false);
         }}
-        siteOptions={(sites.data?.data ?? []).map((site) => ({
-          id: site.id,
-          label: `${site.name} — ${site.suburb}`,
-        }))}
       />
 
       <ConfirmDialog
@@ -347,31 +324,19 @@ export function PortalSupervisorsPage() {
 
 /* ── The invite ───────────────────────────────────────────────────────────── */
 
-function InviteDialog({
-  open,
-  onClose,
-  siteOptions,
-}: {
-  open: boolean;
-  onClose: () => void;
-  siteOptions: readonly { id: string; label: string }[];
-}) {
+function InviteDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const toast = useToast();
   const invite = usePortalInviteSupervisor();
 
   const [name, setName] = useState('');
   const [mobile, setMobile] = useState('');
   const [email, setEmail] = useState('');
-  const [siteIds, setSiteIds] = useState<string[]>([]);
-  const [allSites, setAllSites] = useState(true);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const close = () => {
     setName('');
     setMobile('');
     setEmail('');
-    setSiteIds([]);
-    setAllSites(true);
     setErrors({});
     onClose();
   };
@@ -389,10 +354,6 @@ function InviteDialog({
     if (email.trim() && !email.includes('@')) {
       next.email = 'That does not look like an email address.';
     }
-    if (!allSites && siteIds.length === 0) {
-      next.siteIds = 'Choose at least one site, or give them access to all of them.';
-    }
-
     setErrors(next);
     if (Object.keys(next).length > 0) return;
 
@@ -401,7 +362,6 @@ function InviteDialog({
         name: name.trim(),
         email: email.trim(),
         mobile: mobile.trim(),
-        siteIds: allSites ? [] : siteIds,
       });
       toast.success(
         `${created.name} invited`,
@@ -496,66 +456,6 @@ function InviteDialog({
             )}
           </Field>
         </div>
-
-        <fieldset className="space-y-3 rounded-lg border border-border p-3">
-          <legend className="px-1 text-sm font-medium">Which sites can they book for?</legend>
-
-          <div className="flex items-start gap-3">
-            <Checkbox
-              id="invite-all-sites"
-              checked={allSites}
-              onChange={(event) => {
-                setAllSites(event.target.checked);
-                setErrors(({ siteIds: _drop, ...rest }) => rest);
-              }}
-            />
-            <div>
-              <Label htmlFor="invite-all-sites" className="font-normal">
-                All of our sites
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                Including any site added later. Right for head office staff.
-              </p>
-            </div>
-          </div>
-
-          {!allSites && (
-            <div className="space-y-2 border-t border-border pt-3">
-              {siteOptions.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  You have no sites yet — give them access to all sites for now.
-                </p>
-              ) : (
-                <ul className="max-h-56 space-y-1.5 overflow-y-auto">
-                  {siteOptions.map((site) => (
-                    <li key={site.id} className="flex items-start gap-3">
-                      <Checkbox
-                        id={`invite-site-${site.id}`}
-                        checked={siteIds.includes(site.id)}
-                        onChange={(event) => {
-                          setSiteIds((current) =>
-                            event.target.checked
-                              ? [...current, site.id]
-                              : current.filter((id) => id !== site.id),
-                          );
-                          setErrors(({ siteIds: _drop, ...rest }) => rest);
-                        }}
-                      />
-                      <Label htmlFor={`invite-site-${site.id}`} className="font-normal">
-                        {site.label}
-                      </Label>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {errors.siteIds !== undefined && (
-                <p role="alert" className="text-xs font-medium text-destructive">
-                  {errors.siteIds}
-                </p>
-              )}
-            </div>
-          )}
-        </fieldset>
 
         <Alert variant="info" title="What they will and will not see">
           Supervisors can book pickups, confirm sites are ready, keep the access notes current and

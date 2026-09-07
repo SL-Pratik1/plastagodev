@@ -37,7 +37,9 @@ export function useJobPricePreview(draft: JobDraft | null) {
   return useQuery({
     queryKey: queryKeys.jobs.preview(draft),
     queryFn: () => jobs.preview(draft as JobDraft),
-    enabled: draft !== null && draft.siteId !== '',
+    // The suburb is what carries the zone, and the zone is what prices the
+    // job — so there is nothing to preview until one is chosen.
+    enabled: draft !== null && draft.placeId !== '',
     staleTime: 30_000,
   });
 }

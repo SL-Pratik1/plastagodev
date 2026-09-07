@@ -55,7 +55,7 @@ const FormSchema = z.object({
     .min(0, 'Bags cannot be negative')
     .max(200, 'That is more bags than a truck holds — check the figure'),
   serviceLevel: z.enum(['standard', 'urgent']),
-  reference: z.string().trim().max(60),
+
   poNumber: z.string().trim().max(60),
   notes: z.string().trim().max(1000),
 });
@@ -115,7 +115,7 @@ function EditForm({ job }: { job: PortalJob }) {
       expectedAreaM2: job.expectedAreaM2,
       bagCount: job.bagCount,
       serviceLevel: job.serviceLevel,
-      reference: job.reference ?? '',
+
       poNumber: job.poNumber ?? '',
       notes: job.notes,
     },
@@ -157,7 +157,7 @@ function EditForm({ job }: { job: PortalJob }) {
           expectedAreaM2: Number(values.expectedAreaM2),
           bagCount: Number(values.bagCount),
           serviceLevel: values.serviceLevel,
-          reference: values.reference,
+
           poNumber: values.poNumber,
           notes: values.notes,
         },
@@ -269,16 +269,23 @@ function EditForm({ job }: { job: PortalJob }) {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="edit-reference" label="Your reference" error={errors.reference?.message}>
-                {(control) => <Input {...control} {...register('reference')} />}
-              </Field>
-
+              {/*
+                One field, not two.
+                Matt, 9:08: *"customer reference and purchase order number… they
+                are one and the same, we don't need both."* Named as the PO
+                because that is what has to print on the invoice to get paid
+                (9:56).
+              */}
               <Field
                 id="edit-po"
-                label="Purchase order number"
+                label="PO / job reference"
                 required={poRequired}
                 error={errors.poNumber?.message}
-                hint={poRequired ? 'Required on this account before we can invoice.' : undefined}
+                hint={
+                  poRequired
+                    ? 'Required on this account before we can invoice.'
+                    : 'Whichever your accounts team quotes — it prints as the PO.'
+                }
               >
                 {(control) => (
                   <Input

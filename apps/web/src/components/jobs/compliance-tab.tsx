@@ -2,6 +2,8 @@ import type { Job, JobCompliance, SraUploadState } from '@plastago/shared';
 import { Alert, Badge, Card, CardContent, CardHeader, CardTitle, EmptyState } from '@plastago/ui';
 import {
   ClipboardCheckIcon,
+  DownloadIcon,
+  FileTextIcon,
   ShieldAlertIcon,
   ShieldCheckIcon,
   TriangleAlertIcon,
@@ -83,7 +85,7 @@ function RiskAssessmentCard({
           <EmptyState
             icon={ShieldCheckIcon}
             title="Not required at this site"
-            description="This builder does not ask for a written assessment. Set it on the account or the site if that changes."
+            description="This builder does not ask for a written assessment, and the driver did not choose to do one. They can always fill one in — it is on every job."
           />
         ) : riskAssessment === null && arrivedAt === null ? (
           /*
@@ -103,6 +105,15 @@ function RiskAssessmentCard({
           </Alert>
         ) : (
           <>
+            {/*
+              Flagged because it changes how the record reads. An assessment on a
+              site nobody asked for one on means the driver saw something — it is
+              a signal about the site, not a box that got ticked.
+            */}
+            {!riskAssessmentRequired && (
+              <Badge variant="secondary">Driver&rsquo;s own call — not required here</Badge>
+            )}
+
             {riskAssessment.safeToProceed ? (
               <Badge variant="success">Driver judged the site safe</Badge>
             ) : (
@@ -137,6 +148,37 @@ function RiskAssessmentCard({
                   : []),
               ]}
             />
+
+            {/*
+              The PDF, filed against the job.
+
+              Matt, 1:03:25: *"even if the PDF that it produces just gets
+              attached to the job card… once it generates the PDF, just attaches
+              it to that job."* This is the artefact somebody actually asks for
+              — a builder, an auditor, an insurer wants the document, not a
+              rendering of its fields — so it sits above the field-by-field
+              detail rather than as a footnote to it.
+            */}
+            {riskAssessment.document !== null && (
+              <a
+                href={`/api/v1/documents/${riskAssessment.document.documentId}`}
+                target="_blank"
+                rel="noreferrer"
+                className="focus-ring flex items-center gap-3 rounded-lg border border-border p-3 hover:bg-muted/50"
+              >
+                <FileTextIcon aria-hidden className="size-5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">
+                    {riskAssessment.document.fileName}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    {riskAssessment.document.pageCount} pages · assessment + SWMS{' '}
+                    {riskAssessment.swmsVersion}
+                  </span>
+                </span>
+                <DownloadIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+              </a>
+            )}
 
             {/*
               Step 5 is the only one that touches SOMEBODY ELSE'S system, so it

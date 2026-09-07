@@ -1,5 +1,4 @@
 import {
-  requiresRiskAssessment,
   type Job,
   type JobComment,
   type JobDraft,
@@ -9,10 +8,17 @@ import {
 import { ServiceError } from '../service-error';
 import type { JobService } from '../types';
 import { applyListQuery, byDate, byNumber, byText } from './list-query';
-import { ACCOUNTS, BAG_RATE_CENTS, ZONE_RATES, centsToMoney, objectId } from './fixtures/reference';
+import {
+  ACCOUNTS,
+  BAG_RATE_CENTS,
+  ZONE_RATES,
+  centsToMoney,
+  objectId,
+  resolvePlace,
+} from './fixtures/reference';
 import { toListItem } from './fixtures/jobs';
 import { latency } from './mock-transport';
-import { findJob, isAtRisk, jobList, store } from './store';
+import { allAccounts, findJob, isAtRisk, jobList, store } from './store';
 
 const ZONE_NAMES = { sydney: 'Sydney', wollongong: 'Wollongong', newcastle: 'Newcastle' } as const;
 
@@ -28,7 +34,6 @@ export function createMockJobService(): JobService {
           job.builderName,
           job.siteName,
           job.suburb,
-          job.customerReference,
           job.poNumber,
           job.driverName,
         ],
@@ -82,16 +87,27 @@ export function createMockJobService(): JobService {
     async preview(draft: JobDraft) {
       await latency(280, 140);
 
-      const site = store.sites.find((candidate) => candidate.id === draft.siteId);
-      if (!site) throw new ServiceError('NOT_FOUND', 'Choose a site before pricing');
+      /*
+       * The zone comes from the chosen suburb, not from a site record.
+       *
+       * With sites gone (Matt, 0:29) this is the only thing standing between a
+       * typed address and a priced job — which is why the suburb is PICKED and
+       * not typed. See `PlaceSchema`.
+       */
+      const place = resolvePlace(draft.placeId);
+      if (!place) {
+        throw new ServiceError('VALIDATION_FAILED', 'Choose the suburb before pricing', {
+          fieldErrors: { placeId: 'Choose the suburb from the list' },
+        });
+      }
 
       const account = ACCOUNTS.find((candidate) => candidate.id === draft.accountId);
-      const rates = ZONE_RATES[site.zone];
+      const rates = ZONE_RATES[place.zone];
 
       const lines: PricePreviewLine[] = [
         {
           code: 'service-fee',
-          description: `Service fee — ${ZONE_NAMES[site.zone]}`,
+          description: `Service fee — ${ZONE_NAMES[place.zone]}`,
           quantity: 1,
           unitRate: centsToMoney(rates.serviceCents),
           amount: centsToMoney(rates.serviceCents),
@@ -132,7 +148,7 @@ export function createMockJobService(): JobService {
       const gstCents = Math.round(subtotalCents / 10);
 
       const preview: PricePreview = {
-        zone: site.zone,
+        zone: place.zone,
         rateCardLabel: account ? account.rateCardId : 'default',
         lines,
         subtotalExGst: centsToMoney(subtotalCents),
@@ -150,18 +166,21 @@ export function createMockJobService(): JobService {
     async create(draft) {
       await latency(520, 260);
 
-      const site = store.sites.find((candidate) => candidate.id === draft.siteId);
-      const account = ACCOUNTS.find((candidate) => candidate.id === draft.accountId);
-      if (!site || !account) {
-        throw new ServiceError('VALIDATION_FAILED', 'Account and site are required', {
-          fieldErrors: { siteId: 'Choose a site' },
+      const place = resolvePlace(draft.placeId);
+      const account = allAccounts().find((candidate) => candidate.id === draft.accountId);
+      if (!place || !account) {
+        throw new ServiceError('VALIDATION_FAILED', 'Account and suburb are required', {
+          fieldErrors: {
+            ...(account ? {} : { accountId: 'Choose the account' }),
+            ...(place ? {} : { placeId: 'Choose the suburb from the list' }),
+          },
         });
       }
 
       // M1.4 — continue the sequence. Never restart at 1: three years of
       // consignment numbers are quoted in builders' AP systems.
       const nextNumber = Math.max(...store.jobs.map((job) => job.jobNumber)) + 1;
-      const rates = ZONE_RATES[site.zone];
+      const rates = ZONE_RATES[place.zone];
       const subtotalCents =
         rates.serviceCents +
         draft.expectedAreaM2 * rates.perM2Cents +
@@ -176,12 +195,30 @@ export function createMockJobService(): JobService {
         brandId: account.brandId,
         accountId: account.id,
         accountName: account.name,
-        builderName: site.builderName,
-        siteId: site.id,
-        siteName: site.name,
-        suburb: site.suburb,
-        zone: site.zone,
-        customerReference: draft.customerReference || null,
+        builderName: draft.builderName.trim(),
+        // Keyed in by the office — the other path is the portal, below.
+        bookedByName: 'Priya Raman',
+        // Null: keyed in by the office, so no portal user raised it. A null is
+        // invisible to every site supervisor — see `scopedJobs`.
+        bookedByUserId: null,
+        bookedBySource: 'office',
+
+        /* The address, typed on the job — there is no site behind it. */
+        siteName: draft.siteName.trim(),
+        lotNumber: draft.lotNumber.trim() || null,
+        addressLine: draft.addressLine.trim(),
+        suburb: place.suburb,
+        postcode: place.postcode,
+        zone: place.zone,
+        latitude: place.latitude,
+        longitude: place.longitude,
+        accessNotes: draft.accessNotes.trim(),
+        gateHours: draft.gateHours.trim() || null,
+        inductionRequired: draft.inductionRequired,
+        craneAvailable: draft.craneAvailable,
+        siteContactName: draft.siteContactName.trim() || null,
+        siteContactMobile: draft.siteContactMobile.trim() || null,
+        siteContactEmail: draft.siteContactEmail.trim() || null,
         poNumber: draft.poNumber || null,
         readyDate: draft.readyDate,
         targetDate: addBusinessDays(draft.readyDate, 5),
@@ -190,6 +227,10 @@ export function createMockJobService(): JobService {
         driverName: null,
         expectedAreaM2: draft.expectedAreaM2,
         recoveredWeightKg: null,
+        // Nothing has been collected yet, so there is no weight and therefore no
+        // basis. Null rather than a default: "estimated" on a job that has not
+        // happened would be a claim about a measurement nobody has taken.
+        recoveredWeightBasis: null,
         bagCount: draft.bagCount,
         totalExGst: centsToMoney(subtotalCents),
         invoiceStatus: 'not-invoiced',
@@ -231,10 +272,21 @@ export function createMockJobService(): JobService {
          * make a compliant job look like a gap.
          */
         compliance: {
-          riskAssessmentRequired: requiresRiskAssessment(
+          /*
+           * The ACCOUNT's rule, and only the account's.
+           *
+           * There used to be a per-site override on top of this — one estate
+           * with overhead powerlines could demand an assessment the rest of the
+           * account did not. That exception lived on the site record, and with
+           * sites gone (Matt, 0:29) there is nowhere for it to live: a job is
+           * created once and never revisited, so a per-job override would be a
+           * setting nobody could set in advance.
+           *
+           * Still frozen at creation, for the reason above: a job booked under
+           * today's rule must show today's rule when it is audited next year.
+           */
+          riskAssessmentRequired:
             store.accountRiskAssessment.get(account.id) ?? account.riskAssessmentRequired,
-            site.riskAssessmentOverride,
-          ),
           riskAssessment: null,
           preStart: null,
         },

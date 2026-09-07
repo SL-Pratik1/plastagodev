@@ -30,7 +30,7 @@ export const runKeys = {
   all: ['run'] as const,
   sheet: (date: string) => ['run', 'sheet', date] as const,
   job: (jobId: string) => ['run', 'job', jobId] as const,
-  tipOffPreview: (date: string, totalKg: number) => ['run', 'tip-off', date, totalKg] as const,
+  tipOffPreview: (runId: string, totalKg: number) => ['run', 'tip-off', runId, totalKg] as const,
 };
 
 export function useRunSheet(date: string) {
@@ -147,12 +147,12 @@ export function useSubmitRiskAssessment() {
  * false` because this is arithmetic over local data: a failure is a bug, not a
  * network blip, and retrying would hide it.
  */
-export function useTipOffPreview(date: string, totalKg: number, enabled: boolean) {
+export function useTipOffPreview(runId: string | null, totalKg: number, enabled: boolean) {
   const { run } = useServices();
   return useQuery({
-    queryKey: runKeys.tipOffPreview(date, totalKg),
-    queryFn: () => run.previewTipOff(date, totalKg),
-    enabled: enabled && totalKg > 0,
+    queryKey: runKeys.tipOffPreview(runId ?? 'none', totalKg),
+    queryFn: () => run.previewTipOff(runId ?? '', totalKg),
+    enabled: enabled && totalKg > 0 && runId !== null,
     retry: false,
   });
 }

@@ -21,10 +21,22 @@ import { currentPosition } from '@/services/mock/create-mock-services';
  *
  * ── m² and kg are two different quantities, not two units ─────────────────
  * The square metres are the board that was *installed* in the house — that is
- * what gets priced, and it is usually known from the builder's order before the
- * truck arrives. The kilograms are the waste actually *recovered*, weighed on the
- * day, and average around 6.8% of the installed board weight. Labelling them as
- * two readings of one thing is the mistake this screen exists to prevent.
+ * what gets priced, and it is known from the builder's order before the truck
+ * arrives. The kilograms are the waste actually *recovered*, weighed on the day,
+ * and average around 6.8% of the installed board weight. Labelling them as two
+ * readings of one thing is the mistake this screen exists to prevent.
+ *
+ * ── Why the driver is not asked for m² ────────────────────────────────────
+ * Matt, 53:24 and 55:32: *"they'll only enter weight… they won't enter square
+ * because they don't know the square metres either. Like you can't tell"* and
+ * *"that will be entered in the admin side before the job, because we bill based
+ * on square meters, but we issue certificates based on weight."*
+ *
+ * The area is therefore shown here as context — the figure the office booked, so
+ * the driver can see at a glance whether the pile matches what was expected —
+ * and there is no field to type it into. A driver cannot look at a heap of
+ * offcuts and read its area off, so an editable box only ever collected a number
+ * invented to get past it, and that number was what got invoiced.
  *
  * ── Why the kg field disappears rather than greying out ───────────────────
  * Two separate reasons, and they compound:
@@ -71,9 +83,6 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
   const capture = useCaptureWeights();
 
   const [loadType, setLoadType] = useState<LoadType>(job.loadType);
-  const [area, setArea] = useState(
-    job.capturedAreaM2 === null ? String(job.expectedAreaM2) : String(job.capturedAreaM2),
-  );
   const [bags, setBags] = useState(String(job.bagCount));
   const [craneKg, setCraneKg] = useState(job.craneScaleKg === null ? '' : String(job.craneScaleKg));
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -82,15 +91,8 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
 
   const save = async () => {
     const next: Record<string, string> = {};
-    const areaValue = Number(area);
     const bagValue = Number(bags);
     const craneValue = craneKg.trim() === '' ? null : Number(craneKg);
-
-    if (!Number.isFinite(areaValue) || areaValue <= 0) {
-      next.area = 'Enter the square metres you collected.';
-    } else if (areaValue > 100000) {
-      next.area = 'That is larger than any job on record — check the figure.';
-    }
 
     if (!Number.isInteger(bagValue) || bagValue < 0 || bagValue > 200) {
       next.bags = 'Whole bags, 0 to 200.';
@@ -114,7 +116,6 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
         input: {
           occurredAt: new Date().toISOString(),
           position,
-          areaM2: areaValue,
           bagCount: bagValue,
           loadType,
           craneScaleKg: weighable ? craneValue : null,
@@ -138,10 +139,26 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
 
       <header>
         <h1 className="font-display text-lg font-semibold tracking-tight">What did you collect?</h1>
-        <p className="text-sm text-muted-foreground">
-          {job.siteName} · expected {job.expectedAreaM2.toLocaleString('en-AU')} m²
-        </p>
+        <p className="text-sm text-muted-foreground">{job.siteName}</p>
       </header>
+
+      {/*
+       * The area, shown and not asked for.
+       *
+       * It is here because the driver still needs it — it is how they tell
+       * whether the pile in front of them is the job that was booked — but it is
+       * read-only, because they have no way to measure it and the office already
+       * has the number from the builder's order.
+       */}
+      <div className="flex items-baseline justify-between rounded-xl border border-border bg-muted/40 px-3 py-2.5">
+        <div>
+          <p className="text-sm font-medium">Booked for this job</p>
+          <p className="text-xs text-muted-foreground">Set in the office · you do not enter this</p>
+        </div>
+        <p className="font-display text-lg font-semibold tabular-nums">
+          {job.expectedAreaM2.toLocaleString('en-AU')} m²
+        </p>
+      </div>
 
       <fieldset className="space-y-2">
         <legend className="text-sm font-medium">How was it loaded?</legend>
@@ -174,31 +191,6 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
           ))}
         </div>
       </fieldset>
-
-      <Field
-        id="weights-area"
-        label="Square metres collected"
-        required
-        error={errors.area}
-        hint="What was actually there. Change it if the pile was bigger or smaller than booked."
-      >
-        {(control) => (
-          <Input
-            {...control}
-            type="number"
-            inputMode="numeric"
-            min={1}
-            step={10}
-            // Big numeric field: typed on a phone, standing next to the pile.
-            className="h-16 text-2xl font-semibold tabular-nums"
-            value={area}
-            onChange={(event) => {
-              setArea(event.target.value);
-              setErrors(({ area: _drop, ...rest }) => rest);
-            }}
-          />
-        )}
-      </Field>
 
       <Field id="weights-bags" label="Bags collected" error={errors.bags}>
         {(control) => (
@@ -246,8 +238,9 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
 
       {loadType === 'hand-load' && (
         <Alert variant="info" title="Hand loads are not weighed">
-          There is no bag to lift onto the scale, so we work the weight out at the end of the run
-          from the tip-off figure. Just the square metres here.
+          There is no bag to lift onto the scale. This job&rsquo;s weight gets worked out at the end
+          of the run from the tip-off figure, shared out by job size — so it will be recorded as an
+          estimate, not a measurement.
         </Alert>
       )}
 

@@ -3,6 +3,8 @@ import {
   LOAD_TYPE_LABELS,
   type DriverJob,
   type DriverTransition,
+  type SraDocument,
+  type SraUploadState,
 } from '@plastago/shared';
 import {
   Alert,
@@ -23,11 +25,13 @@ import {
   CheckCircle2Icon,
   CircleSlashIcon,
   ClockIcon,
+  FileTextIcon,
   MapPinIcon,
   MessageSquareIcon,
   NavigationIcon,
   PhoneIcon,
   ScaleIcon,
+  Share2Icon,
   ShieldAlertIcon,
   TriangleAlertIcon,
   TruckIcon,
@@ -92,8 +96,6 @@ export function DriverJobDetailPage() {
 function nextTransition(job: DriverJob): DriverTransition | null {
   switch (job.status) {
     case 'assigned':
-      return 'acknowledged';
-    case 'acknowledged':
       return 'in-transit';
     case 'in-transit':
       return 'arrived';
@@ -122,19 +124,20 @@ function JobScreen({ job }: { job: DriverJob }) {
   const failed = job.status === 'futile' || job.status === 'cancelled';
 
   const missingPhotos = missingRequiredPhotos(job.photos, job.requiredPhotos);
-  const needsWeights = job.capturedAreaM2 === null;
-  const needsRiskForm = job.riskAssessmentRequired && job.riskAssessmentDoneAt === null;
+  const needsWeights = job.weightsRecordedAt === null;
+  const riskFormDone = job.riskAssessmentDoneAt !== null;
+  const needsRiskForm = job.riskAssessmentRequired && !riskFormDone;
 
   /*
    * What has to be true before "Complete job" can be tapped.
    *
    * Blocked, not warned. Every item here is evidence that defends a charge or a
    * legal obligation, and "the driver meant to go back and do it" is exactly how
-   * a $90 contamination charge becomes undisputable-in-theory and unpaid in fact.
+   * a contamination charge becomes undisputable-in-theory and unpaid in fact.
    */
   const completionBlockers = [
     needsRiskForm ? 'the site risk assessment' : null,
-    needsWeights ? 'the m² collected' : null,
+    needsWeights ? 'what you collected' : null,
     missingPhotos.length > 0
       ? `${String(missingPhotos.length)} required photo${missingPhotos.length === 1 ? '' : 's'}`
       : null,
@@ -196,7 +199,16 @@ function JobScreen({ job }: { job: DriverJob }) {
     }
   };
 
-  const mapsHref = `https://www.google.com/maps/dir/?api=1&destination=${String(job.latitude)},${String(job.longitude)}`;
+  /*
+   * Navigation stays inside the app (I3).
+   *
+   * This used to be a link straight out to Google Maps, which ended the run: the
+   * phone was in another application, and the photo prompts and weight capture
+   * were behind an app switch. The map now lives on its own screen here, and the
+   * hand-off to the phone's maps app is offered there rather than being the only
+   * option.
+   */
+  const navigateHref = `/driver/jobs/${job.jobId}/navigate`;
 
   return (
     <div className="space-y-4">
@@ -230,10 +242,10 @@ function JobScreen({ job }: { job: DriverJob }) {
 
       {/* ── Navigate and call, the two things needed on approach ──────── */}
       <div className="grid grid-cols-2 gap-2">
-        <a href={mapsHref} className={`${buttonVariants({ size: 'lg' })} min-h-14`}>
+        <Link to={navigateHref} className={`${buttonVariants({ size: 'lg' })} min-h-14`}>
           <NavigationIcon aria-hidden />
           Navigate
-        </a>
+        </Link>
         {job.siteContactMobile !== null ? (
           <a
             href={`tel:${job.siteContactMobile}`}
@@ -298,10 +310,10 @@ function JobScreen({ job }: { job: DriverJob }) {
                 <dd className="font-medium">{job.gateHours}</dd>
               </div>
             )}
-            {job.customerReference !== null && (
+            {job.poNumber !== null && (
               <div className="col-span-2">
                 <dt className="text-xs text-muted-foreground">Their reference</dt>
-                <dd className="font-medium">{job.customerReference}</dd>
+                <dd className="font-medium">{job.poNumber}</dd>
               </div>
             )}
           </dl>
@@ -350,6 +362,15 @@ function JobScreen({ job }: { job: DriverJob }) {
             ))}
           </CardContent>
         </Card>
+      )}
+
+      {/* ── M4.8b — the driver's own copy of the assessment PDF ───────── */}
+      {job.riskAssessment?.document != null && (
+        <SraDocumentCard
+          document={job.riskAssessment.document}
+          uploadState={job.riskAssessment.uploadState}
+          accountName={job.accountName}
+        />
       )}
 
       {/* ── M4.8b — the form the builder demands before work starts ───── */}
@@ -405,13 +426,39 @@ function JobScreen({ job }: { job: DriverJob }) {
                 hint={
                   needsWeights
                     ? job.capturesWeight
-                      ? 'Square metres, and the crane scale if it is bagged'
-                      : 'Square metres — this customer does not record weight'
-                    : `${String(job.capturedAreaM2 ?? 0)} m²${job.craneScaleKg !== null ? ` · ${String(job.craneScaleKg)} kg` : ''}`
+                      ? 'Bags, and the crane scale if it is bagged'
+                      : 'Bags — this customer does not record weight'
+                    : job.craneScaleKg !== null
+                      ? `${String(job.bagCount)} bags · ${String(job.craneScaleKg)} kg weighed`
+                      : `${String(job.bagCount)} bags · hand load, weight worked out at tip-off`
                 }
                 icon={ScaleIcon}
                 tone={needsWeights ? 'warning' : 'neutral'}
                 onClick={() => void navigate(`/driver/jobs/${job.jobId}/weights`)}
+              />
+
+              {/*
+               * M4.8b — available on every job, not only the flagged ones.
+               *
+               * Matt, 1:07:26: *"it needs to be an option that we won't say, oh,
+               * this site needs this or that site needs this. It just needs to be
+               * an option that the driver can always fill one out if necessary."*
+               * The `riskAssessmentRequired` flag still drives the automatic
+               * prompt on arrival and the completion blocker — it just no longer
+               * decides whether the driver can reach the form at all.
+               */}
+              <ActionButton
+                label={riskFormDone ? 'Risk assessment done' : 'Site risk assessment'}
+                hint={
+                  riskFormDone
+                    ? 'Filled in for this site — tap to look at it'
+                    : job.riskAssessmentRequired
+                      ? `${job.accountName} require it before you start`
+                      : 'Optional here — fill one in if the site warrants it'
+                }
+                icon={ShieldAlertIcon}
+                tone={needsRiskForm ? 'warning' : 'neutral'}
+                onClick={() => void navigate(`/driver/jobs/${job.jobId}/risk-assessment`)}
               />
 
               <ActionButton
@@ -459,7 +506,7 @@ function JobScreen({ job }: { job: DriverJob }) {
 
       {job.status === 'futile' && (
         <Alert variant="destructive" title="Marked as could not collect">
-          The office will review it. A $120 futile fee applies to the customer either way.
+          The office will review it. A futile fee applies to the customer either way.
         </Alert>
       )}
 
@@ -600,5 +647,79 @@ function JobScreen({ job }: { job: DriverJob }) {
         </Field>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * The driver's copy of the site risk assessment PDF (M4.8b).
+ *
+ * ── Why the driver gets a copy at all ─────────────────────────────────────
+ * Matt, 1:03:25: *"once it generates the PDF, just attaches it to that job and
+ * **gives the driver a copy** he can upload onto the builder's site."* Some
+ * builders only accept the assessment through their own portal, and the person
+ * standing at that portal is the driver, not the office. Filing it against the
+ * job without handing over a copy would solve the office's half and leave the
+ * driver exactly where they started.
+ *
+ * ── Why "Share" and not "Download" ────────────────────────────────────────
+ * The next thing that happens to this file is an upload into somebody else's web
+ * form, from the same phone. The share sheet is what hands a file to another app;
+ * a download drops it into a folder the driver then has to go and find.
+ *
+ * The upload state is shown alongside because the two destinations can disagree
+ * — the office copy can still be queued while the driver already has theirs —
+ * and a driver who has been told the upload failed knows to do it by hand.
+ */
+function SraDocumentCard({
+  document: file,
+  uploadState,
+  accountName,
+}: {
+  document: SraDocument;
+  uploadState: SraUploadState;
+  accountName: string;
+}) {
+  const toast = useToast();
+  const preparing = file.generatedAt === null;
+
+  const share = () => {
+    // Real build: fetch the blob and hand it to `navigator.share({ files })`,
+    // falling back to an object-URL download where the API is absent.
+    toast.info(
+      'Not wired up in this build',
+      `The real app opens the share sheet with ${file.fileName}.`,
+    );
+  };
+
+  return (
+    <Card>
+      <CardContent className="flex items-start gap-3 py-3">
+        <FileTextIcon aria-hidden className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">Your copy of the risk assessment</p>
+          <p className="truncate text-xs text-muted-foreground">
+            {preparing
+              ? 'Preparing the PDF…'
+              : `${file.fileName} · ${String(file.pageCount)} pages`}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {uploadState === 'uploaded'
+              ? `Already on ${accountName}'s portal.`
+              : uploadState === 'failed'
+                ? `It did not reach ${accountName}'s portal — upload this copy yourself.`
+                : `Queued for ${accountName}'s portal. Upload this copy if they want it now.`}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={share}
+          disabled={preparing}
+          className={`${buttonVariants({ variant: uploadState === 'failed' ? 'default' : 'outline', size: 'sm' })} shrink-0`}
+        >
+          <Share2Icon aria-hidden />
+          Share
+        </button>
+      </CardContent>
+    </Card>
   );
 }

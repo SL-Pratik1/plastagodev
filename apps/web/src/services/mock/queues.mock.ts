@@ -8,6 +8,7 @@ import {
   type FutileReviewItem,
   type Job,
   type Lead,
+  type LeadAttachment,
   type LeadListItem,
   type PoExtractionItem,
 } from '@plastago/shared';
@@ -235,6 +236,16 @@ function extractionItem(extraction: (typeof store.poExtractions)[number]): PoExt
 }
 
 /* ── Service ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Ids for attachments added this session.
+ *
+ * A counter rather than `crypto.randomUUID()` for the same reason sites use one:
+ * these are `ObjectId`s — 24 hex characters — and a UUID is neither the right
+ * length nor the right alphabet. It would pass through the mock unnoticed and
+ * fail the moment the real schema validated it.
+ */
+let leadAttachmentSequence = 0;
 
 export function createMockQueueService(): QueueService {
   return {
@@ -669,7 +680,136 @@ export function createMockQueueService(): QueueService {
       await latency();
       const lead = store.leads.find((candidate) => candidate.id === id);
       if (!lead) throw new ServiceError('NOT_FOUND', `No lead ${id}`);
-      return { ...lead, notes: [...lead.notes] };
+      return { ...lead, notes: [...lead.notes], attachments: [...lead.attachments] };
+    },
+
+    /**
+     * Attach a proposal (Matt, 5:53).
+     *
+     * The mock keeps an object URL so the file genuinely opens in the demo — a
+     * download link that does nothing is worse than no link, because it teaches
+     * whoever is watching that the feature does not work.
+     */
+    async leadAttach(leadId, file) {
+      await latency(760, 320);
+
+      const lead = store.leads.find((candidate) => candidate.id === leadId);
+      if (!lead) throw new ServiceError('NOT_FOUND', `No lead ${leadId}`);
+
+      // 20 MB. A scanned proposal is a few hundred KB; past this, somebody is
+      // attaching a folder of site photos to the wrong record.
+      if (file.size > 20 * 1024 * 1024) {
+        throw new ServiceError('CONFLICT', 'That file is larger than 20 MB', {
+          fieldErrors: { file: 'Attachments are limited to 20 MB' },
+        });
+      }
+
+      leadAttachmentSequence += 1;
+      const attachment: LeadAttachment = {
+        id: objectId('lat', leadAttachmentSequence),
+        fileName: file.name,
+        sizeBytes: file.size,
+        contentType: file.type || 'application/octet-stream',
+        uploadedAt: new Date().toISOString(),
+        uploadedBy: 'Priya Raman',
+        url: URL.createObjectURL(file),
+      };
+
+      store.leads = store.leads.map((candidate) =>
+        candidate.id === leadId
+          ? { ...candidate, attachments: [...candidate.attachments, attachment] }
+          : candidate,
+      );
+
+      return attachment;
+    },
+
+    async leadDetach(leadId, attachmentId) {
+      await latency(340, 160);
+
+      const lead = store.leads.find((candidate) => candidate.id === leadId);
+      if (!lead) throw new ServiceError('NOT_FOUND', `No lead ${leadId}`);
+
+      // Releases the blob created above. Without this a long demo session leaks
+      // every file anyone ever attached.
+      const removed = lead.attachments.find((item) => item.id === attachmentId);
+      if (removed?.url) URL.revokeObjectURL(removed.url);
+
+      store.leads = store.leads.map((candidate) =>
+        candidate.id === leadId
+          ? {
+              ...candidate,
+              attachments: candidate.attachments.filter((item) => item.id !== attachmentId),
+            }
+          : candidate,
+      );
+    },
+
+    /**
+     * A.1 — a lead typed in by hand.
+     *
+     * ⚠️ Ids are offset well past the fixtures on purpose. The seeds take
+     * `objectId('ld', index + 1)`, so numbering new leads from the array length
+     * would hand the first manual lead an id a seed already owns the moment the
+     * fixture set changes size — and a colliding ObjectId does not fail loudly,
+     * it silently opens the wrong lead.
+     */
+    async leadCreate(input) {
+      await latency(700, 260);
+
+      // A second lead for a company already in the queue is far more often a
+      // duplicate than a real second enquiry — the same builder rings back and
+      // whoever answers has no way to know. Blocking it outright would be wrong
+      // (they do sometimes re-enquire a year later), so only OPEN leads count:
+      // a won or lost one is history and cannot be duplicated into.
+      const name = input.companyName.trim().toLowerCase();
+      const clash = store.leads.find(
+        (candidate) =>
+          candidate.companyName.trim().toLowerCase() === name &&
+          !['won', 'lost'].includes(candidate.status),
+      );
+      if (clash) {
+        throw new ServiceError(
+          'VALIDATION_FAILED',
+          `${clash.companyName} is already an open lead — work that one instead of starting a second`,
+          { fieldErrors: { companyName: 'This company already has an open lead' } },
+        );
+      }
+
+      const now = new Date().toISOString();
+      const seq = store.leads.length + 1;
+      const note = input.note.trim();
+
+      const lead: Lead = {
+        id: objectId('ld', 500 + seq),
+        companyName: input.companyName.trim(),
+        contactName: input.contactName.trim(),
+        email: input.email.trim(),
+        mobile: input.mobile.trim() || null,
+        // Not the form's to choose. Every lead starts here; A.4 is the only
+        // thing that may ever write 'won'.
+        status: 'new',
+        source: input.source,
+        zone: input.zone,
+        suburbs: input.suburbs.trim(),
+        typicalVolumeM2: input.typicalVolumeM2,
+        expectedFrequency: input.expectedFrequency.trim(),
+        ownerName: input.ownerName.trim() || null,
+        createdAt: now,
+        // Equal to createdAt, not null: taking the call IS the last activity,
+        // and the ageing badge measures against this.
+        lastActivityAt: now,
+        convertedAccountId: null,
+        heardAbout: input.heardAbout.trim(),
+        notes: note
+          ? [{ id: objectId('ln', 500 + seq), at: now, author: DEMO_ACTOR, body: note }]
+          : [],
+        // A lead taken on the phone has no proposal yet — that comes later.
+        attachments: [],
+      };
+
+      store.leads.push(lead);
+      return { ...lead, notes: [...lead.notes], attachments: [...lead.attachments] };
     },
 
     async leadUpdate(id, input) {
@@ -739,34 +879,17 @@ export function createMockQueueService(): QueueService {
         ],
       };
 
-      // A real conversion also writes the Account, the Site and the invitation.
-      // The mock stops at the lead because Accounts are fixture data here — the
-      // service signature is what the backend implements, and it already says so.
-      store.sites.push({
-        id: objectId('st', 400 + index),
-        accountId,
-        builderName: lead.companyName,
-        name: input.siteName,
-        lotNumber: null,
-        addressLine: `${input.siteName}, ${input.siteSuburb}`,
-        suburb: input.siteSuburb,
-        postcode: '2000',
-        zone: input.primaryZone,
-        latitude: -33.86,
-        longitude: 151.2,
-        accessNotes: '',
-        gateHours: null,
-        inductionRequired: false,
-        craneAvailable: false,
-        siteContactName: lead.contactName,
-        siteContactMobile: lead.mobile,
-        jobCount: 0,
-        status: 'active',
-        // A site created by converting a lead follows its new account's rule.
-        // Anything else would silently exempt every customer we just won.
-        riskAssessmentOverride: 'inherit',
-      });
-
+      /*
+       * A real conversion writes the Account and sends the invitation.
+       *
+       * It no longer writes a Site: there is no such record (Matt, 0:29), and
+       * the first-site fields went with the requirement to supply one (6:31 —
+       * *"we'll activate customers sometimes months before we get a first job
+       * off them"*). The address is typed on the first booking instead.
+       *
+       * The mock stops at the lead because Accounts are fixture data here — the
+       * service signature is what the backend implements, and it already says so.
+       */
       return { accountId, customerCode: input.customerCode };
     },
   };

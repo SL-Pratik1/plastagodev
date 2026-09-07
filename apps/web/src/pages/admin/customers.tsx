@@ -3,14 +3,20 @@ import {
   CAPTURE_MODE_LABELS,
   CAPTURE_MODES,
   PO_POLICIES,
+  ACCOUNT_TYPE_LABELS,
+  ACCOUNT_TYPES,
+  ONBOARDING_STATE_LABELS,
+  ONBOARDING_STATES,
   PO_POLICY_LABELS,
   RATE_CARD_LABELS,
   RATE_CARDS,
   type AccountListItem,
 } from '@plastago/shared';
-import { Badge, Card, Pagination } from '@plastago/ui';
-import { Building2Icon } from 'lucide-react';
+import { Badge, Card, Pagination, buttonVariants } from '@plastago/ui';
+import { Building2Icon, PlusIcon } from 'lucide-react';
+import { Link } from 'react-router';
 import { DataTable } from '@/components/data-table/data-table';
+import { AccountTypeBadge } from '@/components/domain-badges';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
@@ -32,7 +38,14 @@ import { formatRelative } from '@/lib/format';
  * card, PO policy, capture mode — because those are the questions the office
  * actually asks of this list.
  */
-const FILTER_KEYS = ['status', 'rateCard', 'poPolicy', 'captureMode'] as const;
+const FILTER_KEYS = [
+  'status',
+  'accountType',
+  'onboarding',
+  'rateCard',
+  'poPolicy',
+  'captureMode',
+] as const;
 
 const FILTERS: readonly FilterDefinition[] = [
   {
@@ -43,6 +56,30 @@ const FILTERS: readonly FilterDefinition[] = [
       { value: 'active', label: 'Active' },
       { value: 'inactive', label: 'Inactive' },
     ],
+  },
+  {
+    // The first thing the office wants to slice by: the two types barely share a
+    // workflow, so "show me the contractors" is a real question (Matt, 21:55).
+    key: 'accountType',
+    label: 'Type',
+    allLabel: 'Builders and contractors',
+    options: ACCOUNT_TYPES.map((type) => ({ value: type, label: ACCOUNT_TYPE_LABELS[type] })),
+  },
+  {
+    /*
+     * Who has not signed yet.
+     *
+     * An account in `awaiting-terms` has no director's guarantee on file — the
+     * exposure Matt's paper form exists to close (7:49) — so being able to ask
+     * "who is outstanding?" is the point of recording the state at all.
+     */
+    key: 'onboarding',
+    label: 'Terms',
+    allLabel: 'Signed and not',
+    options: ONBOARDING_STATES.map((state) => ({
+      value: state,
+      label: ONBOARDING_STATE_LABELS[state],
+    })),
   },
   {
     key: 'rateCard',
@@ -94,6 +131,20 @@ const COLUMNS: readonly DataTableColumn<AccountListItem>[] = [
     ),
   },
   {
+    id: 'accountType',
+    header: 'Type',
+    priority: 'primary',
+    cell: (row) => (
+      <span className="flex flex-wrap items-center gap-1.5">
+        <AccountTypeBadge type={row.accountType} />
+        {/* Only worth showing when it is outstanding — "signed" is the norm. */}
+        {row.onboardingState === 'awaiting-terms' && (
+          <Badge variant="warning">Terms unsigned</Badge>
+        )}
+      </span>
+    ),
+  },
+  {
     id: 'rateCard',
     header: 'Rate card',
     priority: 'detail',
@@ -119,15 +170,6 @@ const COLUMNS: readonly DataTableColumn<AccountListItem>[] = [
     cell: (row) => (
       <span className="text-muted-foreground">{CAPTURE_MODE_LABELS[row.captureMode]}</span>
     ),
-  },
-  {
-    id: 'siteCount',
-    header: 'Sites',
-    sortKey: 'siteCount',
-    numeric: true,
-    priority: 'detail',
-    className: 'w-20',
-    cell: (row) => row.siteCount,
   },
   {
     id: 'openJobCount',
@@ -161,6 +203,13 @@ export function AdminCustomersPage() {
       <PageHeader
         title="Customers"
         description="The party being invoiced — distinct from the builder whose site is serviced."
+        actions={
+          // Matt, 6:10 — an account can be opened without a lead behind it.
+          <Link to="/admin/customers/new" className={buttonVariants()}>
+            <PlusIcon aria-hidden />
+            New customer
+          </Link>
+        }
       />
 
       <Card className="overflow-hidden p-0">

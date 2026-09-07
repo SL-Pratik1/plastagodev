@@ -1,3 +1,4 @@
+import type { Db, MongoClient } from 'mongodb';
 import mongoose from 'mongoose';
 import { env, requireDatabase } from '../config/env.js';
 import { logger } from '../lib/logger.js';
@@ -53,6 +54,67 @@ export async function disconnectMongo(): Promise<void> {
 
 export function isMongoConnected(): boolean {
   return mongoose.connection.readyState === mongoose.ConnectionStates.connected;
+}
+
+/**
+ * The native driver handles, borrowed from the Mongoose connection.
+ *
+ * ── Why borrow rather than open a second client ─────────────────────────────
+ * Better Auth speaks to the native driver, not to Mongoose. Giving it its own
+ * `MongoClient` would mean two connection pools, two sets of retry semantics,
+ * and two things to close on shutdown — and, worse, writes to the SAME `users`
+ * collection through two independent clients. One pool, one lifecycle.
+ *
+ * These are the only two functions permitted to reach past Mongoose, and they
+ * exist for that single integration. Domain code uses models (§6A.3 #5).
+ */
+export function getMongoDb(): Db {
+  const db = mongoose.connection.db;
+  if (!db) throw new Error('MongoDB is not connected — call connectMongo() first');
+  return db;
+}
+
+export function getMongoClient(): MongoClient {
+  if (!isMongoConnected()) {
+    throw new Error('MongoDB is not connected — call connectMongo() first');
+  }
+  return mongoose.connection.getClient();
+}
+
+/**
+ * Whether this deployment can run multi-document transactions (§6A.3 #3).
+ *
+ * Detected rather than configured: a standalone `mongod` reports no replica set
+ * name, and asking it for a session throws at the moment it matters. Atlas and
+ * a local replica set both report one. Cached because it cannot change without
+ * a reconnect, and because this runs on the sign-in path.
+ *
+ * ⚠️ Invoicing MUST NOT be built against a topology where this is false.
+ */
+let transactionSupport: boolean | undefined;
+
+export async function supportsTransactions(): Promise<boolean> {
+  if (transactionSupport !== undefined) return transactionSupport;
+  if (!isMongoConnected()) return false;
+
+  try {
+    const hello = await getMongoDb().admin().command({ hello: 1 });
+    // `setName` on a replica set; `msg: 'isdbgrid'` on a sharded cluster.
+    transactionSupport =
+      typeof hello.setName === 'string' || hello.msg === 'isdbgrid';
+  } catch (error) {
+    log.warn({ err: error }, 'could not determine transaction support — assuming none');
+    transactionSupport = false;
+  }
+
+  if (!transactionSupport) {
+    log.warn(
+      'MongoDB is standalone: multi-document transactions are unavailable (§6A.3 #3). ' +
+        'Fine for auth; move to Atlas or a local replica set before building invoicing.',
+    );
+  }
+
+  return transactionSupport;
 }
 
 /** Round-trips a `ping` so readiness reflects reality, not just socket state. */

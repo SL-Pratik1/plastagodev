@@ -146,6 +146,22 @@ export function formatArea(squareMetres: number | null | undefined, fallback = '
   return `${squareMetres.toLocaleString('en-AU')} m²`;
 }
 
+/**
+ * An invoice number as it is shown and quoted — "PGA-104312".
+ *
+ * Matt, 7:07 asked for a configurable prefix. It is applied at RENDER time,
+ * never stored: the stored number is a bare sequence that Xero matches on and
+ * that must never collide, so changing the prefix in settings has to leave every
+ * existing invoice numbered exactly as it was.
+ *
+ * The hyphen is part of the presentation rather than the setting, so nobody has
+ * to remember to type it — and so "PGA" and "PGA-" cannot both end up in use.
+ */
+export function formatInvoiceNumber(invoiceNumber: number, prefix = ''): string {
+  const clean = prefix.trim();
+  return clean === '' ? `#${String(invoiceNumber)}` : `${clean}-${String(invoiceNumber)}`;
+}
+
 export function formatWeight(kilograms: number | null | undefined, fallback = '—'): string {
   if (kilograms === null || kilograms === undefined) return fallback;
   if (kilograms >= 1000) return `${(kilograms / 1000).toLocaleString('en-AU')} t`;

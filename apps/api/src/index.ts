@@ -1,7 +1,9 @@
 import type { Server } from 'node:http';
 import { API_PREFIX } from '@plastago/shared';
+import { initAuth } from './auth/better-auth.js';
 import { env } from './config/env.js';
-import { connectMongo, disconnectMongo } from './db/mongo.js';
+import { connectMongo, disconnectMongo, isMongoConnected } from './db/mongo.js';
+import { authRepository } from './domains/auth/auth.repository.js';
 import { disconnectRedis } from './db/redis.js';
 import { logger } from './lib/logger.js';
 import { closeQueues } from './queues/index.js';
@@ -11,6 +13,8 @@ const log = logger.child({ module: 'bootstrap' });
 
 async function main(): Promise<void> {
   await connectMongo();
+  await prepareDatabase();
+  await initAuth();
 
   const app = createServer();
   const server: Server = app.listen(env.PORT, () => {
@@ -30,6 +34,35 @@ async function main(): Promise<void> {
   server.requestTimeout = 60_000;
 
   registerShutdown(server);
+}
+
+/**
+ * Idempotent database preparation, on every boot.
+ *
+ * Indexes and `$jsonSchema` validators are not optional extras — the unique
+ * index on `email` is what makes "one identifier, one person" true, and the
+ * validators are the only integrity guard that applies to writers we do not
+ * control (§6A.3 #4, #6). Applying them at boot means no environment can be
+ * missing them because somebody forgot to run a script.
+ *
+ * Never fatal in development: a laptop with no Mongo should still serve, and
+ * `/readyz` reports the truth.
+ */
+async function prepareDatabase(): Promise<void> {
+  if (!isMongoConnected()) {
+    log.warn('skipping index and validator setup — no database connection');
+    return;
+  }
+
+  try {
+    await authRepository.createIndexes();
+    await authRepository.ensureSchemaValidators();
+    await authRepository.seedBrands();
+    log.info('indexes, validators and brand reference data are in place');
+  } catch (error) {
+    log.error({ err: error }, 'database preparation failed');
+    if (env.NODE_ENV === 'production') throw error;
+  }
 }
 
 function registerShutdown(server: Server): void {

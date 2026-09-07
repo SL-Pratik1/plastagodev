@@ -26,14 +26,26 @@ export const UserListItemSchema = z
     name: NonEmptyStringSchema,
     email: z.email().nullable(),
     mobile: z.string().nullable(),
+    /**
+     * The role this user is listed under — their main one.
+     *
+     * A user may hold more than one (see `roles`); this is the one the grid
+     * groups and filters by, so a driver who also allocates still reads as a
+     * driver in the list rather than appearing in two places.
+     */
     role: RoleSchema,
+    /**
+     * Every role this user holds. Usually just `[role]`.
+     *
+     * Matt, 27:01: an allocator who covers a driver's shift when someone calls
+     * in sick holds both, and switches between them.
+     */
+    roles: z.array(RoleSchema).min(1),
     status: UserStatusSchema,
     brandIds: z.array(BrandIdSchema),
     /** Set for the two customer roles — scopes the portal to one account. */
     accountId: ObjectIdSchema.nullable(),
     accountName: z.string().nullable(),
-    /** A site supervisor sees only their own sites (M1.5). */
-    siteCount: z.number().int().nonnegative(),
     lastSignedInAt: IsoDateTimeSchema.nullable(),
     createdAt: IsoDateTimeSchema,
   })
@@ -83,7 +95,16 @@ export const UserDraftSchema = z
     name: z.string().trim().min(2, 'Enter their full name').max(80),
     email: z.string().trim(),
     mobile: z.string().trim(),
+    /** Their main role — what they are listed under. */
     role: RoleSchema,
+    /**
+     * Any extra roles beyond `role`. Almost always empty.
+     *
+     * The one case Matt confirmed is an allocator who also drives (27:01), and
+     * he was explicit that no other pairing is needed (27:36) — so this is a
+     * deliberate exception, not a general-purpose permission matrix.
+     */
+    additionalRoles: z.array(RoleSchema),
     jobTitle: z.string().trim().max(80),
     brandIds: z.array(BrandIdSchema).min(1, 'Choose at least one brand'),
     accountId: ObjectIdSchema.nullable(),

@@ -17,9 +17,13 @@ import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { StatCard } from '@/components/stat-card';
-import { usePortalInvoicePdf, usePortalInvoices } from '@/features/portal/queries';
+import {
+  usePortalInvoicePdf,
+  usePortalInvoices,
+  usePortalScope,
+} from '@/features/portal/queries';
 import { describeError } from '@/lib/error-message';
-import { formatDate, formatMoney } from '@/lib/format';
+import { formatDate, formatInvoiceNumber, formatMoney } from '@/lib/format';
 
 /**
  * Invoices (M5.10 · F8, W72, W73) — Customer Administrator only.
@@ -74,7 +78,8 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
   },
 ];
 
-const COLUMNS: readonly DataTableColumn<PortalInvoice>[] = [
+function columns(prefix: string): readonly DataTableColumn<PortalInvoice>[] {
+  return [
   {
     id: 'invoiceNumber',
     header: 'Invoice',
@@ -82,7 +87,9 @@ const COLUMNS: readonly DataTableColumn<PortalInvoice>[] = [
     priority: 'primary',
     cell: (row) => (
       <span className="block">
-        <span className="font-mono font-medium">#{row.invoiceNumber}</span>
+        <span className="font-mono font-medium">
+          {formatInvoiceNumber(row.invoiceNumber, prefix)}
+        </span>
         <span className="block text-xs text-muted-foreground">
           {row.kind === 'base' ? 'Pickup' : 'Additional charges'}
         </span>
@@ -125,10 +132,10 @@ const COLUMNS: readonly DataTableColumn<PortalInvoice>[] = [
       ),
   },
   {
-    id: 'reference',
-    header: 'Your reference',
+    id: 'poNumber',
+    header: 'PO / job reference',
     priority: 'detail',
-    cell: (row) => row.reference ?? <span className="text-muted-foreground">—</span>,
+    cell: (row) => row.poNumber ?? <span className="text-muted-foreground">—</span>,
   },
   {
     id: 'issuedOn',
@@ -153,14 +160,18 @@ const COLUMNS: readonly DataTableColumn<PortalInvoice>[] = [
     numeric: true,
     priority: 'secondary',
     cell: (row) => formatMoney(row.totalIncGst),
-  },
-];
+    },
+  ];
+}
 
 export function PortalInvoicesPage() {
   const toast = useToast();
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = usePortalInvoices(controller.query);
   const requestPdf = usePortalInvoicePdf();
+  // Carried on the scope: the portal cannot read office settings, but the
+  // customer has to quote the same number back when they pay.
+  const prefix = usePortalScope().data?.invoiceNumberPrefix ?? '';
 
   const [selected, setSelected] = useState<string[]>([]);
 
@@ -237,7 +248,7 @@ export function PortalInvoicesPage() {
 
         <DataTable
           caption="Your invoices"
-          columns={COLUMNS}
+          columns={columns(prefix)}
           rows={rows}
           getRowId={(row) => row.id}
           isPending={isPending}

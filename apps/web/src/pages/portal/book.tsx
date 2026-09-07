@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import type { PortalBookingDraft } from '@plastago/shared';
+import type { Place, PortalBookingDraft } from '@plastago/shared';
 import {
   Alert,
   Button,
@@ -9,12 +9,10 @@ import {
   CardTitle,
   Checkbox,
   DatePicker,
-  ErrorState,
   Field,
   Input,
   Label,
   Select,
-  Skeleton,
   Spinner,
   Textarea,
   useToast,
@@ -26,16 +24,12 @@ import {
   PackageIcon,
   ZapIcon,
 } from 'lucide-react';
-import { useMemo } from 'react';
-import { useForm, useWatch } from 'react-hook-form';
+import { useMemo, useState } from 'react';
+import { Controller, useForm, useWatch } from 'react-hook-form';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import * as z from 'zod';
-import {
-  usePortalBook,
-  usePortalQuote,
-  usePortalScope,
-  usePortalSites,
-} from '@/features/portal/queries';
+import { PlacePicker } from '@/components/place-picker';
+import { usePortalBook, usePortalQuote, usePortalScope } from '@/features/portal/queries';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
 import { isServiceError } from '@/services/service-error';
@@ -66,19 +60,52 @@ import { useNow } from '@/lib/use-now';
  * computed here — pricing must match TransVirtual to the cent (Risk 1).
  */
 const FormSchema = z.object({
-  siteId: z.string().min(1, 'Choose which site the pickup is for'),
+  /* ── Where the pickup is ──────────────────────────────────────────────
+   *
+   * Typed, not chosen from a saved list — there are no saved sites (Matt,
+   * 0:29): *"we don't ever really visit a site more than once."*
+   *
+   * ⚠️ The SUBURB is still chosen, because it carries the zone that prices the
+   * job and the pin the board plots. Neither survives free text.
+   */
+  siteName: z.string().trim().min(1, 'Name the place — our driver navigates by it').max(120),
+  lotNumber: z.string().trim().max(30),
+  addressLine: z.string().trim().min(1, 'Enter the street address').max(160),
+  placeId: z.string().min(1, 'Choose the suburb from the list'),
+  builderName: z.string().trim().max(120),
+  accessNotes: z.string().trim().max(1000),
+  gateHours: z.string().trim().max(120),
+  inductionRequired: z.boolean(),
+  craneAvailable: z.boolean(),
+  siteContactName: z.string().trim().max(80),
+  siteContactMobile: z.string().trim().max(20),
+  siteContactEmail: z
+    .string()
+    .trim()
+    .max(160)
+    .refine(
+      (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
+      'Enter a valid email address, or leave it blank',
+    ),
   readyDate: z.string().min(1, 'Tell us the date the board will be ready'),
+  /**
+   * Optional in the schema, required in the form — for contractors only.
+   *
+   * A builder never sees this field: their area comes off the purchase order
+   * (Matt, 25:19), and `null` here means *"the PO will tell us"*, not zero.
+   * Zero would price the job at the call-out fee and nobody would notice.
+   */
   expectedAreaM2: z.coerce
     .number()
     .positive('Enter the expected square metres')
-    .max(100000, 'That is larger than any job on record — check the figure'),
+    .max(100000, 'That is larger than any job on record — check the figure')
+    .nullable(),
   bagCount: z.coerce
     .number()
     .int('Whole bags only')
     .min(0, 'Bags cannot be negative')
     .max(200, 'That is more bags than a truck holds — check the figure'),
   serviceLevel: z.enum(['standard', 'urgent']),
-  reference: z.string().trim().max(60),
   poNumber: z.string().trim().max(60),
   notes: z.string().trim().max(1000),
   jobReady: z.literal(true, {
@@ -99,14 +126,40 @@ export function PortalBookPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const now = useNow(300_000);
-
   const scope = usePortalScope();
-  const sites = usePortalSites({ page: 1, pageSize: 200 });
   const book = usePortalBook();
+
+  /*
+   * The chosen suburb, held beside the form.
+   *
+   * The form field stores the id — that is what the service resolves and what
+   * cannot be tampered with. This holds the whole `Place` so the picker can
+   * show the label and the zone back to the person booking.
+   */
+  const [place, setPlace] = useState<Place | null>(null);
 
   const today = new Date(now).toISOString().slice(0, 10);
   const poRequired = scope.data?.poRequired ?? false;
   const canSeePricing = scope.data?.canSeePricing ?? false;
+
+  /*
+   * A builder's numbers are already on their purchase order.
+   *
+   * Matt, 25:19: *"in the builder's regard it probably won't ask expected
+   * plasterboard square metres, won't ask recycling bags, because **all that
+   * information is in the purchase order**."*
+   *
+   * So the form does not ask. Not because the figures are unimportant — they are
+   * what the job is priced on — but because asking invites a second, contradicting
+   * number from someone who has no reason to know it. The site supervisor booking
+   * this run *"is running the site, they're not going to know it's 823.4 square
+   * metres"* (29:21). The office fills them from the PO.
+   *
+   * A contractor gets the full form, because for them it IS the authorisation:
+   * *"they're just going to fill out the form and we'll generate them an
+   * invoice"* (22:53).
+   */
+  const fromPurchaseOrder = scope.data?.accountType === 'builder';
 
   const {
     register,
@@ -118,14 +171,24 @@ export function PortalBookPage() {
     resolver: zodResolver(FormSchema),
     mode: 'onTouched',
     defaultValues: {
-      // Deep-linked from a site page or the site's shareable booking link (B.1),
-      // so the supervisor who taps a WhatsApp link lands with the site chosen.
-      siteId: params.get('site') ?? '',
+      siteName: '',
+      lotNumber: '',
+      addressLine: '',
+      // Deep-linkable, so a shared booking link can still land with the suburb
+      // resolved — what B.1 used to do with a site id.
+      placeId: params.get('place') ?? '',
+      builderName: '',
+      accessNotes: '',
+      gateHours: '',
+      inductionRequired: false,
+      craneAvailable: false,
+      siteContactName: '',
+      siteContactMobile: '',
+      siteContactEmail: '',
       readyDate: '',
       expectedAreaM2: '' as unknown as number,
       bagCount: 0,
       serviceLevel: 'standard',
-      reference: '',
       poNumber: '',
       notes: '',
       jobReady: false as unknown as true,
@@ -143,23 +206,37 @@ export function PortalBookPage() {
    * for a price. Only the three fields that affect the figure are included.
    */
   const quoteDraft = useMemo<PortalBookingDraft | null>(() => {
-    const siteId = watched.siteId ?? '';
+    const placeId = watched.placeId ?? '';
     const area = Number(watched.expectedAreaM2 ?? 0);
-    if (!siteId || !Number.isFinite(area) || area <= 0) return null;
+    // The suburb carries the zone, and the zone is the price. No suburb, no quote.
+    if (!placeId || !Number.isFinite(area) || area <= 0) return null;
 
     return {
-      siteId,
+      // Only the fields that move the figure are real here; the rest are
+      // placeholders so the draft satisfies the contract without re-quoting
+      // every time somebody types a note.
+      siteName: 'quote',
+      lotNumber: '',
+      addressLine: 'quote',
+      placeId,
+      builderName: '',
+      accessNotes: '',
+      gateHours: '',
+      inductionRequired: false,
+      craneAvailable: false,
+      siteContactName: '',
+      siteContactMobile: '',
+      siteContactEmail: '',
       readyDate: watched.readyDate ?? today,
       expectedAreaM2: area,
       bagCount: Number(watched.bagCount ?? 0) || 0,
       serviceLevel: watched.serviceLevel ?? 'standard',
-      reference: '',
       poNumber: '',
       notes: '',
       certification: { jobReady: true, truckAccessible: true, freeOfContaminants: true },
     };
   }, [
-    watched.siteId,
+    watched.placeId,
     watched.expectedAreaM2,
     watched.bagCount,
     watched.serviceLevel,
@@ -169,8 +246,7 @@ export function PortalBookPage() {
 
   const quote = usePortalQuote(quoteDraft, canSeePricing);
 
-  const siteOptions = sites.data?.data ?? [];
-  const chosenSite = siteOptions.find((site) => site.id === watched.siteId);
+
 
   const submit = handleSubmit(async (values) => {
     if (poRequired && values.poNumber.trim().length === 0) {
@@ -180,14 +256,31 @@ export function PortalBookPage() {
       return;
     }
 
+    // Contractors must give a figure, because for them the form is the only
+    // source there is. Builders must not be asked — see `fromPurchaseOrder`.
+    if (!fromPurchaseOrder && !values.expectedAreaM2) {
+      setError('expectedAreaM2', { message: 'Enter the expected square metres' });
+      return;
+    }
+
     try {
       const created = await book.mutateAsync({
-        siteId: values.siteId,
+        siteName: values.siteName,
+        lotNumber: values.lotNumber,
+        addressLine: values.addressLine,
+        placeId: values.placeId,
+        builderName: values.builderName,
+        accessNotes: values.accessNotes,
+        gateHours: values.gateHours,
+        inductionRequired: values.inductionRequired,
+        craneAvailable: values.craneAvailable,
+        siteContactName: values.siteContactName,
+        siteContactMobile: values.siteContactMobile,
+        siteContactEmail: values.siteContactEmail,
         readyDate: values.readyDate,
-        expectedAreaM2: Number(values.expectedAreaM2),
-        bagCount: Number(values.bagCount),
+        expectedAreaM2: fromPurchaseOrder ? null : Number(values.expectedAreaM2),
+        bagCount: fromPurchaseOrder ? 0 : Number(values.bagCount),
         serviceLevel: values.serviceLevel,
-        reference: values.reference,
         poNumber: values.poNumber,
         notes: values.notes,
         certification: { jobReady: true, truckAccessible: true, freeOfContaminants: true },
@@ -212,46 +305,6 @@ export function PortalBookPage() {
     }
   });
 
-  if (sites.error) {
-    const described = describeError(sites.error);
-    return (
-      <ErrorState
-        title={described.title}
-        description={described.detail}
-        onRetry={() => void sites.refetch()}
-      />
-    );
-  }
-
-  if (sites.isPending) {
-    return (
-      <div className="space-y-5">
-        <Skeleton className="h-7 w-48" />
-        <Card className="p-5">
-          <Skeleton className="h-4 w-32" />
-          <Skeleton className="mt-4 h-64 w-full" />
-        </Card>
-      </div>
-    );
-  }
-
-  // A supervisor with no sites yet is a real state (freshly invited), and it
-  // needs an answer rather than an empty dropdown.
-  if (siteOptions.length === 0) {
-    return (
-      <div className="space-y-5">
-        <h1 className="font-display text-xl font-semibold tracking-tight">Book a pickup</h1>
-        <Alert variant="info" title="No sites are linked to your account yet">
-          Ask your account administrator to add a site for you, or call the office on{' '}
-          <a href="tel:1300395438" className="font-medium underline underline-offset-4">
-            1300 395 438
-          </a>{' '}
-          and we will set it up.
-        </Alert>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-5">
       <header>
@@ -267,28 +320,76 @@ export function PortalBookPage() {
             <CardTitle className="text-base">The pickup</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/*
+              The address, typed each time.
+              Matt, 0:29: *"the job should just have the site on it as part of
+              the details for the job"* — because a site is a house being built
+              and it is never a pickup twice (3:28).
+            */}
             <Field
-              id="book-site"
-              label="Which site?"
+              id="book-site-name"
+              label="What should we call this pickup?"
               required
-              error={errors.siteId?.message}
-              hint={
-                chosenSite?.accessNotes
-                  ? `Access notes on file: ${chosenSite.accessNotes}`
-                  : 'Your saved sites — no address to retype.'
-              }
+              error={errors.siteName?.message}
+              hint="Whatever you would say on the phone — “Lot 214” or “the Edgeworth job”."
             >
               {(control) => (
-                <Select {...control} {...register('siteId')}>
-                  <option value="">Choose a site…</option>
-                  {siteOptions.map((site) => (
-                    <option key={site.id} value={site.id}>
-                      {site.name} — {site.suburb}
-                    </option>
-                  ))}
-                </Select>
+                <Input {...control} placeholder="Lot 214 Allambie Circuit" {...register('siteName')} />
               )}
             </Field>
+
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Field
+                id="book-lot"
+                label="Lot number"
+                error={errors.lotNumber?.message}
+                hint="If there is one."
+              >
+                {(control) => <Input {...control} placeholder="214" {...register('lotNumber')} />}
+              </Field>
+
+              <Field
+                id="book-address"
+                label="Street address"
+                required
+                error={errors.addressLine?.message}
+                className="sm:col-span-2"
+              >
+                {(control) => (
+                  <Input {...control} placeholder="46 Allambie Circuit" {...register('addressLine')} />
+                )}
+              </Field>
+            </div>
+
+            {/*
+              The suburb is PICKED, not typed — it carries the zone that prices
+              the job and the pin the board plots (Matt, 7:25 asked for the
+              type-ahead; this is also what replaces the site's stored zone).
+            */}
+            <Controller
+              control={control}
+              name="placeId"
+              render={({ field }) => (
+                <Field
+                  id="book-place"
+                  label="Suburb"
+                  required
+                  error={errors.placeId?.message}
+                  hint="Start typing — we only service Sydney, Wollongong and Newcastle."
+                >
+                  {(aria) => (
+                    <PlacePicker
+                      {...aria}
+                      value={place}
+                      onChange={(next) => {
+                        setPlace(next);
+                        field.onChange(next?.id ?? '');
+                      }}
+                    />
+                  )}
+                </Field>
+              )}
+            />
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Field
@@ -303,43 +404,48 @@ export function PortalBookPage() {
                 )}
               </Field>
 
-              <Field
-                id="book-area"
-                label="Expected plasterboard (m²)"
-                required
-                error={errors.expectedAreaM2?.message}
-                hint="A rough figure is fine — we measure on collection."
-              >
-                {(control) => (
-                  <Input
-                    {...control}
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    step={10}
-                    placeholder="850"
-                    {...register('expectedAreaM2')}
-                  />
-                )}
-              </Field>
+              {/* Both hidden for a builder — see `fromPurchaseOrder` above. */}
+              {!fromPurchaseOrder && (
+                <>
+                  <Field
+                    id="book-area"
+                    label="Expected plasterboard (m²)"
+                    required
+                    error={errors.expectedAreaM2?.message}
+                    hint="A rough figure is fine — we measure on collection."
+                  >
+                    {(control) => (
+                      <Input
+                        {...control}
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        step={10}
+                        placeholder="850"
+                        {...register('expectedAreaM2')}
+                      />
+                    )}
+                  </Field>
 
-              <Field
-                id="book-bags"
-                label="Recycling bags needed"
-                error={errors.bagCount?.message}
-                hint="Leave at 0 if the board is stacked loose."
-              >
-                {(control) => (
-                  <Input
-                    {...control}
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    max={200}
-                    {...register('bagCount')}
-                  />
-                )}
-              </Field>
+                  <Field
+                    id="book-bags"
+                    label="Recycling bags needed"
+                    error={errors.bagCount?.message}
+                    hint="Leave at 0 if the board is stacked loose."
+                  >
+                    {(control) => (
+                      <Input
+                        {...control}
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        max={200}
+                        {...register('bagCount')}
+                      />
+                    )}
+                  </Field>
+                </>
+              )}
 
               <Field
                 id="book-service-level"
@@ -369,33 +475,33 @@ export function PortalBookPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Your references</CardTitle>
+            <CardTitle className="text-base">Your reference</CardTitle>
             <p className="text-xs text-muted-foreground">
               Optional, unless your account requires a purchase order.
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field
-                id="book-reference"
-                label="Your reference"
-                error={errors.reference?.message}
-                hint="Job number, lot number — whatever you use to find it later."
-              >
-                {(control) => (
-                  <Input {...control} placeholder="Lot 1097" {...register('reference')} />
-                )}
-              </Field>
-
+            {/*
+              One field, not two.
+              Matt, 9:08: *"customer reference and purchase order number… either a
+              customer gives us a purchase order number or they'll give us a job
+              reference number. **They are one and the same.**"* It keeps the PO
+              name because that is what has to print on the invoice — 9:56: *"if
+              we don't list PO on the invoice, then sometimes I have trouble
+              getting paid."*
+            */}
+            <div className="grid gap-4">
               <Field
                 id="book-po"
-                label="Purchase order number"
+                label="PO / job reference"
                 required={poRequired}
                 error={errors.poNumber?.message}
                 hint={
-                  poRequired
-                    ? 'Your account requires a PO before we can invoice.'
-                    : 'Add one if your accounts team needs it on the invoice.'
+                  fromPurchaseOrder
+                    ? 'We take the area, bag allowance and site supervisor from this order.'
+                    : poRequired
+                      ? 'Your account requires a PO before we can invoice.'
+                      : 'A PO number or your own job reference — whichever you use. It prints as the PO.'
                 }
               >
                 {(control) => (
@@ -404,7 +510,7 @@ export function PortalBookPage() {
                     className="font-mono"
                     autoComplete="off"
                     spellCheck={false}
-                    placeholder="29916613/096"
+                    placeholder="29916613/096 or Lot 1097"
                     {...register('poNumber')}
                   />
                 )}

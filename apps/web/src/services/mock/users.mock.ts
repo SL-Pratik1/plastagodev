@@ -9,7 +9,7 @@ import {
 } from '@plastago/shared';
 import { ServiceError } from '../service-error';
 import type { UserService } from '../types';
-import { applyListQuery, byDate, byNumber, byText } from './list-query';
+import { applyListQuery, byDate, byText } from './list-query';
 import { latency } from './mock-transport';
 import { accountName, findUser, store } from './store';
 import { objectId } from './fixtures/reference';
@@ -37,6 +37,16 @@ export function createMockUserService(): UserService {
       return applyListQuery(store.users.map(toListItem), query, {
         search: (user) => [user.name, user.email, user.mobile, user.accountName],
         filters: {
+          /*
+           * Not a facet the user picks — the screen sets it from the caller's
+           * capability, so an operations seat asks for customer users and gets
+           * customer users. It lives here rather than as a client-side
+           * `.filter()` on the page because `meta.total` and the paging have to
+           * agree with what is on screen: filtering after the fact gives you
+           * "Showing 1–3 of 27" and a grid that skips pages.
+           */
+          scope: (user, value) =>
+            value === 'customers' ? user.role.startsWith('customer-') : true,
           role: (user, value) => user.role === value,
           status: (user, value) => user.status === value,
           account: (user, value) => user.accountId === value,
@@ -47,7 +57,6 @@ export function createMockUserService(): UserService {
           role: byText((user) => user.role),
           status: byText((user) => user.status),
           account: byText((user) => user.accountName),
-          siteCount: byNumber((user) => user.siteCount),
           lastSignedInAt: byDate((user) => user.lastSignedInAt),
           createdAt: byDate((user) => user.createdAt),
         },
@@ -74,6 +83,9 @@ export function createMockUserService(): UserService {
         email: draft.email || null,
         mobile: draft.mobile ? normaliseMobile(draft.mobile) : null,
         role: draft.role,
+        // The main role is always held; extras are additive and deduplicated, so
+        // ticking "also drives" on a driver cannot produce ['driver','driver'].
+        roles: [...new Set([draft.role, ...draft.additionalRoles])],
         // Invited, not active: they exist but have never signed in. Showing them
         // as active would make the invitation campaign's activation rate — a
         // go-live gate — unmeasurable.
@@ -81,7 +93,6 @@ export function createMockUserService(): UserService {
         brandIds: draft.brandIds,
         accountId: draft.accountId,
         accountName: draft.accountId ? accountName(draft.accountId) : null,
-        siteCount: 0,
         lastSignedInAt: null,
         createdAt: new Date().toISOString(),
         jobTitle: draft.jobTitle || null,
@@ -112,6 +123,9 @@ export function createMockUserService(): UserService {
         email: draft.email || null,
         mobile: draft.mobile ? normaliseMobile(draft.mobile) : null,
         role: draft.role,
+        // The main role is always held; extras are additive and deduplicated, so
+        // ticking "also drives" on a driver cannot produce ['driver','driver'].
+        roles: [...new Set([draft.role, ...draft.additionalRoles])],
         brandIds: draft.brandIds,
         accountId: draft.accountId,
         accountName: draft.accountId ? accountName(draft.accountId) : null,

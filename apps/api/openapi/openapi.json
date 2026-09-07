@@ -19,6 +19,10 @@
     {
       "name": "Health",
       "description": "Liveness and readiness probes"
+    },
+    {
+      "name": "Authentication",
+      "description": "Email and SMS one-time codes (§9 A1/A2). No passwords exist in this product. Sign-in is a two-step challenge: request a code, then verify it. The identifier is held server-side against the returned challengeId and is never sent again."
     }
   ],
   "paths": {
@@ -75,10 +79,311 @@
           }
         }
       }
+    },
+    "/api/v1/auth/otp/request": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "requestOtp",
+        "summary": "Send a one-time sign-in code",
+        "description": "Accepts an email address OR an Australian mobile in one field, and routes to the matching channel. The response never reveals whether the identifier exists: an unrecognised one receives an identically shaped challenge and no message is sent. `sentTo` is masked.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OtpRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "A code has been issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtpChallenge"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/otp/resend": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "resendOtp",
+        "summary": "Re-send the code for an existing challenge",
+        "description": "Refuses until `resendAvailableAt` has passed, and refills the attempt counter. Subject to the same per-identifier ceiling as the initial send.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OtpResend"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "A new code has been issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtpChallenge"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/otp/verify": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "verifyOtp",
+        "summary": "Verify a code and open a session",
+        "description": "On success sets the session cookie and returns the session. On failure the exact reason travels as a field issue at path `authReason` — one of CODE_INCORRECT, CODE_EXPIRED, CODE_ATTEMPTS_EXCEEDED or CHALLENGE_NOT_FOUND — because the closed `ErrorCode` union cannot express them and the sign-in screen needs different copy for each. `CODE_INCORRECT` also carries `attemptsRemaining`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OtpVerify"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "getCurrentSession",
+        "summary": "The current session, or null",
+        "description": "Answers 200 with `null` when nobody is signed in — not 401. Every surface calls this on load, and \"no session yet\" is the most ordinary state the app has, not an error. The user record is re-read on each call, so a suspended account loses access on its next request rather than at its next sign-in.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The signed-in session, or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Session"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/sign-out": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "signOut",
+        "summary": "End the current session",
+        "description": "Idempotent: succeeds with 204 whether or not a session existed, because the caller has already got what they asked for either way.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "responses": {
+          "204": {
+            "description": "Session ended and the cookie cleared"
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "OtpRequest": {
+        "type": "object",
+        "properties": {
+          "identifier": {
+            "$ref": "#/components/schemas/AuthIdentifier"
+          }
+        },
+        "required": [
+          "identifier"
+        ]
+      },
+      "AuthIdentifier": {
+        "type": "string",
+        "minLength": 1
+      },
+      "OtpResend": {
+        "type": "object",
+        "properties": {
+          "challengeId": {
+            "$ref": "#/components/schemas/ObjectId"
+          }
+        },
+        "required": [
+          "challengeId"
+        ]
+      },
+      "ObjectId": {
+        "type": "string",
+        "pattern": "^[0-9a-fA-F]{24}$",
+        "description": "Mongo ObjectId",
+        "example": "66b3f0c1a2d4e5f6a7b8c9d0"
+      },
+      "OtpVerify": {
+        "type": "object",
+        "properties": {
+          "challengeId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^\\d{6}$"
+          }
+        },
+        "required": [
+          "challengeId",
+          "code"
+        ]
+      },
       "Liveness": {
         "type": "object",
         "properties": {
@@ -124,7 +429,7 @@
           "checkedAt": {
             "type": "string",
             "format": "date-time",
-            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
           },
           "dependencies": {
             "type": "object",
@@ -177,6 +482,242 @@
           "up",
           "down",
           "disabled"
+        ]
+      },
+      "OtpChallenge": {
+        "type": "object",
+        "properties": {
+          "challengeId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "channel": {
+            "$ref": "#/components/schemas/AuthChannel"
+          },
+          "sentTo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Masked destination, e.g. \"•••• 678\" or \"m•••@iplasta.com.au\""
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "resendAvailableAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "attemptsRemaining": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "challengeId",
+          "channel",
+          "sentTo",
+          "expiresAt",
+          "resendAvailableAt",
+          "attemptsRemaining"
+        ],
+        "additionalProperties": false
+      },
+      "AuthChannel": {
+        "type": "string",
+        "enum": [
+          "email",
+          "sms"
+        ]
+      },
+      "IsoDateTime": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+        "example": "2026-08-25T01:30:00.000Z"
+      },
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "$ref": "#/components/schemas/ErrorCode"
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable, safe to surface in the UI"
+              },
+              "issues": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/FieldIssue"
+                }
+              },
+              "requestId": {
+                "type": "string",
+                "description": "Correlates the response with the server log line"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "requestId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "BAD_REQUEST",
+          "VALIDATION_FAILED",
+          "UNAUTHENTICATED",
+          "FORBIDDEN",
+          "NOT_FOUND",
+          "CONFLICT",
+          "RATE_LIMITED",
+          "DEPENDENCY_UNAVAILABLE",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "FieldIssue": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Dot path to the offending field, e.g. \"site.postcode\""
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/AuthenticatedUser"
+          },
+          "issuedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "user",
+          "issuedAt",
+          "expiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "AuthenticatedUser": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "email",
+                "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mobile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "roles": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Role"
+            }
+          },
+          "jobTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "brandIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "accountId": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObjectId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lastSignedInAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "email",
+          "mobile",
+          "role",
+          "roles",
+          "jobTitle",
+          "brandIds",
+          "accountId",
+          "lastSignedInAt"
+        ],
+        "additionalProperties": false
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "super-admin",
+          "operations",
+          "office-staff",
+          "allocator",
+          "driver",
+          "customer-administrator",
+          "customer-site-supervisor"
         ]
       }
     },

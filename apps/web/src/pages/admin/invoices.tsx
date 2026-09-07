@@ -30,8 +30,9 @@ import {
   useSendInvoices,
 } from '@/features/invoices/queries';
 import { useAccountOptions } from '@/features/lookups/queries';
+import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
-import { formatDate, formatMoney } from '@/lib/format';
+import { formatDate, formatInvoiceNumber, formatMoney } from '@/lib/format';
 
 /**
  * Invoice list (M7.7).
@@ -95,7 +96,8 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
   },
 ];
 
-const COLUMNS: readonly DataTableColumn<InvoiceListItem>[] = [
+function columns(prefix: string): readonly DataTableColumn<InvoiceListItem>[] {
+  return [
   {
     id: 'invoiceNumber',
     header: 'Invoice',
@@ -103,7 +105,9 @@ const COLUMNS: readonly DataTableColumn<InvoiceListItem>[] = [
     priority: 'primary',
     cell: (row) => (
       <span className="block">
-        <span className="font-mono font-medium">#{row.invoiceNumber}</span>
+        <span className="font-mono font-medium">
+          {formatInvoiceNumber(row.invoiceNumber, prefix)}
+        </span>
         <span className="block text-xs text-muted-foreground">{INVOICE_KIND_LABELS[row.kind]}</span>
       </span>
     ),
@@ -170,14 +174,17 @@ const COLUMNS: readonly DataTableColumn<InvoiceListItem>[] = [
     numeric: true,
     priority: 'secondary',
     cell: (row) => formatMoney(row.totalIncGst),
-  },
-];
+    },
+  ];
+}
 
 export function AdminInvoicesPage() {
   const toast = useToast();
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultSort: '-invoiceNumber' });
   const { data, error, isPending, isFetching, refetch } = useInvoiceList(controller.query);
   const accounts = useAccountOptions();
+  // Presentation only (Matt, 7:07). Empty until the office sets one.
+  const prefix = useSettings().data?.invoicing.invoiceNumberPrefix ?? '';
 
   const [selected, setSelected] = useState<string[]>([]);
   const [confirm, setConfirm] = useState<'send' | 'approve' | null>(null);
@@ -285,7 +292,7 @@ export function AdminInvoicesPage() {
 
         <DataTable
           caption="Invoices"
-          columns={COLUMNS}
+          columns={columns(prefix)}
           rows={data?.data ?? []}
           getRowId={(row) => row.id}
           isPending={isPending}

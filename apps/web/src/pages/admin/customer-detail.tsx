@@ -1,17 +1,14 @@
 import {
+  ACCOUNT_TYPE_DESCRIPTIONS,
   BRAND_LABELS,
   CAPTURE_MODE_LABELS,
   CONTACT_ROLE_LABELS,
   PO_POLICY_LABELS,
   RATE_CARD_LABELS,
-  RISK_ASSESSMENT_OVERRIDES,
-  RISK_ASSESSMENT_OVERRIDE_LABELS,
   ZONE_LABELS,
-  requiresRiskAssessment,
   type Account,
   type InvoiceListItem,
   type JobListItem,
-  type Site,
 } from '@plastago/shared';
 import {
   Alert,
@@ -22,7 +19,6 @@ import {
   CardTitle,
   ErrorState,
   Pagination,
-  Select,
   Skeleton,
   Switch,
   Tabs,
@@ -34,7 +30,6 @@ import {
 import {
   BriefcaseIcon,
   MailIcon,
-  MapPinIcon,
   ReceiptIcon,
   ShieldCheckIcon,
   SmartphoneIcon,
@@ -45,18 +40,17 @@ import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { DetailList } from '@/components/detail-list';
-import { InvoiceStatusBadge, JobStatusBadge } from '@/components/domain-badges';
+import { AccountTypeBadge, InvoiceStatusBadge, JobStatusBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
 import {
   useCustomer,
   useCustomerInvoices,
   useCustomerJobs,
-  useCustomerSites,
   useSetRiskAssessmentRequired,
-  useSetSiteRiskAssessmentOverride,
 } from '@/features/customers/queries';
+import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
-import { formatDate, formatMobile, formatMoney } from '@/lib/format';
+import { formatDate, formatInvoiceNumber, formatMobile, formatMoney } from '@/lib/format';
 
 const TABS = ['overview', 'sites', 'contacts', 'jobs', 'invoices', 'preferences'] as const;
 type TabKey = (typeof TABS)[number];
@@ -79,6 +73,7 @@ export function AdminCustomerDetailPage() {
   const [params, setParams] = useSearchParams();
 
   const { data: account, error, isPending, refetch } = useCustomer(customerId);
+  const invoicePrefix = useSettings().data?.invoicing.invoiceNumberPrefix ?? '';
 
   const rawTab = params.get('tab');
   const tab: TabKey = (TABS as readonly string[]).includes(rawTab ?? '')
@@ -97,11 +92,6 @@ export function AdminCustomerDetailPage() {
     );
   };
 
-  const siteQuery = useListQuery({
-    paramPrefix: 'sites',
-    filterKeys: ['zone'],
-    defaultPageSize: 10,
-  });
   const jobQuery = useListQuery({
     paramPrefix: 'jobs',
     filterKeys: ['status'],
@@ -113,7 +103,6 @@ export function AdminCustomerDetailPage() {
     defaultPageSize: 10,
   });
 
-  const sites = useCustomerSites(customerId, siteQuery.query, tab === 'sites');
   const jobs = useCustomerJobs(customerId, jobQuery.query, tab === 'jobs');
   const invoices = useCustomerInvoices(customerId, invoiceQuery.query, tab === 'invoices');
 
@@ -163,9 +152,6 @@ export function AdminCustomerDetailPage() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList label="Account sections">
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="sites" badge={account.siteCount}>
-            Sites
-          </TabsTrigger>
           <TabsTrigger value="contacts" badge={account.contacts.length}>
             Contacts
           </TabsTrigger>
@@ -185,12 +171,39 @@ export function AdminCustomerDetailPage() {
                 <DetailList
                   columns={2}
                   items={[
+                    {
+                      // First, because it is what tells the reader whether the
+                      // rest of this account has POs and supervisors at all.
+                      label: 'Type',
+                      value: (
+                        <span className="flex flex-wrap items-center gap-2">
+                          <AccountTypeBadge type={account.accountType} />
+                          <span className="text-xs text-muted-foreground">
+                            {ACCOUNT_TYPE_DESCRIPTIONS[account.accountType]}
+                          </span>
+                        </span>
+                      ),
+                      wide: true,
+                    },
                     { label: 'ABN', value: account.abn },
                     { label: 'Payment terms', value: `${String(account.paymentTermsDays)} days` },
                     { label: 'Rate card', value: RATE_CARD_LABELS[account.rateCardId] },
                     { label: 'Primary zone', value: ZONE_LABELS[account.primaryZone] },
                     { label: 'PO policy', value: PO_POLICY_LABELS[account.poPolicy] },
                     { label: 'Capture', value: CAPTURE_MODE_LABELS[account.captureMode] },
+                    {
+                      /*
+                       * Certificates go somewhere different from invoices.
+                       * Matt, 31:04 — for most builders it is a compliance or
+                       * ESG mailbox with no connection to accounts payable.
+                       */
+                      label: 'Certificates emailed to',
+                      value: account.certificateEmail ?? (
+                        <span className="text-muted-foreground">
+                          Not set — falls back to the accounts contact
+                        </span>
+                      ),
+                    },
                     { label: 'Notes', value: account.notes || '—', wide: true },
                   ]}
                 />
@@ -227,53 +240,6 @@ export function AdminCustomerDetailPage() {
               )}
             </div>
           </div>
-        </TabsPanel>
-
-        {/* ── Sites ────────────────────────────────────────────────────── */}
-        <TabsPanel value="sites">
-          <Card className="overflow-hidden p-0">
-            <DataTableToolbar
-              controller={siteQuery}
-              searchPlaceholder="Search site, lot, suburb or builder…"
-              filters={[
-                {
-                  key: 'zone',
-                  label: 'Zone',
-                  allLabel: 'All zones',
-                  options: Object.entries(ZONE_LABELS).map(([value, label]) => ({ value, label })),
-                },
-              ]}
-            />
-            <DataTable
-              caption={`Sites for ${account.name}`}
-              columns={siteColumns(account.riskAssessmentRequired)}
-              rows={sites.data?.data ?? []}
-              getRowId={(row) => row.id}
-              isPending={sites.isPending}
-              isFetching={sites.isFetching && !sites.isPending}
-              error={sites.error}
-              onRetry={() => void sites.refetch()}
-              sort={siteQuery.sort}
-              onToggleSort={siteQuery.toggleSort}
-              isFiltered={siteQuery.isFiltered}
-              onClearFilters={siteQuery.clearFilters}
-              empty={{
-                icon: MapPinIcon,
-                title: 'No sites yet',
-                description: 'Sites are added when the first job is booked at an address.',
-              }}
-            />
-            {sites.data && (
-              <Pagination
-                page={sites.data.meta.page}
-                pageSize={sites.data.meta.pageSize}
-                total={sites.data.meta.total}
-                onPageChange={siteQuery.setPage}
-                onPageSizeChange={siteQuery.setPageSize}
-                pageSizeOptions={[5, 10, 15, 20]}
-              />
-            )}
-          </Card>
         </TabsPanel>
 
         {/* ── Contacts ─────────────────────────────────────────────────── */}
@@ -374,7 +340,7 @@ export function AdminCustomerDetailPage() {
             />
             <DataTable
               caption={`Invoices for ${account.name}`}
-              columns={INVOICE_COLUMNS}
+              columns={invoiceColumns(invoicePrefix)}
               rows={invoices.data?.data ?? []}
               getRowId={(row) => row.id}
               isPending={invoices.isPending}
@@ -435,6 +401,7 @@ export function AdminCustomerDetailPage() {
           </Card>
         </TabsPanel>
       </Tabs>
+
     </div>
   );
 }
@@ -515,121 +482,6 @@ function RiskAssessmentCard({ account }: { account: Account }) {
  * open this tab is to see which sites differ, and a control you have to click
  * into to read is not an answer to that question.
  */
-function SiteRiskOverrideCell({ site, accountDefault }: { site: Site; accountDefault: boolean }) {
-  const toast = useToast();
-  const setOverride = useSetSiteRiskAssessmentOverride();
-  const effective = requiresRiskAssessment(accountDefault, site.riskAssessmentOverride);
-
-  return (
-    <span className="flex flex-col gap-1">
-      <Select
-        value={site.riskAssessmentOverride}
-        disabled={setOverride.isPending}
-        aria-label={`Risk assessment for ${site.name}`}
-        className="h-8 text-xs"
-        onChange={(event) => {
-          const override = event.target.value as Site['riskAssessmentOverride'];
-          void setOverride
-            .mutateAsync({ siteId: site.id, override })
-            .then(() => {
-              toast.success('Site updated', RISK_ASSESSMENT_OVERRIDE_LABELS[override]);
-            })
-            .catch((error: unknown) => {
-              toast.error(describeError(error).title, describeError(error).detail);
-            });
-        }}
-      >
-        {RISK_ASSESSMENT_OVERRIDES.map((value) => (
-          <option key={value} value={value}>
-            {RISK_ASSESSMENT_OVERRIDE_LABELS[value]}
-          </option>
-        ))}
-      </Select>
-      {/*
-        The resolved answer, spelled out. "Follow the account" is not something
-        anyone can act on without also remembering what the account says — and
-        the whole point of the override is that some rows do not match it.
-      */}
-      <span className="text-[11px] text-muted-foreground">
-        {effective ? 'Driver must complete it' : 'Not required here'}
-      </span>
-    </span>
-  );
-}
-
-/**
- * Site columns, built per account.
- *
- * A function rather than a module constant because the risk-assessment column
- * has to resolve each site against ITS ACCOUNT'S default — "Follow the account"
- * means nothing without knowing what the account says. A static column list
- * cannot see that, and reading it from a module-level variable would be a
- * second source of truth for a value already on screen.
- */
-function siteColumns(accountDefault: boolean): readonly DataTableColumn<Site>[] {
-  return [
-    ...BASE_SITE_COLUMNS,
-    {
-      id: 'riskAssessment',
-      header: 'Risk form',
-      priority: 'secondary',
-      className: 'w-48',
-      cell: (row) => <SiteRiskOverrideCell site={row} accountDefault={accountDefault} />,
-    },
-  ];
-}
-
-const BASE_SITE_COLUMNS: readonly DataTableColumn<Site>[] = [
-  {
-    id: 'name',
-    header: 'Site',
-    sortKey: 'name',
-    priority: 'primary',
-    cell: (row) => (
-      <span className="block">
-        <span className="font-medium">{row.name}</span>
-        <span className="block text-xs text-muted-foreground">
-          {row.addressLine}, {row.suburb} {row.postcode}
-        </span>
-      </span>
-    ),
-  },
-  {
-    id: 'builderName',
-    header: 'Builder',
-    sortKey: 'builderName',
-    priority: 'secondary',
-    // The builder is a property of the SITE, not the account (M1.2).
-    cell: (row) => <Badge variant="outline">{row.builderName}</Badge>,
-  },
-  {
-    id: 'zone',
-    header: 'Zone',
-    priority: 'detail',
-    cell: (row) => <span className="text-muted-foreground">{ZONE_LABELS[row.zone]}</span>,
-  },
-  {
-    id: 'access',
-    header: 'Access',
-    priority: 'detail',
-    cell: (row) => (
-      <span className="flex flex-wrap gap-1">
-        {row.craneAvailable && <Badge variant="secondary">Crane</Badge>}
-        {row.inductionRequired && <Badge variant="warning">Induction</Badge>}
-        {row.gateHours && <Badge variant="outline">{row.gateHours}</Badge>}
-      </span>
-    ),
-  },
-  {
-    id: 'jobCount',
-    header: 'Jobs',
-    sortKey: 'jobCount',
-    numeric: true,
-    priority: 'detail',
-    className: 'w-20',
-    cell: (row) => row.jobCount,
-  },
-];
 
 const ACCOUNT_JOB_COLUMNS: readonly DataTableColumn<JobListItem>[] = [
   {
@@ -668,7 +520,7 @@ const ACCOUNT_JOB_COLUMNS: readonly DataTableColumn<JobListItem>[] = [
     header: 'm²',
     numeric: true,
     priority: 'detail',
-    cell: (row) => row.expectedAreaM2.toLocaleString('en-AU'),
+    cell: (row) => row.expectedAreaM2?.toLocaleString('en-AU') ?? '—',
   },
   {
     id: 'totalExGst',
@@ -679,7 +531,8 @@ const ACCOUNT_JOB_COLUMNS: readonly DataTableColumn<JobListItem>[] = [
   },
 ];
 
-const INVOICE_COLUMNS: readonly DataTableColumn<InvoiceListItem>[] = [
+function invoiceColumns(prefix: string): readonly DataTableColumn<InvoiceListItem>[] {
+  return [
   {
     id: 'invoiceNumber',
     header: 'Invoice',
@@ -687,7 +540,9 @@ const INVOICE_COLUMNS: readonly DataTableColumn<InvoiceListItem>[] = [
     priority: 'primary',
     cell: (row) => (
       <span className="block">
-        <span className="font-mono font-medium">#{row.invoiceNumber}</span>
+        <span className="font-mono font-medium">
+          {formatInvoiceNumber(row.invoiceNumber, prefix)}
+        </span>
         <span className="block text-xs text-muted-foreground">
           {row.kind === 'base' ? 'Base invoice' : 'Additional charges'}
         </span>
@@ -739,4 +594,5 @@ const INVOICE_COLUMNS: readonly DataTableColumn<InvoiceListItem>[] = [
     priority: 'detail',
     cell: (row) => formatMoney(row.totalIncGst),
   },
-];
+  ];
+}

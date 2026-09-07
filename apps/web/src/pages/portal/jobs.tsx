@@ -7,7 +7,7 @@ import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { PickupStatusBadge, ReadinessBadge } from '@/components/portal/pickup-status';
-import { usePortalJobs, usePortalScope, usePortalSites } from '@/features/portal/queries';
+import { usePortalJobs, usePortalScope } from '@/features/portal/queries';
 import { formatArea, formatDate, formatMoney, formatWeight } from '@/lib/format';
 
 /**
@@ -25,7 +25,7 @@ import { formatArea, formatDate, formatMoney, formatWeight } from '@/lib/format'
  * and the site supervisor cards on a phone, from one column definition. Nothing
  * is dropped on the small layout; only its position changes.
  */
-const FILTER_KEYS = ['state', 'site', 'urgent', 'readiness'] as const;
+const FILTER_KEYS = ['state', 'suburb', 'urgent', 'readiness'] as const;
 
 const STATIC_FILTERS: readonly FilterDefinition[] = [
   {
@@ -65,25 +65,29 @@ export function PortalJobsPage() {
   const scope = usePortalScope();
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = usePortalJobs(controller.query);
-  const sites = usePortalSites({ page: 1, pageSize: 200 });
 
   const canSeePricing = scope.data?.canSeePricing ?? false;
   const capturesWeight = scope.data?.capturesWeight ?? false;
 
+  /*
+   * Filtered by suburb, not by site.
+   *
+   * There is no saved site list to build a dropdown from any more (Matt, 0:29),
+   * so the options come from the jobs on screen — which is also more honest: it
+   * only ever offers a suburb the customer actually has work in.
+   */
+  const suburbs = [...new Set((data?.data ?? []).map((job) => job.suburb))].sort();
+
   const filters: readonly FilterDefinition[] = [
     ...STATIC_FILTERS,
-    // Only worth offering when there is more than one site to choose between —
-    // a single-site supervisor gets a dropdown with one option otherwise.
-    ...((sites.data?.data.length ?? 0) > 1
+    // One option is not a choice; the filter only earns its place past that.
+    ...(suburbs.length > 1
       ? [
           {
-            key: 'site',
-            label: 'Site',
-            allLabel: 'All sites',
-            options: (sites.data?.data ?? []).map((site) => ({
-              value: site.id,
-              label: `${site.name} — ${site.suburb}`,
-            })),
+            key: 'suburb',
+            label: 'Suburb',
+            allLabel: 'All suburbs',
+            options: suburbs.map((suburb) => ({ value: suburb, label: suburb })),
           },
         ]
       : []),
@@ -100,7 +104,7 @@ export function PortalJobsPage() {
           <span className="block font-medium">{formatDate(row.readyDate)}</span>
           <span className="block text-xs text-muted-foreground">
             <span className="font-mono">#{row.jobNumber}</span>
-            {row.reference !== null && ` · ${row.reference}`}
+            {row.poNumber !== null && ` · ${row.poNumber}`}
           </span>
         </span>
       ),
@@ -144,6 +148,26 @@ export function PortalJobsPage() {
           <ReadinessBadge job={row} />
         ) : (
           <span className="text-xs text-muted-foreground">—</span>
+        ),
+    },
+    {
+      /*
+       * Who raised it.
+       *
+       * Matt, 18:15: *"I just want to make sure site supervisors can submit
+       * their jobs and be able to see the jobs they've submitted."* On an
+       * account with several supervisors this is how an administrator tells
+       * whose booking is whose without opening every job.
+       */
+      id: 'bookedBy',
+      header: 'Booked by',
+      sortKey: 'bookedByName',
+      priority: 'detail',
+      cell: (row) =>
+        row.bookedByName === null ? (
+          <span className="text-xs text-muted-foreground">—</span>
+        ) : (
+          <span className="block truncate text-sm">{row.bookedByName}</span>
         ),
     },
     {

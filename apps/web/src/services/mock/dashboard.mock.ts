@@ -18,7 +18,7 @@ import { isAtRisk, store, todayIso } from './store';
  * and the lists can never disagree — a headline that says 14 unallocated while
  * the board shows 11 destroys confidence in every other number on the page.
  */
-const OPEN: readonly JobStatus[] = ['booked', 'assigned', 'acknowledged', 'in-transit', 'arrived'];
+const OPEN: readonly JobStatus[] = ['booked', 'assigned', 'in-transit', 'arrived'];
 
 function isoDaysAgo(days: number): string {
   const date = new Date();
@@ -51,7 +51,7 @@ export function createMockDashboardService(): DashboardService {
         return {
           date,
           jobs: onDate.length,
-          areaM2: onDate.reduce((sum, job) => sum + job.expectedAreaM2, 0),
+          areaM2: onDate.reduce((sum, job) => sum + (job.expectedAreaM2 ?? 0), 0),
         };
       });
 

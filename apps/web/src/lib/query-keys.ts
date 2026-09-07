@@ -25,7 +25,7 @@ export const queryKeys = {
     accounts: () => [...queryKeys.lookups.all, 'accounts'] as const,
     builders: () => [...queryKeys.lookups.all, 'builders'] as const,
     drivers: () => [...queryKeys.lookups.all, 'drivers'] as const,
-    sites: (accountId: string) => [...queryKeys.lookups.all, 'sites', accountId] as const,
+    places: (query: string) => [...queryKeys.lookups.all, 'places', query] as const,
   },
 
   dashboard: {
@@ -43,8 +43,6 @@ export const queryKeys = {
     all: ['customers'] as const,
     list: (query: ListQuery) => [...queryKeys.customers.all, 'list', query] as const,
     detail: (id: string) => [...queryKeys.customers.all, 'detail', id] as const,
-    sites: (id: string, query: ListQuery) =>
-      [...queryKeys.customers.all, 'sites', id, query] as const,
     jobs: (id: string, query: ListQuery) =>
       [...queryKeys.customers.all, 'jobs', id, query] as const,
     invoices: (id: string, query: ListQuery) =>
@@ -135,20 +133,19 @@ export const queryKeys = {
     jobs: (query: ListQuery) => [...queryKeys.portal.all, 'jobs', query] as const,
     job: (id: string) => [...queryKeys.portal.all, 'job', id] as const,
     quote: (draft: unknown) => [...queryKeys.portal.all, 'quote', draft] as const,
-    sites: (query: ListQuery) => [...queryKeys.portal.all, 'sites', query] as const,
-    site: (id: string) => [...queryKeys.portal.all, 'site', id] as const,
     invoices: (query: ListQuery) => [...queryKeys.portal.all, 'invoices', query] as const,
     report: (filters: unknown) => [...queryKeys.portal.all, 'report', filters] as const,
     certificates: (query: ListQuery) => [...queryKeys.portal.all, 'certificates', query] as const,
     supervisors: (query: ListQuery) => [...queryKeys.portal.all, 'supervisors', query] as const,
     account: () => [...queryKeys.portal.all, 'account'] as const,
+    onboarding: () => [...queryKeys.portal.all, 'onboarding'] as const,
   },
 
   dispatch: {
     all: ['dispatch'] as const,
     board: (date: string) => [...queryKeys.dispatch.all, 'board', date] as const,
-    runSheet: (driverId: string, date: string) =>
-      [...queryKeys.dispatch.all, 'run-sheet', driverId, date] as const,
+    /** Keyed by RUN, not by driver-and-date — a driver has two on a busy day. */
+    runSheet: (runId: string) => [...queryKeys.dispatch.all, 'run-sheet', runId] as const,
     map: (date: string) => [...queryKeys.dispatch.all, 'map', date] as const,
     drivers: () => [...queryKeys.dispatch.all, 'drivers'] as const,
   },

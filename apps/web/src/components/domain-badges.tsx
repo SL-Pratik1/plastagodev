@@ -1,8 +1,10 @@
 import {
+  ACCOUNT_TYPE_LABELS,
   EXPIRY_STATE_LABELS,
   INVOICE_STATUS_LABELS,
   JOB_STATUS_LABELS,
   USER_STATUS_LABELS,
+  type AccountType,
   type ExpiryState,
   type InvoiceStatus,
   type JobStatus,
@@ -27,7 +29,6 @@ import { ClockIcon, TriangleAlertIcon, ZapIcon } from 'lucide-react';
 const JOB_STATUS_VARIANT: Record<JobStatus, BadgeProps['variant']> = {
   booked: 'outline',
   assigned: 'secondary',
-  acknowledged: 'secondary',
   'in-transit': 'default',
   arrived: 'default',
   completed: 'success',
@@ -80,6 +81,21 @@ const USER_STATUS_VARIANT: Record<UserStatus, BadgeProps['variant']> = {
   invited: 'warning',
   suspended: 'destructive',
 };
+
+/**
+ * Builder or contractor.
+ *
+ * Worth a badge rather than a text column because it changes what the reader
+ * should expect on the rest of the row: a builder has purchase orders and site
+ * supervisors, a contractor has neither (Matt, 21:55).
+ */
+export function AccountTypeBadge({ type }: { type: AccountType }) {
+  return (
+    <Badge variant={type === 'builder' ? 'default' : 'secondary'}>
+      {ACCOUNT_TYPE_LABELS[type]}
+    </Badge>
+  );
+}
 
 export function UserStatusBadge({ status }: { status: UserStatus }) {
   return <Badge variant={USER_STATUS_VARIANT[status]}>{USER_STATUS_LABELS[status]}</Badge>;

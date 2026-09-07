@@ -1,4 +1,4 @@
-import type { AuthenticatedUser, OtpChallenge, Session } from '@plastago/shared';
+import type { AuthenticatedUser, OtpChallenge, Role, Session } from '@plastago/shared';
 import { createContext, useContext } from 'react';
 import type { Capability } from './permissions';
 
@@ -28,7 +28,21 @@ export interface AuthContextValue {
   signOut: () => Promise<void>;
   abandonChallenge: () => void;
 
-  /** Capability check for the signed-in user. False when anonymous. */
+  /**
+   * Switch which of the user's roles is active.
+   *
+   * Matt's driver manager holds both allocator and driver (27:01) and moves
+   * between them when he covers a shift. The surfaces are different
+   * applications — a dispatch board and a run sheet — so this changes what the
+   * whole app is, not a filter on one screen.
+   *
+   * Rejects a role the user does not hold: the active role is what every
+   * capability check reads, so accepting an arbitrary one here would be a
+   * privilege escalation rather than a display bug.
+   */
+  switchRole: (role: Role) => void;
+
+  /** Capability check for the ACTIVE role. False when anonymous. */
   can: (capability: Capability) => boolean;
 }
 

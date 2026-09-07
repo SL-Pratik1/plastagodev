@@ -12,11 +12,15 @@ import { BrandIdSchema, ZoneSchema } from './party.js';
  * Jobs (M2, M4, M6).
  *
  * ── The status set is deliberately small ───────────────────────────────────
- * These are the six statuses actually used across all 5,079 production jobs,
- * plus the one we add. **We are not building a 20-state machine nobody uses.**
+ * These are the statuses actually used across all 5,079 production jobs, plus
+ * the one we add. **We are not building a 20-state machine nobody uses.**
  *
- *   booked → assigned → acknowledged → in-transit → arrived → completed
- *                                                        → admin-complete
+ * `acknowledged` was dropped: the driver app raised it from an "Accept job" tap,
+ * and a job that is already dispatched to a named driver gives them nothing to
+ * accept or reject. One less tap before the truck moves.
+ *
+ *   booked → assigned → in-transit → arrived → completed
+ *                                             → admin-complete
  *   exception branch: futile
  *
  * `arrived` does not exist in TransVirtual but the workflow depends on it: it
@@ -30,7 +34,6 @@ import { BrandIdSchema, ZoneSchema } from './party.js';
 export const JOB_STATUSES = [
   'booked',
   'assigned',
-  'acknowledged',
   'in-transit',
   'arrived',
   'completed',
@@ -44,7 +47,6 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
   booked: 'Booked',
   assigned: 'Assigned',
-  acknowledged: 'Acknowledged',
   'in-transit': 'En route',
   arrived: 'On site',
   completed: 'Completed',
@@ -57,7 +59,6 @@ export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
 export const OPEN_JOB_STATUSES: readonly JobStatus[] = [
   'booked',
   'assigned',
-  'acknowledged',
   'in-transit',
   'arrived',
 ];
@@ -288,6 +289,56 @@ export const SraUploadStateSchema = z.enum(SRA_STEP_STATES).meta({ id: 'SraUploa
 export type SraUploadState = z.infer<typeof SraUploadStateSchema>;
 
 /**
+ * M4.3 — whether a recovered weight was measured or worked out.
+ *
+ * Matt, 56:11: *"we want to mark that weight as an **estimated** weight, not an
+ * actual weight. So for jobs where they actually weigh, the driver weighs them,
+ * in the job card, we want to record the weight of that job as an **actual**
+ * weight. And in the jobs where it's calculated based off weighbridge total, we
+ * want to record that as an estimated weight."*
+ *
+ * Carried as a field rather than inferred from `loadType` at read time: the
+ * basis is a fact about the number that was stored, and a job whose load type is
+ * corrected later must not silently restate a measurement as a guess.
+ */
+export const WEIGHT_BASES = ['actual', 'estimated'] as const;
+export const WeightBasisSchema = z.enum(WEIGHT_BASES).meta({ id: 'WeightBasis' });
+export type WeightBasis = z.infer<typeof WeightBasisSchema>;
+
+export const WEIGHT_BASIS_LABELS: Record<WeightBasis, string> = {
+  actual: 'Actual',
+  estimated: 'Estimated',
+};
+
+export const WEIGHT_BASIS_HINTS: Record<WeightBasis, string> = {
+  actual: 'Weighed on the crane scale by the driver',
+  estimated: 'Worked out from the weighbridge total, by job size',
+};
+
+/**
+ * M4.8b — the PDF the assessment produces.
+ *
+ * Matt, 1:03:25: *"even if the PDF that it produces just gets attached to the
+ * job card… once it generates the PDF, just attaches it to that job and **gives
+ * the driver a copy** he can upload onto the builder's site."*
+ *
+ * Two destinations, not one: the office needs it filed against the job, and the
+ * driver needs it in their hand at the fence because some builders only accept
+ * it through their own portal.
+ */
+export const SraDocumentSchema = z
+  .object({
+    documentId: NonEmptyStringSchema,
+    fileName: NonEmptyStringSchema,
+    /** Null until generation finishes — the driver sees "preparing". */
+    generatedAt: IsoDateTimeSchema.nullable(),
+    pageCount: z.number().int().positive(),
+    sizeBytes: z.number().int().nonnegative(),
+  })
+  .meta({ id: 'SraDocument' });
+export type SraDocument = z.infer<typeof SraDocumentSchema>;
+
+/**
  * M4.8 — the compliance record the office can READ BACK.
  *
  * ── Why this exists as its own block on the job ───────────────────────────
@@ -342,6 +393,8 @@ export const JobRiskAssessmentRecordSchema = z
     builderPortalCode: z.string().nullable(),
     /** Step 5 of the five-step workflow — the handoff to the builder's portal. */
     uploadState: SraUploadStateSchema,
+    /** The generated PDF, filed against this job. Null while it is being made. */
+    document: SraDocumentSchema.nullable(),
   })
   .meta({ id: 'JobRiskAssessmentRecord' });
 
@@ -372,20 +425,144 @@ export const JobListItemSchema = z
     accountId: ObjectIdSchema,
     accountName: NonEmptyStringSchema,
     builderName: z.string(),
-    siteId: ObjectIdSchema,
+
+    /* ── Where the job is ─────────────────────────────────────────────────
+     *
+     * The address lives ON the job. There is no Site record behind it.
+     *
+     * Matt, 0:29: *"sites is its own section and then jobs seem to be assigned
+     * to a site. I don't really think that's necessary — the job should just
+     * have the site on it as part of the details for the job."* And on why:
+     * *"we don't ever really visit a site more than once… they build them, we go
+     * there, we collect the stuff, we move on and someone moves into that"*
+     * (3:28).
+     *
+     * He is describing greenfield housing. A site is a house being built; once
+     * it is finished somebody lives there and it is never a pickup again. A
+     * reusable Site record models a permanence this business does not have, and
+     * the cost of pretending otherwise was a whole module to maintain, a foreign
+     * key on every job, and an address that could be edited out from under a
+     * completed job's own history.
+     *
+     * ⚠️ Nothing here is a lookup. Every field a driver or the board needs is
+     * on the record, frozen at creation — which also means a job's address is
+     * what it was on the day, not what somebody typed later.
+     */
+
+    /** The human name for the place — "Lot 214 (#46) Allambie Circuit". */
     siteName: NonEmptyStringSchema,
+    /**
+     * The lot number, where there is one.
+     *
+     * Load-bearing in a half-built estate: the street number does not exist yet
+     * and the lot is how the site is identified on the ground.
+     */
+    lotNumber: z.string().nullable(),
+    addressLine: NonEmptyStringSchema,
     suburb: NonEmptyStringSchema,
+    postcode: z.string(),
+    /**
+     * Decides the rate (M6.3) — resolved from the chosen place, never typed.
+     *
+     * With no site to carry it, this comes off the suburb picker at booking. See
+     * `PlaceSchema`.
+     */
     zone: ZoneSchema,
-    customerReference: z.string().nullable(),
+    /** The pin. Drives the dispatch map, route optimisation and navigation. */
+    latitude: z.number(),
+    longitude: z.number(),
+
+    /* ── Getting a truck in ───────────────────────────────────────────────
+     * Formerly on the site, now typed per job. Matt accepted the retyping as
+     * the price of dropping the module (2:07).
+     */
+    accessNotes: z.string(),
+    gateHours: z.string().nullable(),
+    inductionRequired: z.boolean(),
+    craneAvailable: z.boolean(),
+    siteContactName: z.string().nullable(),
+    siteContactMobile: z.string().nullable(),
+    /**
+     * Where this job's completion photos go, on top of the account's contacts.
+     *
+     * Matt, 14:16 — often the *builder's* supervisor, who has no login here. It
+     * moved from the site to the job with everything else; the cost is that it
+     * is retyped per booking rather than set once per address.
+     */
+    siteContactEmail: z.string().nullable(),
+    /**
+     * The customer's own reference — PO number, job number, whatever they use.
+     *
+     * ── One field, not two ────────────────────────────────────────────────
+     * Matt, 9:08: *"customer reference and purchase order number… they're really
+     * interchangeable. Either a customer gives us a purchase order number or
+     * they'll give us a job reference number. **They are one and the same, we
+     * don't need both of them.**"*
+     *
+     * ⚠️ Named `poNumber` and printed as the PO on the invoice, deliberately —
+     * 9:56: *"it needs to be referenced as a PO number, like PO slash job
+     * reference. Because if we don't list PO on the invoice, then sometimes I
+     * have trouble getting paid."* Whatever the customer calls it, the builder's
+     * accounts system is looking for a PO line, and an invoice without one does
+     * not get paid.
+     */
     poNumber: z.string().nullable(),
+    /**
+     * Who raised this pickup, as a name to show.
+     *
+     * Matt, 18:15: *"I don't mind the column. That will probably come in handy…
+     * I just want to make sure site supervisors can submit their jobs and be
+     * able to see the jobs they've submitted."*
+     *
+     * A denormalised name rather than a user id, because it has to survive the
+     * person leaving: a job booked in 2026 by a supervisor who is off the
+     * account by 2027 must still say who booked it. Null for the older jobs and
+     * for anything that arrived by email or phone before this was recorded.
+     */
+    bookedByName: z.string().nullable(),
+    /**
+     * The user who raised it — the site supervisor's SCOPE.
+     *
+     * ⚠️ This is an authorisation field, not a display one. Until sites were
+     * removed, a supervisor was scoped by the list of sites assigned to them
+     * (M1.5): it is what stopped Clarendon's supervisor seeing Domaine's work.
+     * With no site records there is nothing left to scope on, so the boundary
+     * moves to "the jobs this person raised".
+     *
+     * Matt asked for exactly this visibility at 18:15 on the earlier call: *"I
+     * just want to make sure site supervisors can submit their jobs and be able
+     * to see the jobs they've submitted."*
+     *
+     * Null on anything booked before this existed, or keyed in by the office. A
+     * null is invisible to every supervisor, which is the safe direction.
+     */
+    bookedByUserId: ObjectIdSchema.nullable(),
+    /** How it reached us — a supervisor in the portal, or the office by phone. */
+    bookedBySource: z.enum(['portal', 'office', 'call-up']).nullable(),
     readyDate: IsoDateSchema,
     /** M2.4a — ready date + 5 business days. */
     targetDate: IsoDateSchema,
     serviceLevel: ServiceLevelSchema,
     driverId: ObjectIdSchema.nullable(),
     driverName: z.string().nullable(),
-    expectedAreaM2: z.number().nonnegative(),
+    /**
+     * Null when nobody has told us the area yet — which is not an edge case.
+     *
+     * Matt, 31:04: *"if you look at the **Wisdom PO**, it's a little different
+     * because we're on a fixed price with them. So they don't actually give us
+     * square metres… they just give us a line item."* A builder's supervisor
+     * booking a pickup does not know it either (29:21).
+     *
+     * ⚠️ Null is not zero, and the difference is money. Zero prices the job at
+     * the call-out fee alone, and it silently takes a hand-load stop out of the
+     * m²-weighted tip-off split — handing its share of recovered tonnage to
+     * everyone else on the run, on a figure that ends up on a diversion
+     * certificate. Every consumer must branch on it rather than `?? 0`.
+     */
+    expectedAreaM2: z.number().nonnegative().nullable(),
     recoveredWeightKg: z.number().nonnegative().nullable(),
+    /** How that weight was arrived at. Null where there is no weight at all. */
+    recoveredWeightBasis: WeightBasisSchema.nullable(),
     bagCount: z.number().int().nonnegative(),
     totalExGst: MoneySchema,
     invoiceStatus: z.enum(['not-invoiced', 'awaiting-po', 'invoiced', 'paid']),
@@ -419,14 +596,37 @@ export const JobSchema = JobListItemSchema.extend({
 /**
  * M2.1 — what the create-job form collects.
  *
- * Account, builder and site are IDs from pickers, not free text — the field
- * being free text today is exactly why leads arrive disguised as jobs.
+ * ── The account is an id; the address is typed ────────────────────────────
+ * The account still comes from a picker — that field being free text is exactly
+ * why leads used to arrive disguised as jobs. The address does not, because
+ * there is no longer a Site record to pick from (Matt, 0:29).
+ *
+ * ⚠️ The SUBURB is still a chosen value, not typed. It carries the zone that
+ * prices the job and the coordinate that plots it, and neither can be guessed
+ * from free text — see `PlaceSchema`. Everything else about the address is
+ * genuinely free text, because it is a house that did not exist last year.
  */
 export const JobDraftSchema = z
   .object({
     accountId: ObjectIdSchema,
-    siteId: ObjectIdSchema,
-    customerReference: z.string().trim().max(60),
+
+    /* ── The address ──────────────────────────────────────────────────── */
+    siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120),
+    lotNumber: z.string().trim().max(30),
+    addressLine: z.string().trim().min(1, 'Enter the street address').max(160),
+    /** From the suburb picker. Supplies suburb, postcode, zone and the pin. */
+    placeId: z.string().trim().min(1, 'Choose the suburb from the list'),
+    builderName: z.string().trim().max(120),
+
+    /* ── Getting a truck in ───────────────────────────────────────────── */
+    accessNotes: z.string().trim().max(1000),
+    gateHours: z.string().trim().max(120),
+    inductionRequired: z.boolean(),
+    craneAvailable: z.boolean(),
+    siteContactName: z.string().trim().max(80),
+    siteContactMobile: z.string().trim().max(20),
+    siteContactEmail: z.string().trim().max(160),
+    /** PO number or job reference — one field. See `Job.poNumber`. */
     poNumber: z.string().trim().max(60),
     readyDate: IsoDateSchema,
     serviceLevel: ServiceLevelSchema,

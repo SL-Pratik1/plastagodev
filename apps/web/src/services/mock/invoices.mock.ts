@@ -125,7 +125,7 @@ export function createMockInvoiceService(): InvoiceService {
           invoice.invoiceNumber,
           invoice.accountName,
           invoice.poNumber,
-          invoice.customerReference,
+          invoice.poNumber,
           invoice.jobNumber,
         ],
         filters: {

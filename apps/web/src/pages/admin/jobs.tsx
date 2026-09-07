@@ -110,6 +110,34 @@ const COLUMNS: readonly DataTableColumn<JobListItem>[] = [
     ),
   },
   {
+    /*
+     * How the job reached us, and from whom.
+     *
+     * The office side of Matt's "booked by" column (18:15). The SOURCE is the
+     * useful half here: a call-up email that failed and had to be booked by hand
+     * is the pattern worth spotting, and it is invisible if only the name shows.
+     */
+    id: 'bookedBy',
+    header: 'Booked by',
+    sortKey: 'bookedByName',
+    priority: 'detail',
+    cell: (row) =>
+      row.bookedByName === null ? (
+        <span className="text-xs text-muted-foreground">—</span>
+      ) : (
+        <span className="block min-w-0">
+          <span className="block truncate text-sm">{row.bookedByName}</span>
+          <span className="block text-xs text-muted-foreground">
+            {row.bookedBySource === 'portal'
+              ? 'Portal'
+              : row.bookedBySource === 'call-up'
+                ? 'Call-up email'
+                : 'Office'}
+          </span>
+        </span>
+      ),
+  },
+  {
     id: 'site',
     header: 'Site',
     sortKey: 'siteName',
@@ -163,7 +191,7 @@ const COLUMNS: readonly DataTableColumn<JobListItem>[] = [
     numeric: true,
     priority: 'detail',
     className: 'w-20',
-    cell: (row) => row.expectedAreaM2.toLocaleString('en-AU'),
+    cell: (row) => row.expectedAreaM2?.toLocaleString('en-AU') ?? '—',
   },
   {
     id: 'totalExGst',

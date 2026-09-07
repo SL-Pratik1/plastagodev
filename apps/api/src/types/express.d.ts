@@ -23,7 +23,26 @@ declare global {
        */
       auth?: {
         userId: string;
+        /**
+         * The caller's display name, for audit trails — a job event's actor, a
+         * comment's author, who booked a job.
+         *
+         * Frozen into those records on write, because they have to survive the
+         * person leaving: a job booked in 2026 by someone who is gone by 2027
+         * must still say who booked it.
+         */
+        name: string;
         roles: readonly string[];
+        /**
+         * The account this caller belongs to — set only for the two customer
+         * roles, null for office and admin.
+         *
+         * ⚠️ This is a scoping input, not a display field. Repositories narrow
+         * queries by it, so a wrong value here is a data-leak, not a cosmetic
+         * bug. It comes from the re-read session on every request rather than
+         * from a token, for the same reason the role does.
+         */
+        accountId: string | null;
       };
     }
   }

@@ -223,6 +223,9 @@ function defaults(): Settings {
     },
 
     invoicing: {
+      // Empty by default — bare numbers, which is what they use today. Matt
+      // named "PGA" as an example (7:07), not as the value.
+      invoiceNumberPrefix: '',
       // The six shipped templates (M7.5).
       templates: [
         {
@@ -293,6 +296,11 @@ let current: Settings | null = null;
 function settings(): Settings {
   current ??= defaults();
   return current;
+}
+
+/** The office's invoice prefix, for surfaces that cannot read settings. */
+export function invoiceNumberPrefix(): string {
+  return settings().invoicing.invoiceNumberPrefix;
 }
 
 export function createMockSettingsService(): SettingsService {

@@ -21,7 +21,7 @@ import {
 import { useSearchParams } from 'react-router';
 import { MonthlyVolumeChart } from '@/components/charts/portal-charts';
 import { StatCard } from '@/components/stat-card';
-import { usePortalMonthlyReport, usePortalScope, usePortalSites } from '@/features/portal/queries';
+import { usePortalMonthlyReport, usePortalScope } from '@/features/portal/queries';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatMoney, formatWeight } from '@/lib/format';
 import { useNow } from '@/lib/use-now';
@@ -35,13 +35,14 @@ import { useNow } from '@/lib/use-now';
  * (W74, W76, W78, W82) are all "ask PlastaGo for a report" — and every one of
  * them disappears the moment the customer can pull it themselves.
  *
- * ── Grouped by site, not by account ───────────────────────────────────────
+ * ── Grouped by suburb, not by account ─────────────────────────────────────
  * The admin console groups the same report by account because it serves many.
- * A customer has one account and several sites, so "which of my sites produced
- * this" is the only grouping that answers a question they actually have.
+ * A customer has one account, so "which area produced this" is the grouping that
+ * answers a question they actually have — and with sites gone (Matt, 0:29) it is
+ * also the finest grouping there is.
  *
  * ── No report builder ─────────────────────────────────────────────────────
- * Two dates and an optional site. Risk 5 names the generic report builder as the
+ * Two dates and an optional suburb. Risk 5 names the generic report builder as the
  * biggest scope trap in the project, and a parameterised grid is the first step
  * onto it.
  */
@@ -49,7 +50,6 @@ export function PortalReportsPage() {
   const [params, setParams] = useSearchParams();
   const now = useNow(600_000);
   const scope = usePortalScope();
-  const sites = usePortalSites({ page: 1, pageSize: 200 });
 
   // Default window: the last three months, which is what a customer opening a
   // "monthly report" almost always wants. A single month hides the trend.
@@ -64,7 +64,7 @@ export function PortalReportsPage() {
     from: params.get('from') ?? defaultFrom,
     to: params.get('to') ?? defaultTo,
     accountId: null,
-    siteId: params.get('site') || null,
+    suburb: params.get('suburb') || null,
     zone: null,
     driverId: null,
   };
@@ -82,6 +82,14 @@ export function PortalReportsPage() {
   };
 
   const report = usePortalMonthlyReport(filters);
+
+  /*
+   * The suburbs to offer, taken from the report rows.
+   *
+   * Not filtered by the current selection: narrowing the list to the suburb
+   * already chosen would leave no way back to the others.
+   */
+  const suburbs = [...new Set((report.data?.rows ?? []).map((row) => row.label))].sort();
   const capturesWeight = scope.data?.capturesWeight ?? false;
 
   const totalWeightKg = (report.data?.rows ?? []).reduce(
@@ -94,7 +102,7 @@ export function PortalReportsPage() {
       <header>
         <h1 className="font-display text-xl font-semibold tracking-tight">Reports</h1>
         <p className="text-sm text-muted-foreground">
-          Your pickup volumes by site and by month — the report we used to email you.
+          Your pickup volumes by suburb and by month — the report we used to email you.
         </p>
       </header>
 
@@ -122,19 +130,24 @@ export function PortalReportsPage() {
               className="w-auto"
             />
           </label>
-          {(sites.data?.data.length ?? 0) > 1 && (
+          {/*
+            Options come from the report itself rather than a saved site list —
+            there is none (Matt, 0:29) — which also means it only ever offers a
+            suburb this customer has work in.
+          */}
+          {suburbs.length > 1 && (
             <label className="flex flex-col gap-1 text-xs text-muted-foreground sm:w-64">
-              Site
+              Suburb
               <Select
-                value={filters.siteId ?? ''}
+                value={filters.suburb ?? ''}
                 onChange={(event) => {
-                  setParam('site', event.target.value);
+                  setParam('suburb', event.target.value);
                 }}
               >
-                <option value="">All sites</option>
-                {(sites.data?.data ?? []).map((site) => (
-                  <option key={site.id} value={site.id}>
-                    {site.name} — {site.suburb}
+                <option value="">All suburbs</option>
+                {suburbs.map((suburb) => (
+                  <option key={suburb} value={suburb}>
+                    {suburb}
                   </option>
                 ))}
               </Select>
