@@ -9,6 +9,27 @@ import {
 import { Schema, model } from 'mongoose';
 
 export const SETTINGS_COLLECTION = 'settings';
+
+/**
+ * Where each sequence starts, in ONE place.
+ *
+ * ⚠️ M1.4 — jobs and invoices continue from TransVirtual and must never restart
+ * at 1: three years of numbers are quoted in builders' AP systems, and a
+ * collision means two records answer to one number.
+ *
+ * Single-sourced because these are used twice — as the schema default when the
+ * settings document is first created, and by `takeNextNumber` when a sequence
+ * is added to a document that already exists. Two copies would be two chances
+ * to restart invoicing at 1.
+ */
+export const SEQUENCE_STARTS = {
+  nextJobNumber: 61_300,
+  nextInvoiceNumber: 104_100,
+  /** Runs are internal and nobody quotes them, so this one genuinely starts at 1. */
+  nextRunNumber: 1,
+} as const;
+
+export type SequenceField = keyof typeof SEQUENCE_STARTS;
 export const RATE_CARDS_COLLECTION = 'ratecards';
 export const ZONE_RATES_COLLECTION = 'zonerates';
 export const ADDITIONAL_SERVICES_COLLECTION = 'additionalservices';
@@ -53,8 +74,13 @@ const settingsSchema = new Schema(
      * Allocated with `findOneAndUpdate($inc)`, which is atomic. Reading then
      * writing would hand the same number to two simultaneous bookings.
      */
-    nextJobNumber: { type: Number, required: true, min: 1, default: 61_300 },
-    nextInvoiceNumber: { type: Number, required: true, min: 1, default: 104_100 },
+    nextJobNumber: { type: Number, required: true, min: 1, default: SEQUENCE_STARTS.nextJobNumber },
+    nextInvoiceNumber: {
+      type: Number,
+      required: true,
+      min: 1,
+      default: SEQUENCE_STARTS.nextInvoiceNumber,
+    },
     /**
      * M3 — the number dispatch quotes down the phone ("run 41").
      *
@@ -63,7 +89,7 @@ const settingsSchema = new Schema(
      * forward. Not on the `Settings` contract because no screen sets it — it is
      * an internal allocator, and `takeNextNumber` is its only reader.
      */
-    nextRunNumber: { type: Number, required: true, min: 1, default: 1 },
+    nextRunNumber: { type: Number, required: true, min: 1, default: SEQUENCE_STARTS.nextRunNumber },
 
     /* ── Invoicing (M7) ──────────────────────────────────────────────── */
     /**

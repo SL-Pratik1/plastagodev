@@ -4,7 +4,8 @@ import { RouterProvider } from 'react-router';
 import { AppProviders } from '@/app/providers';
 import { router } from '@/app/router';
 import { env } from '@/config/env';
-import { createMockServices } from '@/services/mock/create-mock-services';
+import { api } from '@/lib/api-client';
+import { createHttpServices } from '@/services/http/create-http-services';
 import { registerServiceWorker } from '@/pwa/register-sw';
 import './styles/index.css';
 
@@ -27,18 +28,15 @@ async function startMocks(): Promise<void> {
 /**
  * ⚠️ THE SWAP POINT. This one line decides where every screen's data comes from.
  *
- * `createMockServices()` resolves every service to in-memory fixtures. When the
- * endpoints exist, this becomes `createHttpServices(api)` and nothing else in the
- * app changes — no screen, hook or component imports a URL or the api client
- * directly. See `services/README.md`.
+ * It now resolves to the real API. `services/mock/` is gone — every domain has
+ * endpoints, and a mock kept beside a working backend is how a screen ends up
+ * quietly reading fixtures for a month without anybody noticing.
  *
- * Note this is separate from MSW above, and the two are not redundant. MSW
- * intercepts real HTTP for endpoints that DO exist (`/readyz` today, so the
- * dashboard's status panel exercises the genuine request path). The service
- * container stands in for domains that have no endpoints yet, without inventing
- * paths that would pre-empt the day-3 contract freeze (§6A.9).
+ * Nothing else in the app changed to make this work: no screen, hook or
+ * component imports a URL or the api client directly, which is the whole point
+ * of the seam described in `services/README.md`.
  */
-const services = createMockServices();
+const services = createHttpServices(api);
 
 const container = document.getElementById('root');
 if (!container) throw new Error('#root element is missing from index.html');

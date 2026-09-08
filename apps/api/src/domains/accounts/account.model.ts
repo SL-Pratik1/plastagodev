@@ -86,6 +86,26 @@ const accountSchema = new Schema(
     certificateEmail: { type: String, default: null, lowercase: true, trim: true },
 
     preferredPickupWindow: { type: String, default: null, trim: true },
+
+    /**
+     * B.2 — whether a supervisor joining by customer code needs approving.
+     * Off by default: most builders want their people working immediately, and
+     * an approval step nobody expects is a supervisor locked out on day one.
+     */
+    approveNewSupervisors: { type: Boolean, required: true, default: false },
+
+    /*
+     * ── The registered business details the CUSTOMER supplies (Journey A.4) ─
+     *
+     * Separate from `name`, which is what the office typed at conversion. The
+     * customer is the authority on their own registered name and address, and
+     * these are the fields the paper account application collected — the form
+     * Matt chases a director's guarantee on today (7:49).
+     */
+    tradingName: { type: String, default: null, trim: true },
+    addressLine: { type: String, default: null, trim: true },
+    suburb: { type: String, default: null, trim: true },
+    postcode: { type: String, default: null, trim: true },
     notes: { type: String, default: '', trim: true },
   },
   { collection: ACCOUNTS_COLLECTION, timestamps: true, versionKey: false },

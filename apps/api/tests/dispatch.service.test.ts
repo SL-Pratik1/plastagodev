@@ -438,6 +438,33 @@ describe('deleting a run', () => {
     await expect(dispatchService.deleteRun(run.id)).rejects.toMatchObject({ status: 409 });
   });
 
+  /*
+   * ⚠️ Regression. This used to be permitted, which left the two rules
+   * disagreeing: a stop could not be added to an assigned run, but the whole
+   * run could be deleted — and the driver's phone lost the day with nothing to
+   * say why. Deleting every stop at once is the same act as changing one, so it
+   * takes the same discipline.
+   */
+  it('refuses while a driver is holding it, and says to unassign first', async () => {
+    const { run } = await runWithStops(2);
+    await dispatchService.assignRun(run.id, WAYNE);
+
+    await expect(dispatchService.deleteRun(run.id)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('Unassign it'),
+    });
+  });
+
+  it('allows the delete once the driver has been taken off', async () => {
+    const { run, jobIds } = await runWithStops(2);
+    await dispatchService.assignRun(run.id, WAYNE);
+    await dispatchService.unassignRun(run.id);
+
+    await dispatchService.deleteRun(run.id);
+
+    expect(jobIds.every((id) => runs.isFree(id))).toBe(true);
+  });
+
   it('404s a run that does not exist', async () => {
     await expect(dispatchService.deleteRun('f'.repeat(24))).rejects.toMatchObject({ status: 404 });
   });

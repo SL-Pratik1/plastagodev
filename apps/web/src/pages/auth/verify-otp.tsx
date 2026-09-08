@@ -1,6 +1,5 @@
 import { OTP_CODE_LENGTH, ROLE_LABELS } from '@plastago/shared';
 import {
-  Alert,
   Button,
   Card,
   CardContent,
@@ -15,7 +14,6 @@ import { ArrowLeftIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router';
 import { formatCountdown, useCountdown } from '@/lib/use-countdown';
-import { DEMO_OTP_CODE } from '@/services/mock/fixtures/identities';
 import { useAuth } from '@/features/auth/auth-context';
 import { codeSentHint, codeSentMessage, describeAuthError } from '@/features/auth/auth-messages';
 import { signInDestination } from '@/features/auth/route-access';
@@ -235,13 +233,6 @@ export function VerifyOtpPage() {
         </CardContent>
       </Card>
 
-      <Alert variant="warning" title="Demo build">
-        Enter{' '}
-        <code className="rounded bg-warning/15 px-1 py-0.5 font-mono font-semibold text-foreground">
-          {DEMO_OTP_CODE}
-        </code>
-        . Any other code demonstrates the retry and lockout states.
-      </Alert>
     </div>
   );
 }

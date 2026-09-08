@@ -660,6 +660,83 @@ export const DriverChargeNoticeSchema = z
   })
   .meta({ id: 'DriverChargeNotice' });
 
+/* ── Transport shapes (M4.5, M4.4, M8.6) ─────────────────────────────────── */
+
+/*
+ * The three requests below and the upload ticket used to live in
+ * `apps/api/src/domains/driver/driver.schemas.ts`, which the Flutter app cannot
+ * see. They are part of the published contract for the same reason everything
+ * else in this file is (§6A.4): a shape the native app has to guess at is a
+ * shape the two implementations will disagree about. The API now re-exports
+ * these rather than declaring its own.
+ */
+
+/**
+ * Asking for somewhere to put a photo (M4.5).
+ *
+ * ⚠️ `contentLength` is declared UP FRONT, not discovered from the body,
+ * because the bytes never reach this API — they go straight to object storage.
+ * The declared size is signed into the upload URL, so a phone that asks for a
+ * 4 MB slot cannot then push 2 GB into the bucket.
+ */
+export const PresignPhotoSchema = z
+  .object({
+    caption: z.string().trim().max(120),
+    /** Matches a `RequiredPhoto.key`, or null for a free-form extra. */
+    slot: z.string().trim().max(40).nullable(),
+    contentType: z.string().trim().min(1),
+    contentLength: z.number().int().positive(),
+    takenAt: IsoDateTimeSchema,
+    position: GeoFixSchema.nullable(),
+  })
+  .meta({ id: 'PresignPhoto' });
+
+/**
+ * Where the phone PUTs the bytes, and what that PUT must carry.
+ *
+ * `headers` is not advisory — the values are signed into `uploadUrl`, so a PUT
+ * that omits or alters one fails the signature check at the bucket rather than
+ * at this API, where nothing can explain it.
+ */
+export const PresignedUploadSchema = z
+  .object({
+    /** The permanent object key. Stored on the photo record. */
+    key: NonEmptyStringSchema,
+    uploadUrl: NonEmptyStringSchema,
+    headers: z.record(z.string(), z.string()),
+    expiresAt: IsoDateTimeSchema,
+  })
+  .meta({ id: 'PresignedUpload' });
+
+/**
+ * The 201 from registering a photo.
+ *
+ * The RECORD exists at this point; the bytes do not. `DriverPhoto.uploaded`
+ * stays false until the PUT lands, which is what the cloud-arrow badge on the
+ * photos screen is reading.
+ */
+export const PhotoUploadTicketSchema = z
+  .object({
+    photoId: NonEmptyStringSchema,
+    upload: PresignedUploadSchema,
+  })
+  .meta({ id: 'PhotoUploadTicket' });
+
+/** M4.4 — the preview the driver sees before committing a docket. */
+export const PreviewTipOffSchema = z
+  .object({
+    totalKg: z
+      .number()
+      .positive('Enter the weighbridge figure')
+      .max(50000, 'That is heavier than the truck — check the docket'),
+  })
+  .meta({ id: 'PreviewTipOff' });
+
+/** M8.6 · W102 — a message into the job's driver thread. */
+export const DriverMessageSchema = z
+  .object({ body: z.string().trim().min(1, 'Write something before sending').max(2000) })
+  .meta({ id: 'DriverMessage' });
+
 export type DriverRun = z.infer<typeof DriverRunSchema>;
 export type RequiredPhoto = z.infer<typeof RequiredPhotoSchema>;
 export type DriverPhoto = z.infer<typeof DriverPhotoSchema>;
@@ -679,3 +756,8 @@ export type SiteRiskAssessment = z.infer<typeof SiteRiskAssessmentSchema>;
 export type DefectReport = z.infer<typeof DefectReportSchema>;
 export type Completion = z.infer<typeof CompletionSchema>;
 export type DriverChargeNotice = z.infer<typeof DriverChargeNoticeSchema>;
+export type PresignPhoto = z.infer<typeof PresignPhotoSchema>;
+export type PresignedUpload = z.infer<typeof PresignedUploadSchema>;
+export type PhotoUploadTicket = z.infer<typeof PhotoUploadTicketSchema>;
+export type PreviewTipOff = z.infer<typeof PreviewTipOffSchema>;
+export type DriverMessage = z.infer<typeof DriverMessageSchema>;

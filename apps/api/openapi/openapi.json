@@ -23,6 +23,10 @@
     {
       "name": "Authentication",
       "description": "Email and SMS one-time codes (§9 A1/A2). No passwords exist in this product. Sign-in is a two-step challenge: request a code, then verify it. The identifier is held server-side against the returned challengeId and is never sent again."
+    },
+    {
+      "name": "Driver",
+      "description": "The driver's own day (M4). Every route is scoped to the signed-in driver by the session alone — no path or query anywhere under /driver identifies a driver, so there is no parameter to change to read someone else's run.\n\nTwo things apply to the whole tag:\n\n1. **Every mutation carries `occurredAt` and `position`.** The app is built to work with no signal, so a payload must say when the DRIVER acted rather than when the server heard about it. A run that syncs at 17:00 otherwise collapses into one timestamp and the on-site durations — which an Extra Load Time charge is computed from — become fiction. `position` is nullable: a driver in a basement car park must still be able to complete a job.\n\n2. **Send an `idempotency-key` header on every mutation** (UUID v4, one per queued operation, kept across retries). A phone replaying its outbox must not raise a second $120 futile charge. ⚠️ Server-side enforcement is NOT yet implemented — send the header from day one so it starts working the moment it lands."
     }
   ],
   "paths": {
@@ -286,7 +290,7 @@
         "description": "Answers 200 with `null` when nobody is signed in — not 401. Every surface calls this on load, and \"no session yet\" is the most ordinary state the app has, not an error. The user record is re-read on each call, so a suspended account loses access on its next request rather than at its next sign-in.",
         "security": [
           {
-            "bearerAuth": []
+            "sessionCookie": []
           },
           {}
         ],
@@ -321,13 +325,1280 @@
         "description": "Idempotent: succeeds with 204 whether or not a session existed, because the caller has already got what they asked for either way.",
         "security": [
           {
-            "bearerAuth": []
+            "sessionCookie": []
           },
           {}
         ],
         "responses": {
           "204": {
             "description": "Session ended and the cookie cleared"
+          }
+        }
+      }
+    },
+    "/api/v1/driver/run-sheet": {
+      "get": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "getRunSheet",
+        "summary": "The signed-in driver's day",
+        "description": "Takes a date rather than a cursor, because a driver needs *today* — and yesterday, for the tip-off they forgot to record.\n\n⚠️ **A day can hold more than one run.** `runs[]` is the real structure: a driver commonly does a morning trip and an afternoon one, and each ends at the weighbridge with its own docket, so `tipOffRecordedAt` sits on the RUN and not on the day. `stops[]` is the same stops flattened, kept because most screens want \"the next job\" without caring which run it came from; every stop carries its `runId`, so nothing has to infer the grouping.\n\n`preStartCompletedAt` is the exception that stays on the day: it is a check on the vehicle, and the vehicle does not change between the two trips.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "date",
+            "schema": {
+              "$ref": "#/components/schemas/IsoDate"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The driver's runs and stops for that date",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSheetDay"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}": {
+      "get": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "getDriverJob",
+        "summary": "One job, in full",
+        "description": "Everything the driver reads before getting out of the truck — access notes, gate hours, site contact — plus what has been captured so far, the photos and their required slots, the risk assessment and its PDF state, and the office thread.\n\n`requiredPhotos[]` arrives as DATA rather than being fixed in the app: the prompts are configurable per site and per job, so a client that hard-codes the five standard slots will be wrong on the first site that differs.\n\n404 rather than 403 for a job on another driver's run: whether it exists is not this driver's business either.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriverJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/status": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "updateJobStatus",
+        "summary": "Move the job forward",
+        "description": "Three transitions only — `in-transit`, `arrived`, `completed`. `admin-complete` is absent because it is an office act, and there is no \"accept job\" step: the first thing a driver does on a stop is `in-transit`.\n\n`arrived` is the load-bearing one: it starts the on-site clock that Extra Load Time is computed from, and on a site whose builder requires it, the risk assessment form opens on the back of it.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StatusUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Status recorded"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/complete": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "completeJob",
+        "summary": "Finish the job",
+        "description": "Carries the optional \"anything worth recording?\" note. The client should keep the button disabled until the weights, the required photos and any mandatory risk assessment are done — but the server enforces it too, and answers 409 when something is missing.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Completion"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Job completed"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/weights": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "captureWeights",
+        "summary": "What was collected",
+        "description": "⚠️ There is deliberately **no `areaM2` field**. The square metres are what the job is priced on, they come off the builder's order, and the office sets them before the truck leaves. A driver looking at a pile cannot tell its area, and a guess typed to get past a field would be a guess that got invoiced.\n\n`craneScaleKg` must be **null** on a hand load, never 0. There is no bag to lift, so no measurement exists — and a zero enters the tip-off reconciliation as \"we collected nothing\", skewing every imputed weight on the run.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WeightCapture"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Weights recorded"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/photos": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "registerJobPhoto",
+        "summary": "Register a photo and get somewhere to put it",
+        "description": "**The image bytes never travel through this API.** This call creates the photo RECORD and returns a presigned URL; the phone then PUTs the bytes straight to object storage, sending exactly the headers in `upload.headers` — they are signed into the URL, so an altered or missing one fails at the bucket.\n\nThe record is written before the bytes arrive on purpose: it is what lets the photos screen show a pending shot with the cloud-arrow badge. `DriverPhoto.uploaded` stays false until the PUT lands.\n\n`contentLength` is declared up front and signed in, so a phone that asks for a 4 MB slot cannot then push 2 GB. `slot` matches a `RequiredPhoto.key`, or is null for a free-form extra.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresignPhoto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Photo registered; PUT the bytes to `upload.uploadUrl`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhotoUploadTicket"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/photos/{photoId}": {
+      "delete": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "removeJobPhoto",
+        "summary": "Remove a photo",
+        "description": "Deletes the record and the stored object. Idempotent from the caller's side.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          },
+          {
+            "in": "path",
+            "name": "photoId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Photo removed"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/futile": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "reportFutile",
+        "summary": "Could not collect",
+        "description": "Ends the job and raises the futile charge. At least one photo is REQUIRED and the reason is structured rather than free text, because the customer certified at booking that the job was ready and accessible — photo plus GPS plus timestamp at the point of failure is what turns a disputed phone call into an invoice line that survives challenge.\n\n⚠️ The reason enum accepts **eight** values (`weather`, `customer-request` and `other` beyond the five on the original screens). Confirm with the office which the app should offer before trimming the list client-side.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FutileReport"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Recorded as futile"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/contamination": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "reportContamination",
+        "summary": "Contaminated load",
+        "description": "**Does not stop the job** — the driver takes the load anyway and carries on. A photo is required because the office approves the charge by looking at it.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContaminationReport"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Contamination recorded"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/pre-start": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "submitPreStart",
+        "summary": "Daily vehicle check",
+        "description": "Ten checks, the odometer and a signed declaration. Under Chain of Responsibility this is an operator obligation as much as a driver one, so it is a record kept against the vehicle rather than a box ticked for the driver's benefit — which is why any item marked `fail` becomes a defect report (see `/driver/defects`) and carries a required note.\n\nScoped to the DAY, not the run: the vehicle does not change between the morning and afternoon trips.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreStartSubmission"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Pre-start recorded"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/risk-assessment": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "submitRiskAssessment",
+        "summary": "Site risk assessment",
+        "description": "Available on EVERY job, not only the flagged ones — `riskAssessmentRequired` gates the automatic prompt on arrival and the completion blocker, never access to the form.\n\n`hazardKeys` and `controlKeys` each need at least one entry. \"No significant hazards identified\" is mutually exclusive with every other hazard — enforce that in the UI, both directions.\n\nWhen `safeToProceed` is false the office is alerted immediately and the driver must not start; the note becomes mandatory in that case.\n\nPDF generation and the upload to the builder's portal happen server-side afterwards, and surface as `riskAssessment.uploadState` on the job — they are not prerequisites for saving, because this has to work at a fence with no signal.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteRiskAssessment"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Assessment recorded"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/runs/{runId}/tip-off/preview": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "previewTipOff",
+        "summary": "How the weighbridge figure splits across the run",
+        "description": "**A read, served over POST.** The weighbridge figure is an input to a calculation, not a filter — and putting a number the driver is about to commit into a query string would land it in access logs and browser history on a device we do not control. Nothing is written.\n\nThe split: measured crane weights come off the total first, and the remainder is shared between the hand-load jobs **in proportion to their square metres**, not per head — an equal split would put the same tonnage on a garage and a two-storey house, and that tonnage is printed on a diversion certificate.\n\nShown to the driver rather than computed silently because a wildly wrong imputed figure usually means a mistyped crane weight, and the driver is still standing at the weighbridge. Check `looksWrong` — it is true when the measured weights exceed the total, and committing that would corrupt a certificate.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewTipOff"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reconciliation, as the driver should see it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TipOffReconciliation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/tip-off": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "recordTipOff",
+        "summary": "Commit the weighbridge docket",
+        "description": "⚠️ **Keyed by `runId`, not by date.** A driver with a morning trip and an afternoon one produces two dockets on one date; keyed by date the second would overwrite the first or the two would be summed, and either way the remainder could no longer be apportioned because the jobs it belongs to are no longer identifiable. `date` is carried as a denormalised convenience for the day's reports — the run is the key.\n\nSo the Tip-off screen is per run: a second run on the same day gets its own empty form, and \"already recorded\" is a property of the run, not the day.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TipOffEntry"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Tip-off recorded and the run reconciled"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/defects": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "reportDefect",
+        "summary": "Report a vehicle fault",
+        "description": "Available at any time from the Report tab, and also raised automatically by a failed pre-start item.\n\nOn `unroadworthy` the client must show the office number and tell the driver to ring it: this request may be sitting in an offline queue, and a queued report is not good enough when the answer is stop driving.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DefectReport"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Defect reported"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/messages": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "sendJobMessage",
+        "summary": "Message the office about this job",
+        "description": "Posts into the job's thread, so whoever picks it up has the context. Read the thread back from `messages[]` on the job.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DriverMessage"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Message sent"
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -382,6 +1653,588 @@
         "required": [
           "challengeId",
           "code"
+        ]
+      },
+      "IsoDate": {
+        "type": "string",
+        "format": "date",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+        "example": "2026-08-25"
+      },
+      "StatusUpdate": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transition": {
+            "$ref": "#/components/schemas/DriverTransition"
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "transition"
+        ]
+      },
+      "IsoDateTime": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+        "example": "2026-08-25T01:30:00.000Z"
+      },
+      "GeoFix": {
+        "type": "object",
+        "properties": {
+          "latitude": {
+            "type": "number"
+          },
+          "longitude": {
+            "type": "number"
+          },
+          "accuracyMetres": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "latitude",
+          "longitude",
+          "accuracyMetres"
+        ]
+      },
+      "DriverTransition": {
+        "type": "string",
+        "enum": [
+          "in-transit",
+          "arrived",
+          "completed"
+        ]
+      },
+      "Completion": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "note"
+        ]
+      },
+      "WeightCapture": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bagCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 200
+          },
+          "loadType": {
+            "$ref": "#/components/schemas/LoadType"
+          },
+          "craneScaleKg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 20000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "bagCount",
+          "loadType",
+          "craneScaleKg"
+        ]
+      },
+      "LoadType": {
+        "type": "string",
+        "enum": [
+          "bagged",
+          "hand-load"
+        ]
+      },
+      "PresignPhoto": {
+        "type": "object",
+        "properties": {
+          "caption": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "slot": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 40
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contentType": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contentLength": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "takenAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "caption",
+          "slot",
+          "contentType",
+          "contentLength",
+          "takenAt",
+          "position"
+        ]
+      },
+      "FutileReport": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "$ref": "#/components/schemas/ExceptionReason"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "photoIds": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "reason",
+          "note",
+          "photoIds"
+        ]
+      },
+      "ExceptionReason": {
+        "type": "string",
+        "enum": [
+          "site-not-ready",
+          "access-blocked",
+          "crane-unavailable",
+          "nobody-on-site",
+          "site-closed",
+          "weather",
+          "customer-request",
+          "other"
+        ]
+      },
+      "ContaminationReport": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "$ref": "#/components/schemas/ContaminationType"
+          },
+          "extent": {
+            "$ref": "#/components/schemas/ContaminationExtent"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "photoIds": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "type",
+          "extent",
+          "note",
+          "photoIds"
+        ]
+      },
+      "ContaminationType": {
+        "type": "string",
+        "enum": [
+          "timber",
+          "insulation",
+          "metal",
+          "general-waste",
+          "wet-board",
+          "other"
+        ]
+      },
+      "ContaminationExtent": {
+        "type": "string",
+        "enum": [
+          "light",
+          "moderate",
+          "heavy"
+        ]
+      },
+      "PreStartSubmission": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "date": {
+            "$ref": "#/components/schemas/IsoDate"
+          },
+          "vehicleRego": {
+            "type": "string",
+            "maxLength": 12
+          },
+          "odometerKm": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 2000000
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "pass",
+                    "fail",
+                    "not-applicable"
+                  ]
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "key",
+                "state",
+                "note"
+              ]
+            }
+          },
+          "declaration": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "date",
+          "vehicleRego",
+          "odometerKm",
+          "items",
+          "declaration"
+        ]
+      },
+      "SiteRiskAssessment": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "jobId": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "hazardKeys": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "controlKeys": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "safeToProceed": {
+            "type": "boolean"
+          },
+          "swmsVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "builderPortalCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "jobId",
+          "hazardKeys",
+          "controlKeys",
+          "note",
+          "safeToProceed",
+          "swmsVersion",
+          "builderPortalCode"
+        ]
+      },
+      "PreviewTipOff": {
+        "type": "object",
+        "properties": {
+          "totalKg": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 50000
+          }
+        },
+        "required": [
+          "totalKg"
+        ]
+      },
+      "TipOffEntry": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runId": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "date": {
+            "$ref": "#/components/schemas/IsoDate"
+          },
+          "totalKg": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 50000
+          },
+          "docketReference": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "docketPhotoId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "runId",
+          "date",
+          "totalKg",
+          "docketReference",
+          "docketPhotoId"
+        ]
+      },
+      "DefectReport": {
+        "type": "object",
+        "properties": {
+          "occurredAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GeoFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "vehicleRego": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "$ref": "#/components/schemas/DefectSeverity"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "photoIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "occurredAt",
+          "position",
+          "vehicleRego",
+          "severity",
+          "summary",
+          "detail",
+          "photoIds"
+        ]
+      },
+      "DefectSeverity": {
+        "type": "string",
+        "enum": [
+          "monitor",
+          "needs-attention",
+          "unroadworthy"
+        ]
+      },
+      "DriverMessage": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "body"
         ]
       },
       "Liveness": {
@@ -527,12 +2380,6 @@
           "email",
           "sms"
         ]
-      },
-      "IsoDateTime": {
-        "type": "string",
-        "format": "date-time",
-        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
-        "example": "2026-08-25T01:30:00.000Z"
       },
       "ApiError": {
         "type": "object",
@@ -719,14 +2566,911 @@
           "customer-administrator",
           "customer-site-supervisor"
         ]
+      },
+      "RunSheetDay": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "$ref": "#/components/schemas/IsoDate"
+          },
+          "driverId": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "driverName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "vehicleRego": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicleLabel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DriverRun"
+            }
+          },
+          "stops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunStop"
+            }
+          },
+          "preStartCompletedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "date",
+          "driverId",
+          "driverName",
+          "vehicleRego",
+          "vehicleLabel",
+          "runs",
+          "stops",
+          "preStartCompletedAt"
+        ],
+        "additionalProperties": false
+      },
+      "DriverRun": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "runName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sequenceForDay": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "suburbs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "stops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunStop"
+            }
+          },
+          "tipOffRecordedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tipOffKg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "runId",
+          "runName",
+          "sequenceForDay",
+          "suburbs",
+          "stops",
+          "tipOffRecordedAt",
+          "tipOffKg"
+        ],
+        "additionalProperties": false
+      },
+      "RunStop": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "jobNumber": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "sequence": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "accountName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "builderName": {
+            "type": "string"
+          },
+          "siteName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "lotNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "addressLine": {
+            "type": "string",
+            "minLength": 1
+          },
+          "suburb": {
+            "type": "string",
+            "minLength": 1
+          },
+          "postcode": {
+            "type": "string"
+          },
+          "zone": {
+            "$ref": "#/components/schemas/Zone"
+          },
+          "latitude": {
+            "type": "number"
+          },
+          "longitude": {
+            "type": "number"
+          },
+          "expectedAreaM2": {
+            "type": "number",
+            "minimum": 0
+          },
+          "bagCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "loadType": {
+            "$ref": "#/components/schemas/LoadType"
+          },
+          "capturesWeight": {
+            "type": "boolean"
+          },
+          "poNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "urgent": {
+            "type": "boolean"
+          },
+          "riskAssessmentRequired": {
+            "type": "boolean"
+          },
+          "riskAssessmentDoneAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "photoCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "hasQueuedActions": {
+            "type": "boolean"
+          },
+          "runId": {
+            "$ref": "#/components/schemas/ObjectId"
+          }
+        },
+        "required": [
+          "jobId",
+          "jobNumber",
+          "sequence",
+          "status",
+          "accountName",
+          "builderName",
+          "siteName",
+          "lotNumber",
+          "addressLine",
+          "suburb",
+          "postcode",
+          "zone",
+          "latitude",
+          "longitude",
+          "expectedAreaM2",
+          "bagCount",
+          "loadType",
+          "capturesWeight",
+          "poNumber",
+          "urgent",
+          "riskAssessmentRequired",
+          "riskAssessmentDoneAt",
+          "photoCount",
+          "hasQueuedActions",
+          "runId"
+        ],
+        "additionalProperties": false
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "booked",
+          "assigned",
+          "in-transit",
+          "arrived",
+          "completed",
+          "admin-complete",
+          "futile",
+          "cancelled"
+        ]
+      },
+      "Zone": {
+        "type": "string",
+        "enum": [
+          "sydney",
+          "wollongong",
+          "newcastle"
+        ]
+      },
+      "DriverJob": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "jobNumber": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "sequence": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "accountName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "builderName": {
+            "type": "string"
+          },
+          "siteName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "lotNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "addressLine": {
+            "type": "string",
+            "minLength": 1
+          },
+          "suburb": {
+            "type": "string",
+            "minLength": 1
+          },
+          "postcode": {
+            "type": "string"
+          },
+          "zone": {
+            "$ref": "#/components/schemas/Zone"
+          },
+          "latitude": {
+            "type": "number"
+          },
+          "longitude": {
+            "type": "number"
+          },
+          "expectedAreaM2": {
+            "type": "number",
+            "minimum": 0
+          },
+          "bagCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "loadType": {
+            "$ref": "#/components/schemas/LoadType"
+          },
+          "capturesWeight": {
+            "type": "boolean"
+          },
+          "poNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "urgent": {
+            "type": "boolean"
+          },
+          "riskAssessmentRequired": {
+            "type": "boolean"
+          },
+          "riskAssessmentDoneAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "photoCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "hasQueuedActions": {
+            "type": "boolean"
+          },
+          "runId": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "accessNotes": {
+            "type": "string"
+          },
+          "gateHours": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inductionRequired": {
+            "type": "boolean"
+          },
+          "craneAvailable": {
+            "type": "boolean"
+          },
+          "siteContactName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "siteContactMobile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notes": {
+            "type": "string"
+          },
+          "readyDate": {
+            "$ref": "#/components/schemas/IsoDate"
+          },
+          "arrivedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "photos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DriverPhoto"
+            }
+          },
+          "requiredPhotos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequiredPhoto"
+            }
+          },
+          "capturedAreaM2": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "craneScaleKg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "weightsRecordedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "riskAssessment": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "completedAt": {
+                    "$ref": "#/components/schemas/IsoDateTime"
+                  },
+                  "safeToProceed": {
+                    "type": "boolean"
+                  },
+                  "uploadState": {
+                    "$ref": "#/components/schemas/SraUploadState"
+                  },
+                  "document": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/SraDocument"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "completedAt",
+                  "safeToProceed",
+                  "uploadState",
+                  "document"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "body": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "author": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "at": {
+                  "$ref": "#/components/schemas/IsoDateTime"
+                },
+                "fromDriver": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "body",
+                "author",
+                "at",
+                "fromDriver"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "jobId",
+          "jobNumber",
+          "sequence",
+          "status",
+          "accountName",
+          "builderName",
+          "siteName",
+          "lotNumber",
+          "addressLine",
+          "suburb",
+          "postcode",
+          "zone",
+          "latitude",
+          "longitude",
+          "expectedAreaM2",
+          "bagCount",
+          "loadType",
+          "capturesWeight",
+          "poNumber",
+          "urgent",
+          "riskAssessmentRequired",
+          "riskAssessmentDoneAt",
+          "photoCount",
+          "hasQueuedActions",
+          "runId",
+          "accessNotes",
+          "gateHours",
+          "inductionRequired",
+          "craneAvailable",
+          "siteContactName",
+          "siteContactMobile",
+          "notes",
+          "readyDate",
+          "arrivedAt",
+          "completedAt",
+          "photos",
+          "requiredPhotos",
+          "capturedAreaM2",
+          "craneScaleKg",
+          "weightsRecordedAt",
+          "riskAssessment",
+          "messages"
+        ],
+        "additionalProperties": false
+      },
+      "DriverPhoto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "slot": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "caption": {
+            "type": "string",
+            "minLength": 1
+          },
+          "takenAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "latitude": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "longitude": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "uploaded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "slot",
+          "caption",
+          "takenAt",
+          "latitude",
+          "longitude",
+          "uploaded"
+        ],
+        "additionalProperties": false
+      },
+      "RequiredPhoto": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "hint": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "hint",
+          "required"
+        ],
+        "additionalProperties": false
+      },
+      "SraUploadState": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "queued",
+          "uploaded",
+          "failed"
+        ]
+      },
+      "SraDocument": {
+        "type": "object",
+        "properties": {
+          "documentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fileName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "generatedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pageCount": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "documentId",
+          "fileName",
+          "generatedAt",
+          "pageCount",
+          "sizeBytes"
+        ],
+        "additionalProperties": false
+      },
+      "PhotoUploadTicket": {
+        "type": "object",
+        "properties": {
+          "photoId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "upload": {
+            "$ref": "#/components/schemas/PresignedUpload"
+          }
+        },
+        "required": [
+          "photoId",
+          "upload"
+        ],
+        "additionalProperties": false
+      },
+      "PresignedUpload": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uploadUrl": {
+            "type": "string",
+            "minLength": 1
+          },
+          "headers": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "expiresAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "key",
+          "uploadUrl",
+          "headers",
+          "expiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "TipOffReconciliation": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "$ref": "#/components/schemas/ObjectId"
+          },
+          "runName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "date": {
+            "$ref": "#/components/schemas/IsoDate"
+          },
+          "totalKg": {
+            "type": "number",
+            "minimum": 0
+          },
+          "measuredKg": {
+            "type": "number",
+            "minimum": 0
+          },
+          "remainderKg": {
+            "type": "number"
+          },
+          "handLoadJobCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "handLoadAreaM2": {
+            "type": "number",
+            "minimum": 0
+          },
+          "looksWrong": {
+            "type": "boolean"
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "jobId": {
+                  "$ref": "#/components/schemas/ObjectId"
+                },
+                "jobNumber": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "siteName": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "loadType": {
+                  "$ref": "#/components/schemas/LoadType"
+                },
+                "areaM2": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "measuredKg": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "imputedKg": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "shareOfRemainder": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "jobId",
+                "jobNumber",
+                "siteName",
+                "loadType",
+                "areaM2",
+                "measuredKg",
+                "imputedKg",
+                "shareOfRemainder"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "runId",
+          "runName",
+          "date",
+          "totalKg",
+          "measuredKg",
+          "remainderKg",
+          "handLoadJobCount",
+          "handLoadAreaM2",
+          "looksWrong",
+          "warning",
+          "lines"
+        ],
+        "additionalProperties": false
       }
     },
     "securitySchemes": {
-      "bearerAuth": {
-        "type": "http",
-        "scheme": "bearer",
-        "bearerFormat": "JWT",
-        "description": "Short-lived access token issued after OTP verification."
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "better-auth.session_token",
+        "description": "httpOnly session cookie, set by POST /auth/otp/verify and cleared by POST /auth/sign-out. Browsers send it automatically with `credentials: \"include\"`. A native client must persist it in a cookie jar."
       }
     }
   }

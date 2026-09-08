@@ -21,7 +21,7 @@ import { CameraIcon, TriangleAlertIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useAddPhoto, useDriverJob, useMarkContaminated } from '@/features/run/queries';
-import { currentPosition } from '@/services/mock/create-mock-services';
+import { currentPosition } from '@/lib/geolocation';
 
 /**
  * Contaminated load (M4.7 · W27, W32).

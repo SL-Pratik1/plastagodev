@@ -13,6 +13,8 @@ import { env, revealUnknownIdentifier } from '../../config/env.js';
 import { AppError, isAppError } from '../../lib/app-error.js';
 import { authError } from '../../lib/auth-error.js';
 import { logger } from '../../lib/logger.js';
+import { userRepository } from '../users/user.repository.js';
+import { auditService } from '../audit/audit.service.js';
 import { authRepository, type ChallengeRecord, type UserRecord } from './auth.repository.js';
 
 const log = logger.child({ module: 'auth-service' });
@@ -141,22 +143,26 @@ export const authService = {
     // time is not a wrong guess, and the screen says something different about
     // each ("send a new one" vs "check the digits").
     if (Date.now() > challenge.expiresAt.getTime()) {
+      await noteSignIn(challenge, 'expired-code', ctx);
       throw authError('CODE_EXPIRED', 'Code expired');
     }
 
     const remaining = await authRepository.spendAttempt(challengeId);
     if (remaining === null) {
+      await noteSignIn(challenge, 'locked-out', ctx);
       throw authError('CODE_ATTEMPTS_EXCEEDED', 'No attempts remaining');
     }
 
     // A decoy has no user and no code on file. It burns attempts exactly like a
     // real challenge so that timing and responses stay uninformative.
     if (challenge.decoy || !challenge.userId) {
+      await noteSignIn(challenge, 'failed-code', ctx);
       throw wrongCode(remaining);
     }
 
     const verified = await verifyWithProvider(challenge, code, ctx);
     if (!verified) {
+      await noteSignIn(challenge, 'failed-code', ctx);
       throw wrongCode(remaining);
     }
 
@@ -178,6 +184,7 @@ export const authService = {
 
     const signedInAt = new Date();
     await authRepository.markSignedIn(user.id, signedInAt);
+    await noteSignIn(challenge, 'success', ctx, user);
 
     log.info({ userId: user.id, role: user.role, channel: challenge.channel }, 'signed in');
 
@@ -239,6 +246,78 @@ async function resolveUser(normalised: string, channel: AuthChannel): Promise<Us
     ? authRepository.findUserByEmail(normalised)
     : authRepository.findUserByMobile(normalised);
 }
+
+/**
+ * Records one sign-in attempt, in both places it belongs (§9 — "an audit of all
+ * logins").
+ *
+ * ── Why two writes and not one ────────────────────────────────────────────
+ * `usersignins` is the per-user list on the Users screen — "here are Priya's
+ * last 20 sign-ins", read while looking AT Priya. The audit log is the
+ * chronological cross-cutting record — "what happened around 4pm on Tuesday",
+ * read without knowing who to look at yet. Same event, two genuinely different
+ * questions, and answering the second from the first would mean scanning every
+ * user's list.
+ *
+ * ⚠️ FAILURES ARE RECORDED, and that is the point. A successful sign-in is
+ * routine; six failed ones against a director's address at 2am is the thing
+ * somebody needs to be able to find. `identifierMasked` keeps the log useful
+ * without turning it into a list of everybody's email addresses.
+ *
+ * Never throws: a sign-in must not fail because its own audit row could not be
+ * written.
+ */
+async function noteSignIn(
+  challenge: ChallengeRecord,
+  outcome: 'success' | 'failed-code' | 'expired-code' | 'locked-out',
+  ctx: RequestContext,
+  user?: UserRecord,
+): Promise<void> {
+  const device = ctx.headers.get('user-agent') ?? '';
+  const masked = mask(challenge.identifier, challenge.channel);
+
+  try {
+    await userRepository.recordSignIn({
+      userId: challenge.userId,
+      identifierMasked: masked,
+      channel: challenge.channel,
+      outcome,
+      device,
+    });
+  } catch (error) {
+    log.error({ err: error, outcome }, 'could not record the sign-in attempt');
+  }
+
+  await auditService.record({
+    /*
+     * The user id where there is one — a failed attempt against a real account
+     * still belongs on that account's history. A decoy has none, and inventing
+     * one would attach the attempt to somebody who does not exist.
+     */
+    actorId: challenge.userId,
+    // The masked identifier is the only name a failed attempt has.
+    actorName: user?.name ?? masked,
+    actorRole: user?.role ?? null,
+    action: outcome === 'success' ? 'signed-in' : 'sign-in-failed',
+    entity: 'session',
+    // A session is not a row anybody can link to; the user is.
+    entityId: challenge.userId,
+    entityLabel: user?.name ?? masked,
+    summary:
+      outcome === 'success'
+        ? `Signed in with ${challenge.channel === 'sms' ? 'an SMS' : 'an email'} code`
+        : `Sign-in failed — ${FAILURE_REASONS[outcome]}`,
+    changes: [],
+    href: challenge.userId ? `/admin/users/${challenge.userId}?tab=sign-ins` : '',
+    device: device || null,
+  });
+}
+
+const FAILURE_REASONS: Record<string, string> = {
+  'failed-code': 'wrong code',
+  'expired-code': 'code expired',
+  'locked-out': 'too many attempts',
+};
 
 /** Mirrors `mock-transport.ts` exactly, so the masked value does not change shape. */
 function mask(identifier: string, channel: AuthChannel): string {

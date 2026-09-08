@@ -71,6 +71,46 @@ function printBox(title: string, lines: readonly string[]): void {
   );
 }
 
+/**
+ * The sign-in code, on its own, impossible to miss.
+ *
+ * ── Why this is separate from the message box above ───────────────────────
+ * The stub already printed the whole email, and the code was in it — on line
+ * four, in a sentence, directly beneath a wall of request logging. It was
+ * technically visible and practically unfindable, which is the same as absent
+ * when somebody is trying to sign in.
+ *
+ * So the code gets its own banner: spaced digits, blank lines either side, and
+ * nothing else on the line. Printed to stderr like the box, so piping stdout to
+ * a file still leaves it on the terminal.
+ */
+function printSignInCode(to: string, code: string): void {
+  const spaced = code.split('').join(' ');
+
+  process.stderr.write(
+    `\n${'═'.repeat(62)}\n` +
+      `  SIGN-IN CODE for ${to}\n\n` +
+      `      ${spaced}\n\n` +
+      `${'═'.repeat(62)}\n\n`,
+  );
+}
+
+/**
+ * Pulls the code out of an outbound message.
+ *
+ * ⚠️ Deliberately narrow: exactly six digits, standing alone. Matching loosely
+ * would print a postcode or an invoice number as if it were a code, and a
+ * wrong code shown confidently is worse than none.
+ *
+ * Reading it back out of the copy rather than threading it through every send
+ * signature keeps the code out of the `Mailer` interface — the real providers
+ * have no business knowing which of their messages is an OTP.
+ */
+function extractCode(text: string): string | null {
+  const match = /(?<![0-9])([0-9]{6})(?![0-9])/.exec(text);
+  return match?.[1] ?? null;
+}
+
 function createStubMailer(): Mailer {
   return {
     name: 'stub',
@@ -82,6 +122,12 @@ function createStubMailer(): Mailer {
         '',
         ...text.split('\n'),
       ]);
+
+      // The banner goes LAST so it is the final thing on the terminal — the
+      // one place somebody signing in will actually look.
+      const code = extractCode(text);
+      if (code) printSignInCode(to, code);
+
       return Promise.resolve();
     },
   };
@@ -93,6 +139,11 @@ function createStubSmsSender(): SmsSender {
     send({ to, body }) {
       log.info({ to, provider: 'stub' }, 'SMS not sent (SMS_PROVIDER=stub)');
       printBox('SMS — not sent (SMS_PROVIDER=stub)', [`to   : ${to}`, `body : ${body}`]);
+
+      // A driver signs in by SMS (§9 A2), so the same banner matters here.
+      const code = extractCode(body);
+      if (code) printSignInCode(to, code);
+
       return Promise.resolve();
     },
   };

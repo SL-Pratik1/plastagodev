@@ -22,8 +22,8 @@ import { ArrowRightIcon, MailIcon, SmartphoneIcon } from 'lucide-react';
 import { useForm, useWatch } from 'react-hook-form';
 import { useLocation, useNavigate } from 'react-router';
 import * as z from 'zod';
-import type { DemoIdentity } from '@/services/mock/fixtures/identities';
-import { DEMO_IDENTITIES, DEMO_OTP_CODE } from '@/services/mock/fixtures/identities';
+import type { SeededIdentity } from '@/config/seeded-identities';
+import { SEEDED_IDENTITIES } from '@/config/seeded-identities';
 import { useAuth } from '@/features/auth/auth-context';
 import { describeAuthError } from '@/features/auth/auth-messages';
 
@@ -82,7 +82,7 @@ export function SignInPage() {
    * product does not do — and would hide which identifier a role actually uses,
    * which is the whole point of a driver and a supervisor being on mobile.
    */
-  const fillIdentifier = (identity: DemoIdentity) => {
+  const fillIdentifier = (identity: SeededIdentity) => {
     setValue('identifier', identity.email ?? identity.mobile ?? '', {
       shouldValidate: true,
       shouldDirty: true,
@@ -202,7 +202,7 @@ export function SignInPage() {
         </a>
       </p>
 
-      <DemoIdentityPanel onPick={fillIdentifier} />
+      <SeededIdentityPanel onPick={fillIdentifier} />
     </div>
   );
 }
@@ -232,18 +232,18 @@ const SURFACE_DOT: Record<Surface, string> = {
   driver: 'bg-warning',
 };
 
-function DemoIdentityPanel({ onPick }: { onPick: (identity: DemoIdentity) => void }) {
+function SeededIdentityPanel({ onPick }: { onPick: (identity: SeededIdentity) => void }) {
   return (
     <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgb(16_24_16/0.04)]">
       <p className="text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
-        Demo accounts — tap to fill
+        Seeded accounts — tap to fill
       </p>
 
       <ul className="mt-3 flex flex-wrap gap-2">
-        {DEMO_IDENTITIES.map((identity) => {
+        {SEEDED_IDENTITIES.map((identity) => {
           const identifier = identity.email ?? identity.mobile ?? '';
           return (
-            <li key={identity.id}>
+            <li key={identity.role}>
               <button
                 type="button"
                 onClick={() => {
@@ -272,12 +272,9 @@ function DemoIdentityPanel({ onPick }: { onPick: (identity: DemoIdentity) => voi
       </ul>
 
       <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
-        Demo build — no backend connected. Tap a role to fill the field above, then send the code.
-        Every account accepts{' '}
-        <code className="rounded bg-muted px-1 py-0.5 font-mono font-semibold text-foreground">
-          {DEMO_OTP_CODE}
-        </code>
-        .
+        Development build. These are the accounts <code className="font-mono">seed:auth</code>{' '}
+        creates — tap one to fill the field, then send a real code. Email codes are printed by the
+        API when <code className="font-mono">MAIL_PROVIDER=stub</code>.
       </p>
     </div>
   );

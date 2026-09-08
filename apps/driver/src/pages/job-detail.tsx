@@ -47,7 +47,7 @@ import {
   useSendDriverMessage,
   useUpdateStatus,
 } from '@/features/run/queries';
-import { currentPosition } from '@/services/mock/create-mock-services';
+import { currentPosition } from '@/lib/geolocation';
 
 /**
  * One job (M4.1) and its status actions (M4.2).

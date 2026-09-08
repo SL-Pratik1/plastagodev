@@ -23,7 +23,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useDriverJob, useSubmitRiskAssessment } from '@/features/run/queries';
 import { useOnlineStatus } from '@/offline/use-offline-state';
-import { currentPosition } from '@/services/mock/create-mock-services';
+import { currentPosition } from '@/lib/geolocation';
 
 /**
  * Site Risk Assessment (M4.8b · F56, F14, W37, W41).

@@ -2,6 +2,7 @@ import type {
   MapPin,
   RunSheetStop,
   BrandId,
+  ChargeCode,
   ExceptionReason,
   FreightItem,
   Job,
@@ -221,6 +222,8 @@ interface JobFilter {
   serviceLevel?: ServiceLevel;
   readyDate?: { $gte?: string; $lte?: string };
   targetDate?: { $lt: string };
+  /** An exact job-number search. See the note in `buildFilter`. */
+  jobNumber?: number;
   $text?: { $search: string };
 }
 
@@ -247,14 +250,22 @@ export const jobRepository = {
      * A text search orders by relevance unless the caller asked otherwise.
      * Otherwise: newest job first, because the office works from the top of the
      * list. Mongo's natural order is not an order anyone can predict.
+     *
+     * ⚠️ Keyed off whether `$text` is ACTUALLY in the filter, not off whether a
+     * search term was supplied. A numeric term is matched against `jobNumber`
+     * instead (see `buildFilter`), and asking Mongo for `textScore` with no
+     * `$text` query is an error — so keying this off `query.q` would make every
+     * search-by-job-number fail outright.
      */
+    const relevance = '$text' in filter;
+
     const sort: Record<string, 1 | -1 | { $meta: 'textScore' }> = sortField
       ? { [sortField]: direction }
-      : query.q
+      : relevance
         ? { score: { $meta: 'textScore' } }
         : { jobNumber: -1 };
 
-    const projection = query.q && !sortField ? { score: { $meta: 'textScore' } } : {};
+    const projection = relevance && !sortField ? { score: { $meta: 'textScore' } } : {};
 
     const [rows, total] = await Promise.all([
       JobModel.find(filter, projection)
@@ -550,15 +561,33 @@ export const jobRepository = {
     return result.matchedCount === 1;
   },
 
-  async reschedule(id: string, readyDate: string, targetDate: string): Promise<boolean> {
-    if (!mongoose.isValidObjectId(id)) return false;
+  /**
+   * Moves the ready date, and returns THE DATES IT REPLACED.
+   *
+   * ⚠️ The before-values come back from the update itself rather than from a
+   * read beforehand, because M1.6's worked example is exactly this operation —
+   * *"who changed job 61402's ready date from 12 Aug to 19 Aug?"* — and a `from`
+   * read in a separate query is a `from` that another writer can invalidate in
+   * between. An audit entry recording a value that was never replaced is worse
+   * than no entry: it is evidence that happens to be wrong.
+   */
+  async reschedule(
+    id: string,
+    readyDate: string,
+    targetDate: string,
+  ): Promise<{ readyDate: string; targetDate: string; accountName: string } | null> {
+    if (!mongoose.isValidObjectId(id)) return null;
 
-    const result = await JobModel.updateOne(
+    const previous = await JobModel.findOneAndUpdate(
       { _id: new mongoose.Types.ObjectId(id) },
       { $set: { readyDate, targetDate } },
-    );
+      {
+        returnDocument: 'before',
+        projection: { readyDate: 1, targetDate: 1, accountName: 1 },
+      },
+    ).lean<{ readyDate: string; targetDate: string; accountName: string }>();
 
-    return result.matchedCount === 1;
+    return previous;
   },
 
   async addComment(input: CreateCommentInput): Promise<JobComment> {
@@ -758,7 +787,29 @@ function applyScope(filter: JobFilter, scope: JobScope): void {
 function buildFilter(query: ListJobsQuery, scope: JobScope): JobFilter {
   const filter: JobFilter = {};
 
-  if (query.q) filter.$text = { $search: query.q };
+  /*
+   * ⚠️ A NUMBER is a job number, not a text search.
+   *
+   * The text index covers the site, the account, the builder, the suburb and
+   * the customer's PO — but `jobNumber` is numeric, and MongoDB's text index
+   * cannot index a number at all. So typing "61402" into the grid used to
+   * return nothing, which is the single most common search the office runs:
+   * the number is on every run sheet and every invoice, and it is what gets
+   * quoted down the phone.
+   *
+   * Digits are therefore matched EXACTLY against the number, using its unique
+   * index. A `#` prefix is stripped because people type the number the way it
+   * is printed.
+   */
+  if (query.q) {
+    const term = query.q.trim().replace(/^#/, '');
+
+    if (/^\d+$/.test(term)) {
+      filter.jobNumber = Number(term);
+    } else {
+      filter.$text = { $search: query.q };
+    }
+  }
   if (query.status) filter.status = query.status;
   if (query.builder) filter.builderName = query.builder;
   if (query.zone) filter.zone = query.zone;
@@ -850,4 +901,112 @@ async function jobIdsWithPendingCharges(ids: mongoose.Types.ObjectId[]): Promise
   });
 
   return new Set(jobIds.map((id) => id.toHexString()));
+}
+
+/**
+ * Writes the priced lines of a job as its own charge rows.
+ *
+ * ── Why the quote is persisted as charges rather than recomputed later ────
+ * Because the invoice has to reproduce what the customer was quoted, to the
+ * cent (Risk 1). Rates are effective-dated (M6.2) — a job is priced by the date
+ * it RAN — so re-running the quote at invoice time would silently re-price
+ * history the first time somebody edits a rate card. Storing the lines at
+ * booking makes the job the single source of truth, and the invoice a straight
+ * copy of it.
+ *
+ * `system` source and `not-required` approval: these are what the price list
+ * says, not something anybody raised or has to approve.
+ */
+export async function writeQuotedCharges(
+  jobId: string,
+  lines: ReadonlyArray<{
+    code: ChargeCode;
+    description: string;
+    quantity: number;
+    unitRate: string;
+    amount: string;
+  }>,
+): Promise<void> {
+  if (lines.length === 0) return;
+
+  const _id = new mongoose.Types.ObjectId(jobId);
+  const raisedAt = new Date();
+
+  await JobChargeModel.insertMany(
+    lines.map((line) => ({
+      jobId: _id,
+      code: line.code,
+      description: line.description,
+      quantity: line.quantity,
+      unitRate: toDecimal128(line.unitRate),
+      amount: toDecimal128(line.amount),
+      source: 'system',
+      approvalState: 'not-required',
+      raisedBy: null,
+      raisedAt,
+      photoCount: 0,
+      note: null,
+    })),
+  );
+}
+
+/**
+ * The charges an invoice is built from, split by who raised them.
+ *
+ * Only APPROVED and `not-required` charges are billable: a `pending` charge is
+ * one the office has not yet looked at, and a `rejected` one is a charge they
+ * decided not to make. Billing either would be billing a decision nobody took.
+ */
+export async function billableCharges(jobId: string): Promise<
+  Array<{
+    id: string;
+    code: ChargeCode;
+    description: string;
+    quantity: number;
+    unitRate: string;
+    amount: string;
+    source: 'office' | 'driver' | 'system';
+    raisedBy: string | null;
+  }>
+> {
+  if (!mongoose.isValidObjectId(jobId)) return [];
+
+  const rows = await JobChargeModel.find({
+    jobId: new mongoose.Types.ObjectId(jobId),
+    approvalState: { $in: ['approved', 'not-required'] },
+  })
+    .sort({ raisedAt: 1 })
+    .lean();
+
+  return rows.map((row) => ({
+    id: row._id.toHexString(),
+    code: row.code,
+    description: row.description,
+    quantity: row.quantity,
+    unitRate: fromDecimal128(row.unitRate),
+    amount: fromDecimal128(row.amount),
+    source: row.source,
+    raisedBy: row.raisedBy ?? null,
+  }));
+}
+
+/** Marks a job's invoice rollup, so the jobs grid agrees with the invoice list. */
+export async function setInvoiceStatus(
+  jobId: string,
+  status: 'not-invoiced' | 'awaiting-po' | 'invoiced' | 'paid',
+  invoiceNumber?: number,
+): Promise<void> {
+  if (!mongoose.isValidObjectId(jobId)) return;
+
+  await JobModel.updateOne(
+    { _id: new mongoose.Types.ObjectId(jobId) },
+    {
+      $set: {
+        invoiceStatus: status,
+        ...(invoiceNumber === undefined
+          ? {}
+          : { invoiceNumber, invoicedAt: new Date() }),
+      },
+    },
+  );
 }

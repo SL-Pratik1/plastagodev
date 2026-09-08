@@ -20,7 +20,7 @@ import {
   ZapIcon,
 } from 'lucide-react';
 import { Link } from 'react-router';
-import { RUN_DATE } from '@/services/mock/fixtures/driver-run';
+import { todayInSydney } from '@/lib/geolocation';
 import { useRunSheet } from '@/features/driver/queries';
 
 /**
@@ -38,7 +38,7 @@ import { useRunSheet } from '@/features/driver/queries';
  * it is done.
  */
 export function DriverRunSheetPage() {
-  const { data, error, isPending, refetch } = useRunSheet(RUN_DATE);
+  const { data, error, isPending, refetch } = useRunSheet(todayInSydney());
 
   if (error) {
     return (

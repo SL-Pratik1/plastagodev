@@ -49,6 +49,17 @@ const SERVICES: Record<string, AdditionalServiceSetting> = {
     driverRaisable: true,
     systemGenerated: false,
   },
+  // M4.6 — the driver-raised one that matters most commercially. Mirrors the
+  // seeded figure so a test cannot pass against a price the system never uses.
+  'futile-pickup': {
+    code: 'futile-pickup',
+    label: 'Futile pickup',
+    kind: 'fixed',
+    value: '120.00',
+    requiresApproval: true,
+    driverRaisable: true,
+    systemGenerated: false,
+  },
   'fuel-levy-percent': {
     code: 'fuel-levy-percent',
     label: 'Fuel levy (10%)',

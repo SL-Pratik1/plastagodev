@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JobDraft, Role } from '@plastago/shared';
 import { createFakeJobRepository } from './helpers/fake-jobs.js';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
+import { makeFakeAuditRepository } from './helpers/fake-audit.js';
 
 /**
  * Job rules (M2).
@@ -29,11 +30,34 @@ let accountFound = true;
 
 // GETTERS, not values: `vi.mock` factories hoist above every import, so the
 // fakes do not exist yet when these run.
+/*
+ * M1.6 — this suite's service records to the audit log. Faked like every other
+ * repository: the real one would buffer a write against a MongoDB that is not
+ * there and time out. See `helpers/fake-audit.ts`.
+ */
+vi.mock('../src/domains/audit/audit.repository.js', () => ({
+  auditRepository: makeFakeAuditRepository(),
+}));
+
+
 vi.mock('../src/domains/jobs/job.repository.js', () => ({
   get jobRepository() {
     return repo.repository;
   },
+  writeQuotedCharges: (
+    jobId: string,
+    lines: ReadonlyArray<{ code: string; amount: string }>,
+  ) => {
+    quotedCharges.push({ jobId, lines });
+    return Promise.resolve();
+  },
 }));
+
+/** What the quote persisted as the job's own charge lines. See below. */
+const quotedCharges: Array<{
+  jobId: string;
+  lines: ReadonlyArray<{ code: string; amount: string }>;
+}> = [];
 
 vi.mock('../src/domains/settings/settings.repository.js', () => ({
   get settingsRepository() {
@@ -123,6 +147,7 @@ function draft(overrides: Partial<JobDraft> = {}): JobDraft {
 }
 
 beforeEach(() => {
+  quotedCharges.length = 0;
   repo = createFakeJobRepository();
   settings = createFakeSettingsRepository();
   accountScope = null;
@@ -507,5 +532,37 @@ describe('commenting', () => {
     await expect(
       jobService.addComment('f'.repeat(24), { body: 'Hi', visibility: 'customer' }, CUSTOMER_ADMIN),
     ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('the quote is persisted as the job’s own charge lines', () => {
+  /*
+   * ⚠️ Why this matters: the invoice is a straight COPY of these lines. Rates
+   * are effective-dated (M6.2), so re-running the quote at invoice time would
+   * silently re-price history the first time somebody edits a rate card — and
+   * the invoice has to reproduce what the customer was quoted, to the cent
+   * (Risk 1).
+   */
+  it('writes the quoted lines against the job it created', async () => {
+    const created = await jobService.create(draft(), OFFICE);
+
+    expect(quotedCharges).toHaveLength(1);
+    expect(quotedCharges[0]?.jobId).toBe(created.id);
+    expect(quotedCharges[0]?.lines.length).toBeGreaterThan(0);
+  });
+
+  it('persists lines that add up to the price the job was saved at', async () => {
+    // The invoice adds these up. If they disagreed with `totalExGst`, the
+    // customer would be quoted one figure and billed another.
+    await jobService.create(draft(), OFFICE);
+
+    const summed = quotedCharges[0]?.lines.reduce(
+      (total, line) => total + Math.round(Number(line.amount) * 100),
+      0,
+    );
+
+    // Against what the service asked to STORE on the job, which is the figure
+    // the customer was quoted.
+    expect(summed).toBe(Math.round(Number(repo.calls.lastCreate?.totalExGst) * 100));
   });
 });

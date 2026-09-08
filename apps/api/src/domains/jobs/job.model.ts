@@ -370,6 +370,15 @@ const jobPhotoSchema = new Schema(
     /** REFERENCE → `jobs._id`. */
     jobId: { type: Schema.Types.ObjectId, required: true, ref: 'Job' },
     caption: { type: String, required: true, trim: true },
+    /**
+     * Which of the five required shots this is — 'front-of-site', 'pile-before'
+     * and so on. Null for a free-form extra.
+     *
+     * Matt asked for *"a prompt of what's in the photos that are required, and a
+     * space to put in any others"*, so the slot is data rather than a position
+     * in an array: a photo retaken later must replace the right one.
+     */
+    slot: { type: String, default: null, trim: true },
     takenAt: { type: Date, required: true },
     takenBy: { type: String, required: false, default: '', trim: true },
     latitude: { type: Number, default: null },

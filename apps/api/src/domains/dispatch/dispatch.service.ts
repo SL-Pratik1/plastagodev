@@ -118,16 +118,32 @@ export const dispatchService = {
   /**
    * Deletes a run. Its stops go back to the unallocated column.
    *
-   * Refused once the run has started: a run in progress is a truck on the road,
-   * and deleting the record does not recall it — it just removes the only thing
-   * that says where the driver is meant to be.
+   * ── Why an assigned run has to be unassigned first ────────────────────────
+   * Once a driver has the run, its stops are frozen — `assertPlanning` refuses
+   * to add or remove one, because changing the contents underneath somebody on
+   * the road is how a stop gets missed.
+   *
+   * Deleting the run is the same act, taken to its limit: it removes every stop
+   * at once, and the driver's phone simply loses the day with nothing to say
+   * why. So it takes the same discipline — take the driver off, then delete.
+   * That is one deliberate extra click, and it puts the allocator through the
+   * moment where they notice somebody is holding this run.
+   *
+   * ⚠️ Found in QA: this used to permit `assigned`, so stops could not be
+   * changed but the whole run could be deleted out from under the driver.
+   *
+   * Refused outright once the run has started: a run in progress is a truck on
+   * the road, and deleting the record does not recall it — it just removes the
+   * only thing that says where the driver is meant to be.
    */
   async deleteRun(runId: string): Promise<void> {
     const run = await requireRunSummary(runId);
 
-    if (run.status !== MUTABLE_STATUS && run.status !== 'assigned') {
+    if (run.status !== MUTABLE_STATUS) {
       throw AppError.conflict(
-        `Run ${String(run.runNumber)} has already started, so it cannot be deleted`,
+        run.status === 'assigned'
+          ? `Run ${String(run.runNumber)} is with a driver. Unassign it before deleting it.`
+          : `Run ${String(run.runNumber)} has already started, so it cannot be deleted`,
       );
     }
 

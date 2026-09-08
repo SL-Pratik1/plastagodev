@@ -1,0 +1,399 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { mkdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join, normalize, resolve, sep } from 'node:path';
+import type { Readable } from 'node:stream';
+/*
+ * Type-only imports, so nothing from the AWS SDK is loaded at runtime unless
+ * `STORAGE_PROVIDER=s3` — the actual `import()` calls below are lazy. This keeps
+ * a developer laptop and the test suite free of a dependency they do not use,
+ * without giving up type safety at the vendor boundary.
+ */
+import type { S3Client } from '@aws-sdk/client-s3';
+import type * as S3Module from '@aws-sdk/client-s3';
+import type { getSignedUrl as GetSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { env } from '../config/env.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger.child({ module: 'storage' });
+
+/**
+ * Object storage (§6A.10 #9) — photos, weighbridge dockets, generated PDFs.
+ *
+ * ── Why the bytes never pass through this API ─────────────────────────────
+ * A driver's phone uploads STRAIGHT to S3 using a presigned URL. The API only
+ * ever issues the URL and records the key.
+ *
+ * That is not a micro-optimisation. Photos are the evidence that defends a
+ * futile charge (M4.6), so there are five or more per job, taken on a building
+ * site over patchy 4G. Routing them through Node would mean holding a multipart
+ * body per upload, a request timeout the phone cannot retry cheaply, and a
+ * memory profile that scales with how many drivers are working at once. Handing
+ * out a URL costs nothing and lets the phone retry on its own.
+ *
+ * ── Why there is a stub at all ────────────────────────────────────────────
+ * Same reason the mailer has one: the whole capture-and-view path had to be
+ * buildable and testable before an AWS account existed. The stub keeps bytes on
+ * local disk and hands out ordinary API URLs. Selecting the real thing is
+ * `STORAGE_PROVIDER=s3` plus credentials — never a code change (§8).
+ */
+
+/** What the caller must know to complete an upload from the phone. */
+export interface PresignedUpload {
+  /** The permanent key. This is what gets stored on the photo record. */
+  key: string;
+  /** Where to PUT the bytes. Expires — see `S3_URL_TTL_SECONDS`. */
+  uploadUrl: string;
+  /** Headers the PUT must carry, or the signature will not match. */
+  headers: Record<string, string>;
+  expiresAt: string;
+}
+
+export interface StorageProvider {
+  /** For logs and `/readyz`, so it is obvious which provider is live. */
+  readonly name: string;
+  /** A URL the phone can PUT to directly. */
+  presignUpload: (input: {
+    key: string;
+    contentType: string;
+    contentLength: number;
+  }) => Promise<PresignedUpload>;
+  /** A short-lived URL for reading one object back. */
+  presignDownload: (key: string) => Promise<string>;
+  /** Server-side write, for things the API generates itself (PDFs). */
+  put: (key: string, body: Buffer, contentType: string) => Promise<void>;
+  /** Used by the stub's own read route, and by PDF generation. */
+  get: (key: string) => Promise<Readable>;
+  remove: (key: string) => Promise<void>;
+  exists: (key: string) => Promise<boolean>;
+}
+
+/**
+ * The MIME types a driver's phone may upload.
+ *
+ * An allow-list, not a block-list. The bucket is served back to browsers, and
+ * `image/svg+xml` executes script in the origin that serves it — an allow-list
+ * of raster formats plus PDF makes that whole class of problem unreachable.
+ */
+export const UPLOADABLE_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/heic',
+  'image/heif',
+  'image/webp',
+  'application/pdf',
+]);
+
+const EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+  'image/webp': 'webp',
+  'application/pdf': 'pdf',
+};
+
+/** 20 MB. A modern phone photo is 3–5 MB; a burst of HEIC frames is not. */
+export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Builds the key an object lives at.
+ *
+ * ── Why the shape is `jobs/<id>/photos/<uuid>.<ext>` ──────────────────────
+ * Prefixed by owner so a lifecycle rule, a bulk delete or an access policy can
+ * be written against a path rather than a database query. Ending in a UUID
+ * rather than the driver's filename: two phones both produce `IMG_0001.jpg`, and
+ * a caller-supplied name is a path-traversal vector besides.
+ */
+export function buildKey(input: {
+  scope: 'jobs' | 'runs' | 'vehicles' | 'invoices' | 'leads' | 'purchase-orders';
+  ownerId: string;
+  kind: string;
+  contentType: string;
+}): string {
+  const extension = EXTENSIONS[input.contentType] ?? 'bin';
+  // The owner id is checked rather than trusted: it reaches here from a route
+  // parameter, and a `..` in a storage key escapes the prefix it is meant to
+  // stay inside.
+  if (!/^[a-f0-9]{24}$/i.test(input.ownerId)) {
+    throw new Error(`Refusing to build a storage key for a non-id owner: ${input.ownerId}`);
+  }
+  return `${input.scope}/${input.ownerId}/${input.kind}/${randomUUID()}.${extension}`;
+}
+
+/* ── The stub ────────────────────────────────────────────────────────────── */
+
+/**
+ * Keeps bytes under `STORAGE_STUB_DIR` and serves them from the API.
+ *
+ * The "presigned" upload URL points back at this API's own upload route rather
+ * than at a signing service, so the client code path is identical to S3's: ask
+ * for a URL, PUT the bytes to it, then reference the key. That is the whole
+ * point — the phone must not know which provider is behind it.
+ */
+function createStubStorage(): StorageProvider {
+  const root = resolve(process.cwd(), env.STORAGE_STUB_DIR);
+
+  /**
+   * Resolves a key to a path INSIDE the storage root, or throws.
+   *
+   * Defence in depth: keys are built by `buildKey` above and should already be
+   * safe, but this is the last point before a filesystem write, and a traversal
+   * here writes anywhere the process can reach.
+   */
+  const pathFor = (key: string): string => {
+    const full = resolve(root, normalize(key));
+    if (full !== root && !full.startsWith(root + sep)) {
+      throw new Error('Storage key escapes the storage root');
+    }
+    return full;
+  };
+
+  return {
+    name: 'stub',
+
+    presignUpload: async ({ key, contentType }) => {
+      await mkdir(dirname(pathFor(key)), { recursive: true });
+
+      /*
+       * A short-lived HMAC over the key, so the upload route can verify that
+       * this URL came from us. Without it the stub's upload endpoint would
+       * accept a write to any key anybody named.
+       */
+      const expiresAt = Date.now() + env.S3_URL_TTL_SECONDS * 1000;
+      const token = signStubToken(key, expiresAt);
+
+      return {
+        key,
+        uploadUrl: `${env.AUTH_BASE_URL}/storage/${encodeURIComponent(key)}?expires=${String(expiresAt)}&token=${token}`,
+        headers: { 'Content-Type': contentType },
+        expiresAt: new Date(expiresAt).toISOString(),
+      };
+    },
+
+    presignDownload: (key) => {
+      const expiresAt = Date.now() + env.S3_URL_TTL_SECONDS * 1000;
+      const token = signStubToken(key, expiresAt);
+      return Promise.resolve(
+        `${env.AUTH_BASE_URL}/storage/${encodeURIComponent(key)}?expires=${String(expiresAt)}&token=${token}`,
+      );
+    },
+
+    put: async (key, body) => {
+      const path = pathFor(key);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, body);
+    },
+
+    get: (key) => Promise.resolve(createReadStream(pathFor(key))),
+
+    remove: async (key) => {
+      try {
+        await unlink(pathFor(key));
+      } catch {
+        // Already gone is the outcome the caller wanted.
+      }
+    },
+
+    exists: async (key) => {
+      try {
+        await stat(pathFor(key));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+/**
+ * Signs a stub URL so only URLs this process issued are accepted.
+ *
+ * The real provider gets this from AWS SigV4; the stub has to do something
+ * equivalent or it would be a world-writable bucket on the developer's laptop.
+ */
+export function signStubToken(key: string, expiresAt: number): string {
+  return createHash('sha256')
+    .update(`${key}:${String(expiresAt)}:${env.BETTER_AUTH_SECRET}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+export function verifyStubToken(key: string, expiresAt: number, token: string): boolean {
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return false;
+  const expected = signStubToken(key, expiresAt);
+  // Constant-time compare: a timing oracle on a 32-character hex token is a
+  // small hole, but it is a free one to close.
+  return timingSafeEqualHex(expected, token);
+}
+
+function timingSafeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/* ── S3 ──────────────────────────────────────────────────────────────────── */
+
+/**
+ * The real provider.
+ *
+ * Loaded lazily so `@aws-sdk/*` is never imported when `STORAGE_PROVIDER=stub`
+ * — which keeps a developer laptop and the test suite free of an AWS dependency
+ * they do not use.
+ */
+function createS3Storage(): StorageProvider {
+  interface S3Deps {
+    client: S3Client;
+    commands: typeof S3Module;
+    getSignedUrl: typeof GetSignedUrl;
+  }
+
+  let deps: Promise<S3Deps> | null = null;
+
+  const load = async (): Promise<S3Deps> => {
+    deps ??= (async () => {
+      const [s3, presigner] = await Promise.all([
+        import('@aws-sdk/client-s3'),
+        import('@aws-sdk/s3-request-presigner'),
+      ]);
+
+      const client = new s3.S3Client({
+        region: env.S3_REGION,
+        ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
+        /*
+         * Credentials are only passed when explicitly configured. Otherwise the
+         * SDK's default chain finds the instance role, which is the better
+         * deployment: nothing long-lived to leak or rotate.
+         */
+        ...(env.S3_ACCESS_KEY_ID && env.S3_SECRET_ACCESS_KEY
+          ? {
+              credentials: {
+                accessKeyId: env.S3_ACCESS_KEY_ID,
+                secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+              },
+            }
+          : {}),
+      });
+
+      return { client, commands: s3, getSignedUrl: presigner.getSignedUrl };
+    })();
+
+    return deps;
+  };
+
+  /** Every command needs it, and it is validated at boot for this provider. */
+  const bucket = (): string => {
+    if (!env.S3_BUCKET) throw new Error('S3_BUCKET is required when STORAGE_PROVIDER=s3');
+    return env.S3_BUCKET;
+  };
+
+  return {
+    name: 's3',
+
+    presignUpload: async ({ key, contentType, contentLength }) => {
+      const s3 = await load();
+      const expiresIn = env.S3_URL_TTL_SECONDS;
+
+      /*
+       * `ContentType` and `ContentLength` are part of the signature, so the
+       * phone cannot present a 20 MB URL and then upload 2 GB, nor claim a JPEG
+       * and store an HTML document that the bucket would later serve.
+       */
+      const command = new s3.commands.PutObjectCommand({
+        Bucket: bucket(),
+        Key: key,
+        ContentType: contentType,
+        ContentLength: contentLength,
+        // Belt and braces alongside the bucket's own default encryption.
+        ServerSideEncryption: 'AES256',
+      });
+
+      const uploadUrl = await s3.getSignedUrl(s3.client, command, { expiresIn });
+
+      return {
+        key,
+        uploadUrl,
+        headers: { 'Content-Type': contentType, 'Content-Length': String(contentLength) },
+        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+      };
+    },
+
+    presignDownload: async (key) => {
+      const s3 = await load();
+      const command = new s3.commands.GetObjectCommand({ Bucket: bucket(), Key: key });
+      return s3.getSignedUrl(s3.client, command, { expiresIn: env.S3_URL_TTL_SECONDS });
+    },
+
+    put: async (key, body, contentType) => {
+      const s3 = await load();
+      await s3.client.send(
+        new s3.commands.PutObjectCommand({
+          Bucket: bucket(),
+          Key: key,
+          Body: body,
+          ContentType: contentType,
+          ServerSideEncryption: 'AES256',
+        }),
+      );
+    },
+
+    get: async (key) => {
+      const s3 = await load();
+      const result = (await s3.client.send(
+        new s3.commands.GetObjectCommand({ Bucket: bucket(), Key: key }),
+      )) as { Body: Readable };
+      return result.Body;
+    },
+
+    remove: async (key) => {
+      const s3 = await load();
+      await s3.client.send(new s3.commands.DeleteObjectCommand({ Bucket: bucket(), Key: key }));
+    },
+
+    exists: async (key) => {
+      const s3 = await load();
+      try {
+        await s3.client.send(new s3.commands.HeadObjectCommand({ Bucket: bucket(), Key: key }));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+let provider: StorageProvider | undefined;
+
+export function getStorage(): StorageProvider {
+  provider ??= env.STORAGE_PROVIDER === 's3' ? createS3Storage() : createStubStorage();
+  return provider;
+}
+
+/** Test seam. Nothing in `src/` should call this. */
+export function setStorageForTesting(next: StorageProvider | undefined): void {
+  provider = next;
+}
+
+export function describeStorage(): { provider: string; bucket: string | null } {
+  return {
+    provider: env.STORAGE_PROVIDER,
+    bucket: env.STORAGE_PROVIDER === 's3' ? (env.S3_BUCKET ?? null) : null,
+  };
+}
+
+log.debug({ provider: env.STORAGE_PROVIDER }, 'storage configured');
+
+/** Exposed for the stub's read/write route, which must resolve keys the same way. */
+export const stubStorageRoot = (): string => resolve(process.cwd(), env.STORAGE_STUB_DIR);
+export const stubPathFor = (key: string): string => {
+  const root = stubStorageRoot();
+  const full = resolve(root, normalize(key));
+  if (full !== root && !full.startsWith(root + sep)) {
+    throw new Error('Storage key escapes the storage root');
+  }
+  return full;
+};
+
+export { join as joinStoragePath };

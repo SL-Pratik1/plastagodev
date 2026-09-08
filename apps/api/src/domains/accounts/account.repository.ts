@@ -381,6 +381,44 @@ export const accountRepository = {
       termsVersion: terms.termsVersion,
     };
   },
+
+  /**
+   * Journey A.4 — records the customer accepting the terms.
+   *
+   * ── Why this is an insert that can fail, not an upsert ────────────────────
+   * The acceptance is the record Matt currently chases as a signed PDF (7:49) —
+   * a director's guarantee, given once by a named individual. Overwriting it
+   * would silently replace who signed and when, which is the one thing the
+   * record exists to prove. The unique index on `accountId` makes a second
+   * acceptance impossible; this returns false so the caller can say so.
+   */
+  async recordTermsAcceptance(input: {
+    accountId: string;
+    acceptedByName: string;
+    acceptedByRole: string;
+    termsVersion: string;
+  }): Promise<boolean> {
+    if (!mongoose.isValidObjectId(input.accountId)) return false;
+
+    const result = await TermsAcceptanceModel.updateOne(
+      { accountId: new mongoose.Types.ObjectId(input.accountId) },
+      {
+        $setOnInsert: {
+          accountId: new mongoose.Types.ObjectId(input.accountId),
+          acceptedAt: new Date(),
+          acceptedByName: input.acceptedByName,
+          acceptedByRole: input.acceptedByRole,
+          termsVersion: input.termsVersion,
+        },
+      },
+      { upsert: true },
+    );
+
+    // `upsertedCount` is 1 only when this call created it. An existing
+    // acceptance matches and changes nothing, which is the correct outcome and
+    // a false return.
+    return result.upsertedCount === 1;
+  },
 };
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */

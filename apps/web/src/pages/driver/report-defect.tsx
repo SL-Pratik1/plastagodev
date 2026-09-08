@@ -4,8 +4,8 @@ import { CameraIcon, PhoneIcon, WrenchIcon } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useReportDefect, useRunSheet } from '@/features/driver/queries';
-import { RUN_DATE } from '@/services/mock/fixtures/driver-run';
-import { currentPosition } from '@/services/mock/driver.mock';
+import { todayInSydney } from '@/lib/geolocation';
+import { currentPosition } from '@/lib/geolocation';
 
 /**
  * Vehicle defect (M4.9 · F43, W33).
@@ -26,7 +26,7 @@ import { currentPosition } from '@/services/mock/driver.mock';
 export function DriverReportDefectPage() {
   const toast = useToast();
   const navigate = useNavigate();
-  const { data: day } = useRunSheet(RUN_DATE);
+  const { data: day } = useRunSheet(todayInSydney());
   const report = useReportDefect();
 
   const [severity, setSeverity] = useState<DefectSeverity | null>(null);

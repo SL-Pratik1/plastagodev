@@ -12,11 +12,13 @@ import type {
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { withTransaction } from '../../lib/transaction.js';
+import { auditService } from '../audit/audit.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { placeService } from '../places/place.service.js';
 import { pricingService } from '../settings/pricing.service.js';
 import { settingsRepository } from '../settings/settings.repository.js';
 import {
+  writeQuotedCharges,
   jobRepository,
   type JobScope,
   type ListJobsQuery,
@@ -201,6 +203,27 @@ export const jobService = {
           // fails on a deployment with no transactions.
           createdId = job.id;
 
+          /*
+           * The quote is PERSISTED as the job's own charge lines.
+           *
+           * Not recomputed at invoice time: rates are effective-dated (M6.2), so
+           * a re-quote months later would silently re-price history the first
+           * time somebody edits a rate card — and the invoice has to reproduce
+           * what the customer was quoted, to the cent (Risk 1). Storing them
+           * here makes the job the single source of truth and the invoice a
+           * straight copy of it.
+           */
+          await writeQuotedCharges(
+            job.id,
+            quote.lines.map((line) => ({
+              code: line.code,
+              description: line.description,
+              quantity: line.quantity,
+              unitRate: line.unitRate,
+              amount: line.amount,
+            })),
+          );
+
           await jobRepository.appendEvent({
             jobId: job.id,
             label: 'Job created',
@@ -222,6 +245,27 @@ export const jobService = {
         },
       },
     );
+
+    /*
+     * M1.6. A creation has no before-values, so `changes` records the fields a
+     * later dispute is actually about — who it is for, and when it was promised.
+     */
+    await auditService.record({
+      actorId: caller.userId,
+      actorName: caller.name,
+      actorRole: caller.roles[0] ?? null,
+      action: 'created',
+      entity: 'job',
+      entityId: created.id,
+      entityLabel: `Job #${String(jobNumber)}`,
+      summary: `Job booked — ${account.name}, ${created.siteName}`,
+      changes: [
+        { field: 'accountName', from: null, to: account.name },
+        { field: 'readyDate', from: null, to: created.readyDate },
+        { field: 'targetDate', from: null, to: created.targetDate },
+      ],
+      href: `/admin/jobs/${created.id}`,
+    });
 
     log.info(
       { jobId: created.id, jobNumber, accountId: account.id, zone: place.zone },
@@ -283,6 +327,27 @@ export const jobService = {
       detail: note.trim() || null,
     });
 
+    /*
+     * M1.6. Recorded as `status-changed` rather than `deleted`: the job is still
+     * there, and a log implying it was destroyed would send somebody looking for
+     * a row that was never removed.
+     */
+    await auditService.record({
+      actorId: caller.userId,
+      actorName: caller.name,
+      actorRole: caller.roles[0] ?? null,
+      action: 'status-changed',
+      entity: 'job',
+      entityId: id,
+      entityLabel: `Job #${String(job.jobNumber)}`,
+      summary: `Job cancelled — ${reason}`,
+      changes: [
+        { field: 'status', from: job.status, to: 'cancelled' },
+        { field: 'cancellationReason', from: null, to: reason },
+      ],
+      href: `/admin/jobs/${id}?tab=timeline`,
+    });
+
     log.info({ jobId: id, jobNumber: job.jobNumber, reason }, 'job cancelled');
   },
 
@@ -302,8 +367,8 @@ export const jobService = {
     const settings = await settingsRepository.get();
     const targetDate = addBusinessDays(readyDate, settings.general.slaBusinessDays);
 
-    const changed = await jobRepository.reschedule(id, readyDate, targetDate);
-    if (!changed) throw AppError.notFound('No such job');
+    const previous = await jobRepository.reschedule(id, readyDate, targetDate);
+    if (!previous) throw AppError.notFound('No such job');
 
     await jobRepository.appendEvent({
       jobId: id,
@@ -311,6 +376,27 @@ export const jobService = {
       actor: caller.name,
       status: null,
       detail: `Moved to ${readyDate}`,
+    });
+
+    /*
+     * M1.6, and the example the scope names by number: *"who changed job
+     * 61402's ready date from 12 Aug to 19 Aug?"* — currently unanswerable.
+     * This is the row that answers it.
+     *
+     * `targetDate` is recorded alongside because it moved too, derived from the
+     * SLA. A log showing only the date somebody typed, while the date the
+     * customer is actually promised silently shifted with it, tells half the
+     * story.
+     */
+    await auditService.recordUpdate({
+      actor: caller,
+      entity: 'job',
+      entityId: id,
+      entityLabel: `Job #${String(job.jobNumber)}`,
+      summary: `Ready date changed — ${previous.accountName}`,
+      before: { readyDate: previous.readyDate, targetDate: previous.targetDate },
+      after: { readyDate, targetDate },
+      href: `/admin/jobs/${id}?tab=timeline`,
     });
 
     log.info({ jobId: id, jobNumber: job.jobNumber, readyDate, targetDate }, 'job rescheduled');

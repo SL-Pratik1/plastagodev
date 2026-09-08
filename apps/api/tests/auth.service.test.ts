@@ -2,6 +2,7 @@ import { OtpChallengeSchema, SessionSchema } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AUTH_REASON_PATH, type AuthReason } from '../src/lib/auth-error.js';
 import { createFakeAuth, createFakeRepository, VALID_CODE } from './helpers/fake-auth.js';
+import { makeFakeAuditRepository } from './helpers/fake-audit.js';
 
 /**
  * The sign-in state machine (§9, M1.5).
@@ -19,6 +20,33 @@ let auth: ReturnType<typeof createFakeAuth>;
 // A GETTER, not a value: `vi.mock` factories are hoisted above every import, so
 // the fakes do not exist yet when this runs. Resolving them on each access lets
 // `beforeEach` hand out a clean pair per test.
+/*
+ * M1.6 — this suite's service records to the audit log. Faked like every other
+ * repository: the real one would buffer a write against a MongoDB that is not
+ * there and time out. See `helpers/fake-audit.ts`.
+ */
+vi.mock('../src/domains/audit/audit.repository.js', () => ({
+  auditRepository: makeFakeAuditRepository(),
+}));
+
+/*
+ * §9 — every sign-in attempt is recorded, so the auth service reaches the users
+ * repository. Faked: the real one would buffer against a MongoDB that is not
+ * there and time the test out after five seconds.
+ */
+vi.mock('../src/domains/users/user.repository.js', () => ({
+  userRepository: {
+    recordSignIn: () => {
+      signInsRecorded.push('recorded');
+      return Promise.resolve();
+    },
+  },
+}));
+
+/** Sign-in rows the service wrote. Asserted where the trail is under test. */
+const signInsRecorded: string[] = [];
+
+
 vi.mock('../src/domains/auth/auth.repository.js', () => ({
   get authRepository() {
     return repo.repository;

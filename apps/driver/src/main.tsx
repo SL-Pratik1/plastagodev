@@ -6,7 +6,8 @@ import { AppProviders } from '@/app/providers';
 import { router } from '@/app/router';
 import { AuthProvider } from '@/features/auth/auth-provider';
 import { registerServiceWorker } from '@/pwa/register-sw';
-import { createMockDriverServices } from '@/services/mock/create-mock-services';
+import { api } from '@/lib/api-client';
+import { createHttpDriverServices } from '@/services/http/create-http-services';
 import { ServicesProvider } from '@/services/services-context';
 import './styles/index.css';
 
@@ -16,12 +17,11 @@ if (!container) throw new Error('#root element is missing from index.html');
 /**
  * ⚠️ THE SWAP POINT.
  *
- * `createMockDriverServices()` becomes `createHttpDriverServices(api)` and this
- * app is running against the real backend. Nothing else changes: no screen
- * imports a URL, and the outbox already speaks HTTP through
- * `offline/transport.ts` — the mock only replaces the send.
+ * Now running against the real backend. Nothing else changed: no screen imports
+ * a URL, and the outbox already spoke HTTP through `offline/transport.ts` — the
+ * mock only replaced the send, so deleting it left the queue untouched.
  */
-const services = createMockDriverServices();
+const services = createHttpDriverServices(api);
 
 createRoot(container).render(
   <StrictMode>

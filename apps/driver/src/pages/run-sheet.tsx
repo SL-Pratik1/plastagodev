@@ -20,7 +20,7 @@ import {
   ZapIcon,
 } from 'lucide-react';
 import { Link } from 'react-router';
-import { RUN_DATE } from '@/services/mock/fixtures';
+import { todayInSydney } from '@/lib/geolocation';
 import { useRunSheet } from '@/features/run/queries';
 
 /**
@@ -38,7 +38,7 @@ import { useRunSheet } from '@/features/run/queries';
  * it is done.
  */
 export function RunSheetPage() {
-  const { data, error, isPending, refetch } = useRunSheet(RUN_DATE);
+  const { data, error, isPending, refetch } = useRunSheet(todayInSydney());
 
   if (error) {
     return (

@@ -15,8 +15,8 @@ import { CheckIcon, MinusIcon, XIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useRunSheet, useSubmitPreStart } from '@/features/driver/queries';
-import { RUN_DATE } from '@/services/mock/fixtures/driver-run';
-import { currentPosition } from '@/services/mock/driver.mock';
+import { todayInSydney } from '@/lib/geolocation';
+import { currentPosition } from '@/lib/geolocation';
 
 /**
  * Driver pre-start checklist (M4.8a · F56).
@@ -41,7 +41,7 @@ import { currentPosition } from '@/services/mock/driver.mock';
 export function DriverPreStartPage() {
   const toast = useToast();
   const navigate = useNavigate();
-  const { data: day } = useRunSheet(RUN_DATE);
+  const { data: day } = useRunSheet(todayInSydney());
   const submit = useSubmitPreStart();
 
   const [states, setStates] = useState<Record<string, PreStartItemState>>({});
@@ -90,7 +90,7 @@ export function DriverPreStartPage() {
       await submit.mutateAsync({
         occurredAt: new Date().toISOString(),
         position,
-        date: RUN_DATE,
+        date: todayInSydney(),
         vehicleRego: day?.vehicleRego ?? '',
         odometerKm: odometerValue,
         items: PRE_START_ITEMS.map((item) => ({

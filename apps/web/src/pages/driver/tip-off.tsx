@@ -18,8 +18,8 @@ import { CameraIcon, CheckCircle2Icon, ScaleIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useRecordTipOff, useRunSheet, useTipOffPreview } from '@/features/driver/queries';
-import { RUN_DATE } from '@/services/mock/fixtures/driver-run';
-import { currentPosition } from '@/services/mock/driver.mock';
+import { todayInSydney } from '@/lib/geolocation';
+import { currentPosition } from '@/lib/geolocation';
 
 /**
  * Tip-off weight and end-of-run reconciliation (M4.4).
@@ -57,7 +57,7 @@ import { currentPosition } from '@/services/mock/driver.mock';
 export function DriverTipOffPage() {
   const toast = useToast();
   const navigate = useNavigate();
-  const { data: day } = useRunSheet(RUN_DATE);
+  const { data: day } = useRunSheet(todayInSydney());
   const record = useRecordTipOff();
 
   const [totalKg, setTotalKg] = useState('');
@@ -113,7 +113,7 @@ export function DriverTipOffPage() {
         occurredAt: new Date().toISOString(),
         position,
         runId: activeRunId ?? '',
-        date: RUN_DATE,
+        date: todayInSydney(),
         totalKg: parsed,
         docketReference: docket.trim(),
         docketPhotoId,

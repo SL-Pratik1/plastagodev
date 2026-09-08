@@ -58,6 +58,18 @@ const userSchema = new Schema(
     },
     status: { type: String, required: true, enum: USER_STATUSES, default: 'active' },
     jobTitle: { type: String, default: null, trim: true },
+
+    /**
+     * Who invited them, as a NAME.
+     *
+     * Frozen rather than a reference: the point of the field is the audit trail,
+     * and an id that resolves to a deleted user answers nothing. `Seeded` for
+     * the accounts that existed before anybody was inviting anybody.
+     */
+    invitedBy: { type: String, default: null, trim: true },
+
+    /** Free text the office keeps about a person. Never shown to them. */
+    notes: { type: String, required: false, default: '', trim: true },
     /** REFERENCE → `accounts._id`. Only ever set for the two customer roles. */
     accountId: { type: Schema.Types.ObjectId, ref: 'Account', default: null },
     /** REFERENCES → `brands._id`. Slug keys — see `brand.model.ts`. */
@@ -67,6 +79,15 @@ const userSchema = new Schema(
       default: [],
     },
     lastSignedInAt: { type: Date, default: null },
+
+    /**
+     * B.2 — a site supervisor who joined by customer code and needs approving.
+     *
+     * Only meaningful on an account whose `approveNewSupervisors` is on. False
+     * everywhere else, including for supervisors the customer invited directly —
+     * inviting somebody IS the approval.
+     */
+    awaitingApproval: { type: Boolean, required: true, default: false },
   },
   {
     collection: USERS_COLLECTION,

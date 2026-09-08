@@ -1,6 +1,7 @@
 import { OtpRequestSchema, OtpVerifySchema } from '@plastago/shared';
 import { Router } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { env } from '../../config/env.js';
 import { asyncHandler } from '../../lib/async-handler.js';
 import { AppError } from '../../lib/app-error.js';
 import { validate } from '../../middleware/validate.js';
@@ -20,11 +21,12 @@ import { OtpResendSchema } from './auth.schemas.js';
  *
  * Sizing note: the office sits behind ONE NAT address, so these are per-office
  * ceilings, not per-person. Deliberately loose enough for a Monday morning with
- * every staff member signing in at once.
+ * every staff member signing in at once — and much looser again in development,
+ * where a developer and their browser share one address. See `config/env.ts`.
  */
 const sendLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: env.OTP_SENDS_PER_IP,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   // IPv6-safe: bare `req.ip` would key every address in a /64 separately.
@@ -42,7 +44,7 @@ const sendLimiter = rateLimit({
  */
 const verifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 60,
+  limit: env.OTP_VERIFIES_PER_IP,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   keyGenerator: (req) => ipKeyGenerator(req.ip ?? 'unknown'),

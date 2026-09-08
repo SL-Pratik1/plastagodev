@@ -121,9 +121,48 @@ export default defineConfig({
   ],
 
   resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url)),
-    },
+    /*
+     * ⚠️ AN ARRAY, NOT AN OBJECT — the object form matches by PREFIX, so
+     * '@plastago/ui' would also capture '@plastago/ui/styles.css' and rewrite it
+     * to '<path>/index.ts/styles.css'. The regexes below are anchored, so
+     * subpath imports keep resolving through the package's own exports.
+     */
+    alias: [
+      { find: '@', replacement: fileURLToPath(new URL('./src', import.meta.url)) },
+
+      /*
+       * ⚠️ THE WORKSPACE PACKAGES RESOLVE TO SOURCE, NOT TO `dist`.
+       *
+       * Their published exports point at `dist/index.js`, which is right for the
+       * API and for a production build. In the dev server it caused a bug that
+       * looked like the app itself was broken:
+       *
+       * `turbo run dev` starts `tsc --watch` for shared, ui and api-client. Each
+       * rewrites its ENTIRE `dist/` on the first compile, and they finish up to a
+       * minute apart. Vite was watching those emitted files, so every rewrite
+       * triggered a full page reload — anyone typing a one-time code during that
+       * window lost the form, and the code with it, repeatedly.
+       *
+       * Pointing at `src` takes `dist` out of the browser's dependency graph
+       * entirely: Vite watches real source, HMR is precise instead of a full
+       * reload, and the type-checking watchers can emit whenever they like
+       * without disturbing anybody.
+       */
+      {
+        find: /^@plastago\/shared$/,
+        replacement: fileURLToPath(new URL('../../packages/shared/src/index.ts', import.meta.url)),
+      },
+      {
+        find: /^@plastago\/ui$/,
+        replacement: fileURLToPath(new URL('../../packages/ui/src/index.ts', import.meta.url)),
+      },
+      {
+        find: /^@plastago\/api-client$/,
+        replacement: fileURLToPath(
+          new URL('../../packages/api-client/src/index.ts', import.meta.url),
+        ),
+      },
+    ],
   },
 
   /**

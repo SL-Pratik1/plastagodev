@@ -64,9 +64,35 @@ export default defineConfig({
   ],
 
   resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url)),
-    },
+    /*
+     * ⚠️ AN ARRAY, NOT AN OBJECT — the object form matches by PREFIX, so
+     * '@plastago/ui' would also capture '@plastago/ui/styles.css' and rewrite it
+     * to '<path>/index.ts/styles.css'. The regexes below are anchored, so
+     * subpath imports keep resolving through the package's own exports.
+     */
+    alias: [
+      { find: '@', replacement: fileURLToPath(new URL('./src', import.meta.url)) },
+
+      /*
+       * Resolved to SOURCE rather than `dist` — see the long note in
+       * `apps/web/vite.config.ts`. Both apps need it, or the driver app keeps
+       * the page-reload bug the console just lost.
+       */
+      {
+        find: /^@plastago\/shared$/,
+        replacement: fileURLToPath(new URL('../../packages/shared/src/index.ts', import.meta.url)),
+      },
+      {
+        find: /^@plastago\/ui$/,
+        replacement: fileURLToPath(new URL('../../packages/ui/src/index.ts', import.meta.url)),
+      },
+      {
+        find: /^@plastago\/api-client$/,
+        replacement: fileURLToPath(
+          new URL('../../packages/api-client/src/index.ts', import.meta.url),
+        ),
+      },
+    ],
   },
 
   server: {

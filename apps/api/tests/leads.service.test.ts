@@ -1,0 +1,402 @@
+import type { LeadConversion, LeadCreate, Role } from '@plastago/shared';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * Leads and onboarding (M5, Journey A).
+ *
+ * ── What is actually under test ───────────────────────────────────────────
+ * The rules that keep the pipeline honest. A lead cannot be created already
+ * `won` — that would bypass A.4 and so bypass the rate card, the terms and the
+ * account. A lead cannot be converted twice, because that is two accounts for
+ * one builder and only one of them gets invoiced.
+ */
+
+let created: Array<Record<string, unknown>> = [];
+let notes: Array<{ leadId: string; body: string }> = [];
+let updates: Array<{ id: string; status: string; ownerName: string | null }> = [];
+let accountsCreated: Array<Record<string, unknown>> = [];
+let markedConverted: string[] = [];
+
+let stored: Record<string, unknown> | null = null;
+let updateMatches = true;
+let convertMatches = true;
+let codeTaken = false;
+
+vi.mock('../src/domains/queues/lead.repository.js', () => ({
+  leadRepository: {
+    list: () =>
+      Promise.resolve({ data: [], meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 } }),
+    findById: () => Promise.resolve(stored),
+    findByEmail: () => Promise.resolve([]),
+    create: (input: Record<string, unknown>) => {
+      created.push(input);
+      return Promise.resolve('lead1');
+    },
+    update: (id: string, input: { status: string; ownerName: string | null }) => {
+      if (!updateMatches) return Promise.resolve(false);
+      updates.push({ id, ...input });
+      return Promise.resolve(true);
+    },
+    addNote: (input: { leadId: string; body: string }) => {
+      notes.push(input);
+      return Promise.resolve({ id: 'n1', at: new Date().toISOString(), author: 'x', body: input.body });
+    },
+    addAttachment: () => Promise.resolve({ id: 'att1' }),
+    findAttachment: () => Promise.resolve({ id: 'att1', storageKey: 'leads/x/f.pdf' }),
+    removeAttachment: () => Promise.resolve(true),
+    markConverted: (id: string) => {
+      if (!convertMatches) return Promise.resolve(false);
+      markedConverted.push(id);
+      return Promise.resolve(true);
+    },
+    countOpen: () => Promise.resolve(7),
+  },
+}));
+
+vi.mock('../src/domains/accounts/account.repository.js', () => ({
+  accountRepository: {
+    codeExists: () => Promise.resolve(codeTaken),
+    create: (input: Record<string, unknown>) => {
+      accountsCreated.push(input);
+      return Promise.resolve({ id: 'acc-new', ...input });
+    },
+  },
+}));
+
+vi.mock('../src/integrations/storage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/integrations/storage.js')>();
+  return {
+    ...actual,
+    getStorage: () => ({
+      name: 'test',
+      presignUpload: (input: { key: string }) =>
+        Promise.resolve({
+          key: input.key,
+          uploadUrl: `https://example.test/${input.key}`,
+          headers: {},
+          expiresAt: new Date().toISOString(),
+        }),
+      presignDownload: (key: string) => Promise.resolve(`https://example.test/${key}`),
+      put: () => Promise.resolve(),
+      get: () => Promise.reject(new Error('not used')),
+      remove: () => Promise.resolve(),
+      exists: () => Promise.resolve(true),
+    }),
+  };
+});
+
+const { leadService } = await import('../src/domains/queues/lead.service.js');
+
+const OPERATIONS = {
+  userId: 'usr0000000000000000000o1',
+  name: 'Renee Alvarez',
+  roles: ['operations'] as Role[],
+};
+
+const OFFICE = {
+  userId: 'usr0000000000000000000f1',
+  name: 'Priya Raman',
+  roles: ['office-staff'] as Role[],
+};
+
+const DRIVER = {
+  userId: 'usr0000000000000000000d1',
+  name: 'Troy Holm',
+  roles: ['driver'] as Role[],
+};
+
+const ID = 'a'.repeat(24);
+
+function lead(overrides: Record<string, unknown> = {}) {
+  return {
+    id: ID,
+    companyName: 'Newlands Constructions',
+    contactName: 'Sam Farrar',
+    email: 'sam@newlands.com.au',
+    mobile: '0400111222',
+    status: 'quoted',
+    source: 'phone',
+    zone: 'sydney',
+    suburbs: 'Oran Park, Catherine Field',
+    typicalVolumeM2: 800,
+    expectedFrequency: 'Weekly',
+    heardAbout: 'Referral from Clarendon',
+    ownerName: 'Renee Alvarez',
+    createdAt: '2026-08-01T00:00:00.000Z',
+    lastActivityAt: '2026-09-01T00:00:00.000Z',
+    convertedAccountId: null,
+    notes: [],
+    attachments: [],
+    ...overrides,
+  };
+}
+
+function draft(overrides: Partial<LeadCreate> = {}): LeadCreate {
+  return {
+    companyName: 'Newlands Constructions',
+    contactName: 'Sam Farrar',
+    email: 'sam@newlands.com.au',
+    mobile: '0400111222',
+    source: 'phone',
+    zone: 'sydney',
+    suburbs: 'Oran Park',
+    typicalVolumeM2: 800,
+    expectedFrequency: 'Weekly',
+    heardAbout: 'Referral',
+    ownerName: '',
+    note: 'Rang about a new estate',
+    ...overrides,
+  };
+}
+
+function conversion(overrides: Partial<LeadConversion> = {}): LeadConversion {
+  return {
+    customerCode: 'NEW001',
+    legalName: 'Newlands Constructions Pty Ltd',
+    abn: '12345678901',
+    brandId: 'plastago',
+    rateCardId: 'default',
+    poPolicy: 'required-before-invoice',
+    captureMode: 'area-only',
+    paymentTermsDays: 7,
+    primaryZone: 'sydney',
+    sendInvitation: true,
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  created = [];
+  notes = [];
+  updates = [];
+  accountsCreated = [];
+  markedConverted = [];
+  stored = lead();
+  updateMatches = true;
+  convertMatches = true;
+  codeTaken = false;
+});
+
+describe('taking a lead by hand (A.1)', () => {
+  /*
+   * ⚠️ Every lead starts `new`. Letting intake choose would allow one created
+   * already `won`, bypassing A.4 — and so bypassing the rate card, the terms
+   * and the account that "won" is supposed to mean.
+   */
+  it('never lets intake choose a status', async () => {
+    await leadService.create(draft(), OFFICE);
+
+    // The service passes no status at all — the repository hard-codes `new`.
+    // A status that could travel from here is one that could arrive as `won`.
+    expect(created[0]).not.toHaveProperty('status');
+    expect(Object.keys(created[0] ?? {})).not.toContain('status');
+  });
+
+  /* What was said on the call is lost the moment the person hangs up. */
+  it('files the call itself as the first note', async () => {
+    await leadService.create(draft({ note: 'Rang about Oran Park, 40 lots' }), OFFICE);
+
+    expect(notes[0]?.body).toBe('Rang about Oran Park, 40 lots');
+  });
+
+  it('does not file an empty note', async () => {
+    await leadService.create(draft({ note: '   ' }), OFFICE);
+
+    expect(notes).toHaveLength(0);
+  });
+
+  it('defaults the owner to whoever took the call', async () => {
+    await leadService.create(draft({ ownerName: '' }), OFFICE);
+
+    expect(created[0]?.ownerName).toBe('Priya Raman');
+  });
+
+  /*
+   * A phone call cannot insist. A thin lead in the queue beats a perfect one in
+   * a notebook — so an unknown volume is null, not zero.
+   */
+  it('accepts a lead with almost nothing filled in', async () => {
+    await expect(
+      leadService.create(
+        draft({
+          mobile: '',
+          zone: null,
+          suburbs: '',
+          typicalVolumeM2: null,
+          expectedFrequency: '',
+          heardAbout: '',
+          note: '',
+        }),
+        OFFICE,
+      ),
+    ).resolves.toBeDefined();
+
+    expect(created[0]?.typicalVolumeM2).toBeNull();
+    expect(created[0]?.mobile).toBeNull();
+  });
+
+  it('keeps drivers out of the pipeline', async () => {
+    await expect(leadService.create(draft(), DRIVER)).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe('working a lead', () => {
+  it('records the status change and the note together', async () => {
+    await leadService.update(
+      ID,
+      { status: 'quoted', ownerName: 'Renee Alvarez', note: 'Sent the proposal' },
+      OFFICE,
+    );
+
+    expect(updates[0]).toMatchObject({ status: 'quoted' });
+    expect(notes[0]?.body).toBe('Sent the proposal');
+  });
+
+  /* A converted lead is history — re-opening one would leave an account with a
+   * lead still claiming to be chasing it. */
+  it('404s a lead that has already been converted', async () => {
+    updateMatches = false;
+
+    await expect(
+      leadService.update(ID, { status: 'contacted', ownerName: '', note: '' }, OFFICE),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('proposals (Matt, 5:53)', () => {
+  it('hands back somewhere to put the PDF', async () => {
+    const result = await leadService.attach(
+      ID,
+      { fileName: 'Proposal.pdf', contentType: 'application/pdf', sizeBytes: 240_000 },
+      OFFICE,
+    );
+
+    expect(result.attachmentId).toBe('att1');
+    expect(result.upload.uploadUrl).toContain('leads/');
+  });
+
+  it('refuses a file type nobody sends a proposal as', async () => {
+    await expect(
+      leadService.attach(
+        ID,
+        { fileName: 'x.exe', contentType: 'application/x-msdownload', sizeBytes: 100 },
+        OFFICE,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('refuses a file over the cap', async () => {
+    await expect(
+      leadService.attach(
+        ID,
+        { fileName: 'huge.pdf', contentType: 'application/pdf', sizeBytes: 40 * 1024 * 1024 },
+        OFFICE,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('mints an expiring link when reading the lead back', async () => {
+    stored = lead({
+      attachments: [
+        {
+          id: 'att1',
+          fileName: 'Proposal.pdf',
+          sizeBytes: 1000,
+          contentType: 'application/pdf',
+          uploadedAt: '2026-09-01T00:00:00.000Z',
+          uploadedBy: 'Priya Raman',
+          url: null,
+        },
+      ],
+    });
+
+    const result = await leadService.get(ID, OFFICE);
+
+    // A proposal link that lived forever would outlive the reason anybody had
+    // for seeing it.
+    expect(result.attachments[0]?.url).toContain('leads/x/f.pdf');
+  });
+});
+
+describe('converting a lead (A.4)', () => {
+  it('creates the account with everything the wizard chose', async () => {
+    const result = await leadService.convert(ID, conversion(), OPERATIONS);
+
+    expect(result).toEqual({ accountId: 'acc-new', customerCode: 'NEW001' });
+    expect(accountsCreated[0]).toMatchObject({
+      code: 'NEW001',
+      name: 'Newlands Constructions Pty Ltd',
+      abn: '12345678901',
+      rateCardId: 'default',
+      poPolicy: 'required-before-invoice',
+      paymentTermsDays: 7,
+    });
+  });
+
+  /* Otherwise the first thing the office does with a new account is retype
+   * what the lead already had. */
+  it('carries the lead’s contact onto the account', async () => {
+    await leadService.convert(ID, conversion(), OPERATIONS);
+
+    expect(accountsCreated[0]?.contact).toMatchObject({
+      name: 'Sam Farrar',
+      email: 'sam@newlands.com.au',
+    });
+  });
+
+  /*
+   * Terms are accepted by the customer in the portal (M5.2). Pre-signing them
+   * here would be PlastaGo agreeing on the builder's behalf.
+   */
+  it('does not pre-sign the terms', async () => {
+    await leadService.convert(ID, conversion(), OPERATIONS);
+
+    expect(accountsCreated[0]?.termsAgreedOffSystem).toBeNull();
+  });
+
+  it('marks the lead converted and notes it in the thread', async () => {
+    await leadService.convert(ID, conversion(), OPERATIONS);
+
+    expect(markedConverted).toEqual([ID]);
+    expect(notes[0]?.body).toContain('NEW001');
+  });
+
+  it('refuses a lead that is already converted', async () => {
+    stored = lead({ convertedAccountId: 'acc-existing' });
+
+    await expect(leadService.convert(ID, conversion(), OPERATIONS)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(accountsCreated).toHaveLength(0);
+  });
+
+  it('refuses a customer code somebody else has', async () => {
+    codeTaken = true;
+
+    await expect(leadService.convert(ID, conversion(), OPERATIONS)).rejects.toMatchObject({
+      status: 422,
+    });
+    expect(accountsCreated).toHaveLength(0);
+  });
+
+  /*
+   * ⚠️ Two people finishing the wizard together. The loser is told, loudly —
+   * the account already exists by then, so a silent success would leave two
+   * accounts for one builder with only one of them invoiced.
+   */
+  it('conflicts when another user converted it mid-flow', async () => {
+    convertMatches = false;
+
+    await expect(leadService.convert(ID, conversion(), OPERATIONS)).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
+  /* Converting sets the rate card and the terms — a commercial decision. */
+  it('refuses office staff without operations', async () => {
+    await expect(leadService.convert(ID, conversion(), OFFICE)).rejects.toMatchObject({
+      status: 403,
+    });
+    expect(accountsCreated).toHaveLength(0);
+  });
+});

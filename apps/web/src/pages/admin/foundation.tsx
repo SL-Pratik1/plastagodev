@@ -35,7 +35,7 @@ import { useListQuery } from '@/components/data-table/use-list-query';
 import { PageHeader } from '@/components/page-header';
 import { formatDateTime, formatMobile, formatMoney, TIMEZONE_LABEL } from '@/lib/format';
 import { ServiceError } from '@/services/service-error';
-import { DEMO_IDENTITIES, type DemoIdentity } from '@/services/mock/fixtures/identities';
+import { SEEDED_IDENTITIES } from '@/config/seeded-identities';
 
 /**
  * The design system, exercised.
@@ -104,7 +104,40 @@ const ROLE_FILTER: FilterDefinition = {
 
 const FILTER_KEYS = ['role'] as const;
 
-const COLUMNS: readonly DataTableColumn<DemoIdentity>[] = [
+
+/**
+ * Sample rows for the DataTable demonstration.
+ *
+ * ⚠️ Showcase data, and it lives here on purpose. This page exists to exercise
+ * the design system — sorting, filtering, paging, the empty and error states —
+ * so it needs rows with a last-sign-in and a brand count to sort BY. Those are
+ * not facts the seeded account list carries, and inventing them there would put
+ * fake data one import away from a real screen.
+ *
+ * The names come from the seed list so the page still reads as PlastaGo.
+ */
+interface ShowcaseRow {
+  id: string;
+  name: string;
+  email: string | null;
+  mobile: string | null;
+  role: Role;
+  lastSignedInAt: string;
+  brandIds: readonly string[];
+}
+
+const SHOWCASE_ROWS: readonly ShowcaseRow[] = SEEDED_IDENTITIES.map((identity, index) => ({
+  id: identity.role,
+  name: identity.name,
+  email: identity.email,
+  mobile: identity.mobile,
+  role: identity.role,
+  // Spread across the last week so the column has something to sort.
+  lastSignedInAt: new Date(Date.now() - index * 19 * 3_600_000).toISOString(),
+  brandIds: index % 3 === 0 ? ['plastago', 'easylift', 'brickgo'] : ['plastago'],
+}));
+
+const COLUMNS: readonly DataTableColumn<ShowcaseRow>[] = [
   {
     id: 'name',
     header: 'Name',
@@ -156,7 +189,7 @@ function TableSection() {
   const search = (controller.query.q ?? '').toLowerCase();
   const roleFilter = controller.filters.role;
 
-  let rows: DemoIdentity[] = DEMO_IDENTITIES.filter((identity) => {
+  let rows: ShowcaseRow[] = SHOWCASE_ROWS.filter((identity) => {
     const matchesSearch =
       !search ||
       identity.name.toLowerCase().includes(search) ||
@@ -171,8 +204,8 @@ function TableSection() {
     const descending = sort.startsWith('-');
     const key = descending ? sort.slice(1) : sort;
     rows = [...rows].sort((a, b) => {
-      const left = String(a[key as keyof DemoIdentity] ?? '');
-      const right = String(b[key as keyof DemoIdentity] ?? '');
+      const left = String(a[key as keyof ShowcaseRow] ?? '');
+      const right = String(b[key as keyof ShowcaseRow] ?? '');
       return descending ? right.localeCompare(left) : left.localeCompare(right);
     });
   }
@@ -217,7 +250,7 @@ function TableSection() {
         />
 
         <DataTable
-          caption="Demo identities"
+          caption="Sample rows"
           columns={COLUMNS}
           rows={paged}
           getRowId={(row) => row.id}

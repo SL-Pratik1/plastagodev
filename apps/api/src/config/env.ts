@@ -6,6 +6,40 @@ import * as z from 'zod';
  * again. A missing or malformed variable fails the process immediately with a
  * readable message rather than surfacing as a null-pointer three screens deep.
  */
+/**
+ * Read before the schema, because the sign-in ceilings below depend on it.
+ *
+ * Deliberately NOT `env.NODE_ENV` — that value does not exist until this schema
+ * has parsed, and a default cannot wait for its own object.
+ */
+const isDevelopment = (process.env.NODE_ENV ?? 'development') === 'development';
+
+/**
+ * The sign-in rate ceilings, which differ sharply between environments.
+ *
+ * ── Why development needs its own numbers ─────────────────────────────────
+ * Production's limits are sized for a person: six codes an hour is generous for
+ * somebody signing in, and each one costs an SMS. On a laptop they are actively
+ * broken — signing in and out to check a screen is the whole job, six is reached
+ * in about two minutes, and the developer is then locked out of their own app
+ * for an hour by a message that reads like a bug. That happened.
+ *
+ * Exported as a function so both numbers are covered by a test rather than by a
+ * ternary nobody reruns. Every value can still be overridden by setting the
+ * variable explicitly.
+ */
+export function signInLimits(development: boolean): {
+  sendsPerHourPerIdentifier: number;
+  sendsPerIp: number;
+  verifiesPerIp: number;
+} {
+  return development
+    ? { sendsPerHourPerIdentifier: 200, sendsPerIp: 500, verifiesPerIp: 500 }
+    : { sendsPerHourPerIdentifier: 6, sendsPerIp: 20, verifiesPerIp: 60 };
+}
+
+const LIMITS = signInLimits(isDevelopment);
+
 const EnvSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -39,6 +73,21 @@ const EnvSchema = z
 
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
+
+    /**
+     * The per-IP ceiling on the sign-in routes, over 15 minutes.
+     *
+     * Sized separately from the global limiter because every request to those
+     * routes can spend money on an SMS. The office sits behind ONE NAT address,
+     * so this is a per-OFFICE ceiling rather than a per-person one — loose
+     * enough for a Monday morning with everybody signing in at once.
+     *
+     * ⚠️ Development is far higher for the same reason as
+     * `OTP_MAX_SENDS_PER_HOUR`: a developer and their own browser share one
+     * address, and 20 is about ten minutes of testing.
+     */
+    OTP_SENDS_PER_IP: z.coerce.number().int().positive().default(LIMITS.sendsPerIp),
+    OTP_VERIFIES_PER_IP: z.coerce.number().int().positive().default(LIMITS.verifiesPerIp),
 
     // ─── Authentication (§9, M1.5) ────────────────────────────────────────────
 
@@ -76,8 +125,24 @@ const EnvSchema = z
     /** Wrong guesses allowed before the challenge is burned. */
     OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().max(10).default(5),
 
-    /** Codes any one identifier may request per hour, however many IPs are used. */
-    OTP_MAX_SENDS_PER_HOUR: z.coerce.number().int().positive().default(6),
+    /**
+     * Codes any one identifier may request per hour, however many IPs are used.
+     *
+     * ── ⚠️ The default is much higher in development, on purpose ───────────
+     * Six an hour is right in production: each code costs an SMS, and somebody
+     * genuinely signing in needs one or two. It is hopeless on a laptop, where
+     * signing in and out to check a screen is the whole job — six is reached in
+     * about two minutes, and the developer is then locked out of their own app
+     * for an hour with a message that reads like a bug.
+     *
+     * So development gets a working ceiling and production keeps the real one.
+     * Set the variable explicitly to override either.
+     */
+    OTP_MAX_SENDS_PER_HOUR: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(LIMITS.sendsPerHourPerIdentifier),
 
     /**
      * ⚠️ SECURITY / UX trade-off, deliberately switchable.
@@ -121,6 +186,36 @@ const EnvSchema = z
 
     /** Shown in the OTP message so the recipient knows who is asking. */
     OTP_SENDER_NAME: z.string().min(1).default('PlastaGo'),
+
+    /**
+     * §6A.10 #9 — object storage for photos, dockets and generated PDFs.
+     *
+     * `stub` keeps the bytes on local disk and hands out ordinary API URLs, so
+     * the whole capture-and-view path is walkable with no AWS account. Swapping
+     * to S3 is this variable plus its credentials — never a code change (§8).
+     */
+    STORAGE_PROVIDER: z.enum(['stub', 's3']).default('stub'),
+
+    S3_REGION: z.string().min(1).optional(),
+    S3_BUCKET: z.string().min(1).optional(),
+    /**
+     * Optional. Omit on EC2/ECS/Lambda so the SDK uses the instance role, which
+     * is better than a long-lived key sitting in an environment variable.
+     */
+    S3_ACCESS_KEY_ID: z.string().min(1).optional(),
+    S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+    /** For S3-compatible storage (MinIO, R2). Left unset for real AWS. */
+    S3_ENDPOINT: z.string().url().optional(),
+    /**
+     * How long an upload or view URL stays valid, in seconds.
+     *
+     * Short by default: a link that leaks is only useful while it is live, and
+     * a driver's phone redeems an upload URL within seconds of asking for it.
+     * Long enough that a poor 4G connection on a building site can still finish.
+     */
+    S3_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
+    /** Where the stub provider keeps bytes. Ignored when STORAGE_PROVIDER=s3. */
+    STORAGE_STUB_DIR: z.string().min(1).default('.storage'),
   })
   .superRefine((value, ctx) => {
     const isProd = value.NODE_ENV === 'production';
@@ -163,6 +258,46 @@ const EnvSchema = z
           });
         }
       }
+    }
+
+    if (value.STORAGE_PROVIDER === 's3') {
+      // The region and bucket have no sane default. Credentials deliberately do
+      // NOT appear here: on EC2/ECS the instance role supplies them, and
+      // demanding a static key would push deployments towards the worse option.
+      for (const key of ['S3_REGION', 'S3_BUCKET'] as const) {
+        if (!value[key]) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [key],
+            message: 'Required when STORAGE_PROVIDER=s3',
+          });
+        }
+      }
+
+      // Half a key pair is always a mistake, and the failure it causes is an
+      // opaque SDK error at the moment a driver uploads a photo.
+      const hasId = Boolean(value.S3_ACCESS_KEY_ID);
+      const hasSecret = Boolean(value.S3_SECRET_ACCESS_KEY);
+      if (hasId !== hasSecret) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [hasId ? 'S3_SECRET_ACCESS_KEY' : 'S3_ACCESS_KEY_ID'],
+          message:
+            'Set both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or neither to use the instance role',
+        });
+      }
+    }
+
+    /*
+     * Local disk in production is not durable storage: containers are replaced,
+     * and the completion photos that defend a futile charge would go with them.
+     */
+    if (isProd && value.STORAGE_PROVIDER === 'stub') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['STORAGE_PROVIDER'],
+        message: 'Cannot be "stub" in production — photos and dockets would not survive a restart',
+      });
     }
 
     // A production deployment that cannot send a code cannot let anyone in.

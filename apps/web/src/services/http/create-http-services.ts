@@ -1,37 +1,59 @@
 import type { ApiClient } from '@plastago/api-client';
-import { createMockServices } from '../mock/create-mock-services.js';
 import type { Services } from '../types.js';
+import {
+  createHttpCustomerService,
+  createHttpDispatchService,
+  createHttpInvoiceService,
+  createHttpJobService,
+  createHttpReportService,
+  createHttpVehicleService,
+} from './admin.http.js';
 import { createHttpAuthService } from './auth.http.js';
+import { createHttpDriverRunService } from './driver-run.http.js';
+import { createHttpPortalService } from './portal.http.js';
+import { createHttpQueueService } from './queues.http.js';
+import {
+  createHttpAuditService,
+  createHttpDashboardService,
+  createHttpDriverService,
+  createHttpLookupService,
+  createHttpNotificationService,
+  createHttpSettingsService,
+  createHttpUserService,
+} from './reference.http.js';
 
 /**
- * The HTTP service graph — real endpoints where they exist, mocks elsewhere.
+ * The service graph, over the real API.
  *
- * ── Why this is a hybrid rather than an all-or-nothing swap ─────────────────
- * There are nineteen service interfaces and roughly 139 methods behind them.
- * Waiting until every endpoint exists before switching any of them would mean
- * one enormous cutover, with the first real integration bug arriving at the
- * same moment as the hundredth — and no way to tell which change caused what.
+ * ── There is no mock fallback any more ────────────────────────────────────
+ * There used to be: each domain moved from `mock` to `http` as its endpoints
+ * landed, and the mock kept the app running in between. Every domain is now
+ * real, so the fallback is gone and `services/mock/` with it. Keeping a mock
+ * beside a working backend is how a screen ends up quietly reading fixtures for
+ * a month without anybody noticing.
  *
- * So the graph is composed: each domain moves from `mock` to `http` on the day
- * its endpoints land, and the mock keeps the app running in the meantime. The
- * screens cannot tell the difference, because both sides implement the same
- * interfaces.
- *
- * Wiring a newly built domain is one line below, plus its adapter. Once the
- * last one is real, the fallback and the whole `mock/` folder are deleted.
- *
- *     WIRED   auth
- *     MOCKED  users, customers, jobs, dispatch, dashboard, invoices, reports,
- *             drivers, vehicles, notifications, settings, portal, queues,
- *             audit, lookups, driverRun
+ * The screens did not change. That is the point of the seam described in
+ * `services/README.md`: both sides implemented the same interfaces from
+ * `types.ts`, so the swap is this file.
  */
 export function createHttpServices(api: ApiClient): Services {
-  // Everything not yet wired. Retained rather than stubbed with throws so the
-  // console and the portal stay demonstrable while the backend is built.
-  const fallback = createMockServices();
-
   return {
-    ...fallback,
     auth: createHttpAuthService(api),
+    lookups: createHttpLookupService(api),
+    users: createHttpUserService(api),
+    customers: createHttpCustomerService(api),
+    jobs: createHttpJobService(api),
+    dispatch: createHttpDispatchService(api),
+    dashboard: createHttpDashboardService(api),
+    invoices: createHttpInvoiceService(api),
+    reports: createHttpReportService(api),
+    drivers: createHttpDriverService(api),
+    vehicles: createHttpVehicleService(api),
+    notifications: createHttpNotificationService(api),
+    settings: createHttpSettingsService(api),
+    audit: createHttpAuditService(api),
+    queues: createHttpQueueService(api),
+    portal: createHttpPortalService(api),
+    driverRun: createHttpDriverRunService(api),
   };
 }

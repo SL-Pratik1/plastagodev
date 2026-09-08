@@ -14,7 +14,7 @@ import { SaveIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useCaptureWeights, useDriverJob } from '@/features/driver/queries';
-import { currentPosition } from '@/services/mock/driver.mock';
+import { currentPosition } from '@/lib/geolocation';
 
 /**
  * What was collected (M4.3 · F34, W30, W44).

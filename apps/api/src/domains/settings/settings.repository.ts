@@ -26,10 +26,12 @@ import {
   InvoiceTemplateModel,
   NotificationRuleModel,
   RateCardModel,
+  SEQUENCE_STARTS,
   SETTINGS_SINGLETON_ID,
   SettingsModel,
   ZoneRateModel,
 } from './settings.model.js';
+import type { SequenceField } from './settings.model.js';
 
 /**
  * Repository layer — the ONLY file in this domain that touches Mongoose
@@ -297,27 +299,52 @@ export const settingsRepository = {
   /**
    * Take the next number in a sequence, atomically.
    *
-   * ⚠️ `findOneAndUpdate($inc)` — one round trip that both reads and reserves.
-   * Reading then writing would hand the same job number to two simultaneous
-   * bookings, and M1.4 is explicit that these continue from TransVirtual and
-   * must never collide.
+   * ⚠️ One round trip that both reads and reserves. Reading then writing would
+   * hand the same job number to two simultaneous bookings, and M1.4 is explicit
+   * that these continue from TransVirtual and must never collide.
+   *
+   * ── Why this is a pipeline update and not a plain `$inc` ──────────────────
+   * Because a plain `$inc` is wrong the first time a NEW sequence is added to a
+   * settings document that already exists. `$inc` on a missing field creates it
+   * at 1 and reports no previous value, so the caller both fails AND leaves the
+   * sequence restarted at 1.
+   *
+   * Harmless for run numbers, which start at 1 anyway. Not harmless for
+   * invoices: M1.4 says they continue from ~104,100 and must NEVER restart,
+   * because three years of numbers are quoted in builders' AP systems. Found in
+   * QA when `nextRunNumber` was added to an already-seeded document — the first
+   * run creation after deploy returned a 500.
+   *
+   * `$ifNull` folds the seed default into the same atomic update, so a missing
+   * field starts where it is supposed to and there is no window in which two
+   * callers could both initialise it.
    */
-  async takeNextNumber(
-    field: 'nextJobNumber' | 'nextInvoiceNumber' | 'nextRunNumber',
-  ): Promise<number> {
+  async takeNextNumber(field: SequenceField): Promise<number> {
+    const start = SEQUENCE_STARTS[field];
+
     const updated = await SettingsModel.findOneAndUpdate(
       { _id: SETTINGS_SINGLETON_ID },
-      { $inc: { [field]: 1 } },
-      // `before` so the caller gets the number it reserved rather than the one
-      // after it — off-by-one here is a permanently skipped invoice number.
-      { returnDocument: 'before', projection: { [field]: 1 } },
+      [{ $set: { [field]: { $add: [{ $ifNull: [`$${field}`, start] }, 1] } } }],
+      {
+        // `before` so the caller gets the number it reserved rather than the one
+        // after it — off-by-one here is a permanently skipped invoice number.
+        returnDocument: 'before',
+        projection: { [field]: 1 },
+        // Mongoose 9 requires opting in before it will send an array as an
+        // aggregation pipeline; without it the driver rejects the update.
+        updatePipeline: true,
+      },
     ).lean<Record<string, number>>();
 
-    const value = updated?.[field];
-    if (value === undefined) {
+    if (!updated) {
+      // No settings document at all is a genuinely unseeded install, which is a
+      // deployment problem rather than something a caller can recover from.
       throw new Error('Settings have not been seeded — run `npm run seed:settings`');
     }
-    return value;
+
+    // Undefined here means the field was missing and the pipeline above has just
+    // initialised it, so the number this caller reserved is the sequence's start.
+    return updated[field] ?? start;
   },
 
   async saveGeneral(input: Settings['general']): Promise<void> {
