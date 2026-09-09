@@ -626,16 +626,83 @@ export const JobDraftSchema = z
     siteContactName: z.string().trim().max(80),
     siteContactMobile: z.string().trim().max(20),
     siteContactEmail: z.string().trim().max(160),
-    /** PO number or job reference — one field. See `Job.poNumber`. */
+    /**
+     * PO number or job reference — one field. See `Job.poNumber`.
+     *
+     * ⚠️ IGNORED when `purchaseOrderId` is set. The confirmed order's own number
+     * wins, because that is the number the builder's accounts system matches on
+     * and a typed one can disagree with it by a character.
+     */
     poNumber: z.string().trim().max(60),
+    /**
+     * M2.12 — the confirmed purchase order this pickup is being booked against.
+     *
+     * ── Why an id and not the figures off the order ────────────────────────
+     * Because the area PRICES the job (M6.3), and a caller that could send its
+     * own area could name its own price. The server resolves the order and takes
+     * the area, the bag allowance and the PO number from the stored record —
+     * the same reason `placeId` is sent rather than a zone.
+     *
+     * Null for a booking with no purchase order behind it, which is every
+     * contractor and most phone bookings.
+     */
+    purchaseOrderId: ObjectIdSchema.nullable().default(null),
     readyDate: IsoDateSchema,
     serviceLevel: ServiceLevelSchema,
     freightItem: FreightItemSchema,
+    /**
+     * ⚠️ IGNORED when `purchaseOrderId` is set — see that field.
+     *
+     * Zero means "nobody has told us yet", which is the fixed-price builder's
+     * normal case, not an area of nothing (`Job.expectedAreaM2`).
+     */
     expectedAreaM2: z.number().nonnegative().max(100000),
+    /** ⚠️ IGNORED when `purchaseOrderId` is set — the order states the allowance. */
     bagCount: z.number().int().nonnegative().max(200),
     notes: z.string().trim().max(2000),
   })
   .meta({ id: 'JobDraft' });
+
+/**
+ * M2.12 — a confirmed purchase order, as the booking form offers it.
+ *
+ * ── Why the form shows the figures it cannot change ───────────────────────
+ * The area and the bag allowance are resolved server-side from this record, so
+ * the form does not send them. It still has to SHOW them, because somebody
+ * choosing an order needs to see that they are choosing 823.41 m² — a picker
+ * that silently changed the price would be worse than one that asked.
+ */
+export const BookablePurchaseOrderSchema = z
+  .object({
+    id: ObjectIdSchema,
+    poNumber: NonEmptyStringSchema,
+    accountId: ObjectIdSchema,
+    accountName: NonEmptyStringSchema,
+    receivedAt: z.iso.datetime(),
+    lotNumber: z.string().nullable(),
+    addressLine: z.string().nullable(),
+    suburb: z.string().nullable(),
+    postcode: z.string().nullable(),
+    /**
+     * ⚠️ Null on a fixed-price order, and that is a REAL answer — the builder
+     * genuinely does not state an area (Matt, 31:04). The form must say "fixed
+     * price" rather than render a zero.
+     */
+    expectedAreaM2: z.number().nullable(),
+    bagAllowance: z.number().int().nullable(),
+    siteSupervisorName: z.string().nullable(),
+    siteSupervisorMobile: z.string().nullable(),
+    amountExGst: MoneySchema.nullable(),
+    /**
+     * The job already booked against this order, if there is one.
+     *
+     * Present rather than filtered out: *"PO-88214 is on job 61,412"* is the
+     * answer somebody hunting for it needs. Hiding the row makes them think the
+     * extraction failed and key the order in by hand.
+     */
+    usedByJobNumber: z.number().int().positive().nullable(),
+  })
+  .meta({ id: 'BookablePurchaseOrder' });
 
 /**
  * M2.1 / M6.9 — the price shown BEFORE saving.
@@ -684,5 +751,6 @@ export type JobCompliance = z.infer<typeof JobComplianceSchema>;
 export type JobPreStartRecord = z.infer<typeof JobPreStartRecordSchema>;
 export type JobRiskAssessmentRecord = z.infer<typeof JobRiskAssessmentRecordSchema>;
 export type JobDraft = z.infer<typeof JobDraftSchema>;
+export type BookablePurchaseOrder = z.infer<typeof BookablePurchaseOrderSchema>;
 export type PricePreviewLine = z.infer<typeof PricePreviewLineSchema>;
 export type PricePreview = z.infer<typeof PricePreviewSchema>;

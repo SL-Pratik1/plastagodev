@@ -136,8 +136,21 @@ export function AdminUsersPage() {
 
   const invite = async (user: UserListItem) => {
     try {
-      await resendInvite.mutateAsync(user.id);
-      toast.success('Invitation resent', `Sent to ${user.email ?? formatMobile(user.mobile)}.`);
+      const result = await resendInvite.mutateAsync(user.id);
+
+      // Reports the send rather than the click: a failed provider used to look
+      // exactly like a successful re-invitation from this screen.
+      if (result.outcome === 'sent') {
+        toast.success(
+          'Invitation resent',
+          `${result.channel === 'sms' ? 'Texted' : 'Emailed'} to ${result.toMasked ?? user.email ?? formatMobile(user.mobile)}.`,
+        );
+      } else {
+        toast.warning(
+          'Invitation not sent',
+          result.detail ?? 'Nothing went out. Check their email and mobile, or tell them by phone.',
+        );
+      }
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);

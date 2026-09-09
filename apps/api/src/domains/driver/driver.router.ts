@@ -11,6 +11,7 @@ import {
 } from '@plastago/shared';
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
+import { idempotency } from '../../middleware/idempotency.js';
 import { requireAuth, requireRole } from '../../middleware/require-auth.js';
 import { validate } from '../../middleware/validate.js';
 import { driverController } from './driver.controller.js';
@@ -18,6 +19,7 @@ import {
   DateQuerySchema,
   JobIdParamsSchema,
   PhotoParamsSchema,
+  PresignDocketPhotoSchema,
   PresignPhotoSchema,
   PreviewTipOffSchema,
   RunIdParamsSchema,
@@ -41,6 +43,16 @@ export const driverRouter = Router();
 
 driverRouter.use(requireAuth);
 driverRouter.use(requireRole('driver'));
+
+/*
+ * Replay protection, AFTER auth because keys are scoped per driver.
+ *
+ * Every write below is queued on a phone and drained when signal returns, and a
+ * drain that times out mid-flight cannot tell whether the server saw it. Without
+ * this, the retry that follows raises a second futile charge against a customer
+ * who was only failed once. See `docs/offline-sync-protocol.md` §3.
+ */
+driverRouter.use(idempotency);
 
 /* ── Reads ───────────────────────────────────────────────────────────────── */
 
@@ -145,6 +157,21 @@ driverRouter.post(
   '/runs/:runId/tip-off/preview',
   validate({ params: RunIdParamsSchema, body: PreviewTipOffSchema }),
   asyncHandler(driverController.previewTipOff),
+);
+
+/**
+ * Somewhere to put the weighbridge docket photo.
+ *
+ * Run-scoped, not job-scoped: the docket evidences the WHOLE load, so there is
+ * no stop it honestly belongs to. Filing it against an arbitrary one would
+ * misattribute the evidence the monthly tipping bill is audited against.
+ *
+ * The key it returns goes back as `docketPhotoId` on the tip-off below.
+ */
+driverRouter.post(
+  '/runs/:runId/docket-photo',
+  validate({ params: RunIdParamsSchema, body: PresignDocketPhotoSchema }),
+  asyncHandler(driverController.presignDocketPhoto),
 );
 
 driverRouter.post(

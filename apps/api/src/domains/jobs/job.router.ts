@@ -8,6 +8,7 @@ import {
   CancelJobBodySchema,
   JobIdParamsSchema,
   ListJobsQuerySchema,
+  PurchaseOrderOptionsQuerySchema,
   RescheduleJobBodySchema,
 } from './job.schemas.js';
 
@@ -41,6 +42,18 @@ jobRouter.post(
   '/preview',
   validate({ body: JobDraftSchema }),
   asyncHandler(jobController.preview),
+);
+
+/**
+ * M2.12 — the purchase orders a pickup can be booked against.
+ *
+ * Mounted BEFORE `/:id`, or Express matches "purchase-orders" as a job id and
+ * answers 422 on an invalid ObjectId.
+ */
+jobRouter.get(
+  '/purchase-orders',
+  validate({ query: PurchaseOrderOptionsQuerySchema }),
+  asyncHandler(jobController.purchaseOrders),
 );
 
 jobRouter.get('/:id', validate({ params: JobIdParamsSchema }), asyncHandler(jobController.get));

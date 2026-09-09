@@ -181,11 +181,25 @@ export const portalService = {
      * their PO number is while they are filling in the form, not three weeks
      * later when the invoice will not go out.
      */
-    if (account.poPolicy === 'required-before-invoice' && !draft.poNumber.trim()) {
-      throw AppError.validation('This account needs a purchase order number', [
+    /*
+     * ⚠️ Choosing a purchase order SATISFIES the policy.
+     *
+     * A confirmed order carries its own number, and that number is better than
+     * a typed one — it is the string the builder's accounts system matches, and
+     * a retyped copy can differ from it by a character (M2.12). Demanding the
+     * text as well would be asking somebody to transcribe a document PlastaGo
+     * is already holding.
+     */
+    if (
+      account.poPolicy === 'required-before-invoice' &&
+      draft.purchaseOrderId === null &&
+      !draft.poNumber.trim()
+    ) {
+      throw AppError.validation('This account needs a purchase order', [
         {
           path: 'poNumber',
-          message: 'Enter the PO or job reference — your invoice cannot be sent without it',
+          message:
+            'Choose the purchase order, or enter the PO reference — your invoice cannot be sent without it',
         },
       ]);
     }
@@ -215,6 +229,9 @@ export const portalService = {
         siteContactMobile: draft.siteContactMobile,
         siteContactEmail: draft.siteContactEmail,
         poNumber: draft.poNumber,
+        // Overrides the number, the area and the bag count when set. See the
+        // field on `PortalBookingDraftSchema`.
+        purchaseOrderId: draft.purchaseOrderId,
         readyDate: draft.readyDate,
         serviceLevel: draft.serviceLevel,
         freightItem: draft.craneAvailable ? 'plasterboard-bagged' : 'plasterboard-hand-load',
@@ -285,6 +302,9 @@ export const portalService = {
         siteContactMobile: draft.siteContactMobile,
         siteContactEmail: draft.siteContactEmail,
         poNumber: draft.poNumber,
+        // Overrides the number, the area and the bag count when set. See the
+        // field on `PortalBookingDraftSchema`.
+        purchaseOrderId: draft.purchaseOrderId,
         readyDate: draft.readyDate,
         serviceLevel: draft.serviceLevel,
         freightItem: draft.craneAvailable ? 'plasterboard-bagged' : 'plasterboard-hand-load',
@@ -316,12 +336,12 @@ export const portalService = {
       );
     }
 
-    const settings = await settingsRepository.get();
+    const slaBusinessDays = await settingsRepository.slaBusinessDays();
 
     const changed = await portalRepository.editJob(id, scope, {
       readyDate: input.readyDate,
       // The SLA clock restarts from the customer's new ready date (M2.4a).
-      targetDate: addBusinessDays(input.readyDate, settings.general.slaBusinessDays),
+      targetDate: addBusinessDays(input.readyDate, slaBusinessDays),
       expectedAreaM2: input.expectedAreaM2,
       bagCount: input.bagCount,
       serviceLevel: input.serviceLevel,

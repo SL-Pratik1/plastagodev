@@ -114,7 +114,16 @@ const runTipOffSchema = new Schema(
   {
     /** REFERENCE → `runs._id`. */
     runId: { type: Schema.Types.ObjectId, required: true, ref: 'Run' },
-    facility: { type: String, required: true, trim: true },
+    /**
+     * Where the load was tipped.
+     *
+     * NOT required: the driver's Tip-off screen has no facility picker — it asks
+     * for the weighbridge figure, the docket number and a photo, and nothing
+     * else. Requiring it here would mean either inventing a field on that screen
+     * or refusing the driver's own docket, and the office fills it in when it
+     * reconciles. The office path supplies it on write.
+     */
+    facility: { type: String, default: null, trim: true },
     docketNumber: { type: String, default: null, trim: true },
     /**
      * Net kilograms off the weighbridge.

@@ -1,6 +1,5 @@
 import {
   CredentialTypeSettingSchema,
-  GeneralSettingsSchema,
   InvoicingSettingsSchema,
   NotificationSettingsSchema,
 } from '@plastago/shared';
@@ -55,12 +54,11 @@ settingsRouter.get(
 
 const ADMIN = requireRole('super-admin', 'operations');
 
-settingsRouter.put(
-  '/general',
-  ADMIN,
-  validate({ body: GeneralSettingsSchema }),
-  asyncHandler(settingsController.saveGeneral),
-);
+/*
+ * There is no `PUT /general`. The SLA is the only value that route ever wrote,
+ * and it no longer has a screen — see the note in `@plastago/shared`'s settings
+ * schema. It is a seed-time value now.
+ */
 
 settingsRouter.put(
   '/notifications',

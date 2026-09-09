@@ -37,6 +37,7 @@ export const RunIdParamsSchema = z
  */
 export {
   PresignPhotoSchema,
+  PresignDocketPhotoSchema,
   PreviewTipOffSchema,
   DriverMessageSchema as SendMessageSchema,
 } from '@plastago/shared';

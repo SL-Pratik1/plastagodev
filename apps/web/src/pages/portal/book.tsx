@@ -232,6 +232,9 @@ export function PortalBookPage() {
       bagCount: Number(watched.bagCount ?? 0) || 0,
       serviceLevel: watched.serviceLevel ?? 'standard',
       poNumber: '',
+      // No picker on this form yet — a portal booking carries no order, so
+      // the area comes from the field above as it does today.
+      purchaseOrderId: null,
       notes: '',
       certification: { jobReady: true, truckAccessible: true, freeOfContaminants: true },
     };
@@ -282,6 +285,7 @@ export function PortalBookPage() {
         bagCount: fromPurchaseOrder ? 0 : Number(values.bagCount),
         serviceLevel: values.serviceLevel,
         poNumber: values.poNumber,
+        purchaseOrderId: null,
         notes: values.notes,
         certification: { jobReady: true, truckAccessible: true, freeOfContaminants: true },
       });

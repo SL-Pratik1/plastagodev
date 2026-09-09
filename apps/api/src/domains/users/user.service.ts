@@ -1,4 +1,6 @@
 import type {
+  InvitationResult,
+  InvitedUser,
   PageMeta,
   Role,
   User,
@@ -8,8 +10,10 @@ import type {
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
+import { buildInviteEmail, buildInviteSms } from '../../integrations/notice-messages.js';
 import { auditService } from '../audit/audit.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
+import { outboundService } from '../notifications/outbound.service.js';
 import { userRepository, type ListUsersQuery } from './user.repository.js';
 
 const log = logger.child({ module: 'users' });
@@ -67,7 +71,7 @@ export const userService = {
    * in has not proved they can be reached, and an active-looking row hides the
    * invitations that silently failed.
    */
-  async create(draft: UserDraft, caller: Caller): Promise<UserListItem> {
+  async create(draft: UserDraft, caller: Caller): Promise<InvitedUser> {
     assertAdmin(caller);
 
     const normalised = await normalise(draft, caller);
@@ -107,12 +111,29 @@ export const userService = {
       href: `/admin/users/${id}`,
     });
 
+    /*
+     * The invitation itself.
+     *
+     * ⚠️ AFTER the audit row, and unable to throw. An account that exists and
+     * an audit row that records it are the durable outcome; the message is the
+     * best-effort part, and the office is told which it got so they can fall
+     * back to the phone. Sending first — or letting a provider error escape —
+     * would mean a mail outage silently stopped anybody being onboarded.
+     */
+    const invitation = await sendInvitation(created, caller.name);
+
     log.info(
-      { userId: id, role: draft.role, invitedBy: caller.name },
+      {
+        userId: id,
+        role: draft.role,
+        invitedBy: caller.name,
+        invitation: invitation.outcome,
+        channel: invitation.channel,
+      },
       'user invited',
     );
 
-    return created;
+    return { user: created, invitation };
   },
 
   /**
@@ -243,7 +264,7 @@ export const userService = {
    * send them a sign-in link they did not ask for, which is indistinguishable
    * from a phishing attempt from their point of view.
    */
-  async resendInvite(id: string, caller: Caller): Promise<void> {
+  async resendInvite(id: string, caller: Caller): Promise<InvitationResult> {
     assertAdmin(caller);
 
     const user = await userRepository.findById(id);
@@ -264,16 +285,80 @@ export const userService = {
     }
 
     /*
-     * The send itself belongs to the notifications domain. Logged here so the
-     * intent is recorded even before that exists — an invitation nobody can
-     * prove was sent is the thing this endpoint is meant to fix.
+     * `force`, because a person clicking Resend has already decided the first
+     * attempt did not land — the once-only guard exists to stop a sweep sending
+     * twice, not to overrule the office.
+     *
+     * `invitedBy` falls back to whoever is resending: the original inviter may
+     * have left, and an invitation signed by nobody reads like a scam.
      */
+    const result = await sendInvitation(user, user.invitedBy ?? caller.name, { force: true });
+
+    // M1.6 — a re-send is a real act with a real cost, and "how many times did
+    // we chase them?" is asked in onboarding reviews.
+    await auditService.record({
+      actorId: caller.userId,
+      actorName: caller.name,
+      actorRole: caller.roles[0] ?? null,
+      action: 'sent',
+      entity: 'user',
+      entityId: id,
+      entityLabel: user.name,
+      summary:
+        result.outcome === 'sent'
+          ? `Invitation re-sent to ${user.name} by ${result.channel ?? 'unknown'}`
+          : `Invitation to ${user.name} could not be re-sent — ${result.detail ?? result.outcome}`,
+      changes: [],
+      href: `/admin/users/${id}`,
+    });
+
     log.info(
-      { userId: id, channel: user.mobile ? 'sms' : 'email', by: caller.name },
-      'invitation re-queued',
+      { userId: id, channel: result.channel, outcome: result.outcome, by: caller.name },
+      'invitation re-sent',
     );
+
+    return result;
   },
 };
+
+/* ── The invitation ──────────────────────────────────────────────────────── */
+
+/**
+ * Sends somebody their way in.
+ *
+ * ── Why the channel is not simply "their role's channel" ───────────────────
+ * `ROLE_PRIMARY_CHANNEL` says how a role SIGNS IN, which is a different
+ * question from how this person can be REACHED. An office administrator with
+ * only a mobile on file still has to be told, and a driver who happens to have
+ * an email is cheaper to reach that way — SMS costs money per message. So the
+ * decision is made from the contact details that actually exist, by
+ * `outboundService`, and this function only supplies both forms of the message.
+ */
+async function sendInvitation(
+  user: Pick<UserListItem, 'id' | 'name' | 'email' | 'mobile' | 'role'>,
+  invitedBy: string,
+  options: { force?: boolean } = {},
+): Promise<InvitationResult> {
+  /*
+   * The identifier is spelled out in the message because it is the ONLY one
+   * that will receive a code — see `notice-messages.ts`. Email wins here for
+   * the same reason it wins in the channel choice.
+   */
+  const identifier = user.email ?? user.mobile ?? '';
+
+  const context = { name: user.name, invitedBy, role: user.role, identifier };
+
+  const result = await outboundService.send({
+    event: 'user-invite',
+    subjectKey: `user-invite:${user.id}`,
+    recipient: { email: user.email, mobile: user.mobile },
+    email: (to) => buildInviteEmail(to, context),
+    sms: (to) => buildInviteSms(to, { ...context, identifier: to }),
+    force: options.force,
+  });
+
+  return result;
+}
 
 /* ── Validation ──────────────────────────────────────────────────────────── */
 

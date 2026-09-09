@@ -35,10 +35,12 @@ function useSettingsMutation<TInput, TResult>(mutationFn: (input: TInput) => Pro
   });
 }
 
-export function useSaveGeneralSettings() {
-  const { settings } = useServices();
-  return useSettingsMutation((input: Settings['general']) => settings.saveGeneral(input));
-}
+/*
+ * There is no `useSaveGeneralSettings`, and no `saveGeneral` on the settings
+ * service either. The General tab is gone and so is `PUT /settings/general` —
+ * see the note in `@plastago/shared`'s settings schema. The SLA still drives
+ * every job's target date; it is a seed-time value now rather than a form.
+ */
 
 export function useSaveNotificationSettings() {
   const { settings } = useServices();

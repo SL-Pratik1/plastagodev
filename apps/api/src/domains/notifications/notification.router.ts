@@ -48,3 +48,20 @@ notificationRouter.post(
   requireRole('super-admin', 'operations'),
   asyncHandler(notificationController.runSweep),
 );
+
+/**
+ * M8.3 — the readiness reminders for tomorrow.
+ *
+ * ⚠️ A separate endpoint from the sweep above, not a flag on it. This one sends
+ * MESSAGES to customers; that one writes rows into an internal inbox. Folding
+ * them together would mean nobody could re-run the harmless one without
+ * risking a second round of texts to every site booked for tomorrow.
+ *
+ * Normally scheduled in the evening; gated to operations because it spends
+ * money and reaches people outside the company.
+ */
+notificationRouter.post(
+  '/readiness-reminders',
+  requireRole('super-admin', 'operations'),
+  asyncHandler(notificationController.runReadinessReminders),
+);

@@ -1,4 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  clearOutbound,
+  makeFakeNotificationRepository,
+  recordingProviders,
+  sentMessages,
+} from './helpers/fake-outbound.js';
 import type { JobDraft, Role } from '@plastago/shared';
 import { createFakeJobRepository } from './helpers/fake-jobs.js';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
@@ -96,7 +102,17 @@ vi.mock('../src/domains/places/place.service.js', () => ({
   },
 }));
 
+/*
+ * M8.1 / M8.2 — booking a job, moving it and completing it now message the site
+ * contact, and every send is logged. Faked like every other repository: the
+ * real one would buffer a write against a MongoDB that is not there.
+ */
+vi.mock('../src/domains/notifications/notification.repository.js', () => ({
+  notificationRepository: makeFakeNotificationRepository(),
+}));
+
 const { jobService } = await import('../src/domains/jobs/job.service.js');
+const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 
 const OFFICE = {
   userId: 'usr0000000000000000000f1',
@@ -127,6 +143,9 @@ function draft(overrides: Partial<JobDraft> = {}): JobDraft {
     addressLine: '46 Allambie Circuit',
     placeId: 'kellyville',
     builderName: 'GJ Gardner',
+    // M2.12 — no purchase order behind these fixtures. Covered on its own in
+    // `jobs.purchase-order.test.ts`.
+    purchaseOrderId: null,
     accessNotes: 'Enter from the west side',
     gateHours: '7am-3pm',
     inductionRequired: false,
@@ -147,6 +166,8 @@ function draft(overrides: Partial<JobDraft> = {}): JobDraft {
 }
 
 beforeEach(() => {
+  clearOutbound();
+  setMessagingProvidersForTests(recordingProviders());
   quotedCharges.length = 0;
   repo = createFakeJobRepository();
   settings = createFakeSettingsRepository();

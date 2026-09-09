@@ -19,7 +19,8 @@
     "clean": "rm -rf dist .turbo coverage openapi/openapi.json *.tsbuildinfo",
     "seed:auth": "tsx src/scripts/seed-auth.ts",
     "seed:settings": "tsx src/scripts/seed-settings.ts",
-    "seed:places": "tsx src/scripts/seed-places.ts"
+    "seed:places": "tsx src/scripts/seed-places.ts",
+    "setup:extractor": "tsx src/scripts/setup-extractor.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",

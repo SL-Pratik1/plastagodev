@@ -51,6 +51,20 @@ const matchCandidateSchema = new Schema(
 
 const poExtractionSchema = new Schema(
   {
+    /**
+     * The extractor's own id for this document (I6).
+     *
+     * ⚠️ The idempotency key for the whole pipeline. The vendor retries a
+     * callback that did not return 2xx and can fire more than once for one
+     * document; without this a single purchase order lands in the queue twice,
+     * two reviewers confirm it, and the unique index on
+     * `(accountId, poNumber)` fails whichever of them was second — with a
+     * database error rather than an explanation.
+     *
+     * Null on a row posted by hand, which is why the index below is partial.
+     */
+    externalId: { type: String, default: null, trim: true },
+
     /* ── Where it came from (I6) ─────────────────────────────────────── */
     fromAddress: { type: String, required: true, trim: true },
     subject: { type: String, required: true, trim: true },
@@ -123,6 +137,22 @@ const poExtractionSchema = new Schema(
     correctedFields: { type: [String], default: [] },
   },
   { collection: PO_EXTRACTIONS_COLLECTION, timestamps: true, versionKey: false },
+);
+
+/**
+ * ⚠️ One row per extractor document.
+ *
+ * Unique rather than a plain index, and PARTIAL on the field being a string:
+ * rows keyed in by hand carry no `externalId`, and Mongo would otherwise treat
+ * every one of those nulls as a collision with the first.
+ */
+poExtractionSchema.index(
+  { externalId: 1 },
+  {
+    unique: true,
+    name: 'external_id_unique',
+    partialFilterExpression: { externalId: { $type: 'string' } },
+  },
 );
 
 /** The queue: everything needing review, oldest first. Partial, so it stays small. */

@@ -179,9 +179,31 @@ export function Select({
    * unsafe under concurrent rendering, and the React Compiler rejects it. Mount
    * is still covered: `useRef(ref)` seeds the box with the first render's ref,
    * and `attachRef` runs during commit, before any effect.
+   *
+   * ── Why the new ref is also HANDED the element ─────────────────────────────
+   * Because `attachRef` is stable, React calls it once per DOM node — so a ref
+   * that arrives later never sees the element unless it is given it here. That
+   * is not a corner case with react-hook-form: `reset()` DROPS its whole field
+   * registry and rebuilds it from the ref callbacks firing again, which it can
+   * rely on only because `register()` returns a fresh callback every render.
+   *
+   * Stabilising the ref above defeats that. The field was then left holding
+   * RHF's `{ name }` placeholder instead of this `<select>`, and since RHF reads
+   * a select's value back off the ref it holds — not off the event — every
+   * subsequent change stored `undefined`. The invite dialog resets on open, so
+   * choosing a role wrote `undefined` over it and the screen crashed on the next
+   * render. Any form that resets and then edits a dropdown had the same fault.
+   *
+   * Only ever called with the live element, never with `null`: a detach is what
+   * caused the blanking described above, and RHF ignores a ref it already holds,
+   * so re-offering it each render costs nothing.
    */
   useEffect(() => {
     forwardedRef.current = ref;
+    const node = nativeRef.current;
+    if (!node) return;
+    if (typeof ref === 'function') ref(node);
+    else if (ref) ref.current = node;
   }, [ref]);
 
   const attachRef = useCallback((node: HTMLSelectElement | null) => {

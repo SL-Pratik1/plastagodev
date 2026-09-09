@@ -168,6 +168,15 @@ export const CAPABILITIES = [
   // Configuration
   'brands:manage',
   'integrations:manage',
+  /**
+   * I6 — the embedded Extractor tab.
+   *
+   * Separate from `integrations:manage`, which is the Administrator's alone and
+   * covers configuring what the platform talks to. This is USING one: reading a
+   * purchase order off a PDF is intake work, and gating it on the config
+   * capability would hide it from the office staff who do that work daily.
+   */
+  'extractor:use',
   'notifications:manage',
   'settings:manage',
   // System
@@ -262,6 +271,7 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'drivers:manage',
     'vehicles:manage',
     'audit:read',
+    'extractor:use',
   ],
 
   /*
@@ -292,6 +302,7 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'reports:read',
     'certificates:manage',
     'pricing:view',
+    'extractor:use',
   ],
 
   /*
@@ -321,6 +332,7 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'driver-comms',
     'drivers:manage',
     'vehicles:manage',
+    'extractor:use',
   ],
 
   /*
@@ -435,6 +447,7 @@ export const CAPABILITY_GROUPS: ReadonlyArray<{
       { capability: 'dispatch:manage', label: 'Dispatch board and run sheets' },
       { capability: 'queues:action', label: 'Work the exception queues' },
       { capability: 'driver-comms', label: 'Message drivers on a job' },
+      { capability: 'extractor:use', label: 'Read purchase orders with the Extractor' },
     ],
   },
   {

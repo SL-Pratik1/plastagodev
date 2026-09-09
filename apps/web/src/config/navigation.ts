@@ -5,6 +5,7 @@ import {
   Building2Icon,
   ClipboardCheckIcon,
   FileScanIcon,
+  FileSearchIcon,
   FileTextIcon,
   IdCardIcon,
   LayersIcon,
@@ -232,6 +233,13 @@ export const ADMIN_NAV: readonly NavGroup[] = [
     id: 'configuration',
     label: 'Configuration',
     items: [
+      {
+        to: '/admin/extractor',
+        label: 'Extractor',
+        icon: FileSearchIcon,
+        capability: 'extractor:use',
+        scope: 'I6 · M2.12 — the embedded 3PM Extractor: upload, templates, mailbox activity',
+      },
       {
         to: '/admin/settings',
         label: 'Settings',

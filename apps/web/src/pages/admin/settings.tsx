@@ -4,7 +4,6 @@ import {
   RATE_CARD_LABELS,
   ROLE_LABELS,
   ROLES,
-  ZONE_LABELS,
   type Integration,
   type NotificationEvent,
   type Settings,
@@ -41,7 +40,6 @@ import { UnsavedBar } from '@/components/unsaved-bar';
 import { CAPABILITY_GROUPS, ROLE_CAPABILITIES, can } from '@/features/auth/permissions';
 import {
   useSaveCredentialTypes,
-  useSaveGeneralSettings,
   useSaveInvoicingSettings,
   useSaveNotificationSettings,
   useSettings,
@@ -51,8 +49,11 @@ import { describeError } from '@/lib/error-message';
 import { formatMoney, formatRelative } from '@/lib/format';
 import { useUnsavedChanges } from '@/lib/use-unsaved-changes';
 
-const TABS = ['general', 'roles', 'notifications', 'pricing', 'invoicing', 'integrations'] as const;
+const TABS = ['roles', 'notifications', 'pricing', 'invoicing', 'integrations'] as const;
 type TabKey = (typeof TABS)[number];
+
+/** The tab shown when the URL carries no `?tab=`, and the one it omits. */
+const DEFAULT_TAB: TabKey = 'roles';
 
 /**
  * Settings (W3), plus brands (M1.1), rate cards (M6), invoice branding (M7.5)
@@ -62,13 +63,23 @@ type TabKey = (typeof TABS)[number];
  * Several things that belong on a settings screen are not settings, and a text
  * box around them would be a lie:
  *
- *  • **Timezone, data residency and the 7-year retention floor** are commitments
- *    in the client's Privacy Policy. Displayed, never edited.
- *  • **Number sequences** need a transactional counter (M1.4). Shown, not typed.
  *  • **Rate cards are effective-dated** (M6.2): changing a rate means issuing a
  *    new schedule, never overwriting the old one, because pricing a job uses the
  *    rates in force on that job's date. Editing them here would silently reprice
  *    history — and pricing correctness is the highest-rated risk in the project.
+ *
+ * ── There is no General tab ───────────────────────────────────────────────
+ * It held three cards and only one control. Timezone, data residency, the
+ * retention floor and the two number sequences were read-only facts the office
+ * never has to look up, and the zones card duplicated Pricing. That left the
+ * SLA with a tab to itself, which the client did not want.
+ *
+ * ⚠️ So the SLA is settable by seed or migration only — the `general` block and
+ * its route are gone from the contract entirely (see the note in
+ * `@plastago/shared`'s settings schema). The VALUE is still live: it is what
+ * every job's target date is computed from, read through
+ * `settingsRepository.slaBusinessDays()`. Re-homing it on another tab means
+ * adding a route back, not just a field.
  *
  * ── The invoice-template trap ─────────────────────────────────────────────
  * Branding and content control are in scope: logo, colours, company details,
@@ -83,13 +94,13 @@ export function AdminSettingsPage() {
   const rawTab = params.get('tab');
   const tab: TabKey = (TABS as readonly string[]).includes(rawTab ?? '')
     ? (rawTab as TabKey)
-    : 'general';
+    : DEFAULT_TAB;
 
   const setTab = (next: string) => {
     setParams(
       (current) => {
         const nextParams = new URLSearchParams(current);
-        if (next === 'general') nextParams.delete('tab');
+        if (next === DEFAULT_TAB) nextParams.delete('tab');
         else nextParams.set('tab', next);
         return nextParams;
       },
@@ -134,7 +145,6 @@ export function AdminSettingsPage() {
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList label="Settings sections">
-          <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="roles">Users & roles</TabsTrigger>
           <TabsTrigger value="notifications">Notifications</TabsTrigger>
           <TabsTrigger value="pricing">Pricing</TabsTrigger>
@@ -151,9 +161,6 @@ export function AdminSettingsPage() {
           alternative, an effect that calls setState, cascades a render and was
           what the linter caught here.
         */}
-        <TabsPanel value="general">
-          <GeneralSection key={String(data.general.slaBusinessDays)} settings={data} />
-        </TabsPanel>
         <TabsPanel value="roles">
           <RolesSection key={JSON.stringify(data.credentialTypes)} settings={data} />
         </TabsPanel>
@@ -170,150 +177,6 @@ export function AdminSettingsPage() {
           <IntegrationsSection settings={data} />
         </TabsPanel>
       </Tabs>
-    </div>
-  );
-}
-
-/* ── General ─────────────────────────────────────────────────────────────── */
-
-function GeneralSection({ settings }: { settings: Settings }) {
-  const toast = useToast();
-  const save = useSaveGeneralSettings();
-
-  const [slaDays, setSlaDays] = useState(String(settings.general.slaBusinessDays));
-  const [fieldError, setFieldError] = useState<string | null>(null);
-
-  const dirty = slaDays !== String(settings.general.slaBusinessDays);
-  useUnsavedChanges(dirty);
-
-  const submit = async () => {
-    const parsed = Number(slaDays);
-    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 30) {
-      setFieldError('Enter a whole number of business days between 1 and 30');
-      return;
-    }
-    setFieldError(null);
-
-    try {
-      await save.mutateAsync({ ...settings.general, slaBusinessDays: parsed });
-      toast.success(
-        'SLA updated',
-        `Target dates are now ready date plus ${String(parsed)} business days.`,
-      );
-    } catch (caught) {
-      const described = describeError(caught);
-      toast.error(described.title, described.detail);
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>Service level</CardTitle>
-          <CardDescription>
-            The target date on every job is the customer’s ready date plus this many business days.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="sm:max-w-xs">
-            <Field
-              id="sla-days"
-              label="Business days from ready date"
-              required
-              error={fieldError ?? undefined}
-              hint="The website says “3 to 5 working days”; the operative rule is 5 business days from the date the customer says it is ready."
-            >
-              {(aria) => (
-                <Input
-                  {...aria}
-                  type="number"
-                  min={1}
-                  max={30}
-                  value={slaDays}
-                  onChange={(event) => {
-                    setSlaDays(event.target.value);
-                  }}
-                />
-              )}
-            </Field>
-          </div>
-
-          <Alert variant="info" title="Most jobs have a date, not a time">
-            A minority have a hard window — a traffic-control permit valid until noon, for instance.
-            Those are recorded on the job rather than configured here.
-          </Alert>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Zones and rates</CardTitle>
-          <CardDescription>
-            Read-only here — rates are effective-dated and live on the rate card.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ul className="divide-y divide-border">
-            {settings.general.zones.map((zone) => (
-              <li key={zone.zone} className="flex flex-wrap items-center gap-3 py-2.5 text-sm">
-                <span className="min-w-0 flex-1 font-medium">{ZONE_LABELS[zone.zone]}</span>
-                <span className="tabular-nums text-muted-foreground">
-                  {formatMoney(zone.serviceCharge)} service
-                </span>
-                <span className="tabular-nums text-muted-foreground">
-                  {formatMoney(zone.ratePerM2)} / m²
-                </span>
-              </li>
-            ))}
-          </ul>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Platform facts</CardTitle>
-          <CardDescription>
-            Displayed rather than editable — these are commitments, not preferences.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <DetailList
-            columns={3}
-            items={[
-              { label: 'Timezone', value: settings.general.timezone },
-              { label: 'Data residency', value: `${settings.general.dataRegion} (Sydney)` },
-              {
-                label: 'Retention floor',
-                value: `${String(settings.general.retentionYears)} years`,
-              },
-              {
-                label: 'Next job number',
-                value: settings.general.nextJobNumber.toLocaleString('en-AU'),
-              },
-              {
-                label: 'Next invoice number',
-                value: settings.general.nextInvoiceNumber.toLocaleString('en-AU'),
-              },
-            ]}
-          />
-          <p className="mt-4 text-xs text-muted-foreground">
-            Sequences continue from the existing system — three years of consignment numbers are
-            quoted in builders’ accounts-payable systems and on paid invoices, so they never
-            restart. Changing one needs a transactional counter, which is why it is not a text box.
-          </p>
-        </CardContent>
-      </Card>
-
-      <UnsavedBar
-        visible={dirty}
-        pending={save.isPending}
-        onSave={() => void submit()}
-        onDiscard={() => {
-          setSlaDays(String(settings.general.slaBusinessDays));
-          setFieldError(null);
-        }}
-      />
     </div>
   );
 }

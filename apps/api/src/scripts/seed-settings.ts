@@ -14,6 +14,7 @@ import {
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { connectMongo, disconnectMongo, isMongoConnected } from '../db/mongo.js';
+import { SEQUENCE_STARTS } from '../domains/settings/settings.model.js';
 import { settingsRepository } from '../domains/settings/settings.repository.js';
 import { logger } from '../lib/logger.js';
 
@@ -326,8 +327,8 @@ Seeded settings into "${mongoose.connection.name}".
   Invoice templates   ${String(settings.invoicing.templates.length)}
   Credential types    ${String(settings.credentialTypes.length)}
 
-  Next job number     ${String(settings.general.nextJobNumber)}
-  Next invoice number ${String(settings.general.nextInvoiceNumber)}
+  Next job number     ${String(SEQUENCE_STARTS.nextJobNumber)}  (start; advances as jobs are raised)
+  Next invoice number ${String(SEQUENCE_STARTS.nextInvoiceNumber)}  (start; advances as invoices are raised)
 
 Sydney is $220.00 + $0.16/m²; Wollongong $250.00 + $0.18; Newcastle $250.00 + $0.20.
 `);

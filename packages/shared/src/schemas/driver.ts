@@ -722,6 +722,21 @@ export const PhotoUploadTicketSchema = z
   })
   .meta({ id: 'PhotoUploadTicket' });
 
+/**
+ * M4.4 — asking for somewhere to put the weighbridge docket photo.
+ *
+ * Leaner than `PresignPhoto`: a docket has no slot to match, no caption worth
+ * typing at a weighbridge, and its position and time are already carried by the
+ * tip-off envelope that follows it. Only the two facts the presigned URL has to
+ * be signed with are asked for.
+ */
+export const PresignDocketPhotoSchema = z
+  .object({
+    contentType: z.string().trim().min(1),
+    contentLength: z.number().int().positive(),
+  })
+  .meta({ id: 'PresignDocketPhoto' });
+
 /** M4.4 — the preview the driver sees before committing a docket. */
 export const PreviewTipOffSchema = z
   .object({
@@ -759,5 +774,6 @@ export type DriverChargeNotice = z.infer<typeof DriverChargeNoticeSchema>;
 export type PresignPhoto = z.infer<typeof PresignPhotoSchema>;
 export type PresignedUpload = z.infer<typeof PresignedUploadSchema>;
 export type PhotoUploadTicket = z.infer<typeof PhotoUploadTicketSchema>;
+export type PresignDocketPhoto = z.infer<typeof PresignDocketPhotoSchema>;
 export type PreviewTipOff = z.infer<typeof PreviewTipOffSchema>;
 export type DriverMessage = z.infer<typeof DriverMessageSchema>;

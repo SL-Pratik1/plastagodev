@@ -1,5 +1,11 @@
 import type { LeadConversion, LeadCreate, Role } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  clearOutbound,
+  makeFakeNotificationRepository,
+  recordingProviders,
+  sentMessages,
+} from './helpers/fake-outbound.js';
 
 /**
  * Leads and onboarding (M5, Journey A).
@@ -85,7 +91,17 @@ vi.mock('../src/integrations/storage.js', async (importOriginal) => {
   };
 });
 
+/*
+ * A.4 now acknowledges a website enquiry and welcomes a converted account, so
+ * this suite reaches the outbound log. Faked for the usual reason: the real one
+ * would buffer a write against a MongoDB that is not there.
+ */
+vi.mock('../src/domains/notifications/notification.repository.js', () => ({
+  notificationRepository: makeFakeNotificationRepository(),
+}));
+
 const { leadService } = await import('../src/domains/queues/lead.service.js');
+const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 
 const OPERATIONS = {
   userId: 'usr0000000000000000000o1',
@@ -175,6 +191,62 @@ beforeEach(() => {
   updateMatches = true;
   convertMatches = true;
   codeTaken = false;
+  clearOutbound();
+  setMessagingProvidersForTests(recordingProviders());
+});
+
+/**
+ * The messages A.4 promises (M5 · M8.2).
+ *
+ * The wizard's own toast used to say a welcome email was "on its way to the
+ * contact" while nothing had attempted to send one. These are about the two
+ * messages actually leaving.
+ */
+describe('what the customer is told', () => {
+  it('acknowledges a website enquiry', async () => {
+    await leadService.create(draft({ source: 'enquiry-form' }), OFFICE);
+
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]?.channel).toBe('email');
+    expect(sentMessages[0]?.subject).toContain('enquiry');
+  });
+
+  /*
+   * ⚠️ NOT for a phone lead. They have just spoken to somebody; an email
+   * afterwards saying we will be in touch reads as if nobody noticed the call.
+   */
+  it('stays quiet on a lead taken over the phone', async () => {
+    await leadService.create(draft({ source: 'phone' }), OFFICE);
+
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it('welcomes a converted account, with its customer code', async () => {
+    const result = await leadService.convert(ID, conversion({ sendInvitation: true }), OPERATIONS);
+
+    expect(result.welcome).toMatchObject({ outcome: 'sent', channel: 'email' });
+    // The code is the handle every later conversation uses — see the note in
+    // `notice-messages.ts`.
+    expect(sentMessages.at(-1)?.body).toContain('NEW001');
+  });
+
+  it('sends nothing when the wizard says not to', async () => {
+    const result = await leadService.convert(ID, conversion({ sendInvitation: false }), OPERATIONS);
+
+    expect(result.welcome).toBeNull();
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  /** An account that exists must survive a mail outage — it cannot be undone. */
+  it('still converts when the welcome email fails', async () => {
+    const { providerFailure } = await import('./helpers/fake-outbound.js');
+    providerFailure.message = 'mailbox unavailable';
+
+    const result = await leadService.convert(ID, conversion({ sendInvitation: true }), OPERATIONS);
+
+    expect(result.accountId).toBe('acc-new');
+    expect(result.welcome).toMatchObject({ outcome: 'failed' });
+  });
 });
 
 describe('taking a lead by hand (A.1)', () => {
@@ -322,7 +394,7 @@ describe('converting a lead (A.4)', () => {
   it('creates the account with everything the wizard chose', async () => {
     const result = await leadService.convert(ID, conversion(), OPERATIONS);
 
-    expect(result).toEqual({ accountId: 'acc-new', customerCode: 'NEW001' });
+    expect(result).toMatchObject({ accountId: 'acc-new', customerCode: 'NEW001' });
     expect(accountsCreated[0]).toMatchObject({
       code: 'NEW001',
       name: 'Newlands Constructions Pty Ltd',

@@ -5,10 +5,13 @@ import type {
   PoExtractionItem,
   Role,
 } from '@plastago/shared';
+import { env } from '../../config/env.js';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
+import { extractorClient, TERMINAL_FAILURES } from '../../integrations/extractor.js';
 import { getStorage } from '../../integrations/storage.js';
 import { accountRepository } from '../accounts/account.repository.js';
+import { adaptExtraction } from './po-ingest.adapter.js';
 import {
   poExtractionRepository,
   type IngestExtractionInput,
@@ -102,6 +105,100 @@ export const poReviewService = {
         reason,
       },
       'purchase-order extraction received for review',
+    );
+
+    return { id };
+  },
+
+  /**
+   * I6 — the extractor has finished reading a document.
+   *
+   * ── Why the callback's body is thrown away ────────────────────────────────
+   * The vendor's webhook carries the extracted data inline, and using it would
+   * mean an unauthenticated HTTP request decides what appears in front of the
+   * office. So the callback is treated as a PING: it names an id, and this
+   * fetches that id from the vendor with our own credentials.
+   *
+   * A forged callback can then achieve exactly one thing — making us re-read a
+   * document that genuinely exists in our own tenant.
+   *
+   * ── Why an unfinished or failed extraction is not an error ────────────────
+   * The vendor fires on state changes, and only `completed` carries data. A
+   * `processing` ping is normal traffic, and answering it with a 4xx would put
+   * the vendor's retry loop to work on a document that is simply not ready.
+   */
+  async ingestFromExtractor(extractionId: string): Promise<{ id: string } | null> {
+    if (!extractorClient.enabled) {
+      // Configuration, not a caller error: the route exists but the pipeline is
+      // switched off, and a 503 says that honestly.
+      throw AppError.dependencyUnavailable('The document extractor is not configured');
+    }
+
+    const alreadyQueued = await poExtractionRepository.findByExternalId(extractionId);
+    if (alreadyQueued) {
+      /*
+       * Idempotent. The vendor retries on a non-2xx and can fire twice for one
+       * document; a second row would put the same purchase order in front of two
+       * reviewers, and the unique index on `(accountId, poNumber)` would then
+       * fail whichever of them confirmed second.
+       */
+      log.info(
+        { extractionId, existing: alreadyQueued },
+        'extractor callback for a document already in the queue — ignored',
+      );
+      return { id: alreadyQueued };
+    }
+
+    const extraction = await extractorClient.getExtraction(extractionId);
+
+    if (extraction.status !== 'completed') {
+      if (TERMINAL_FAILURES.has(extraction.status)) {
+        // Worth a warning: the document arrived and could not be read, so a
+        // purchase order exists that nobody will see unless somebody looks.
+        log.warn(
+          { extractionId, status: extraction.status, detail: extraction.error },
+          'the extractor could not read a purchase order',
+        );
+      }
+      return null;
+    }
+
+    /*
+     * A tenant may hold templates for other document types. Without this a
+     * remittance advice read against an invoice template would arrive in the
+     * purchase-order queue as a purchase order with no number.
+     */
+    if (env.EXTRACTOR_DOCUMENT_ID && extraction.documentId !== env.EXTRACTOR_DOCUMENT_ID) {
+      log.info(
+        { extractionId, documentId: extraction.documentId },
+        'extractor callback for another document type — ignored',
+      );
+      return null;
+    }
+
+    const { input, diagnostics } = await adaptExtraction(extraction, {
+      receivedAt: extraction.createdAt ? new Date(extraction.createdAt) : new Date(),
+      subject: extraction.fileName,
+    });
+
+    const reason = await resolveReason({ ...input, reason: 'below-threshold' });
+
+    const id = await poExtractionRepository.ingest({
+      ...input,
+      reason,
+      externalId: extraction.id,
+    });
+
+    log.info(
+      {
+        extractionId: id,
+        externalId: extraction.id,
+        poNumber: input.poNumber,
+        confidence: input.overallConfidence,
+        reason,
+        ...diagnostics,
+      },
+      'purchase order ingested from the extractor',
     );
 
     return { id };

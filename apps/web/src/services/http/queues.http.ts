@@ -9,6 +9,7 @@ import {
   LeadAttachmentSchema,
   LeadListItemSchema,
   LeadSchema,
+  InvitationResultSchema,
   ObjectIdSchema,
   PoExtractionItemSchema,
   PoExtractionSchema,
@@ -260,7 +261,11 @@ export function createHttpQueueService(api: ApiClient): QueueService {
         api.request(`${base}/leads/${id}/convert`, {
           method: 'POST',
           body: input,
-          schema: z.object({ accountId: ObjectIdSchema, customerCode: z.string() }),
+          schema: z.object({
+            accountId: ObjectIdSchema,
+            customerCode: z.string(),
+            welcome: InvitationResultSchema.nullable(),
+          }),
         }),
       ),
   };

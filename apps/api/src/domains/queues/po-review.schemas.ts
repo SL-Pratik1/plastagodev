@@ -34,6 +34,29 @@ export const RejectExtractionSchema = z
   .meta({ id: 'RejectExtraction' });
 
 /**
+ * The extractor's callback body (I6).
+ *
+ * ⚠️ Only `extractionId` is read, and that is the design rather than an
+ * oversight. The vendor sends the extracted fields inline; acting on them would
+ * let an unauthenticated request decide what appears in front of the office. The
+ * handler takes the id and re-fetches the document with our own credentials.
+ *
+ * `event` is accepted and ignored so a vendor that adds a new event type does
+ * not start failing validation on a route it retries.
+ *
+ * Everything else is `.loose()` — the payload is documented loosely and will
+ * grow, and a callback rejected for carrying an extra field is a purchase order
+ * that never reaches the queue.
+ */
+export const ExtractorWebhookSchema = z
+  .looseObject({
+    /** The vendor's Mongo id for the extraction. The only field acted upon. */
+    extractionId: z.string().trim().min(1).max(64),
+    event: z.string().trim().max(60).optional(),
+  })
+  .meta({ id: 'ExtractorWebhook' });
+
+/**
  * What an external extractor posts (M2.12).
  *
  * ⚠️ Everything here is a CLAIM. `state` and `reason` are deliberately absent —

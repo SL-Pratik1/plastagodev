@@ -111,6 +111,26 @@ export const authRepository = {
       { $set: { lastSignedInAt: at } },
       { timestamps: false },
     ).exec();
+
+    /*
+     * First sign-in ends the invitation (M1.5).
+     *
+     * ── Why this is a second, filtered update ──────────────────────────────
+     * `invited` means "we have sent them access and do not yet know it reached
+     * them". Signing in is the proof, so leaving the status alone made the grid
+     * read "Never — invitation pending" for people who had been working in the
+     * product for weeks, and made the Resend button offer to chase them.
+     *
+     * The filter carries `status: 'invited'` so this can only ever close an
+     * invitation. An unconditional `$set` would quietly reactivate a suspended
+     * account — a privilege change performed by a sign-in, which is exactly the
+     * kind of thing that must never be a side effect.
+     */
+    await UserModel.updateOne(
+      { _id: new mongoose.Types.ObjectId(userId), status: 'invited' },
+      { $set: { status: 'active' } },
+      { timestamps: false },
+    ).exec();
   },
 
   // ── Challenges ────────────────────────────────────────────────────────────

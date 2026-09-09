@@ -69,6 +69,21 @@ export const ListJobsQuerySchema = PageQuerySchema.extend({
  * question the office should be able to answer without reading notes. The note
  * is the free-text part, and it is optional.
  */
+/**
+ * M2.12 — the purchase-order picker on the booking form.
+ *
+ * `accountId` is required rather than inferred from the session, because the
+ * office books on behalf of any account. The service still resolves it through
+ * the caller's own scope, so a customer passing somebody else's id gets a 404.
+ */
+export const PurchaseOrderOptionsQuerySchema = z
+  .object({
+    accountId: ObjectIdSchema,
+    /** Matches the START of a PO number — see the repository for why. */
+    q: z.string().trim().max(60).optional(),
+  })
+  .meta({ id: 'PurchaseOrderOptionsQuery' });
+
 export const CancelJobBodySchema = z
   .object({
     reason: z.enum(EXCEPTION_REASONS),

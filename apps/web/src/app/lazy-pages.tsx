@@ -129,6 +129,10 @@ export const NotificationsPage = lazy(async () => ({
   default: (await import('@/pages/admin/notifications')).AdminNotificationsPage,
 }));
 
+export const ExtractorPage = lazy(async () => ({
+  default: (await import('@/pages/admin/extractor')).AdminExtractorPage,
+}));
+
 export const SettingsPage = lazy(async () => ({
   default: (await import('@/pages/admin/settings')).AdminSettingsPage,
 }));

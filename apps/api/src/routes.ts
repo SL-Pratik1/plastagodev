@@ -6,6 +6,7 @@ import { authRouter } from './domains/auth/auth.router.js';
 import { dashboardRouter } from './domains/dashboard/dashboard.router.js';
 import { dispatchRouter } from './domains/dispatch/dispatch.router.js';
 import { driverRouter } from './domains/driver/driver.router.js';
+import { extractorRouter } from './domains/extractor/extractor.router.js';
 import { vehicleRouter } from './domains/fleet/vehicle.router.js';
 import { healthRouter } from './domains/health/health.router.js';
 import { invoiceRouter } from './domains/invoices/invoice.router.js';
@@ -16,6 +17,7 @@ import { placeRouter } from './domains/places/place.router.js';
 import { rosterRouter } from './domains/roster/roster.router.js';
 import { reportRouter } from './domains/reports/report.router.js';
 import { portalRouter } from './domains/portal/portal.router.js';
+import { poWebhookRouter } from './domains/queues/po-webhook.router.js';
 import { queueRouter } from './domains/queues/queue.router.js';
 import { settingsRouter } from './domains/settings/settings.router.js';
 import { userRouter } from './domains/users/user.router.js';
@@ -71,6 +73,26 @@ export function mountRoutes(app: Express): void {
   // M2.6 · M2.7 · M7.3 — the office's worklists. Everything waiting on a human
   // decision, oldest first, because the old row is the one that costs money.
   v1.use('/queues', queueRouter);
+
+  /*
+   * I6 — the purchase-order extractor's callback.
+   *
+   * Mounted apart from `/queues` because it is the one route in the versioned
+   * API with no session: the caller is a machine and authenticates with a shared
+   * secret instead. Keeping it out of `queueRouter` means that router's contract
+   * stays "everything here is authenticated" — see the note on the router.
+   */
+  v1.use('/webhooks', poWebhookRouter);
+
+  /*
+   * I6 — the Extractor tab's session broker.
+   *
+   * Mounted apart from `/queues` and `/settings` because it belongs to neither:
+   * it authorises nothing about a purchase order and configures nothing on this
+   * side. Its whole job is to mint a third party's credential for a browser
+   * without the credential that mints it ever reaching one.
+   */
+  v1.use('/extractor', extractorRouter);
 
   // M5 — the customer portal. Scoped entirely from the session; no route here
   // takes an account id, so no URL can widen what a customer sees.

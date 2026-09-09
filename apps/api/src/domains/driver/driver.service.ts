@@ -34,6 +34,7 @@ import {
   loadJobDetail,
   type DriverStopRow,
 } from './driver.repository.js';
+import { jobNotices } from '../notifications/job-notices.service.js';
 import { notificationService } from '../notifications/notification.service.js';
 import { queueRepository } from '../queues/queue.repository.js';
 import { reconcileTipOff } from './tipoff.js';
@@ -247,6 +248,16 @@ export const driverService = {
       latitude: input.position?.latitude ?? null,
       longitude: input.position?.longitude ?? null,
     });
+
+    /*
+     * M8.1 — "our driver is on the way".
+     *
+     * ⚠️ Only on `in-transit`, and only after the transition actually changed
+     * something. `arrived` is not messaged: by then the driver is at the gate
+     * and a message is no use to anybody. The replay guards above mean a phone
+     * re-sending a queued action (§6A.8) cannot produce a second message.
+     */
+    if (target === 'in-transit') await jobNotices.enRoute(jobId);
   },
 
   /**
@@ -305,6 +316,15 @@ export const driverService = {
       latitude: input.position?.latitude ?? null,
       longitude: input.position?.longitude ?? null,
     });
+
+    /*
+     * M8.2 · F24 — the completion summary, with the photo count.
+     *
+     * ⚠️ Last, and unable to throw. A driver standing on a site with a queued
+     * action must never see a failure because a mail server was down — the
+     * completion is what the invoice is raised from, and it is already written.
+     */
+    await jobNotices.completed(jobId);
 
     log.info({ jobId, jobNumber: stop.jobNumber, onSiteMinutes }, 'job completed on the phone');
   },
@@ -377,20 +397,7 @@ export const driverService = {
   ): Promise<{ photoId: string; upload: PresignedUpload }> {
     await requireStop(jobId, caller);
 
-    if (!UPLOADABLE_TYPES.has(input.contentType)) {
-      throw AppError.validation('That file type cannot be uploaded', [
-        { path: 'contentType', message: 'Photos must be JPEG, PNG, HEIC or WebP' },
-      ]);
-    }
-
-    if (input.contentLength > MAX_UPLOAD_BYTES) {
-      throw AppError.validation('That photo is too large', [
-        {
-          path: 'contentLength',
-          message: `Photos must be under ${String(Math.round(MAX_UPLOAD_BYTES / 1024 / 1024))} MB`,
-        },
-      ]);
-    }
+    assertUploadable(input);
 
     const key = buildKey({
       scope: 'jobs',
@@ -702,6 +709,48 @@ export const driverService = {
   },
 
   /**
+   * M4.4 — somewhere to put the weighbridge docket photo.
+   *
+   * The docket belongs to the RUN, not to any one stop, so it cannot go through
+   * `presignPhoto`: that writes a `jobphotos` row, and there is no job to hang
+   * this on. Nor should there be — the docket evidences the whole load, and
+   * filing it against an arbitrary stop would misattribute it.
+   *
+   * So there is no photo RECORD here, only an object. The key comes straight
+   * back to the caller, who sends it as `docketPhotoId` on the tip-off, and it
+   * is stored as `docketPhotoKey` on the run's docket. That is why `photoId`
+   * below IS the storage key: the ticket shape stays identical to the job one,
+   * so a client handles both the same way.
+   */
+  async presignDocketPhoto(
+    runId: string,
+    input: { contentType: string; contentLength: number },
+    caller: DriverCaller,
+  ): Promise<{ photoId: string; upload: PresignedUpload }> {
+    // Same ownership gate as the tip-off itself — a driver may only attach a
+    // docket to a run on their own sheet.
+    const run = await driverRepository.stopsForReconciliation(runId, caller.userId);
+    if (!run) throw AppError.notFound('No such run on your sheet');
+
+    assertUploadable(input);
+
+    const key = buildKey({
+      scope: 'runs',
+      ownerId: runId,
+      kind: 'dockets',
+      contentType: input.contentType,
+    });
+
+    const upload = await getStorage().presignUpload({
+      key,
+      contentType: input.contentType,
+      contentLength: input.contentLength,
+    });
+
+    return { photoId: key, upload };
+  },
+
+  /**
    * M4.4 — commit the docket and write the imputed weights.
    *
    * ⚠️ Refuses a reconciliation that does not add up. These figures go onto
@@ -733,7 +782,8 @@ export const driverService = {
       date: input.date,
       totalKg: input.totalKg,
       docketReference: input.docketReference,
-      docketPhotoId: input.docketPhotoId,
+      // The wire calls it an id; it is the storage key the run-scoped upload returned.
+      docketPhotoKey: input.docketPhotoId,
       tippedOffAt: new Date(input.occurredAt),
     });
 
@@ -796,6 +846,31 @@ export const driverService = {
 };
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
+
+/**
+ * The upload rules, shared by the job photo and the tip-off docket.
+ *
+ * Both hand out a presigned URL with the declared length signed into it, so both
+ * have to refuse the same things — and refuse them HERE, before a URL exists,
+ * rather than letting the bucket reject the PUT where the phone gets a signature
+ * error it cannot explain to the driver.
+ */
+function assertUploadable(input: { contentType: string; contentLength: number }): void {
+  if (!UPLOADABLE_TYPES.has(input.contentType)) {
+    throw AppError.validation('That file type cannot be uploaded', [
+      { path: 'contentType', message: 'Photos must be JPEG, PNG, HEIC or WebP' },
+    ]);
+  }
+
+  if (input.contentLength > MAX_UPLOAD_BYTES) {
+    throw AppError.validation('That photo is too large', [
+      {
+        path: 'contentLength',
+        message: `Photos must be under ${String(Math.round(MAX_UPLOAD_BYTES / 1024 / 1024))} MB`,
+      },
+    ]);
+  }
+}
 
 /**
  * The stop, or a 404.

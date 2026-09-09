@@ -10,13 +10,12 @@ import { CredentialTypeSchema } from './fleet.js';
  * Some of what belongs on a settings screen is NOT a setting, and pretending
  * otherwise would be worse than leaving it out:
  *
- *  • **Data residency and the 7-year retention floor** are commitments in the
- *    client's Privacy Policy (M1.7). They are facts, shown read-only.
- *  • **Number sequences** continue from ~61,300 and ~104,100 (M1.4) and need a
- *    transactional counter. The current value is displayed; it is not a text box.
  *  • **Rate schedules are effective-dated** (M6.2): pricing a job always uses the
  *    rates in force on that job's date, so "editing" a rate means issuing a new
  *    schedule, never overwriting the old one. The UI reflects that.
+ *
+ * The client's answer to the rest of that category was to drop it: read-only
+ * facts earn no screen space. See the note where `general` used to be.
  *
  * ── The invoice-template trap ─────────────────────────────────────────────
  * Scope Call 1: **branding and content control are IN** (logo, colours, company
@@ -27,7 +26,7 @@ import { CredentialTypeSchema } from './fleet.js';
  * design.
  */
 
-/* ── General ──────────────────────────────────────────────────────────────── */
+/* ── Zone rates, which belong to a rate card (M6) ─────────────────────────── */
 
 export const ZoneRateSchema = z
   .object({
@@ -37,19 +36,27 @@ export const ZoneRateSchema = z
   })
   .meta({ id: 'ZoneRate' });
 
-export const GeneralSettingsSchema = z
-  .object({
-    /** M2.4a — target date is the customer's ready date plus this many. */
-    slaBusinessDays: z.number().int().min(1).max(30),
-    /** Read-only facts, shown so nobody has to go and ask. */
-    timezone: NonEmptyStringSchema,
-    dataRegion: NonEmptyStringSchema,
-    retentionYears: z.number().int(),
-    nextJobNumber: z.number().int().positive(),
-    nextInvoiceNumber: z.number().int().positive(),
-    zones: z.array(ZoneRateSchema),
-  })
-  .meta({ id: 'GeneralSettings' });
+/*
+ * There is no `GeneralSettingsSchema`, and the settings payload has no
+ * `general` block.
+ *
+ * It carried six values and the client wanted none of them on screen. Timezone,
+ * data region and the retention floor were constants dressed as settings; the
+ * zone list duplicated `pricing.rateCards`; and the two number sequences are
+ * counters nobody may type. That left `slaBusinessDays` alone.
+ *
+ * ⚠️ `slaBusinessDays` and both sequences still EXIST — they are stored on the
+ * settings singleton and are load-bearing:
+ *
+ *  • the SLA is every job's target date (M2.4a), read through
+ *    `settingsRepository.slaBusinessDays()`
+ *  • the sequences number every job and invoice (M1.4), taken through
+ *    `settingsRepository.takeNextNumber()`
+ *
+ * What was removed is the *settings surface* over them — the read block, the
+ * `PUT /settings/general` route and the screen. Changing the SLA is now a seed
+ * or a migration, which is the trade the client accepted.
+ */
 
 /* ── Notifications (M8.3, M8.4 · W5, W14) ─────────────────────────────────── */
 
@@ -233,7 +240,6 @@ export const CredentialTypeSettingSchema = z
 
 export const SettingsSchema = z
   .object({
-    general: GeneralSettingsSchema,
     notifications: NotificationSettingsSchema,
     pricing: PricingSettingsSchema,
     invoicing: InvoicingSettingsSchema,
@@ -243,7 +249,6 @@ export const SettingsSchema = z
   .meta({ id: 'Settings' });
 
 export type ZoneRate = z.infer<typeof ZoneRateSchema>;
-export type GeneralSettings = z.infer<typeof GeneralSettingsSchema>;
 export type NotificationRule = z.infer<typeof NotificationRuleSchema>;
 export type NotificationSettings = z.infer<typeof NotificationSettingsSchema>;
 export type RateCardSummary = z.infer<typeof RateCardSummarySchema>;

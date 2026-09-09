@@ -10,11 +10,10 @@ const log = logger.child({ module: 'settings' });
  *
  * ── Why the rules live here and not in the form ───────────────────────────
  * The settings screen is the one place where a single wrong field changes how
- * every job afterwards behaves. A sequence set backwards silently reissues job
- * numbers that builders already have in their AP systems (M1.4); an SLA of zero
- * makes every job late the moment it is booked. The form validates for the
- * person typing; this validates for everyone downstream, and it is the only one
- * of the two that a script or a stale tab cannot skip.
+ * every job afterwards behaves — a bank BSB with no account number prints an
+ * invoice that gets paid into nothing. The form validates for the person
+ * typing; this validates for everyone downstream, and it is the only one of the
+ * two that a script or a stale tab cannot skip.
  */
 
 export interface Caller {
@@ -38,43 +37,6 @@ export const settingsService = {
   async get(caller: Caller): Promise<Settings> {
     assertStaff(caller);
     return settingsRepository.get();
-  },
-
-  /**
-   * M2.4a — the SLA. The rest of this section is read-only.
-   *
-   * ⚠️ The sequence guard below is the important part of this file. The whole
-   * `general` block round-trips through the form, so a stale tab or a hand-made
-   * request can arrive carrying a different `nextJobNumber` — and the repository
-   * deliberately does not write it (M1.4: numbers come from a transactional
-   * counter, never a text box). Accepting that request and returning 200 would
-   * tell the office it had changed something it had not.
-   *
-   * So a changed sequence is REFUSED rather than ignored, in either direction.
-   * Moving one backwards would re-issue consignment numbers that already exist
-   * in three years of TransVirtual history and in builders' own AP systems;
-   * moving it forwards silently would be a lie about what was saved.
-   */
-  async saveGeneral(input: Settings['general'], caller: Caller): Promise<Settings['general']> {
-    assertWriter(caller);
-
-    const current = await settingsRepository.get();
-
-    assertSequenceUnchanged('nextJobNumber', current.general.nextJobNumber, input.nextJobNumber);
-    assertSequenceUnchanged(
-      'nextInvoiceNumber',
-      current.general.nextInvoiceNumber,
-      input.nextInvoiceNumber,
-    );
-
-    await settingsRepository.saveGeneral(input);
-
-    log.info({ slaBusinessDays: input.slaBusinessDays }, 'general settings saved');
-
-    // Re-read rather than echoing the input: the caller should see what was
-    // actually stored, including the read-only fields it did not send.
-    const saved = await settingsRepository.get();
-    return saved.general;
   },
 
   async saveNotifications(
@@ -209,23 +171,10 @@ function assertWriter(caller: Caller): void {
   }
 }
 
-/**
- * A sequence is displayed, never set here. See the note on `saveGeneral`.
- *
- * The message distinguishes the two cases because they mean different things to
- * whoever hits it: backwards is a dangerous mistake worth explaining, forwards
- * is simply the wrong tool.
+/*
+ * There is no sequence guard here any more, because there is no route that
+ * could carry a sequence. `nextJobNumber` and `nextInvoiceNumber` are reachable
+ * only through `settingsRepository.takeNextNumber()`, which advances them
+ * atomically — so the thing the guard existed to refuse is now unrepresentable
+ * rather than merely rejected. That is the stronger version of the same rule.
  */
-function assertSequenceUnchanged(field: string, current: number, next: number): void {
-  if (next === current) return;
-
-  throw AppError.validation('Number sequences are not set from this screen', [
-    {
-      path: field,
-      message:
-        next < current
-          ? `This is already at ${String(current)}. Moving it back to ${String(next)} would re-issue numbers that have been used.`
-          : `This is at ${String(current)} and advances as jobs and invoices are raised. It cannot be set to ${String(next)} by hand.`,
-    },
-  ]);
-}

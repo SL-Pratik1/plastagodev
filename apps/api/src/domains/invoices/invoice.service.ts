@@ -10,7 +10,10 @@ import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { centsToMoney, moneyToCents } from '../../lib/money.js';
 import { withTransaction } from '../../lib/transaction.js';
+import { buildInvoiceEmail } from '../../integrations/notice-messages.js';
 import { accountRepository } from '../accounts/account.repository.js';
+import { notificationService } from '../notifications/notification.service.js';
+import { outboundService } from '../notifications/outbound.service.js';
 import { billableCharges, jobRepository, setInvoiceStatus } from '../jobs/job.repository.js';
 import { settingsRepository } from '../settings/settings.repository.js';
 import {
@@ -304,6 +307,17 @@ export const invoiceService = {
       );
     }
 
+    /*
+     * M7.7 — "sent" now means sent.
+     *
+     * ⚠️ AFTER the status transition, and per invoice rather than per batch.
+     * The transition is the durable act (and the thing Xero and the ageing
+     * report read); the emails are best-effort on top of it. One unreachable
+     * accounts address must not roll back a batch of forty invoices, so each
+     * send stands or fails alone and is recorded either way.
+     */
+    await Promise.all(ids.map((id) => emailInvoice(id, now, caller)));
+
     log.info({ count: changed, by: caller.name }, 'invoices sent');
     return changed;
   },
@@ -412,6 +426,91 @@ export const invoiceService = {
     log.info({ invoiceId: id, by: caller.name }, 'xero push re-queued');
   },
 };
+
+/* ── The covering email (M7.7 · M8.4) ───────────────────────────────────── */
+
+/**
+ * Emails one invoice to the people who pay it.
+ *
+ * ── Why it re-reads the invoice instead of trusting the selection ──────────
+ * `transitionMany` reports HOW MANY rows moved, not which — a bulk action over
+ * a grid selection is expected to be partly a no-op. Emailing everything that
+ * was selected would therefore send a covering note for invoices that were
+ * already sent last week. Matching `sentAt` to this batch's timestamp is what
+ * identifies the ones that actually moved just now.
+ */
+async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<void> {
+  const invoice = await invoiceRepository.findById(id, scopeFor(caller));
+
+  // Not ours to send: already sent, still awaiting a PO, or out of scope.
+  if (!invoice || invoice.status !== 'sent' || invoice.sentAt !== sentAt.toISOString()) return;
+
+  const account = await accountRepository.findById(invoice.accountId, { accountId: null });
+
+  /*
+   * Accounts payable, not the site.
+   *
+   * M8.4 exists for exactly this: *"today there is exactly one email — the site
+   * contact. The AP person who needs the invoice..."*. A foreman forwarding
+   * invoices to his own accounts department is the delay this removes. The
+   * fallback to any emailable contact is deliberate — an invoice reaching the
+   * wrong desk inside the right company still gets paid; one that goes nowhere
+   * does not.
+   */
+  const contacts = account?.contacts ?? [];
+  const payable = contacts.filter(
+    (contact) => contact.role === 'accounts' && contact.email && contact.notifyByEmail,
+  );
+  const recipients = payable.length > 0 ? payable : contacts.filter((contact) => contact.email);
+
+  const context = {
+    accountName: invoice.accountName,
+    invoiceNumber: invoice.invoiceNumber,
+    totalIncGst: invoice.totalIncGst,
+    dueOn: invoice.dueOn,
+    paymentTermsDays: invoice.paymentTermsDays,
+    jobNumber: invoice.jobNumber,
+    poNumber: invoice.poNumber,
+  };
+
+  for (const contact of recipients) {
+    await outboundService.send({
+      event: 'invoice-sent',
+      // Per contact: two people at the same builder each need their own copy,
+      // and each is its own row in the log.
+      subjectKey: `invoice-sent:${invoice.id}:${contact.id}`,
+      recipient: {
+        email: contact.email,
+        mobile: null,
+        notifyByEmail: contact.notifyByEmail,
+      },
+      email: (to) => buildInvoiceEmail(to, context),
+      accountId: invoice.accountId,
+      invoiceId: invoice.id,
+      jobId: invoice.jobId,
+    });
+  }
+
+  /*
+   * And in the portal, where somebody looking at their account sees it without
+   * having found the email. `action` rather than `info`: an invoice is
+   * something to do, and one waiting on a PO is something to do urgently.
+   */
+  await notificationService.notifyAccount({
+    accountId: invoice.accountId,
+    category: 'invoice',
+    severity: 'action',
+    title: `Invoice INV-${String(invoice.invoiceNumber)} — ${invoice.totalIncGst}`,
+    body: invoice.dueOn
+      ? `Due ${invoice.dueOn}.${invoice.poNumber ? ` Purchase order ${invoice.poNumber}.` : ''}`
+      : `Payment terms ${String(invoice.paymentTermsDays)} days.`,
+    href: '/portal/invoices',
+    subjectKey: `invoice-sent:${invoice.id}`,
+    valueExGst: invoice.subtotalExGst,
+    jobId: invoice.jobId,
+    jobNumber: invoice.jobNumber,
+  });
+}
 
 /* ── Scoping ─────────────────────────────────────────────────────────────── */
 

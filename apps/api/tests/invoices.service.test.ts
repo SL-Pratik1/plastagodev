@@ -1,5 +1,12 @@
 import type { Role } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  clearOutbound,
+  makeFakeNotificationRepository,
+  providerFailure,
+  recordingProviders,
+  sentMessages,
+} from './helpers/fake-outbound.js';
 import { createFakeInvoiceRepository } from './helpers/fake-invoices.js';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
 
@@ -27,6 +34,31 @@ const ACCOUNT = {
   poPolicy: 'required-before-invoice' as 'required-before-invoice' | 'not-required',
   paymentTermsDays: 7,
   status: 'active' as const,
+  /*
+   * M8.4 — two contacts, deliberately. The covering email has to reach the
+   * accounts desk and not the site foreman: *"today there is exactly one email
+   * — the site contact. The AP person who needs the invoice..."*
+   */
+  contacts: [
+    {
+      id: 'con000000000000000000s1',
+      name: 'Dave Nguyen',
+      role: 'site' as string,
+      email: 'dave@clarendon.com.au' as string | null,
+      mobile: '0466778899' as string | null,
+      notifyBySms: true,
+      notifyByEmail: true,
+    },
+    {
+      id: 'con000000000000000000a1',
+      name: 'Angela Fitzgerald',
+      role: 'accounts' as string,
+      email: 'accounts@clarendon.com.au' as string | null,
+      mobile: null as string | null,
+      notifyBySms: false,
+      notifyByEmail: true,
+    },
+  ],
 };
 
 const JOB = {
@@ -81,7 +113,17 @@ vi.mock('../src/domains/jobs/job.repository.js', () => ({
   },
 }));
 
+/*
+ * M7.7 — sending an invoice now emails the people who pay it. The send log is
+ * faked like every other repository; the real one would buffer a write against
+ * a MongoDB that is not there.
+ */
+vi.mock('../src/domains/notifications/notification.repository.js', () => ({
+  notificationRepository: makeFakeNotificationRepository(),
+}));
+
 const { invoiceService } = await import('../src/domains/invoices/invoice.service.js');
+const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 
 const OFFICE = {
   userId: 'usr0000000000000000000f1',
@@ -141,6 +183,58 @@ beforeEach(() => {
   ACCOUNT.poPolicy = 'required-before-invoice';
   JOB.status = 'completed';
   JOB.poNumber = 'PO-88213';
+  clearOutbound();
+  setMessagingProvidersForTests(recordingProviders());
+});
+
+/**
+ * The covering email (M7.7 · M8.4).
+ *
+ * "Sent" used to mean a status column. These are about the invoice actually
+ * arriving at the desk that pays it.
+ */
+describe('what the customer receives', () => {
+  it('emails the accounts contact, not the site foreman', async () => {
+    const draft = invoices.seed({ status: 'draft' });
+
+    await invoiceService.send([draft.id], OFFICE);
+
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]?.to).toBe('accounts@clarendon.com.au');
+  });
+
+  /** An AP system rejects an invoice with no PO on it (Matt, 9:56). */
+  it('quotes the purchase order and the amount', async () => {
+    const draft = invoices.seed({ status: 'draft' });
+
+    await invoiceService.send([draft.id], OFFICE);
+
+    expect(sentMessages[0]?.subject).toContain('Clarendon Homes');
+    expect(sentMessages[0]?.body).toContain('including GST');
+  });
+
+  /*
+   * ⚠️ Only the rows that actually moved. A grid selection routinely holds
+   * invoices that were sent last week, and a second covering email for one of
+   * them reads as a duplicate bill.
+   */
+  it('says nothing about an invoice that had already been sent', async () => {
+    const already = invoices.seed({ status: 'sent' });
+    const draft = invoices.seed({ status: 'draft' });
+
+    await invoiceService.send([already.id, draft.id], OFFICE);
+
+    expect(sentMessages).toHaveLength(1);
+  });
+
+  /** A dead mailbox must not roll back a batch of forty invoices. */
+  it('still marks the invoice sent when the email fails', async () => {
+    providerFailure.message = 'mailbox full';
+    const draft = invoices.seed({ status: 'draft' });
+
+    await expect(invoiceService.send([draft.id], OFFICE)).resolves.toBe(1);
+    expect(invoices.all.find((row) => row.id === draft.id)?.status).toBe('sent');
+  });
 });
 
 describe('the split (M7.2)', () => {

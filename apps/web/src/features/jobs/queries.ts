@@ -44,6 +44,27 @@ export function useJobPricePreview(draft: JobDraft | null) {
   });
 }
 
+/**
+ * M2.12 — the purchase orders a pickup can be booked against.
+ *
+ * Held until an account is chosen, because purchase orders are scoped to one:
+ * asking without an account would either return nothing or, worse, everything.
+ *
+ * Cached briefly rather than aggressively. A confirmed order can appear in this
+ * list within minutes of the extractor reading it, and an office that has just
+ * approved one in the review queue expects to find it here.
+ */
+export function useBookablePurchaseOrders(accountId: string | undefined, search = '') {
+  const { jobs } = useServices();
+
+  return useQuery({
+    queryKey: queryKeys.jobs.purchaseOrders(accountId ?? '', search),
+    queryFn: () => jobs.purchaseOrders(accountId as string, search || undefined),
+    enabled: Boolean(accountId),
+    staleTime: 30_000,
+  });
+}
+
 export function useCreateJob() {
   const { jobs } = useServices();
   const queryClient = useQueryClient();

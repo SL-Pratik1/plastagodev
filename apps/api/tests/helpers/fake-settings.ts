@@ -87,8 +87,25 @@ export function createFakeSettingsRepository() {
   let unpricedZones = new Set<Zone>();
 
   let settings: Settings = baseSettings();
-  /** Runs are new in PlastaGo, so this starts at 1 rather than continuing anything. */
-  let nextRunNumber = 1;
+  /**
+   * M2.4a. Not on the `Settings` contract any more — the General tab is gone —
+   * so the fake holds it the same way the real singleton does: a stored scalar
+   * with no route that writes it.
+   */
+  let slaBusinessDays = 5;
+  /*
+   * The sequences, likewise off-contract (M1.4). They start where the client's
+   * existing history leaves off, so a test asserting a job number is asserting
+   * the real continuation rather than 1.
+   *
+   * `nextRunNumber` genuinely starts at 1: runs are new in PlastaGo and nobody
+   * quotes them.
+   */
+  const sequences: Record<'nextJobNumber' | 'nextInvoiceNumber' | 'nextRunNumber', number> = {
+    nextJobNumber: 61_300,
+    nextInvoiceNumber: 104_100,
+    nextRunNumber: 1,
+  };
   let integrations = new Map<IntegrationId, Integration>([
     [
       'xero',
@@ -107,7 +124,6 @@ export function createFakeSettingsRepository() {
   const calls = {
     resolveRate: [] as Array<{ rateCardId: RateCardId; zone: Zone }>,
     findAdditionalService: [] as string[],
-    savedGeneral: null as Settings['general'] | null,
     savedNotifications: null as Settings['notifications'] | null,
     savedInvoicing: null as Settings['invoicing'] | null,
     savedCredentialTypes: null as Settings['credentialTypes'] | null,
@@ -146,18 +162,9 @@ export function createFakeSettingsRepository() {
       return Promise.resolve(SERVICES[code] ?? null);
     },
 
-    async saveGeneral(input: Settings['general']): Promise<void> {
-      calls.savedGeneral = input;
-      /*
-       * Only `slaBusinessDays`, exactly as the real repository does. Merging the
-       * whole input here would let a test pass that the live API fails — which
-       * is how the sequences came to be silently dropped in the first place.
-       */
-      settings = {
-        ...settings,
-        general: { ...settings.general, slaBusinessDays: input.slaBusinessDays },
-      };
-      return Promise.resolve();
+    /* M2.4a — read-only, like the real one. There is no `saveGeneral` pair. */
+    async slaBusinessDays(): Promise<number> {
+      return Promise.resolve(slaBusinessDays);
     },
 
     async saveNotifications(input: Settings['notifications']): Promise<void> {
@@ -183,24 +190,12 @@ export function createFakeSettingsRepository() {
      *
      * Returning the number before the increment matters — off by one here is a
      * permanently skipped job or invoice number (M1.4).
-     *
-     * `nextRunNumber` is not on the `Settings` contract (no screen sets it), so
-     * it is counted here rather than read off `general`.
      */
     async takeNextNumber(
       field: 'nextJobNumber' | 'nextInvoiceNumber' | 'nextRunNumber',
     ): Promise<number> {
-      if (field === 'nextRunNumber') {
-        const taken = nextRunNumber;
-        nextRunNumber += 1;
-        return Promise.resolve(taken);
-      }
-
-      const taken = settings.general[field];
-      settings = {
-        ...settings,
-        general: { ...settings.general, [field]: taken + 1 },
-      };
+      const taken = sequences[field];
+      sequences[field] = taken + 1;
       return Promise.resolve(taken);
     },
 
@@ -255,19 +250,6 @@ export function createFakeSettingsRepository() {
 
 function baseSettings(): Settings {
   return {
-    general: {
-      slaBusinessDays: 5,
-      timezone: 'Australia/Sydney',
-      dataRegion: 'ap-southeast-2',
-      retentionYears: 7,
-      nextJobNumber: 61_300,
-      nextInvoiceNumber: 104_100,
-      zones: [
-        { zone: 'sydney', serviceCharge: '220.00', ratePerM2: '0.16' },
-        { zone: 'wollongong', serviceCharge: '250.00', ratePerM2: '0.18' },
-        { zone: 'newcastle', serviceCharge: '250.00', ratePerM2: '0.20' },
-      ],
-    },
     notifications: {
       rules: [{ event: 'job-booked', sms: true, email: true, includePhotos: false }],
       reminderLeadDays: 2,

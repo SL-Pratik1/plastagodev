@@ -121,8 +121,9 @@ export const driverRepository = {
       JobModel.find({ runId: { $in: runIds } })
         .sort({ runSequence: 1 })
         .lean<RawJobForDriver[]>(),
+      // `netKg` is the schema's name for the weighbridge figure — see recordTipOff.
       RunTipOffModel.find({ runId: { $in: runIds } }).lean<
-        Array<{ runId: mongoose.Types.ObjectId; totalKg: number; tippedOffAt: Date }>
+        Array<{ runId: mongoose.Types.ObjectId; netKg: number; tippedOffAt: Date }>
       >(),
     ]);
 
@@ -145,7 +146,7 @@ export const driverRepository = {
           // document, so the heading always matches the list underneath it.
           suburbs: [...new Set(runStops.map((stop) => stop.suburb))],
           tipOffRecordedAt: tipOff?.tippedOffAt ?? null,
-          tipOffKg: tipOff?.totalKg ?? null,
+          tipOffKg: tipOff?.netKg ?? null,
         };
       }),
       stops,
@@ -260,13 +261,31 @@ export const driverRepository = {
     );
   },
 
+  /**
+   * M4.4 — the driver's docket, written against `runtipoffs`.
+   *
+   * ⚠️ The field names here are the SCHEMA's, not the driver contract's, and the
+   * two differ. `run.model.ts` calls them `netKg`, `docketNumber` and
+   * `docketPhotoKey`; the wire calls them `totalKg`, `docketReference` and
+   * `docketPhotoId`. Mongoose runs strict by default, so `$set`-ing the wire
+   * names silently DROPPED them — the write acknowledged, and the weighbridge
+   * figure was never stored. The office path (`run.repository.ts`) always used
+   * the schema names, which is why only the driver's tip-off lost its weight.
+   *
+   * Translate once, here, where the boundary is.
+   *
+   * `facility` is not asked for on the driver's screen — there is no picker on
+   * the Tip-off form, and inventing one would be a UI change nobody asked for.
+   * It stays null on this path and the office fills it in; see the note on the
+   * schema.
+   */
   async recordTipOff(input: {
     runId: string;
     driverId: string;
     date: string;
     totalKg: number;
     docketReference: string;
-    docketPhotoId: string | null;
+    docketPhotoKey: string | null;
     tippedOffAt: Date;
   }): Promise<boolean> {
     // One docket per run (Matt, 43:50). An upsert rather than an insert so a
@@ -276,14 +295,10 @@ export const driverRepository = {
       {
         $set: {
           runId: new mongoose.Types.ObjectId(input.runId),
-          date: input.date,
-          totalKg: input.totalKg,
-          docketReference: input.docketReference || null,
-          docketPhotoId: input.docketPhotoId
-            ? new mongoose.Types.ObjectId(input.docketPhotoId)
-            : null,
+          netKg: input.totalKg,
+          docketNumber: input.docketReference || null,
+          docketPhotoKey: input.docketPhotoKey,
           tippedOffAt: input.tippedOffAt,
-          recordedByUserId: new mongoose.Types.ObjectId(input.driverId),
         },
       },
       { upsert: true },

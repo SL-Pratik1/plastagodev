@@ -1,4 +1,5 @@
 import type {
+  InvitationResult,
   Lead,
   LeadAttachment,
   LeadConversion,
@@ -16,7 +17,10 @@ import {
   getStorage,
   type PresignedUpload,
 } from '../../integrations/storage.js';
+import { buildLeadAckEmail, buildWelcomeEmail } from '../../integrations/notice-messages.js';
 import { accountRepository } from '../accounts/account.repository.js';
+import { notificationService } from '../notifications/notification.service.js';
+import { outboundService } from '../notifications/outbound.service.js';
 import { leadRepository, type ListLeadsQuery } from './lead.repository.js';
 
 const log = logger.child({ module: 'leads' });
@@ -127,6 +131,42 @@ export const leadService = {
 
     const lead = await leadRepository.findById(id);
     if (!lead) throw new Error('Lead vanished immediately after being created');
+
+    /*
+     * A.4 — the enquiry form is answered by the product, not by whoever gets to
+     * the queue first.
+     *
+     * ⚠️ Only for `enquiry-form`. A lead the office typed up during a phone
+     * call has already been acknowledged by the person on the phone; emailing
+     * them afterwards to say somebody will be in touch reads as if nobody
+     * noticed they had rung. See `notice-messages.ts`.
+     */
+    if (input.source === 'enquiry-form') {
+      await outboundService.send({
+        event: 'lead-acknowledged',
+        subjectKey: `lead-ack:${id}`,
+        recipient: { email: input.email, mobile: null },
+        email: (to) =>
+          buildLeadAckEmail(to, {
+            contactName: input.contactName,
+            companyName: input.companyName,
+          }),
+      });
+
+      /*
+       * And the office is told, because nobody watches a queue. An enquiry that
+       * sits for three days is the failure this notification exists to prevent
+       * — the same argument as the sweep in `notification.service.ts`.
+       */
+      await notificationService.notifyOffice({
+        category: 'queue',
+        severity: 'action',
+        title: `New website enquiry — ${input.companyName}`,
+        body: `${input.contactName} asked about ${String(input.typicalVolumeM2)} m² in ${input.zone}. They have been sent an acknowledgement; somebody owes them a call.`,
+        href: `/queues/leads/${id}`,
+        subjectKey: `lead-new:${id}`,
+      });
+    }
 
     log.info({ leadId: id, company: input.companyName, source: input.source }, 'lead created');
     return lead;
@@ -255,7 +295,7 @@ export const leadService = {
     id: string,
     input: LeadConversion,
     caller: Caller,
-  ): Promise<{ accountId: string; customerCode: string }> {
+  ): Promise<{ accountId: string; customerCode: string; welcome: InvitationResult | null }> {
     assertConverter(caller);
 
     const lead = await leadRepository.findById(id);
@@ -325,16 +365,37 @@ export const leadService = {
     );
 
     /*
-     * A.4 finishes by sending the welcome email. Not sent from here: the
-     * invitation belongs to the notifications domain, and a conversion that
-     * failed because a mail server was down would be the worst possible place
-     * to lose the account that was just created.
+     * A.4 finishes by welcoming them in.
+     *
+     * ⚠️ LAST, and unable to throw. This is the worst possible place to lose an
+     * account that already exists — the code is taken, the lead is marked
+     * converted, and neither can be undone by a mail server being down. So the
+     * send is best-effort and its outcome is returned instead of thrown, and
+     * the office is told which of the two happened.
      */
+    let welcome: InvitationResult | null = null;
+
     if (input.sendInvitation) {
-      log.info({ accountId: account.id, email: lead.email }, 'welcome invitation queued');
+      welcome = await outboundService.send({
+        event: 'account-welcome',
+        subjectKey: `account-welcome:${account.id}`,
+        recipient: { email: lead.email, mobile: null },
+        email: (to) =>
+          buildWelcomeEmail(to, {
+            contactName: lead.contactName,
+            legalName: input.legalName,
+            customerCode: input.customerCode,
+          }),
+        accountId: account.id,
+      });
+
+      log.info(
+        { accountId: account.id, outcome: welcome.outcome },
+        'welcome email attempted',
+      );
     }
 
-    return { accountId: account.id, customerCode: input.customerCode };
+    return { accountId: account.id, customerCode: input.customerCode, welcome };
   },
 
   /** The nav badge. */

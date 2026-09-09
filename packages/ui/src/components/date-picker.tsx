@@ -95,9 +95,17 @@ export function DatePicker({
   // Stable ref, and kept current in an effect — see the note in `select.tsx`:
   // an inline ref callback detaches and reattaches every render, which stops
   // react-hook-form from populating the field from `defaultValues`.
+  // A later ref is also HANDED the element, because a stable callback is only
+  // ever called once per node — see the long note in `select.tsx`. Without it,
+  // react-hook-form's `reset()` leaves the field holding its `{ name }`
+  // placeholder and every date picked afterwards is stored as `undefined`.
   const forwardedRef = useRef(ref);
   useEffect(() => {
     forwardedRef.current = ref;
+    const node = nativeRef.current;
+    if (!node) return;
+    if (typeof ref === 'function') ref(node);
+    else if (ref) ref.current = node;
   }, [ref]);
 
   const attachRef = useCallback((node: HTMLInputElement | null) => {

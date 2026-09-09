@@ -188,6 +188,24 @@ const EnvSchema = z
     OTP_SENDER_NAME: z.string().min(1).default('PlastaGo'),
 
     /**
+     * Where a person lands when a message tells them to sign in.
+     *
+     * ── Why this is configuration and not derived from the request ─────────
+     * The messages that carry it are sent from a worker and from background
+     * sweeps, where there is no request to read an origin from. Deriving it from
+     * `CORS_ORIGINS[0]` would work today and break the morning somebody
+     * reorders that list — a link in an SMS is the one thing that cannot be
+     * corrected after sending.
+     *
+     * No trailing slash: every caller appends a path.
+     */
+    PUBLIC_APP_URL: z
+      .string()
+      .url()
+      .default('http://localhost:5173')
+      .transform((value) => value.replace(/\/+$/, '')),
+
+    /**
      * §6A.10 #9 — object storage for photos, dockets and generated PDFs.
      *
      * `stub` keeps the bytes on local disk and hands out ordinary API URLs, so
@@ -216,6 +234,51 @@ const EnvSchema = z
     S3_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
     /** Where the stub provider keeps bytes. Ignored when STORAGE_PROVIDER=s3. */
     STORAGE_STUB_DIR: z.string().min(1).default('.storage'),
+
+    /**
+     * I6 · M2.12 — the purchase-order extractor (3PM Extractor).
+     *
+     * `off` is the default and is a working state, not a broken one: the review
+     * queue accepts extractions posted by hand, and the office keys purchase
+     * orders in as it does today. Turning the pipeline on is this variable plus
+     * credentials — never a code change (§8).
+     *
+     * ⚠️ The extractor also OWNS the mailbox connection. PlastaGo's own Graph
+     * registration sends mail (I5) and deliberately does not read it: the
+     * `Mail.Read` consent lives with the vendor that needs it, which is one
+     * fewer permission on our own app.
+     */
+    EXTRACTOR_PROVIDER: z.enum(['off', 'threepm']).default('off'),
+
+    EXTRACTOR_BASE_URL: z.string().url().default('https://extractor.decoded.digital'),
+    EXTRACTOR_APP_ID: z.string().min(1).optional(),
+    /** ⚠️ Never reaches a browser. Exchanged for a short-lived session id. */
+    EXTRACTOR_APP_SECRET: z.string().min(1).optional(),
+    /** From `POST /api/embed/onboard`, run once by `seed-extractor`. */
+    EXTRACTOR_EMBED_TOKEN: z.string().min(1).optional(),
+    /**
+     * The account sessions are created for. A service identity, not a person —
+     * a session minted under someone's own address would attribute every
+     * ingested purchase order to them.
+     */
+    EXTRACTOR_USER_EMAIL: z.string().email().optional(),
+    /**
+     * The extractor's document template id, from `seed-extractor`.
+     *
+     * Optional: without it the webhook accepts every completed extraction in the
+     * tenant. With it, anything raised against another template is ignored —
+     * which matters as soon as the tenant is used for a second document type.
+     */
+    EXTRACTOR_DOCUMENT_ID: z.string().min(1).optional(),
+
+    /**
+     * Shared secret the webhook must present, as `?token=` on the callback URL.
+     *
+     * ⚠️ This authenticates the PING, not the payload. The webhook body is never
+     * trusted — see `po-ingest.adapter.ts`. Its only job is to stop an anonymous
+     * caller making us fetch arbitrary extraction ids.
+     */
+    EXTRACTOR_WEBHOOK_SECRET: z.string().min(16).optional(),
   })
   .superRefine((value, ctx) => {
     const isProd = value.NODE_ENV === 'production';
@@ -298,6 +361,33 @@ const EnvSchema = z
         path: ['STORAGE_PROVIDER'],
         message: 'Cannot be "stub" in production — photos and dockets would not survive a restart',
       });
+    }
+
+    /*
+     * Selecting the extractor without its credentials would fail at the moment a
+     * purchase order arrives — silently, in a background handler nobody is
+     * watching. Fail at boot instead.
+     *
+     * `EXTRACTOR_DOCUMENT_ID` is absent from this list on purpose: it is produced
+     * by `seed-extractor`, which cannot run until the app is already booted with
+     * the credentials below.
+     */
+    if (value.EXTRACTOR_PROVIDER === 'threepm') {
+      for (const key of [
+        'EXTRACTOR_APP_ID',
+        'EXTRACTOR_APP_SECRET',
+        'EXTRACTOR_EMBED_TOKEN',
+        'EXTRACTOR_USER_EMAIL',
+        'EXTRACTOR_WEBHOOK_SECRET',
+      ] as const) {
+        if (!value[key]) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [key],
+            message: 'Required when EXTRACTOR_PROVIDER=threepm',
+          });
+        }
+      }
     }
 
     // A production deployment that cannot send a code cannot let anyone in.

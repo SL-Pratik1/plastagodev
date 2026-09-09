@@ -1,6 +1,5 @@
 import type {
   CredentialTypeSettingSchema,
-  GeneralSettingsSchema,
   InvoicingSettingsSchema,
   NotificationSettingsSchema,
 } from '@plastago/shared';
@@ -27,14 +26,6 @@ export const settingsController = {
   get: async (req: Request, res: Response): Promise<void> => {
     const settings = await settingsService.get(callerOf(req));
     res.json(settings);
-  },
-
-  saveGeneral: async (
-    req: ValidatedRequest<{ body: typeof GeneralSettingsSchema }>,
-    res: Response,
-  ): Promise<void> => {
-    const saved = await settingsService.saveGeneral(req.validated.body, callerOf(req));
-    res.json(saved);
   },
 
   saveNotifications: async (

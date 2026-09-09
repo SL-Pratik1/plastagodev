@@ -55,6 +55,9 @@ export const queryKeys = {
     detail: (id: string) => [...queryKeys.jobs.all, 'detail', id] as const,
     /** Keyed by the draft so a changed field refetches, and an unchanged one does not. */
     preview: (draft: unknown) => [...queryKeys.jobs.all, 'preview', draft] as const,
+    /** M2.12 — the purchase orders one account can book a pickup against. */
+    purchaseOrders: (accountId: string, search: string) =>
+      [...queryKeys.jobs.all, 'purchase-orders', accountId, search] as const,
   },
 
   invoices: {
@@ -93,6 +96,17 @@ export const queryKeys = {
   settings: {
     all: ['settings'] as const,
     detail: () => [...queryKeys.settings.all, 'detail'] as const,
+  },
+
+  /**
+   * I6 — the Extractor tab's brokered session.
+   *
+   * Its own domain rather than a key under `settings`, because it is neither
+   * invalidated by a settings save nor worth re-minting when one happens.
+   */
+  extractor: {
+    all: ['extractor'] as const,
+    session: () => [...queryKeys.extractor.all, 'session'] as const,
   },
 
   audit: {

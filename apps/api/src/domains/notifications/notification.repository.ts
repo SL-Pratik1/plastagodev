@@ -234,6 +234,29 @@ export const notificationRepository = {
     return rows.map((row) => ({ id: row._id.toHexString(), name: row.name }));
   },
 
+  /**
+   * The portal users of ONE account — a customer's own inbox.
+   *
+   * ⚠️ Filtered to the two customer roles as well as the account, not just the
+   * account. A staff record carrying an `accountId` would otherwise be handed a
+   * notification written for the customer's eyes, which is the same disclosure
+   * mistake in the other direction.
+   */
+  async accountRecipients(accountId: string): Promise<Array<{ id: string; name: string }>> {
+    if (!mongoose.isValidObjectId(accountId)) return [];
+
+    const rows = await UserModel.find(
+      {
+        status: 'active',
+        accountId: new mongoose.Types.ObjectId(accountId),
+        roles: { $in: ['customer-administrator', 'customer-site-supervisor'] },
+      },
+      { name: 1 },
+    ).lean<Array<{ _id: mongoose.Types.ObjectId; name: string }>>();
+
+    return rows.map((row) => ({ id: row._id.toHexString(), name: row.name }));
+  },
+
   /* ── M8.1 / M8.2 · the outbound log ────────────────────────────────────── */
 
   /**
@@ -280,9 +303,91 @@ export const notificationRepository = {
     }
   },
 
-  /** Whether this subject has already gone out on this channel. */
+  /**
+   * Whether this subject has already gone out SUCCESSFULLY on this channel.
+   *
+   * ⚠️ `outcome: 'sent'` is part of the filter deliberately. A row recording a
+   * failure means the customer did NOT get the message, so treating it as
+   * "already sent" would turn one mail-server hiccup into a reminder that never
+   * arrives — and nobody would ever find out, because the log would say we had
+   * dealt with it.
+   */
   async alreadySent(subjectKey: string, channel: 'email' | 'sms'): Promise<boolean> {
-    return (await OutboundMessageModel.countDocuments({ subjectKey, channel })) > 0;
+    return (
+      (await OutboundMessageModel.countDocuments({ subjectKey, channel, outcome: 'sent' })) > 0
+    );
+  },
+
+  /**
+   * Claims the right to send, before sending.
+   *
+   * ── Why claim first rather than record afterwards ──────────────────────────
+   * Two workers running the same sweep would both read "not sent yet", both
+   * send, and the customer would get the message twice. The unique index on
+   * `(subjectKey, channel)` is the only thing that can arbitrate that, and it
+   * can only arbitrate a write — so the write happens first and the loser of
+   * the race sends nothing.
+   *
+   * A previous FAILURE is not a claim: its row is taken over and retried, which
+   * is what makes a transient provider outage recoverable rather than
+   * permanent. The caller must follow up with `markSendOutcome` when the
+   * provider answers, so a row that says `sent` means the provider accepted it.
+   */
+  async claimSend(input: {
+    event: string;
+    channel: 'email' | 'sms';
+    toMasked: string;
+    subject: string;
+    accountId: string | null;
+    jobId: string | null;
+    invoiceId: string | null;
+    subjectKey: string;
+  }): Promise<boolean> {
+    const document = {
+      event: input.event,
+      channel: input.channel,
+      toMasked: input.toMasked,
+      subject: input.subject,
+      accountId: input.accountId ? new mongoose.Types.ObjectId(input.accountId) : null,
+      jobId: input.jobId ? new mongoose.Types.ObjectId(input.jobId) : null,
+      invoiceId: input.invoiceId ? new mongoose.Types.ObjectId(input.invoiceId) : null,
+      sentAt: new Date(),
+      outcome: 'sent' as const,
+      detail: null,
+      subjectKey: input.subjectKey,
+    };
+
+    try {
+      await OutboundMessageModel.create(document);
+      return true;
+    } catch (error) {
+      if (!isDuplicateKey(error)) throw error;
+
+      /*
+       * Somebody holds the row. Take it over only if their attempt did not
+       * reach the recipient — an `outcome: 'sent'` row is a genuine duplicate
+       * and must stay untouched.
+       */
+      const taken = await OutboundMessageModel.updateOne(
+        { subjectKey: input.subjectKey, channel: input.channel, outcome: { $ne: 'sent' } },
+        { $set: document },
+      ).exec();
+
+      return taken.modifiedCount > 0;
+    }
+  },
+
+  /** Records what the provider actually did with a claimed send. */
+  async markSendOutcome(
+    subjectKey: string,
+    channel: 'email' | 'sms',
+    outcome: 'sent' | 'failed' | 'skipped',
+    detail: string | null,
+  ): Promise<void> {
+    await OutboundMessageModel.updateOne(
+      { subjectKey, channel },
+      { $set: { outcome, detail } },
+    ).exec();
   },
 
   /** What went to one customer — the question support actually asks. */

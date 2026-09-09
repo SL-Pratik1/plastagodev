@@ -73,6 +73,18 @@ export interface ListJobsQuery {
   risk?: string | undefined;
 }
 
+/** The projection M8.3's reminder sweep reads. See `dueForReadinessReminder`. */
+export interface ReminderJob {
+  id: string;
+  jobNumber: number;
+  accountId: string;
+  accountName: string;
+  siteName: string;
+  targetDate: string;
+  siteContactEmail: string | null;
+  siteContactMobile: string | null;
+}
+
 export interface CreateJobInput {
   jobNumber: number;
   accountId: string;
@@ -95,6 +107,8 @@ export interface CreateJobInput {
   siteContactMobile: string | null;
   siteContactEmail: string | null;
   poNumber: string | null;
+  /** M2.12 — the confirmed order this job fulfils. See the note on the model. */
+  purchaseOrderId: string | null;
   bookedByName: string | null;
   bookedByUserId: string | null;
   bookedBySource: 'portal' | 'office' | 'call-up';
@@ -428,6 +442,58 @@ export const jobRepository = {
   },
 
   /** The status and driver of one job, without loading its whole history. */
+  /**
+   * M8.3 — the jobs a readiness reminder is worth sending about.
+   *
+   * ── Why only `booked` and `assigned` ──────────────────────────────────────
+   * Everything further along has already left the depot: a truck in transit
+   * cannot be stood down by a supervisor tapping a link, and asking whether the
+   * site is ready while the driver is at the gate is worse than silence.
+   *
+   * ⚠️ Reads only the fields a message needs. The reminder runs over every site
+   * booked for tomorrow, and assembling a full job — charges, events, photos,
+   * comments — for each of them would be a page of joins to produce one line of
+   * text.
+   */
+  async dueForReadinessReminder(targetDate: string): Promise<ReminderJob[]> {
+    const rows = await JobModel.find(
+      { targetDate, status: { $in: ['booked', 'assigned'] } },
+      {
+        jobNumber: 1,
+        accountId: 1,
+        accountName: 1,
+        siteName: 1,
+        targetDate: 1,
+        siteContactEmail: 1,
+        siteContactMobile: 1,
+      },
+    )
+      .sort({ siteName: 1 })
+      .lean<
+        Array<{
+          _id: mongoose.Types.ObjectId;
+          jobNumber: number;
+          accountId: mongoose.Types.ObjectId;
+          accountName: string;
+          siteName: string;
+          targetDate: string;
+          siteContactEmail: string | null;
+          siteContactMobile: string | null;
+        }>
+      >();
+
+    return rows.map((row) => ({
+      id: row._id.toHexString(),
+      jobNumber: row.jobNumber,
+      accountId: row.accountId.toHexString(),
+      accountName: row.accountName,
+      siteName: row.siteName,
+      targetDate: row.targetDate,
+      siteContactEmail: row.siteContactEmail,
+      siteContactMobile: row.siteContactMobile,
+    }));
+  },
+
   async findSummary(
     id: string,
     scope: JobScope,
@@ -477,6 +543,9 @@ export const jobRepository = {
       siteContactMobile: input.siteContactMobile,
       siteContactEmail: input.siteContactEmail,
       poNumber: input.poNumber,
+      purchaseOrderId: input.purchaseOrderId
+        ? new mongoose.Types.ObjectId(input.purchaseOrderId)
+        : null,
       bookedByName: input.bookedByName,
       bookedByUserId: input.bookedByUserId
         ? new mongoose.Types.ObjectId(input.bookedByUserId)
@@ -555,7 +624,26 @@ export const jobRepository = {
 
     const result = await JobModel.updateOne(
       { _id: new mongoose.Types.ObjectId(id), status: { $in: cancellableFrom } },
-      { $set: { status: 'cancelled', exceptionReason: reason, exceptionNote: note } },
+      {
+        $set: {
+          status: 'cancelled',
+          exceptionReason: reason,
+          exceptionNote: note,
+          /*
+           * M2.12 — cancelling RELEASES the purchase order.
+           *
+           * The pickup did not happen and nothing was invoiced, so the
+           * builder's order is still live and must be bookable again. Leaving
+           * the reference in place would trip `purchase_order_unique` and
+           * strand a real order behind a cancelled job.
+           *
+           * ⚠️ The audit trail survives regardless: `poNumber` is a frozen copy
+           * on this job and is deliberately not cleared, so the cancelled job
+           * still says which order it was against. Only the live link goes.
+           */
+          purchaseOrderId: null,
+        },
+      },
     );
 
     return result.matchedCount === 1;
@@ -917,6 +1005,42 @@ async function jobIdsWithPendingCharges(ids: mongoose.Types.ObjectId[]): Promise
  * `system` source and `not-required` approval: these are what the price list
  * says, not something anybody raised or has to approve.
  */
+/**
+ * Which of these purchase orders already have a job against them (M2.12).
+ *
+ * ── Why the booking form needs this ───────────────────────────────────────
+ * Wisdom's order says it in capitals: *"ONE PURCHASE ORDER NUMBER ONLY PER TAX
+ * INVOICE."* The unique index on `purchaseOrderId` enforces it, but a database
+ * error at the moment somebody submits a booking form is not an explanation —
+ * so the picker greys the used ones out and says which job took them.
+ *
+ * One query for the whole page rather than one per row: the classic N+1 that
+ * turns a fifty-order picker into fifty-one queries.
+ */
+export async function jobsForPurchaseOrders(
+  purchaseOrderIds: readonly string[],
+): Promise<Map<string, number>> {
+  const ids = purchaseOrderIds
+    .filter((id) => mongoose.isValidObjectId(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  if (ids.length === 0) return new Map();
+
+  /*
+   * No status filter, deliberately. Cancelling NULLS the reference (see
+   * `cancel`), so a released order simply does not appear here — one mechanism
+   * rather than two that can disagree. A status clause here plus a live
+   * reference on the row would grey an order out in the picker while the unique
+   * index still refused it, which is the worst of both.
+   */
+  const rows = await JobModel.find(
+    { purchaseOrderId: { $in: ids } },
+    { purchaseOrderId: 1, jobNumber: 1 },
+  ).lean<Array<{ purchaseOrderId: mongoose.Types.ObjectId; jobNumber: number }>>();
+
+  return new Map(rows.map((row) => [row.purchaseOrderId.toHexString(), row.jobNumber]));
+}
+
 export async function writeQuotedCharges(
   jobId: string,
   lines: ReadonlyArray<{

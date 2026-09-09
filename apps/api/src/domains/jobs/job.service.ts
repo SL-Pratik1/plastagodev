@@ -13,16 +13,33 @@ import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { withTransaction } from '../../lib/transaction.js';
 import { auditService } from '../audit/audit.service.js';
+import { jobNotices } from '../notifications/job-notices.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { placeService } from '../places/place.service.js';
+import {
+  purchaseOrderRepository,
+  type BookablePurchaseOrder,
+} from '../queues/purchase-order.repository.js';
 import { pricingService } from '../settings/pricing.service.js';
 import { settingsRepository } from '../settings/settings.repository.js';
 import {
   writeQuotedCharges,
   jobRepository,
+  jobsForPurchaseOrders,
   type JobScope,
   type ListJobsQuery,
 } from './job.repository.js';
+
+/**
+ * A purchase order as the booking picker shows it.
+ *
+ * `usedByJobNumber` is why this is not just `BookablePurchaseOrder`: an order
+ * already on a job cannot be booked again (one PO, one invoice), and the picker
+ * has to say which job took it rather than quietly hiding the row.
+ */
+export interface BookablePurchaseOrderOption extends BookablePurchaseOrder {
+  usedByJobNumber: number | null;
+}
 
 const log = logger.child({ module: 'jobs' });
 
@@ -86,6 +103,43 @@ export const jobService = {
   },
 
   /**
+   * M2.12 — the purchase orders a pickup can be booked against.
+   *
+   * ── Why this lives in the jobs domain ─────────────────────────────────────
+   * Because it is a booking concern, not a review-queue one. It composes two
+   * repositories — the orders on the account, and which of them a job already
+   * holds — and composing repositories is what a service is for.
+   *
+   * Scoped through the caller's own account, so a customer administrator sees
+   * their orders and nobody else's.
+   */
+  async purchaseOrders(
+    accountId: string,
+    search: string | undefined,
+    caller: Caller,
+  ): Promise<BookablePurchaseOrderOption[]> {
+    const scope = scopeFor(caller);
+
+    // The account is resolved through the caller's scope first, so an id that
+    // is not theirs answers "none" rather than somebody else's orders.
+    const account = await accountRepository.findById(accountId, { accountId: scope.accountId });
+    if (!account) throw AppError.notFound('No such account');
+
+    const orders = await purchaseOrderRepository.listForAccount(account.id, search);
+    const taken = await jobsForPurchaseOrders(orders.map((order) => order.id));
+
+    return orders.map((order) => ({
+      ...order,
+      /*
+       * A used order is RETURNED, not filtered out. "PO-88214 is on job 61,412"
+       * is the answer somebody looking for it needs; silently omitting it makes
+       * them think the extraction failed and key the order in by hand.
+       */
+      usedByJobNumber: taken.get(order.id) ?? null,
+    }));
+  },
+
+  /**
    * M2.1 / M6.9 — the estimate shown BEFORE saving.
    *
    * Runs the same `pricingService.quote` the create below runs, on purpose: if
@@ -93,15 +147,14 @@ export const jobService = {
    * down the phone would not be the number on the invoice.
    */
   async preview(draft: JobDraft, caller: Caller): Promise<PricePreview> {
-    const { account, place } = await resolveDraft(draft, caller);
+    const { account, place, purchaseOrder } = await resolveDraft(draft, caller);
+    const quantities = quantitiesFor(draft, purchaseOrder);
 
     return pricingService.quote({
       rateCardId: account.rateCardId,
       zone: place.zone,
-      // Zero means "nobody has told us yet", which is the fixed-price builder's
-      // normal case (Matt, 31:04) — not an area of nothing.
-      expectedAreaM2: draft.expectedAreaM2 > 0 ? draft.expectedAreaM2 : null,
-      bagCount: draft.bagCount,
+      expectedAreaM2: quantities.expectedAreaM2,
+      bagCount: quantities.bagCount,
     });
   },
 
@@ -115,7 +168,7 @@ export const jobService = {
    * curiosity, a collision is a reconciliation nobody can unpick.
    */
   async create(draft: JobDraft, caller: Caller): Promise<JobListItem> {
-    const { account, place } = await resolveDraft(draft, caller);
+    const { account, place, purchaseOrder } = await resolveDraft(draft, caller);
 
     if (account.status !== 'active') {
       throw AppError.conflict(
@@ -123,13 +176,14 @@ export const jobService = {
       );
     }
 
-    const settings = await settingsRepository.get();
+    const slaBusinessDays = await settingsRepository.slaBusinessDays();
+    const quantities = quantitiesFor(draft, purchaseOrder);
 
     const quote = await pricingService.quote({
       rateCardId: account.rateCardId,
       zone: place.zone,
-      expectedAreaM2: draft.expectedAreaM2 > 0 ? draft.expectedAreaM2 : null,
-      bagCount: draft.bagCount,
+      expectedAreaM2: quantities.expectedAreaM2,
+      bagCount: quantities.bagCount,
     });
 
     const jobNumber = await settingsRepository.takeNextNumber('nextJobNumber');
@@ -171,7 +225,11 @@ export const jobService = {
           siteContactName: draft.siteContactName.trim() || null,
           siteContactMobile: draft.siteContactMobile.trim() || null,
           siteContactEmail: draft.siteContactEmail.trim() || null,
-          poNumber: draft.poNumber.trim() || null,
+          // The order's own number wins where there is one: that is the string
+          // the builder's accounts system matches, and a typed copy can differ
+          // from it by a character (Matt, 9:56).
+          poNumber: purchaseOrder ? purchaseOrder.poNumber : draft.poNumber.trim() || null,
+          purchaseOrderId: purchaseOrder?.id ?? null,
           bookedByName: caller.name,
           // Only a portal booking carries a scoping user. A job keyed in by the
           // office has none, and a null is invisible to every site supervisor —
@@ -180,11 +238,16 @@ export const jobService = {
           bookedBySource: isCustomer(caller) ? 'portal' : 'office',
           readyDate: draft.readyDate,
           // M2.4a — the SLA is in BUSINESS days, from the customer's ready date.
-          targetDate: addBusinessDays(draft.readyDate, settings.general.slaBusinessDays),
+          targetDate: addBusinessDays(draft.readyDate, slaBusinessDays),
           serviceLevel: draft.serviceLevel,
           freightItem: draft.freightItem,
-          expectedAreaM2: draft.expectedAreaM2 > 0 ? draft.expectedAreaM2 : null,
-          bagCount: draft.bagCount,
+          /*
+           * Frozen from the order, exactly like the zone above. Not re-read
+           * through `purchaseOrderId` at invoice time: an order corrected next
+           * year must not re-price a job already collected and invoiced.
+           */
+          expectedAreaM2: quantities.expectedAreaM2,
+          bagCount: quantities.bagCount,
           notes: draft.notes.trim(),
           totalExGst: quote.subtotalExGst,
           gst: quote.gst,
@@ -267,6 +330,39 @@ export const jobService = {
       href: `/admin/jobs/${created.id}`,
     });
 
+    /*
+     * M1.6. A creation has no before-values, so `changes` records the fields a
+     * later dispute is actually about — who it is for, where, and when it was
+     * promised.
+     */
+    await auditService.record({
+      actorId: caller.userId,
+      actorName: caller.name,
+      actorRole: caller.roles[0] ?? null,
+      action: 'created',
+      entity: 'job',
+      entityId: created.id,
+      entityLabel: `Job #${String(jobNumber)}`,
+      summary: `Job booked — ${account.name}, ${created.siteName}`,
+      changes: [
+        { field: 'accountName', from: null, to: account.name },
+        { field: 'readyDate', from: null, to: created.readyDate },
+        { field: 'targetDate', from: null, to: created.targetDate },
+      ],
+      href: `/admin/jobs/${created.id}`,
+    });
+
+    /*
+     * M8.1 — the site contact is told it is coming.
+     *
+     * ⚠️ AFTER the transaction and the audit row, and unable to throw. The
+     * booking is the durable act; a message is not worth losing it for. The job
+     * is re-read rather than assembled from `created` because a notice needs
+     * the site contact, which the grid row does not carry.
+     */
+    const forNotice = await jobRepository.findById(created.id, { accountId: null, bookedByUserId: null, driverId: null });
+    if (forNotice) await jobNotices.booked(forNotice);
+
     log.info(
       { jobId: created.id, jobNumber, accountId: account.id, zone: place.zone },
       'job created',
@@ -348,6 +444,27 @@ export const jobService = {
       href: `/admin/jobs/${id}?tab=timeline`,
     });
 
+    /*
+     * M1.6. Recorded as `status-changed` rather than `deleted`: the job is
+     * still there, and a log implying it was destroyed would send somebody
+     * looking for a row that was never removed.
+     */
+    await auditService.record({
+      actorId: caller.userId,
+      actorName: caller.name,
+      actorRole: caller.roles[0] ?? null,
+      action: 'status-changed',
+      entity: 'job',
+      entityId: id,
+      entityLabel: `Job #${String(job.jobNumber)}`,
+      summary: `Job cancelled — ${reason}`,
+      changes: [
+        { field: 'status', from: job.status, to: 'cancelled' },
+        { field: 'cancellationReason', from: null, to: reason },
+      ],
+      href: `/admin/jobs/${id}?tab=timeline`,
+    });
+
     log.info({ jobId: id, jobNumber: job.jobNumber, reason }, 'job cancelled');
   },
 
@@ -364,8 +481,7 @@ export const jobService = {
       );
     }
 
-    const settings = await settingsRepository.get();
-    const targetDate = addBusinessDays(readyDate, settings.general.slaBusinessDays);
+    const targetDate = addBusinessDays(readyDate, await settingsRepository.slaBusinessDays());
 
     const previous = await jobRepository.reschedule(id, readyDate, targetDate);
     if (!previous) throw AppError.notFound('No such job');
@@ -507,11 +623,12 @@ function isCancellable(status: Job['status']): boolean {
 /* ── Resolving a draft ───────────────────────────────────────────────────── */
 
 /**
- * The account and the place behind a booking form.
+ * The account, the place and the purchase order behind a booking form.
  *
- * Both are resolved SERVER-SIDE from ids. The browser sends `accountId` and
- * `placeId` and nothing else about either — sending the zone or the rate card
- * would let a caller nominate its own, and the zone decides the price (M6.3).
+ * All three are resolved SERVER-SIDE from ids. The browser sends `accountId`,
+ * `placeId` and `purchaseOrderId` and nothing else about any of them — sending
+ * the zone, the rate card or the area would let a caller nominate its own, and
+ * all three decide the price (M6.3).
  */
 async function resolveDraft(draft: JobDraft, caller: Caller) {
   const scope = scopeFor(caller);
@@ -534,7 +651,113 @@ async function resolveDraft(draft: JobDraft, caller: Caller) {
   // Throws a 422 against `placeId` when the suburb is not one PlastaGo services.
   const place = await placeService.require(draft.placeId);
 
-  return { account, place };
+  const purchaseOrder = await resolvePurchaseOrder(draft, account.id);
+
+  return { account, place, purchaseOrder };
+}
+
+/**
+ * M2.12 — the confirmed purchase order this booking is against.
+ *
+ * ── Why the order's figures win over the form's ───────────────────────────
+ * Because the purchase order IS the authority. It is what the builder issued,
+ * what their accounts system matches an invoice against, and what states the
+ * area PlastaGo is being paid for. A typed area that disagreed with it would
+ * produce an invoice the builder rejects — and nobody would know why for weeks
+ * (Matt, 9:56).
+ *
+ * So `expectedAreaM2`, `bagCount` and `poNumber` are taken from the stored
+ * record and whatever arrived in the draft for those three fields is ignored.
+ * That is the same rule as `placeId` supplying the zone.
+ *
+ * Returns null for a booking with no order behind it, which is every contractor
+ * and most phone bookings.
+ */
+async function resolvePurchaseOrder(
+  draft: JobDraft,
+  accountId: string,
+): Promise<BookablePurchaseOrder | null> {
+  if (draft.purchaseOrderId === null) return null;
+
+  /*
+   * Fetched through the ACCOUNT, so a caller cannot attach another customer's
+   * purchase order by pasting its id — the constraint is in the query, not a
+   * check afterwards.
+   */
+  const order = await purchaseOrderRepository.findForAccount(draft.purchaseOrderId, accountId);
+
+  if (!order) {
+    throw AppError.validation('That purchase order could not be found on this account', [
+      { path: 'purchaseOrderId', message: 'Choose a purchase order from the list' },
+    ]);
+  }
+
+  /*
+   * ⚠️ Wisdom's order states it in capitals: *"ONE PURCHASE ORDER NUMBER ONLY
+   * PER TAX INVOICE."* An invoice is raised per job, so a second job against one
+   * order bills the builder twice under a number their accounts system has
+   * already closed.
+   *
+   * The unique index enforces this. Checking here means the second caller gets a
+   * sentence naming the job that took it, rather than a duplicate-key error.
+   */
+  const taken = await jobsForPurchaseOrders([order.id]);
+  const existing = taken.get(order.id);
+
+  if (existing !== undefined) {
+    throw AppError.conflict(
+      `Purchase order ${order.poNumber} is already on job ${String(existing)}. ` +
+        'A builder pays one purchase order once — book this pickup against a different order.',
+    );
+  }
+
+  return order;
+}
+
+/**
+ * The two quantities that price a job, from whichever source is authoritative.
+ *
+ * ── One function, because the preview and the create must not disagree ────
+ * `preview` is the figure quoted down the phone and `create` is the figure
+ * invoiced. If each decided the area for itself they would drift, and the way
+ * you find out is a customer comparing the quote against the invoice (see the
+ * note on `pricingService`).
+ *
+ * ⚠️ Null is not zero, and the difference is money.
+ *
+ * Matt, 31:04, on the Wisdom order: *"we're on a fixed price with them. So they
+ * don't actually give us square metres… they just give us a line item."* A zero
+ * would price the job at the call-out fee AND silently drop the stop out of the
+ * m²-weighted tip-off split, handing its share of recovered tonnage to everyone
+ * else on the run — on a figure that ends up on a diversion certificate.
+ *
+ * So a fixed-price order legitimately yields null here, and that is correct
+ * rather than missing.
+ */
+function quantitiesFor(
+  draft: JobDraft,
+  purchaseOrder: BookablePurchaseOrder | null,
+): { expectedAreaM2: number | null; bagCount: number } {
+  if (purchaseOrder) {
+    return {
+      // Already null on a fixed-price order. Passed through untouched.
+      expectedAreaM2: purchaseOrder.expectedAreaM2,
+      /*
+       * The order states an allowance — "Bulka Bag (500m2 plasterboard per
+       * bag), 2.00 Each". Zero where it states none, because `bagCount` is a
+       * count of bags actually allowed for and the contract makes it
+       * non-nullable.
+       */
+      bagCount: purchaseOrder.bagAllowance ?? 0,
+    };
+  }
+
+  return {
+    // Zero from a form means "nobody has told us yet", which is not an area of
+    // nothing. See the warning above.
+    expectedAreaM2: draft.expectedAreaM2 > 0 ? draft.expectedAreaM2 : null,
+    bagCount: draft.bagCount,
+  };
 }
 
 /* ── Dates ───────────────────────────────────────────────────────────────── */

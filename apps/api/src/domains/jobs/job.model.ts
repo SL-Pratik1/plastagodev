@@ -138,6 +138,24 @@ const jobSchema = new Schema(
      */
     poNumber: { type: String, default: null, trim: true },
 
+    /**
+     * REFERENCE → `purchaseorders._id` (M2.12). Null on a job with no order.
+     *
+     * ── Why the job points at the order and not the reverse ───────────────
+     * A purchase order exists for months before any job does (Matt, 28:40), and
+     * it is the job that is created knowing which order it fulfils. Pointing
+     * from the child keeps both "which order is this job against" and "has this
+     * order been used" a single indexed query.
+     *
+     * ⚠️ The order's FIGURES are not read back through this reference at
+     * invoice time. `expectedAreaM2`, `bagCount` and `poNumber` are copied onto
+     * the job at creation and frozen there, like the zone and the rate — an
+     * order corrected next year must not silently re-price a job that has
+     * already been collected and invoiced. This reference is the audit trail,
+     * not a live lookup.
+     */
+    purchaseOrderId: { type: Schema.Types.ObjectId, default: null, ref: 'PurchaseOrder' },
+
     /* ── Who raised it ───────────────────────────────────────────────── */
     /**
      * A NAME, denormalised, because it has to survive the person leaving: a job
@@ -284,6 +302,27 @@ jobSchema.index({ runId: 1, readyDate: 1, status: 1 }, { name: 'unallocated_read
 
 /** Invoicing sweeps by state (M7.2), including the awaiting-PO backlog. */
 jobSchema.index({ invoiceStatus: 1, completedAt: -1 }, { name: 'invoice_state' });
+
+/**
+ * ⚠️ One job per purchase order.
+ *
+ * Wisdom's order states it in capitals: *"ONE PURCHASE ORDER NUMBER ONLY PER TAX
+ * INVOICE."* An invoice is raised per job, so a second job against one order
+ * produces a second invoice quoting a number the builder's accounts system has
+ * already matched and closed — which is rejected weeks later with no
+ * explanation.
+ *
+ * Partial on the field being an ObjectId, because most jobs carry no order and
+ * Mongo would otherwise treat every one of those nulls as a collision.
+ */
+jobSchema.index(
+  { purchaseOrderId: 1 },
+  {
+    unique: true,
+    name: 'purchase_order_unique',
+    partialFilterExpression: { purchaseOrderId: { $type: 'objectId' } },
+  },
+);
 
 jobSchema.index({ zone: 1, readyDate: 1 }, { name: 'zone_ready' });
 

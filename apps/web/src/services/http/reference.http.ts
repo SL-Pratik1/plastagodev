@@ -5,6 +5,8 @@ import {
   DashboardSummarySchema,
   DriverListItemSchema,
   DriverProfileSchema,
+  InvitationResultSchema,
+  InvitedUserSchema,
   NotificationSchema,
   NotificationSummarySchema,
   PlaceSchema,
@@ -28,7 +30,7 @@ import type {
   SettingsService,
   UserService,
 } from '../types.js';
-import { NoContentSchema, listParams, pageOf } from './list-params.js';
+import { listParams, pageOf } from './list-params.js';
 import { viaService } from './to-service-error.js';
 
 /**
@@ -89,7 +91,7 @@ export function createHttpUserService(api: ApiClient): UserService {
 
     create: (draft: UserDraft) =>
       viaService(() =>
-        api.request(base, { method: 'POST', body: draft, schema: UserListItemSchema }),
+        api.request(base, { method: 'POST', body: draft, schema: InvitedUserSchema }),
       ),
 
     update: (id: string, draft: UserDraft) =>
@@ -112,15 +114,21 @@ export function createHttpUserService(api: ApiClient): UserService {
         }),
       ),
 
-    resendInvite: async (id: string) => {
-      await viaService(() =>
+    /**
+     * 202 with the outcome.
+     *
+     * It used to be an empty body, when nothing was actually sent. Now that a
+     * message really goes out, the screen has to be able to say WHICH channel
+     * carried it — and, more importantly, when it failed, so the office rings
+     * them instead of assuming.
+     */
+    resendInvite: (id: string) =>
+      viaService(() =>
         api.request(`${base}/${id}/resend-invite`, {
           method: 'POST',
-          // 202 with an empty body — the send is queued, not done.
-          schema: NoContentSchema,
+          schema: InvitationResultSchema,
         }),
-      );
-    },
+      ),
   };
 }
 
@@ -234,7 +242,6 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
   return {
     get: () => viaService(() => api.request(base, { schema: SettingsSchema })),
 
-    saveGeneral: section<'general'>('general', SettingsSchema.shape.general),
     saveNotifications: section<'notifications'>(
       'notifications',
       SettingsSchema.shape.notifications,

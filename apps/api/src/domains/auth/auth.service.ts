@@ -13,6 +13,7 @@ import { env, revealUnknownIdentifier } from '../../config/env.js';
 import { AppError, isAppError } from '../../lib/app-error.js';
 import { authError } from '../../lib/auth-error.js';
 import { logger } from '../../lib/logger.js';
+import { maskIdentifier } from '../../lib/mask-identifier.js';
 import { userRepository } from '../users/user.repository.js';
 import { auditService } from '../audit/audit.service.js';
 import { authRepository, type ChallengeRecord, type UserRecord } from './auth.repository.js';
@@ -319,14 +320,13 @@ const FAILURE_REASONS: Record<string, string> = {
   'locked-out': 'too many attempts',
 };
 
-/** Mirrors `mock-transport.ts` exactly, so the masked value does not change shape. */
+/**
+ * Moved to `lib/mask-identifier.ts` — the outbound message log masks recipients
+ * the same way, and two copies would drift into two different shapes for the
+ * same person.
+ */
 function mask(identifier: string, channel: AuthChannel): string {
-  if (channel === 'email') {
-    const [local = '', domain = ''] = identifier.split('@');
-    const head = local.slice(0, 1);
-    return `${head}${'•'.repeat(Math.max(2, local.length - 1))}@${domain}`;
-  }
-  return `•••• ••• ${identifier.slice(-3)}`;
+  return maskIdentifier(identifier, channel);
 }
 
 function windowFrom(now: Date): { expiresAt: Date; resendAvailableAt: Date } {

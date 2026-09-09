@@ -240,13 +240,31 @@ export function UserFormDialog({ open, onClose, user }: UserFormDialogProps) {
         await updateUser.mutateAsync({ id: user.id, draft });
         toast.success(`${values.name} updated`);
       } else {
-        await createUser.mutateAsync(draft);
-        toast.success(
-          `Invitation sent to ${values.name}`,
-          channel === 'sms'
-            ? 'They will get a text with a link. Nothing to install.'
-            : 'They will get an email with a link. Nothing to install.',
-        );
+        const { invitation } = await createUser.mutateAsync(draft);
+
+        /*
+         * The account is created either way, so the toast reports the SEND, not
+         * the save. A cheerful "invitation sent" over a failed provider is how
+         * somebody ends up waiting a week for an email that never left.
+         */
+        if (invitation.outcome === 'sent') {
+          toast.success(
+            `Invitation sent to ${values.name}`,
+            invitation.channel === 'sms'
+              ? `Texted to ${invitation.toMasked ?? 'their mobile'}. Nothing to install.`
+              : `Emailed to ${invitation.toMasked ?? 'their address'}. Nothing to install.`,
+          );
+        } else if (invitation.outcome === 'skipped') {
+          toast.warning(
+            `${values.name} was added, but nobody has been told`,
+            `${invitation.detail ?? 'No usable contact details'} — add an email or a mobile, then use Resend invitation.`,
+          );
+        } else {
+          toast.warning(
+            `${values.name} was added, but the invitation did not send`,
+            'Use Resend invitation on their row, or tell them by phone — they can sign in as soon as they have their address.',
+          );
+        }
       }
       onClose();
     } catch (caught) {

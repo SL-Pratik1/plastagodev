@@ -4,6 +4,7 @@ import {
   AccountSchema,
   AllocationBoardSchema,
   API_PREFIX,
+  BookablePurchaseOrderSchema,
   CertificateSchema,
   DriverSchema,
   FinancialReportSchema,
@@ -139,6 +140,22 @@ export function createHttpJobService(api: ApiClient): JobService {
           method: 'POST',
           body: draft,
           schema: PricePreviewSchema,
+        }),
+      ),
+
+    /**
+     * M2.12 — the purchase orders this account can book against.
+     *
+     * Mounted at `/jobs/purchase-orders` rather than under `/queues`, where the
+     * review workflow lives: choosing which order a pickup fulfils is a booking
+     * concern, and the office booking a job has no business reaching the review
+     * queue's endpoints.
+     */
+    purchaseOrders: (accountId: string, search?: string) =>
+      viaService(() =>
+        api.request(`${base}/purchase-orders`, {
+          searchParams: { accountId, ...(search ? { q: search } : {}) },
+          schema: z.array(BookablePurchaseOrderSchema),
         }),
       ),
 

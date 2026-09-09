@@ -1,6 +1,14 @@
 import type { Role, UserDraft } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeFakeAuditRepository } from './helpers/fake-audit.js';
+import {
+  clearOutbound,
+  makeFakeNotificationRepository,
+  providerFailure,
+  recordingProviders,
+  sendLog,
+  sentMessages,
+} from './helpers/fake-outbound.js';
 
 /**
  * User administration (M1.5).
@@ -66,7 +74,18 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
   },
 }));
 
+/*
+ * M1.5 — creating a user now SENDS them their way in, and the send is logged.
+ * The log is faked for the same reason as the audit repository above; the real
+ * `outboundService` is left in place, because which channel it picks is part of
+ * what this suite is testing.
+ */
+vi.mock('../src/domains/notifications/notification.repository.js', () => ({
+  notificationRepository: makeFakeNotificationRepository(),
+}));
+
 const { userService } = await import('../src/domains/users/user.service.js');
+const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 
 const SUPER = {
   userId: 'usr0000000000000000000m1',
@@ -134,6 +153,8 @@ beforeEach(() => {
   identifierTaken = false;
   otherActiveAdmins = 1;
   accountFound = true;
+  clearOutbound();
+  setMessagingProvidersForTests(recordingProviders());
 });
 
 describe('who may administer users', () => {
@@ -358,7 +379,9 @@ describe('creating and inviting', () => {
   it('re-invites somebody who has never signed in', async () => {
     stored = user({ status: 'invited', lastSignedInAt: null });
 
-    await expect(userService.resendInvite(TARGET, SUPER)).resolves.toBeUndefined();
+    await expect(userService.resendInvite(TARGET, SUPER)).resolves.toMatchObject({
+      outcome: 'sent',
+    });
   });
 
   /*
@@ -381,6 +404,100 @@ describe('creating and inviting', () => {
     stored = user({ email: null, mobile: null, lastSignedInAt: null });
 
     await expect(userService.resendInvite(TARGET, SUPER)).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+/**
+ * The invitation itself (M1.5 · M8.4).
+ *
+ * Until this existed, "Invitation sent" was a toast over a log line: the user
+ * was created and nobody was ever told. These tests are about the message
+ * actually leaving, and about the office being told the truth when it does not.
+ */
+describe('the invitation message', () => {
+  it('emails somebody who has an email address', async () => {
+    stored = user({ id: 'usr-new', name: 'Sam Farrar', email: 'sam@plastago.com.au', mobile: null });
+
+    const result = await userService.create(draft(), SUPER);
+
+    expect(result.invitation).toMatchObject({ outcome: 'sent', channel: 'email' });
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]?.to).toBe('sam@plastago.com.au');
+  });
+
+  /*
+   * ⚠️ The case the product would otherwise be unusable for. §9 makes drivers
+   * and site supervisors SMS-first on purpose — "a driver on a building site
+   * has no email to check" — so an email-only invitation reaches nobody who
+   * actually works on site.
+   */
+  it('texts somebody who has no email', async () => {
+    stored = user({ id: 'usr-new', name: 'Troy Holm', email: null, mobile: '0455112233', role: 'driver' });
+
+    const result = await userService.create(
+      draft({ email: '', mobile: '0455112233', role: 'driver' }),
+      SUPER,
+    );
+
+    expect(result.invitation).toMatchObject({ outcome: 'sent', channel: 'sms' });
+    expect(sentMessages[0]?.channel).toBe('sms');
+  });
+
+  /** The link is what makes it tappable from a building site (§13.2). */
+  it('carries a sign-in link and no code', async () => {
+    stored = user({ id: 'usr-new', email: null, mobile: '0455112233' });
+
+    await userService.create(draft({ email: '', mobile: '0455112233', role: 'driver' }), SUPER);
+
+    expect(sentMessages[0]?.body).toContain('/auth/sign-in');
+    // A message carrying a code would train people to trust codes that arrive
+    // unasked — see the rules in `notice-messages.ts`.
+    expect(sentMessages[0]?.body).not.toMatch(/\b[0-9]{6}\b/);
+  });
+
+  /**
+   * ⚠️ The account must survive a mail outage.
+   *
+   * Losing the user because a provider was unreachable would mean nobody can be
+   * onboarded while the mail server is down — and the office would have no idea
+   * why. The row stands, the failure is reported, and Resend is the recovery.
+   */
+  it('still creates the user when the send fails', async () => {
+    providerFailure.message = 'smtp unavailable';
+    stored = user({ id: 'usr-new' });
+
+    const result = await userService.create(draft(), SUPER);
+
+    expect(created).toHaveLength(1);
+    expect(result.invitation).toMatchObject({ outcome: 'failed', detail: 'smtp unavailable' });
+    // Recorded as failed, so it can be retried rather than looking sent.
+    expect(sendLog.at(-1)).toMatchObject({ outcome: 'failed' });
+  });
+
+  /** A reminder sent twice is worse than one sent late. */
+  it('does not send the same invitation twice', async () => {
+    stored = user({ id: 'usr-new' });
+
+    await userService.create(draft(), SUPER);
+    const second = await userService.create(draft(), SUPER);
+
+    expect(second.invitation.outcome).toBe('duplicate');
+    expect(sentMessages).toHaveLength(1);
+  });
+
+  /*
+   * ...but the office overrules that guard. Somebody clicking Resend has
+   * already decided the first attempt did not land.
+   */
+  it('sends again when the office asks', async () => {
+    stored = user({ id: 'usr-new' });
+    await userService.create(draft(), SUPER);
+
+    stored = user({ id: 'usr-new', status: 'invited', lastSignedInAt: null });
+    const result = await userService.resendInvite('usr-new', SUPER);
+
+    expect(result.outcome).toBe('sent');
+    expect(sentMessages).toHaveLength(2);
   });
 });
 

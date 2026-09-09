@@ -47,6 +47,7 @@ import {
   QueuePoReviewDetailPage,
   QueuePoReviewPage,
   ReportsPage,
+  ExtractorPage,
   SettingsPage,
   UserDetailPage,
   UsersPage,
@@ -249,6 +250,10 @@ export const router = createBrowserRouter([
                   {
                     element: <RequireCapability capability="notifications:read" />,
                     children: [{ path: 'notifications', element: load(<NotificationsPage />) }],
+                  },
+                  {
+                    element: <RequireCapability capability="extractor:use" />,
+                    children: [{ path: 'extractor', element: load(<ExtractorPage />) }],
                   },
                   {
                     element: <RequireCapability capability="settings:manage" />,

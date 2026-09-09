@@ -308,6 +308,23 @@ export const PortalBookingDraftSchema = z
      * Required only where the account's PO policy demands it (M2.10).
      */
     poNumber: z.string().trim().max(60),
+    /**
+     * M2.12 — the confirmed purchase order this pickup is against.
+     *
+     * ── Why this is the better answer than typing a number ────────────────
+     * The field above asks a supervisor to retype a reference off a document.
+     * This one points at the document PlastaGo already holds — and it carries
+     * the area with it, which is the figure the supervisor genuinely does not
+     * know (Matt, 29:21).
+     *
+     * ⚠️ When set, it OVERRIDES `poNumber`, `expectedAreaM2` and `bagCount`. The
+     * order is the authority: it is what the builder issued and what their
+     * accounts system matches an invoice against. Resolved server-side, so a
+     * caller cannot send its own area and thereby its own price.
+     *
+     * Null for a booking with no order behind it.
+     */
+    purchaseOrderId: ObjectIdSchema.nullable().default(null),
     notes: z.string().trim().max(1000),
     certification: ReadinessCertificationSchema,
   })

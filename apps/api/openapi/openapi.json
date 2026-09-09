@@ -26,7 +26,7 @@
     },
     {
       "name": "Driver",
-      "description": "The driver's own day (M4). Every route is scoped to the signed-in driver by the session alone — no path or query anywhere under /driver identifies a driver, so there is no parameter to change to read someone else's run.\n\nTwo things apply to the whole tag:\n\n1. **Every mutation carries `occurredAt` and `position`.** The app is built to work with no signal, so a payload must say when the DRIVER acted rather than when the server heard about it. A run that syncs at 17:00 otherwise collapses into one timestamp and the on-site durations — which an Extra Load Time charge is computed from — become fiction. `position` is nullable: a driver in a basement car park must still be able to complete a job.\n\n2. **Send an `idempotency-key` header on every mutation** (UUID v4, one per queued operation, kept across retries). A phone replaying its outbox must not raise a second $120 futile charge. ⚠️ Server-side enforcement is NOT yet implemented — send the header from day one so it starts working the moment it lands."
+      "description": "The driver's own day (M4). Every route is scoped to the signed-in driver by the session alone — no path or query anywhere under /driver identifies a driver, so there is no parameter to change to read someone else's run.\n\nTwo things apply to the whole tag:\n\n1. **Every mutation carries `occurredAt` and `position`.** The app is built to work with no signal, so a payload must say when the DRIVER acted rather than when the server heard about it. A run that syncs at 17:00 otherwise collapses into one timestamp and the on-site durations — which an Extra Load Time charge is computed from — become fiction. `position` is nullable: a driver in a basement car park must still be able to complete a job.\n\n2. **Send an `idempotency-key` header on every mutation** (UUID v4, one per queued operation, kept across retries). A phone replaying its outbox must not raise a second $120 futile charge. This IS enforced: a repeat of a key already seen replays the original response verbatim, carrying `idempotent-replay: true`, without running the handler again. A key reused with a DIFFERENT body is refused with 409 — so generate one key per queued operation and keep it across that operation’s retries. Keys are scoped per driver and kept for 7 days, so a phone out of coverage for a weekend is still protected."
     }
   ],
   "paths": {
@@ -123,6 +123,16 @@
               }
             }
           },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded",
             "content": {
@@ -177,6 +187,16 @@
           },
           "404": {
             "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -259,6 +279,16 @@
           },
           "404": {
             "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -399,6 +429,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -470,6 +510,16 @@
           },
           "404": {
             "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -568,6 +618,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -652,6 +712,16 @@
           },
           "409": {
             "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -750,6 +820,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -838,6 +918,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -911,6 +1001,16 @@
           },
           "404": {
             "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -1009,6 +1109,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -1100,6 +1210,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -1180,6 +1300,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -1253,6 +1383,114 @@
           },
           "409": {
             "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/runs/{runId}/docket-photo": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "registerDocketPhoto",
+        "summary": "Somewhere to put the weighbridge docket photo",
+        "description": "Run-scoped, not job-scoped: the docket evidences the WHOLE load, so there is no stop it honestly belongs to, and filing it against an arbitrary one would misattribute the evidence the monthly tipping bill is audited against.\n\nSame two-step shape as a job photo — this returns a presigned URL and the bytes go straight to storage — with one difference: there is no photo RECORD to create, so the `photoId` returned **is** the storage key. Send it straight back as `docketPhotoId` on `POST /driver/tip-off`.\n\nThe tip-off accepts a null `docketPhotoId`, so a driver is never stuck at the weighbridge behind a failed upload — but this photo is what the monthly tipping bill is audited against, so take it.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresignDocketPhoto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered; PUT the bytes to `upload.uploadUrl`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhotoUploadTicket"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -1348,6 +1586,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -1428,6 +1676,16 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -1501,6 +1759,16 @@
           },
           "409": {
             "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -1592,6 +1860,16 @@
           },
           "409": {
             "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -2104,6 +2382,24 @@
           "safeToProceed",
           "swmsVersion",
           "builderPortalCode"
+        ]
+      },
+      "PresignDocketPhoto": {
+        "type": "object",
+        "properties": {
+          "contentType": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contentLength": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "contentType",
+          "contentLength"
         ]
       },
       "PreviewTipOff": {

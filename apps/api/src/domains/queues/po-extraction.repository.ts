@@ -27,6 +27,14 @@ export interface ListExtractionsQuery {
 
 /** What an extractor posts. Every field is a claim, none of it is trusted. */
 export interface IngestExtractionInput {
+  /**
+   * The extractor's own id, when the row came from the vendor pipeline (I6).
+   *
+   * Absent on a row posted by hand. See the warning on the model — this is the
+   * idempotency key that stops a retried callback queueing one purchase order
+   * twice.
+   */
+  externalId?: string | undefined;
   fromAddress: string;
   subject: string;
   receivedAt: Date;
@@ -193,6 +201,10 @@ export const poExtractionRepository = {
   async ingest(input: IngestExtractionInput): Promise<string> {
     const created = await PoExtractionModel.create({
       ...input,
+      // Explicit rather than relying on the spread: `undefined` and `null` mean
+      // the same thing to Mongoose here, but only one of them is what the
+      // partial unique index expects to see.
+      externalId: input.externalId ?? null,
       amountExGst: input.amountExGst === null ? null : toDecimal128(input.amountExGst),
       suggestedAccountId: input.suggestedAccountId
         ? new mongoose.Types.ObjectId(input.suggestedAccountId)
@@ -206,6 +218,22 @@ export const poExtractionRepository = {
     });
 
     return created._id.toHexString();
+  },
+
+  /**
+   * The queue row for one extractor document, if it is already here.
+   *
+   * Returns the id rather than a boolean so the caller can report which row the
+   * duplicate callback referred to — "already queued as X" is actionable in a
+   * log; "true" is not.
+   */
+  async findByExternalId(externalId: string): Promise<string | null> {
+    const row = await PoExtractionModel.findOne(
+      { externalId: externalId.trim() },
+      { _id: 1 },
+    ).lean<{ _id: mongoose.Types.ObjectId }>();
+
+    return row ? row._id.toHexString() : null;
   },
 
   /** Whether this PO number is already on a confirmed order for that account. */

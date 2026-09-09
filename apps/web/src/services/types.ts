@@ -48,6 +48,7 @@ import type {
   Job,
   JobComment,
   JobCommentDraft,
+  BookablePurchaseOrder,
   JobDraft,
   JobListItem,
   MapPin,
@@ -75,6 +76,8 @@ import type {
   RunSheet,
   Session,
   User,
+  InvitationResult,
+  InvitedUser,
   UserDraft,
   UserListItem,
   UserStatus,
@@ -162,11 +165,16 @@ export interface LookupService {
 export interface UserService {
   list: (query: ListQuery) => Promise<ListResult<UserListItem>>;
   get: (id: string) => Promise<User>;
-  create: (draft: UserDraft) => Promise<UserListItem>;
+  /**
+   * Returns the new row AND what happened to their invitation — the two are
+   * separate outcomes, because the account is created whether or not the
+   * message got out.
+   */
+  create: (draft: UserDraft) => Promise<InvitedUser>;
   update: (id: string, draft: UserDraft) => Promise<UserListItem>;
   /** Activate, suspend, or re-invite. Never a hard delete — the audit trail. */
   setStatus: (id: string, status: UserStatus) => Promise<UserListItem>;
-  resendInvite: (id: string) => Promise<void>;
+  resendInvite: (id: string) => Promise<InvitationResult>;
 }
 
 /**
@@ -224,6 +232,15 @@ export interface JobService {
    * implementation in the browser would be a second thing to keep correct.
    */
   preview: (draft: JobDraft) => Promise<PricePreview>;
+  /**
+   * M2.12 — the purchase orders this account can book a pickup against.
+   *
+   * The form sends only the chosen `purchaseOrderId`; the area, the bag
+   * allowance and the PO number are resolved server-side from the order. These
+   * rows exist so the picker can SHOW what it is choosing — a control that
+   * silently changed the price would be worse than one that asked.
+   */
+  purchaseOrders: (accountId: string, search?: string) => Promise<BookablePurchaseOrder[]>;
   create: (draft: JobDraft) => Promise<JobListItem>;
   /** M2.4 — cancel with a structured reason, never free text. */
   cancel: (id: string, reason: ExceptionReason, note: string) => Promise<void>;
@@ -394,7 +411,6 @@ export interface NotificationService {
  */
 export interface SettingsService {
   get: () => Promise<Settings>;
-  saveGeneral: (input: Settings['general']) => Promise<Settings['general']>;
   saveNotifications: (input: Settings['notifications']) => Promise<Settings['notifications']>;
   saveInvoicing: (input: Settings['invoicing']) => Promise<Settings['invoicing']>;
   saveCredentialTypes: (input: Settings['credentialTypes']) => Promise<Settings['credentialTypes']>;
@@ -586,6 +602,27 @@ export type { DriverRunService } from './driver-run.types.js';
  * One service per domain. Adding a domain means adding an interface here and an
  * implementation in each adapter; screens keep importing `useServices()`.
  */
+/**
+ * I6 — the Extractor tab's session broker.
+ *
+ * One method, and it is a MUTATION rather than a read: the API creates a
+ * session at a third party, and on a user's first visit provisions them into
+ * the extractor tenant. Nothing about that is safe to repeat idly, which is why
+ * the page calls it once on mount rather than polling it.
+ */
+export interface ExtractorService {
+  /** A one-day session id for the iframe. Never the embed token. */
+  createSession(): Promise<ExtractorSession>;
+  /** Drops the cached session so the next mount mints a fresh one. */
+  forgetSession(): Promise<void>;
+}
+
+export interface ExtractorSession {
+  sessionId: string;
+  /** ISO 8601. The page re-mints on focus rather than waiting for a failure. */
+  expiresAt: string;
+}
+
 export interface Services {
   readonly auth: AuthService;
   readonly lookups: LookupService;
@@ -600,6 +637,7 @@ export interface Services {
   readonly vehicles: VehicleService;
   readonly notifications: NotificationService;
   readonly settings: SettingsService;
+  readonly extractor: ExtractorService;
   readonly audit: AuditService;
   readonly queues: QueueService;
   readonly portal: CustomerPortalService;

@@ -68,12 +68,19 @@ export const userController = {
     );
   },
 
-  /** 202: the invitation is queued, not delivered. */
+  /**
+   * 202, with what actually happened.
+   *
+   * ⚠️ Still 202 rather than 200: the provider accepting a message is not the
+   * recipient receiving it, and this endpoint must not imply delivery. The body
+   * says which channel was used and whether the send failed, because the office
+   * needs to know now — while they can still ring the person instead.
+   */
   resendInvite: async (
     req: ValidatedRequest<{ params: typeof UserIdParamsSchema }>,
     res: Response,
   ): Promise<void> => {
-    await userService.resendInvite(req.validated.params.id, callerFrom(req));
-    res.status(202).send();
+    const result = await userService.resendInvite(req.validated.params.id, callerFrom(req));
+    res.status(202).json(result);
   },
 };

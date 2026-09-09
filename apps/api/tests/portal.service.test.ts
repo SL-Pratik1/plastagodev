@@ -123,9 +123,10 @@ vi.mock('../src/domains/settings/settings.repository.js', () => ({
   settingsRepository: {
     get: () =>
       Promise.resolve({
-        general: { slaBusinessDays: 5 },
         invoicing: { invoiceNumberPrefix: 'PGA-' },
       }),
+    /* M2.4a — a one-field read now, not a slice of the settings tree. */
+    slaBusinessDays: () => Promise.resolve(5),
   },
 }));
 
@@ -171,6 +172,9 @@ function draft(overrides: Partial<PortalBookingDraft> = {}): PortalBookingDraft 
     addressLine: '46 Allambie Circuit',
     placeId: 'kellyville',
     builderName: 'GJ Gardner',
+    // M2.12 — no purchase order behind these fixtures. Covered on its own in
+    // `jobs.purchase-order.test.ts`.
+    purchaseOrderId: null,
     accessNotes: '',
     gateHours: '',
     inductionRequired: false,

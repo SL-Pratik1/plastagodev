@@ -30,7 +30,7 @@ import * as z from 'zod';
 import { PageHeader } from '@/components/page-header';
 import { PlacePicker } from '@/components/place-picker';
 import { useAccountOptions } from '@/features/lookups/queries';
-import { useCreateJob, useJobPricePreview } from '@/features/jobs/queries';
+import { useBookablePurchaseOrders, useCreateJob, useJobPricePreview } from '@/features/jobs/queries';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
 import { isServiceError } from '@/services/service-error';
@@ -72,6 +72,14 @@ const FormSchema = z.object({
   siteContactMobile: z.string().trim().max(20),
   siteContactEmail: z.string().trim().max(160),
   poNumber: z.string().trim().max(60),
+  /**
+   * M2.12 — the confirmed purchase order this pickup fulfils.
+   *
+   * Empty string rather than null, because that is what an unselected `<select>`
+   * gives us. Mapped to null on submit — the contract is nullable, and "" is not
+   * an ObjectId.
+   */
+  purchaseOrderId: z.string(),
   readyDate: z.string().min(1, 'Enter the date the customer says it will be ready'),
   serviceLevel: z.enum(['standard', 'urgent']),
   freightItem: z.enum(FREIGHT_ITEMS),
@@ -122,6 +130,7 @@ export function AdminJobCreatePage() {
       siteContactMobile: '',
       siteContactEmail: '',
       poNumber: '',
+      purchaseOrderId: '',
       readyDate: todayIso(),
       serviceLevel: 'standard',
       freightItem: 'plasterboard-bagged',
@@ -144,6 +153,29 @@ export function AdminJobCreatePage() {
   const [place, setPlace] = useState<Place | null>(null);
   const expectedAreaM2 = useWatch({ control, name: 'expectedAreaM2' });
   const bagCount = useWatch({ control, name: 'bagCount' });
+  const purchaseOrderId = useWatch({ control, name: 'purchaseOrderId' });
+
+  /*
+   * M2.12 — the orders this account has on file.
+   *
+   * Fetched per account rather than filtered client-side: an account can
+   * accumulate hundreds of orders over a year, and only its own are ever
+   * relevant.
+   */
+  const purchaseOrders = useBookablePurchaseOrders(accountId || undefined);
+
+  const chosenOrder =
+    purchaseOrders.data?.find((order) => order.id === purchaseOrderId) ?? null;
+
+  /*
+   * ⚠️ The order OWNS the area, the bags and the PO number.
+   *
+   * The server resolves all three from the stored record and ignores whatever
+   * the form sends (see `JobDraftSchema`). Locking the inputs is what makes
+   * that visible — an editable box whose value is silently discarded is worse
+   * than no box at all.
+   */
+  const lockedToOrder = chosenOrder !== null;
   const readyDate = useWatch({ control, name: 'readyDate' });
   const serviceLevel = useWatch({ control, name: 'serviceLevel' });
   const freightItem = useWatch({ control, name: 'freightItem' });
@@ -175,6 +207,9 @@ export function AdminJobCreatePage() {
       siteContactMobile: '',
       siteContactEmail: '',
       poNumber: '',
+      // Real, not a placeholder: the order supplies the area, so a quote
+      // that omitted it would be the wrong number.
+      purchaseOrderId: purchaseOrderId || null,
       readyDate: readyDate || todayIso(),
       serviceLevel,
       freightItem,
@@ -182,13 +217,30 @@ export function AdminJobCreatePage() {
       bagCount: Number(bagCount) || 0,
       notes: '',
     };
-  }, [accountId, placeId, readyDate, serviceLevel, freightItem, expectedAreaM2, bagCount]);
+  }, [
+    accountId,
+    placeId,
+    readyDate,
+    serviceLevel,
+    freightItem,
+    expectedAreaM2,
+    bagCount,
+    purchaseOrderId,
+  ]);
 
   const preview = useJobPricePreview(priceDraft);
 
   const onSubmit = async (values: FormValues) => {
     const draft: JobDraft = {
       ...values,
+      // '' is what an unselected <select> gives; the contract wants null.
+      purchaseOrderId: values.purchaseOrderId || null,
+      /*
+       * Sent even when an order is chosen, and deliberately ignored by the
+       * server in that case. Stripping them here would make the contract
+       * conditional on a client decision — the server decides which source
+       * wins, and it is the only place that can.
+       */
       expectedAreaM2: Number(values.expectedAreaM2),
       bagCount: Number(values.bagCount),
     };
@@ -322,13 +374,88 @@ export function AdminJobCreatePage() {
                   them."* Kept under the PO name because that is what prints on
                   the invoice (9:56).
                 */}
+                {/*
+                  M2.12 — the confirmed purchase orders on this account.
+                  Choosing one supplies the area, the bag allowance and the PO
+                  number from the document PlastaGo already holds, instead of
+                  asking somebody to retype figures off a PDF.
+                */}
+                <Field
+                  id="job-purchase-order"
+                  label="Purchase order"
+                  error={errors.purchaseOrderId?.message}
+                  hint={
+                    accountId === ''
+                      ? 'Choose an account first.'
+                      : purchaseOrders.isPending
+                        ? 'Loading orders…'
+                        : (purchaseOrders.data?.length ?? 0) === 0
+                          ? 'No purchase orders on file for this account.'
+                          : 'Supplies the m², the bag allowance and the PO number.'
+                  }
+                >
+                  {(aria) => (
+                    <Select
+                      {...aria}
+                      {...register('purchaseOrderId')}
+                      disabled={accountId === '' || purchaseOrders.isPending}
+                    >
+                      <option value="">None — enter the details by hand</option>
+                      {purchaseOrders.data?.map((order) => (
+                        <option
+                          key={order.id}
+                          value={order.id}
+                          /*
+                            One order, one job: an invoice is raised per job and
+                            a builder pays one purchase order once. Shown rather
+                            than hidden, so somebody hunting for it sees where it
+                            went instead of keying it in again.
+                          */
+                          disabled={order.usedByJobNumber !== null}
+                        >
+                          {order.poNumber}
+                          {order.expectedAreaM2 === null
+                            ? ' · fixed price'
+                            : ` · ${String(order.expectedAreaM2)} m²`}
+                          {order.suburb === null ? '' : ` · ${order.suburb}`}
+                          {order.usedByJobNumber === null
+                            ? ''
+                            : ` — already on job ${String(order.usedByJobNumber)}`}
+                        </option>
+                      ))}
+                    </Select>
+                  )}
+                </Field>
+
+                {chosenOrder !== null && (
+                  <Alert
+                    variant="info"
+                    title={`Booking against ${chosenOrder.poNumber}`}
+                  >
+                    {chosenOrder.expectedAreaM2 === null
+                      ? 'This order states a fixed price and no square metres, so the job prices on the call-out fee. That is correct — do not guess an area.'
+                      : `The job will be priced on ${String(chosenOrder.expectedAreaM2)} m² and ${String(chosenOrder.bagAllowance ?? 0)} bag(s) from the order.`}
+                  </Alert>
+                )}
                 <Field
                   id="job-po"
                   label="PO / job reference"
                   error={errors.poNumber?.message}
-                  hint="Whatever the customer quotes. Can be added later if it has not arrived."
+                  hint={
+                    lockedToOrder
+                      ? `Taken from the order — the number the builder matches on.`
+                      : 'Whatever the customer quotes. Can be added later if it has not arrived.'
+                  }
                 >
-                  {(aria) => <Input {...aria} {...register('poNumber')} autoComplete="off" />}
+                  {(aria) => (
+                    <Input
+                      {...aria}
+                      {...register('poNumber')}
+                      autoComplete="off"
+                      disabled={lockedToOrder}
+                      placeholder={lockedToOrder ? (chosenOrder?.poNumber ?? '') : undefined}
+                    />
+                  )}
                 </Field>
               </CardContent>
             </Card>
@@ -377,7 +504,13 @@ export function AdminJobCreatePage() {
                   id="job-area"
                   label="Expected m²"
                   error={errors.expectedAreaM2?.message}
-                  hint="Board installed — this is what gets priced."
+                  hint={
+                    lockedToOrder
+                      ? chosenOrder?.expectedAreaM2 === null
+                        ? 'The order states a fixed price and no area.'
+                        : 'From the purchase order.'
+                      : 'Board installed — this is what gets priced.'
+                  }
                 >
                   {(aria) => (
                     <Input
@@ -387,6 +520,16 @@ export function AdminJobCreatePage() {
                       inputMode="numeric"
                       min={0}
                       step={1}
+                      /*
+                        Locked, not hidden. The server takes the area from the
+                        order regardless, and an editable box whose value is
+                        silently discarded is worse than a disabled one that
+                        says why.
+                      */
+                      disabled={lockedToOrder}
+                      placeholder={
+                        lockedToOrder ? String(chosenOrder?.expectedAreaM2 ?? '—') : undefined
+                      }
                     />
                   )}
                 </Field>
@@ -395,7 +538,7 @@ export function AdminJobCreatePage() {
                   id="job-bags"
                   label="Recycling bags"
                   error={errors.bagCount?.message}
-                  hint="$30 each."
+                  hint={lockedToOrder ? 'From the purchase order.' : '$30 each.'}
                 >
                   {(aria) => (
                     <Input
@@ -405,6 +548,10 @@ export function AdminJobCreatePage() {
                       inputMode="numeric"
                       min={0}
                       step={1}
+                      disabled={lockedToOrder}
+                      placeholder={
+                        lockedToOrder ? String(chosenOrder?.bagAllowance ?? 0) : undefined
+                      }
                     />
                   )}
                 </Field>

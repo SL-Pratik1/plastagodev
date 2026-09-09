@@ -112,6 +112,43 @@ export const UserDraftSchema = z
   })
   .meta({ id: 'UserDraft' });
 
+/**
+ * What happened to the message that was supposed to reach them (M1.5 · M8.4).
+ *
+ * ── Why the API reports this instead of staying silent ─────────────────────
+ * Because "invitation sent" was a claim nobody could check. A user is created
+ * whether or not the message got out — losing the account because a mail server
+ * was down would be worse — so the office has to be told which of the two
+ * happened, in the moment, while they still have the person on the phone.
+ *
+ * `skipped` is its own outcome and not a failure: a driver with no email and no
+ * mobile is unreachable by design, and the honest answer is "nothing was sent",
+ * not "sending failed".
+ */
+export const NOTICE_OUTCOMES = ['sent', 'failed', 'skipped', 'duplicate'] as const;
+export const NoticeOutcomeSchema = z.enum(NOTICE_OUTCOMES).meta({ id: 'NoticeOutcome' });
+export type NoticeOutcome = z.infer<typeof NoticeOutcomeSchema>;
+
+export const InvitationResultSchema = z
+  .object({
+    outcome: NoticeOutcomeSchema,
+    /** `null` when nothing was sent. */
+    channel: z.enum(['email', 'sms']).nullable(),
+    /** Redacted — `a•••••@example.com`. Safe to show and to log. */
+    toMasked: z.string().nullable(),
+    /** Why it did not go, in words the office can act on. */
+    detail: z.string().nullable(),
+  })
+  .meta({ id: 'InvitationResult' });
+
+/** The create response: the row for the grid, plus what reached the person. */
+export const InvitedUserSchema = z
+  .object({ user: UserListItemSchema, invitation: InvitationResultSchema })
+  .meta({ id: 'InvitedUser' });
+
+export type InvitationResult = z.infer<typeof InvitationResultSchema>;
+export type InvitedUser = z.infer<typeof InvitedUserSchema>;
+
 export type UserListItem = z.infer<typeof UserListItemSchema>;
 export type UserDevice = z.infer<typeof UserDeviceSchema>;
 export type UserSignIn = z.infer<typeof UserSignInSchema>;

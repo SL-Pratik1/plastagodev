@@ -1,9 +1,12 @@
 import type { Notification, NotificationSummary, PageMeta, Role } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
+import { todayInSydney } from '../../lib/business-day.js';
+import { jobRepository } from '../jobs/job.repository.js';
 import { queueRepository } from '../queues/queue.repository.js';
 import { vehicleRepository } from '../fleet/vehicle.repository.js';
 import { userRepository } from '../users/user.repository.js';
+import { jobNotices } from './job-notices.service.js';
 import {
   notificationRepository,
   type ListNotificationsQuery,
@@ -232,6 +235,91 @@ export const notificationService = {
    * waiting for the sweep — a driver judging a site unsafe, an unroadworthy
    * truck.
    */
+  /**
+   * M8.3 — asks every site booked for tomorrow whether it will be ready.
+   *
+   * ── Why this is the highest-value message in the product ───────────────────
+   * A futile pickup costs $120 and a truck slot, and the customer disputes it
+   * because nobody warned them. One question the evening before, with a link to
+   * move the date, removes the charge and the argument. Matt's own framing was a
+   * reply-to-SMS; a tap-through is cheaper and unambiguous (see
+   * `notice-messages.ts`).
+   *
+   * ── Why "tomorrow" is computed in Sydney ──────────────────────────────────
+   * Because a reminder that names the wrong day is worse than none, and a UTC
+   * day boundary is ten hours out — an evening sweep would ask about today.
+   *
+   * Safe to run repeatedly: each send is keyed on the job AND its target date,
+   * so a second run tonight sends nothing, while a job rescheduled to tomorrow
+   * gets its own ask.
+   */
+  async runReadinessReminders(): Promise<{ asked: number; skipped: number }> {
+    const target = tomorrowInSydney();
+    const jobs = await jobRepository.dueForReadinessReminder(target);
+
+    let asked = 0;
+    let skipped = 0;
+
+    for (const job of jobs) {
+      const outcome = await jobNotices.readinessReminder(job);
+      if (outcome === 'sent') asked += 1;
+      else skipped += 1;
+    }
+
+    log.info({ target, jobs: jobs.length, asked, skipped }, 'readiness reminders complete');
+    return { asked, skipped };
+  },
+
+  /**
+   * Raises one notification for every portal user of an account.
+   *
+   * ── Why customers get an inbox at all ─────────────────────────────────────
+   * Because email is where a pickup update goes to die. A site supervisor who
+   * opens the portal to book the next job should see that yesterday's was
+   * completed, and an invoice that needs a PO should be visible to the person
+   * who can supply one — without either of them having found the email.
+   *
+   * ⚠️ An account with no portal users yet raises nothing, silently. That is
+   * correct: the customer has been emailed, and inventing an inbox for somebody
+   * who cannot sign in would just accumulate unread rows.
+   */
+  async notifyAccount(input: {
+    accountId: string;
+    category: Notification['category'];
+    severity: Notification['severity'];
+    title: string;
+    body: string;
+    href: string;
+    subjectKey: string;
+    valueExGst?: string | null;
+    jobId?: string | null;
+    jobNumber?: number | null;
+  }): Promise<void> {
+    const { accountId, ...notification } = input;
+
+    /*
+     * ⚠️ Swallowed, like `notifyOffice` below.
+     *
+     * Both are side effects of somebody else's work — an invoice being sent, a
+     * driver reporting an unsafe site. If raising the notification threw, it
+     * would take that work down with it: the invoice would report a failure
+     * having already been marked sent, and the driver's report would be lost
+     * because the office could not be told about it. The inbox is the least
+     * important thing in either transaction.
+     */
+    try {
+      const recipients = await notificationRepository.accountRecipients(accountId);
+
+      await Promise.all(
+        recipients.map((recipient) =>
+          notificationRepository.raise({ ...notification, userId: recipient.id }),
+        ),
+      );
+    } catch (error) {
+      log.error({ err: error, accountId, subjectKey: input.subjectKey }, 'could not notify account');
+    }
+  },
+
   async notifyOffice(input: {
     category: Notification['category'];
     severity: Notification['severity'];
@@ -243,13 +331,18 @@ export const notificationService = {
     jobId?: string | null;
     jobNumber?: number | null;
   }): Promise<void> {
-    const recipients = await notificationRepository.officeRecipients();
+    // Swallowed for the same reason as `notifyAccount` — see the note there.
+    try {
+      const recipients = await notificationRepository.officeRecipients();
 
-    await Promise.all(
-      recipients.map((recipient) =>
-        notificationRepository.raise({ ...input, userId: recipient.id }),
-      ),
-    );
+      await Promise.all(
+        recipients.map((recipient) =>
+          notificationRepository.raise({ ...input, userId: recipient.id }),
+        ),
+      );
+    } catch (error) {
+      log.error({ err: error, subjectKey: input.subjectKey }, 'could not notify the office');
+    }
   },
 };
 
@@ -273,4 +366,19 @@ function daysAgo(iso: string): string {
 
 function todayIso(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+}
+
+/**
+ * Tomorrow, in Sydney.
+ *
+ * ⚠️ Derived from the Sydney date rather than from `Date.now() + 86_400_000`.
+ * Adding a day to a UTC instant is a day out for anything after 10am UTC, which
+ * is most of the working day here — see `lib/business-day.ts`.
+ */
+function tomorrowInSydney(): string {
+  const today = todayInSydney();
+  const next = new Date(`${today}T00:00:00+10:00`);
+  next.setDate(next.getDate() + 1);
+
+  return next.toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
 }

@@ -10,6 +10,7 @@ import {
 } from './admin.http.js';
 import { createHttpAuthService } from './auth.http.js';
 import { createHttpDriverRunService } from './driver-run.http.js';
+import { createHttpExtractorService } from './extractor.http.js';
 import { createHttpPortalService } from './portal.http.js';
 import { createHttpQueueService } from './queues.http.js';
 import {
@@ -51,6 +52,7 @@ export function createHttpServices(api: ApiClient): Services {
     vehicles: createHttpVehicleService(api),
     notifications: createHttpNotificationService(api),
     settings: createHttpSettingsService(api),
+    extractor: createHttpExtractorService(api),
     audit: createHttpAuditService(api),
     queues: createHttpQueueService(api),
     portal: createHttpPortalService(api),

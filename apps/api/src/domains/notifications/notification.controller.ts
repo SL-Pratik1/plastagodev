@@ -49,4 +49,9 @@ export const notificationController = {
   runSweep: async (_req: ValidatedRequest<object>, res: Response): Promise<void> => {
     res.status(202).json(await notificationService.runQueueSweep());
   },
+
+  /** 202: the reminders are going out, and the counts say how many. */
+  runReadinessReminders: async (_req: unknown, res: Response): Promise<void> => {
+    res.status(202).json(await notificationService.runReadinessReminders());
+  },
 };

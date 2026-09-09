@@ -154,17 +154,6 @@ export const settingsRepository = {
     }
 
     return {
-      general: {
-        slaBusinessDays: scalars.slaBusinessDays,
-        // Read-only facts, shown so nobody has to go and ask. Constants rather
-        // than settings because changing either is a migration, not a toggle.
-        timezone: 'Australia/Sydney',
-        dataRegion: 'ap-southeast-2',
-        retentionYears: 7,
-        nextJobNumber: scalars.nextJobNumber,
-        nextInvoiceNumber: scalars.nextInvoiceNumber,
-        zones: ratesByCard.get('default') ?? [],
-      },
       notifications: {
         rules: rules.map(
           (rule): NotificationRule => ({
@@ -347,13 +336,29 @@ export const settingsRepository = {
     return updated[field] ?? start;
   },
 
-  async saveGeneral(input: Settings['general']): Promise<void> {
-    // Only the fields the office may actually change. `nextJobNumber` and the
-    // read-only facts are deliberately NOT written from a form.
-    await SettingsModel.updateOne(
-      { _id: SETTINGS_SINGLETON_ID },
-      { $set: { slaBusinessDays: input.slaBusinessDays } },
-    );
+  /**
+   * M2.4a — the SLA, on its own.
+   *
+   * There is no `saveGeneral` counterpart: the settings screen no longer offers
+   * the SLA, so this value changes by seed or migration only.
+   *
+   * A one-field read rather than `get()` because the three callers that price a
+   * target date need this number and nothing else — handing a job service the
+   * whole settings tree is how a domain quietly starts depending on the
+   * invoice footer.
+   */
+  async slaBusinessDays(): Promise<number> {
+    const scalars = await SettingsModel.findById(SETTINGS_SINGLETON_ID)
+      .select({ slaBusinessDays: 1 })
+      .lean<{ slaBusinessDays: number }>();
+
+    if (!scalars) {
+      // Same reasoning as `get()`: a default invented here would silently give
+      // every job in a misconfigured environment the wrong promised date.
+      throw new Error('Settings have not been seeded — run `npm run seed:settings`');
+    }
+
+    return scalars.slaBusinessDays;
   },
 
   async saveNotifications(input: Settings['notifications']): Promise<void> {

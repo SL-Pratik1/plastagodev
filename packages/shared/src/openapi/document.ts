@@ -17,6 +17,7 @@ import {
   DriverMessageSchema,
   FutileReportSchema,
   PhotoUploadTicketSchema,
+  PresignDocketPhotoSchema,
   PresignPhotoSchema,
   PreStartSubmissionSchema,
   PreviewTipOffSchema,
@@ -94,7 +95,7 @@ function driverAction(input: {
       requestBody: jsonBody(input.body),
       responses: {
         '204': { description: input.success },
-        ...errorResponses('400', '401', '403', '404', '409'),
+        ...errorResponses('400', '422', '401', '403', '404', '409'),
       },
     },
   };
@@ -152,8 +153,12 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           'still be able to complete a job.\n\n' +
           '2. **Send an `idempotency-key` header on every mutation** (UUID v4, one per queued ' +
           'operation, kept across retries). A phone replaying its outbox must not raise a ' +
-          'second $120 futile charge. ⚠️ Server-side enforcement is NOT yet implemented — send ' +
-          'the header from day one so it starts working the moment it lands.',
+          'second $120 futile charge. This IS enforced: a repeat of a key already seen replays ' +
+          'the original response verbatim, carrying `idempotent-replay: true`, without running ' +
+          'the handler again. A key reused with a DIFFERENT body is refused with 409 — so ' +
+          'generate one key per queued operation and keep it across that operation’s retries. ' +
+          'Keys are scoped per driver and kept for 7 days, so a phone out of coverage for a ' +
+          'weekend is still protected.',
       },
     ],
     components: {
@@ -224,7 +229,7 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestBody: jsonBody(OtpRequestSchema),
           responses: {
             '201': jsonResponse('A code has been issued', OtpChallengeSchema),
-            ...errorResponses('400', '429'),
+            ...errorResponses('400', '422', '429'),
           },
         },
       },
@@ -240,7 +245,7 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestBody: jsonBody(OtpResendSchema),
           responses: {
             '201': jsonResponse('A new code has been issued', OtpChallengeSchema),
-            ...errorResponses('400', '404', '429'),
+            ...errorResponses('400', '422', '404', '429'),
           },
         },
       },
@@ -259,7 +264,7 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestBody: jsonBody(OtpVerifySchema),
           responses: {
             '200': jsonResponse('Signed in', SessionSchema),
-            ...errorResponses('400', '401', '403', '404', '429'),
+            ...errorResponses('400', '422', '401', '403', '404', '429'),
           },
         },
       },
@@ -318,7 +323,7 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestParams: { query: RunSheetQuerySchema },
           responses: {
             '200': jsonResponse("The driver's runs and stops for that date", RunSheetDaySchema),
-            ...errorResponses('400', '401', '403'),
+            ...errorResponses('400', '422', '401', '403'),
           },
         },
       },
@@ -341,7 +346,7 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestParams: { path: JobIdPathSchema },
           responses: {
             '200': jsonResponse('The job', DriverJobSchema),
-            ...errorResponses('400', '401', '403', '404'),
+            ...errorResponses('400', '422', '401', '403', '404'),
           },
         },
       },
@@ -411,7 +416,7 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestBody: jsonBody(PresignPhotoSchema),
           responses: {
             '201': jsonResponse('Photo registered; PUT the bytes to `upload.uploadUrl`', PhotoUploadTicketSchema),
-            ...errorResponses('400', '401', '403', '404'),
+            ...errorResponses('400', '422', '401', '403', '404'),
           },
         },
       },
@@ -427,7 +432,7 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestParams: { path: PhotoPathSchema },
           responses: {
             '204': { description: 'Photo removed' },
-            ...errorResponses('400', '401', '403', '404'),
+            ...errorResponses('400', '422', '401', '403', '404'),
           },
         },
       },
@@ -494,6 +499,35 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
         success: 'Assessment recorded',
       }),
 
+      [`${API_PREFIX}/driver/runs/{runId}/docket-photo`]: {
+        post: {
+          tags: ['Driver'],
+          operationId: 'registerDocketPhoto',
+          summary: 'Somewhere to put the weighbridge docket photo',
+          description:
+            'Run-scoped, not job-scoped: the docket evidences the WHOLE load, so there is no ' +
+            'stop it honestly belongs to, and filing it against an arbitrary one would ' +
+            'misattribute the evidence the monthly tipping bill is audited against.\n\n' +
+            'Same two-step shape as a job photo — this returns a presigned URL and the bytes go ' +
+            'straight to storage — with one difference: there is no photo RECORD to create, so ' +
+            'the `photoId` returned **is** the storage key. Send it straight back as ' +
+            '`docketPhotoId` on `POST /driver/tip-off`.\n\n' +
+            'The tip-off accepts a null `docketPhotoId`, so a driver is never stuck at the ' +
+            'weighbridge behind a failed upload — but this photo is what the monthly tipping ' +
+            'bill is audited against, so take it.',
+          security: signedIn,
+          requestParams: { path: RunIdPathSchema },
+          requestBody: jsonBody(PresignDocketPhotoSchema),
+          responses: {
+            '201': jsonResponse(
+              'Registered; PUT the bytes to `upload.uploadUrl`',
+              PhotoUploadTicketSchema,
+            ),
+            ...errorResponses('400', '422', '401', '403', '404'),
+          },
+        },
+      },
+
       [`${API_PREFIX}/driver/runs/{runId}/tip-off/preview`]: {
         post: {
           tags: ['Driver'],
@@ -517,7 +551,7 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestBody: jsonBody(PreviewTipOffSchema),
           responses: {
             '200': jsonResponse('The reconciliation, as the driver should see it', TipOffReconciliationSchema),
-            ...errorResponses('400', '401', '403', '404'),
+            ...errorResponses('400', '422', '401', '403', '404'),
           },
         },
       },

@@ -1,4 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  clearOutbound,
+  makeFakeNotificationRepository,
+  recordingProviders,
+  sentMessages,
+} from './helpers/fake-outbound.js';
 import { createFakeDriverRepository } from './helpers/fake-driver.js';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
 
@@ -35,10 +41,18 @@ vi.mock('../src/domains/driver/driver.repository.js', () => ({
 /** The two URGENT alerts the driver app raises. See `notifyOffice`. */
 const urgentAlerts: Array<{ severity: string; title: string; subjectKey: string }> = [];
 
+/** What the customer's portal inbox was told. Asserted where it matters. */
+const accountAlerts: Array<{ severity: string; title: string; subjectKey: string }> = [];
+
 vi.mock('../src/domains/notifications/notification.service.js', () => ({
   notificationService: {
     notifyOffice: (input: { severity: string; title: string; subjectKey: string }) => {
       urgentAlerts.push(input);
+      return Promise.resolve();
+    },
+    /** M8.2 — the customer's own inbox, raised when a job completes. */
+    notifyAccount: (input: { severity: string; title: string; subjectKey: string }) => {
+      accountAlerts.push(input);
       return Promise.resolve();
     },
   },
@@ -93,7 +107,42 @@ vi.mock('../src/integrations/storage.js', async (importOriginal) => {
   };
 });
 
+/*
+ * M8.1 / M8.2 — booking a job, moving it and completing it now message the site
+ * contact, and every send is logged. Faked like every other repository: the
+ * real one would buffer a write against a MongoDB that is not there.
+ */
+vi.mock('../src/domains/notifications/notification.repository.js', () => ({
+  notificationRepository: makeFakeNotificationRepository(),
+}));
+
+/*
+ * The notice needs the SITE CONTACT, which the driver's own read model does not
+ * carry — the phone is told about a stop, not about who to text. So the notice
+ * module reads the job, and that read is faked here.
+ */
+vi.mock('../src/domains/jobs/job.repository.js', () => ({
+  jobRepository: {
+    findById: () =>
+      Promise.resolve({
+        id: '000000000000000000000015',
+        jobNumber: 61_301,
+        accountId: 'acc0000000000000000000a1',
+        accountName: 'Clarendon Homes',
+        siteName: 'Lot 77 Britannia Road',
+        targetDate: '2026-09-10',
+        siteContactEmail: null,
+        siteContactMobile: '0466778899',
+        expectedAreaM2: 42,
+        recoveredWeightKg: 1180,
+        bagCount: 0,
+        photos: [{ id: 'p1' }, { id: 'p2' }],
+      }),
+  },
+}));
+
 const { driverService } = await import('../src/domains/driver/driver.service.js');
+const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 
 const CALLER = { userId: DRIVER, name: 'Troy Holm', vehicleRego: 'BQ12AB' };
 
@@ -103,6 +152,8 @@ function envelope(at = '2026-09-10T08:00:00.000Z') {
 }
 
 beforeEach(() => {
+  clearOutbound();
+  setMessagingProvidersForTests(recordingProviders());
   driver = createFakeDriverRepository(DRIVER);
   settings = createFakeSettingsRepository();
   uploads.length = 0;

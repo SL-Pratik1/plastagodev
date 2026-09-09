@@ -7,6 +7,7 @@ import type {
   CancelJobBodySchema,
   JobIdParamsSchema,
   ListJobsQuerySchema,
+  PurchaseOrderOptionsQuerySchema,
   RescheduleJobBodySchema,
 } from './job.schemas.js';
 
@@ -46,6 +47,15 @@ export const jobController = {
   ): Promise<void> => {
     const preview = await jobService.preview(req.validated.body, callerOf(req));
     res.json(preview);
+  },
+
+  /** M2.12 — the purchase orders this account can book a pickup against. */
+  purchaseOrders: async (
+    req: ValidatedRequest<{ query: typeof PurchaseOrderOptionsQuerySchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const { accountId, q } = req.validated.query;
+    res.json(await jobService.purchaseOrders(accountId, q, callerOf(req)));
   },
 
   create: async (

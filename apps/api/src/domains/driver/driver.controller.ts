@@ -17,6 +17,7 @@ import type {
   DateQuerySchema,
   JobIdParamsSchema,
   PhotoParamsSchema,
+  PresignDocketPhotoSchema,
   PresignPhotoSchema,
   PreviewTipOffSchema,
   RunIdParamsSchema,
@@ -171,6 +172,25 @@ export const driverController = {
         callerFrom(req),
       ),
     );
+  },
+
+  /**
+   * 201 with the upload URL. `photoId` here IS the storage key — see the note on
+   * the service method for why a run docket has no photo record.
+   */
+  presignDocketPhoto: async (
+    req: ValidatedRequest<{
+      params: typeof RunIdParamsSchema;
+      body: typeof PresignDocketPhotoSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const result = await driverService.presignDocketPhoto(
+      req.validated.params.runId,
+      req.validated.body,
+      callerFrom(req),
+    );
+    res.status(201).json(result);
   },
 
   recordTipOff: async (

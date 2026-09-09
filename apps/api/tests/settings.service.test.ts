@@ -32,17 +32,13 @@ beforeEach(() => {
   repo = createFakeSettingsRepository();
 });
 
-/** The current values, so a test can change one field and send the rest back. */
-function general(overrides: Partial<Settings['general']> = {}): Settings['general'] {
-  return { ...repo.current().general, ...overrides };
-}
-
 describe('who may read settings', () => {
   it('lets office staff read them', async () => {
-    // The SLA and the rate card are on screen while the office books a job, so
-    // making this admin-only would hide the rules they work to.
+    // The additional-service prices are on screen while the office books a job,
+    // so making this admin-only would hide the rules they work to.
     const settings = await settingsService.get(OFFICE);
-    expect(settings.general.slaBusinessDays).toBe(5);
+    expect(settings.pricing.additionalServices.length).toBeGreaterThan(0);
+    expect(settings.invoicing.defaultPaymentTermsDays).toBe(7);
   });
 
   it('refuses a customer outright', async () => {
@@ -57,27 +53,33 @@ describe('who may read settings', () => {
 
 describe('who may change them', () => {
   it('allows an administrator', async () => {
-    const saved = await settingsService.saveGeneral(general({ slaBusinessDays: 7 }), ADMIN);
-    expect(saved.slaBusinessDays).toBe(7);
+    const saved = await settingsService.saveInvoicing(
+      { ...repo.current().invoicing, defaultPaymentTermsDays: 14 },
+      ADMIN,
+    );
+    expect(saved.defaultPaymentTermsDays).toBe(14);
   });
 
   it('allows operations', async () => {
-    const saved = await settingsService.saveGeneral(general({ slaBusinessDays: 3 }), OPS);
-    expect(saved.slaBusinessDays).toBe(3);
+    const saved = await settingsService.saveNotifications(
+      { ...repo.current().notifications, reminderLeadDays: 3 },
+      OPS,
+    );
+    expect(saved.reminderLeadDays).toBe(3);
   });
 
   it('refuses office staff, who may read but not write', async () => {
     // The blast radius of a wrong setting is every job afterwards.
-    await expect(settingsService.saveGeneral(general(), OFFICE)).rejects.toMatchObject({
-      status: 403,
-    });
-    expect(repo.calls.savedGeneral).toBeNull();
+    await expect(
+      settingsService.saveNotifications(repo.current().notifications, OFFICE),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(repo.calls.savedNotifications).toBeNull();
   });
 
   it('refuses a customer', async () => {
-    await expect(settingsService.saveGeneral(general(), CUSTOMER)).rejects.toMatchObject({
-      status: 403,
-    });
+    await expect(
+      settingsService.saveNotifications(repo.current().notifications, CUSTOMER),
+    ).rejects.toMatchObject({ status: 403 });
   });
 
   it('refuses office staff on every write, not just the first', async () => {
@@ -94,67 +96,45 @@ describe('who may change them', () => {
 });
 
 /*
- * ── The guard this domain exists for ────────────────────────────────────────
- * The sequences are displayed on the settings screen but never set from it —
- * they come from a transactional counter (M1.4). The whole `general` block
- * round-trips through the form, so a stale tab can arrive carrying a different
- * number, and the repository would quietly drop it.
+ * ── What used to be the sequence guard ──────────────────────────────────────
+ * `PUT /settings/general` round-tripped the whole block, so a stale tab could
+ * arrive carrying a different `nextJobNumber`, and the service had to refuse it
+ * in both directions — backwards re-issues consignment numbers that exist in
+ * three years of TransVirtual history, forwards is a 200 that lies about what
+ * was saved.
  *
- * Backwards is the dangerous case: it re-issues consignment numbers that exist
- * in three years of TransVirtual history and in builders' AP systems. Forwards
- * is merely a lie — a 200 telling the office it saved something it did not.
- * Both are refused.
+ * That route is gone, so the guard is gone with it. What replaces it is the
+ * stronger claim: the sequences are not on the wire contract AT ALL, so no
+ * request can name one. These pin that, because re-exposing `general` "just to
+ * show the numbers" is exactly how the old bug would come back.
  */
-describe('number sequences', () => {
-  it('refuses to move the job sequence backwards', async () => {
-    await expect(
-      settingsService.saveGeneral(general({ nextJobNumber: 61_000 }), ADMIN),
-    ).rejects.toMatchObject({ status: 422 });
-
-    expect(repo.calls.savedGeneral).toBeNull();
+describe('the sequences are off-contract', () => {
+  it('does not put a general block on the settings payload', async () => {
+    const settings = await settingsService.get(ADMIN);
+    expect(settings).not.toHaveProperty('general');
   });
 
-  it('refuses to move the invoice sequence backwards', async () => {
-    await expect(
-      settingsService.saveGeneral(general({ nextInvoiceNumber: 104_099 }), ADMIN),
-    ).rejects.toMatchObject({ status: 422 });
+  it('names no sequence anywhere in what it returns', async () => {
+    const settings = await settingsService.get(ADMIN);
+    const wire = JSON.stringify(settings);
+    expect(wire).not.toContain('nextJobNumber');
+    expect(wire).not.toContain('nextInvoiceNumber');
   });
 
-  it('names the field and both numbers, so the message is actionable', async () => {
-    await expect(
-      settingsService.saveGeneral(general({ nextJobNumber: 61_000 }), ADMIN),
-    ).rejects.toMatchObject({
-      issues: [{ path: 'nextJobNumber', message: expect.stringContaining('61300') }],
-    });
+  it('exposes no way to write one', () => {
+    // A settings service with a `saveGeneral` again is the regression.
+    expect(settingsService).not.toHaveProperty('saveGeneral');
   });
 
-  /*
-   * Found in QA against the live API: this used to return 200 while the
-   * repository silently dropped the field, so the office was told it had
-   * changed a number it had not.
-   */
-  it('refuses a jump forward too, rather than accepting and ignoring it', async () => {
-    await expect(
-      settingsService.saveGeneral(general({ nextJobNumber: 62_000 }), ADMIN),
-    ).rejects.toMatchObject({ status: 422 });
-
-    expect(repo.calls.savedGeneral).toBeNull();
+  it('still hands out numbers from the counter, which is the only writer', async () => {
+    // M1.4 — reserved through the transactional counter, and it advances.
+    await expect(repo.repository.takeNextNumber('nextJobNumber')).resolves.toBe(61_300);
+    await expect(repo.repository.takeNextNumber('nextJobNumber')).resolves.toBe(61_301);
   });
 
-  it('explains that the sequence advances on its own', async () => {
-    await expect(
-      settingsService.saveGeneral(general({ nextInvoiceNumber: 999_999 }), ADMIN),
-    ).rejects.toMatchObject({
-      issues: [{ path: 'nextInvoiceNumber', message: expect.stringContaining('advances') }],
-    });
-  });
-
-  it('saves happily when the sequence is sent back unchanged', async () => {
-    // The normal case: the form round-trips the whole block, so the numbers it
-    // read are the numbers it sends.
-    const saved = await settingsService.saveGeneral(general({ slaBusinessDays: 10 }), ADMIN);
-    expect(saved.slaBusinessDays).toBe(10);
-    expect(saved.nextJobNumber).toBe(61_300);
+  it('still reads the SLA, which is what the sequences never were — a live value', async () => {
+    // M2.4a. No route writes it now, but every job's target date reads it.
+    await expect(repo.repository.slaBusinessDays()).resolves.toBe(5);
   });
 });
 
