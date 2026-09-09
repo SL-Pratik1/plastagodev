@@ -30,6 +30,7 @@ import {
   PortalAccountPage,
   PortalBookPage,
   PortalCertificatesPage,
+  PortalNotificationsPage,
   PortalDashboardPage,
   PortalInvoicesPage,
   PortalJobDetailPage,
@@ -335,6 +336,17 @@ export const router = createBrowserRouter([
                   {
                     element: <RequireCapability capability="portal:account" />,
                     children: [{ path: 'account', element: load(<PortalAccountPage />) }],
+                  },
+                  {
+                    /*
+                     * M8.1 / M8.2 — the customer's updates. Gated on the same
+                     * capability as the bell that links to it, so a role that
+                     * cannot see the bell cannot reach the screen either.
+                     */
+                    element: <RequireCapability capability="notifications:read" />,
+                    children: [
+                      { path: 'notifications', element: load(<PortalNotificationsPage />) },
+                    ],
                   },
                 ],
               },

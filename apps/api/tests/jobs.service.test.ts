@@ -182,6 +182,25 @@ beforeEach(() => {
  * were removed a supervisor was scoped by their assigned sites (M1.5). With no
  * site records the boundary is "the jobs I raised" — Matt, 18:15.
  */
+/**
+ * M8.1 — the booking notice.
+ *
+ * ⚠️ What this suite can assert is the SAFE path: this repository double returns
+ * a job with no site contact, so nothing can be sent. That is the case worth
+ * pinning here — a job the office booked over the phone for a site whose
+ * foreman is not on file must still book, and must not raise anything to send.
+ * The message itself is covered against a job that HAS a contact in
+ * `driver.service.test.ts` and `users.service.test.ts`.
+ */
+describe('booking notices (M8.1)', () => {
+  it('books the job even when there is nobody to tell', async () => {
+    const created = await jobService.create(draft(), OFFICE);
+
+    expect(created.id).toBeTruthy();
+    expect(sentMessages).toHaveLength(0);
+  });
+});
+
 describe('who sees which jobs', () => {
   it('does not scope the office at all', async () => {
     await jobService.list({ page: 1, pageSize: 20 }, OFFICE);

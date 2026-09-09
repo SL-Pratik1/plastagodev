@@ -359,6 +359,13 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
    */
   'customer-administrator': [
     'portal:access',
+    /*
+     * M8.1 / M8.2 — customers now receive notifications of their own: a pickup
+     * booked, a driver on the way, a job completed, an invoice raised. Without
+     * this capability those rows would be written into an inbox the person
+     * cannot open.
+     */
+    'notifications:read',
     'portal:book',
     'portal:invoices',
     'portal:reports',
@@ -377,7 +384,7 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
    * The site narrowing is data scoping the SERVER does on the session; this row
    * only decides which screens exist for them.
    */
-  'customer-site-supervisor': ['portal:access', 'portal:book'],
+  'customer-site-supervisor': ['portal:access', 'portal:book', 'notifications:read'],
 };
 
 export function can(role: Role, capability: Capability): boolean {

@@ -269,6 +269,43 @@ describe('status, replayed from the outbox', () => {
   });
 });
 
+/**
+ * M8.2 · F24 — what the site is told when the job is closed.
+ *
+ * The site contact on this fixture is mobile-only, which is the common case:
+ * §9 makes site supervisors SMS-first because they have "no email to check" on
+ * a building site. So the completion summary has to reach them by text.
+ */
+describe('the completion message (M8.2)', () => {
+  it('texts the site contact, with the figures', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    await driverService.complete(
+      stop.id,
+      { ...envelope('2026-09-10T08:45:00.000Z'), note: '' },
+      CALLER,
+    );
+
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]?.channel).toBe('sms');
+    expect(sentMessages[0]?.body).toContain('Lot 77 Britannia Road');
+    expect(sentMessages[0]?.body).toContain('42 m²');
+  });
+
+  /** And the customer's own inbox, for whoever does have a login. */
+  it('raises it in the customer portal too', async () => {
+    const stop = driver.addStop({ jobNumber: 61302 });
+
+    await driverService.complete(
+      stop.id,
+      { ...envelope('2026-09-10T08:45:00.000Z'), note: '' },
+      CALLER,
+    );
+
+    expect(accountAlerts.at(-1)?.title).toContain('Pickup complete');
+  });
+});
+
 describe('completing a job', () => {
   it('derives the on-site duration from arrival to completion', async () => {
     const stop = driver.addStop({ jobNumber: 61301 });

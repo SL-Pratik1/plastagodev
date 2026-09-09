@@ -174,6 +174,10 @@ export const PortalReportsPage = lazy(async () => ({
   default: (await import('@/pages/portal/reports')).PortalReportsPage,
 }));
 
+export const PortalNotificationsPage = lazy(async () => ({
+  default: (await import('@/pages/portal/notifications')).PortalNotificationsPage,
+}));
+
 export const PortalCertificatesPage = lazy(async () => ({
   default: (await import('@/pages/portal/certificates')).PortalCertificatesPage,
 }));

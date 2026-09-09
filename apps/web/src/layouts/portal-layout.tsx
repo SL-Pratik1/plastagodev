@@ -13,6 +13,7 @@ import { ChevronDownIcon, LogOutIcon, PhoneIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
+import { NotificationsMenu } from '@/components/notifications-menu';
 import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { visiblePortalNav } from '@/config/portal-navigation';
@@ -184,6 +185,12 @@ export function PortalLayout() {
               label="Install"
               className="hidden sm:inline-flex"
             />
+
+            {/*
+              M8.1 / M8.2 — the customer's own inbox. Same feed as the office
+              bell, scoped by the API to the caller's own rows.
+            */}
+            {can('notifications:read') && <NotificationsMenu surface="portal" />}
 
             <ThemeToggle />
 

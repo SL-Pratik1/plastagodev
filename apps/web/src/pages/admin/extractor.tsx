@@ -1,25 +1,6 @@
-import {
-  Alert,
-  Button,
-  EmptyState,
-  ErrorState,
-  Skeleton,
-  Spinner,
-  Tabs,
-  TabsList,
-  TabsPanel,
-  TabsTrigger,
-} from '@plastago/ui';
-import { RotateCcwIcon } from 'lucide-react';
-import { useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { EmptyState, ErrorState, Skeleton, Spinner } from '@plastago/ui';
 import { PageHeader } from '@/components/page-header';
-import {
-  EXTRACTOR_ENABLED,
-  EXTRACTOR_PAGES,
-  extractorEmbedUrl,
-  type ExtractorPageId,
-} from '@/config/extractor';
+import { EXTRACTOR_ENABLED, extractorEmbedUrl } from '@/config/extractor';
 import { useExtractorSession, useExtractorSessionReset } from '@/features/extractor/queries';
 
 /**
@@ -31,43 +12,25 @@ import { useExtractorSession, useExtractorSessionReset } from '@/features/extrac
  * against their REST API would mean maintaining a second UI for someone else's
  * feature set. Every template field they add would be a PlastaGo release.
  *
+ * ── Why PlastaGo adds no chrome of its own ────────────────────────────────
+ * The frame has its own tab strip, and this page briefly had a second one
+ * wrapped around it — two rows of tabs that could disagree about which section
+ * was open. The page now contributes a heading and nothing else. Anything that
+ * looks like part of the extractor should BE part of the extractor.
+ *
  * ── What the frame cannot do, and where that work lives ───────────────────
  * The page runs on the vendor's origin, so nothing in it can see a PlastaGo
  * account, a zone or a job. Deciding which customer a purchase order belongs to
- * — and therefore who gets invoiced — cannot happen in here. That is why the
- * webhook pipeline and the review queue exist on our side.
+ * — and therefore who gets invoiced — cannot happen in here.
  *
  * ── Why the session is not in this component's state ──────────────────────
  * A remount must not mint a new session at a third party. It is a React Query
- * entry keyed on its own expiry, so switching tabs, navigating away and coming
- * back all reuse the one session until it is genuinely near expiry.
+ * entry keyed on its own expiry, so navigating away and coming back reuses the
+ * one session until it is genuinely near expiry.
  */
 export function AdminExtractorPage(): React.JSX.Element {
-  /*
-   * The tab lives in the URL so a colleague can be sent a link to the activity
-   * log rather than "open Extractor, then click the fourth tab".
-   */
-  const [params, setParams] = useSearchParams();
-  const requested = params.get('tab');
-
-  const [fallbackTab, setFallbackTab] = useState<ExtractorPageId>('upload');
-  const tab = isPageId(requested) ? requested : fallbackTab;
-
   const session = useExtractorSession();
   const reset = useExtractorSessionReset();
-
-  const setTab = (value: string): void => {
-    if (!isPageId(value)) return;
-    setFallbackTab(value);
-    setParams(
-      (current) => {
-        const next = new URLSearchParams(current);
-        next.set('tab', value);
-        return next;
-      },
-      { replace: true },
-    );
-  };
 
   const header = (
     <PageHeader
@@ -100,7 +63,7 @@ export function AdminExtractorPage(): React.JSX.Element {
           <Spinner label="Connecting to the Extractor" />
           Connecting to the Extractor…
         </div>
-        <Skeleton className="h-[70vh] w-full rounded-lg" />
+        <Skeleton className="h-[75vh] w-full rounded-lg" />
       </div>
     );
   }
@@ -112,87 +75,46 @@ export function AdminExtractorPage(): React.JSX.Element {
         <ErrorState
           title="Could not open the Extractor"
           description={messageFor(session.error)}
-          onRetry={() => void session.refetch()}
+          /*
+           * Retry DISCARDS the cached session before asking for another.
+           *
+           * Without that, the retry would be handed back the same stored
+           * session id that just failed — the server reuses a cached row until
+           * it nears expiry — and the button would appear to do nothing. This
+           * is also the recovery path for a session that died inside the frame,
+           * which the page cannot detect on its own: a cross-origin iframe does
+           * not report its own errors.
+           */
+          onRetry={() => {
+            void reset.mutateAsync().catch(() => undefined);
+          }}
         />
       </div>
     );
   }
 
-  const src = extractorEmbedUrl(tab, session.data.sessionId);
+  const src = extractorEmbedUrl(session.data.sessionId);
 
   return (
     <div className="space-y-6">
       {header}
 
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList label="Extractor sections">
-          {EXTRACTOR_PAGES.map((page) => (
-            <TabsTrigger key={page.id} value={page.id}>
-              {page.label}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-
-        {EXTRACTOR_PAGES.map((page) => (
-          <TabsPanel key={page.id} value={page.id}>
-            {/*
-              One frame per tab, mounted only while its tab is selected.
-
-              The alternative — a single frame whose `src` changes — reloads the
-              vendor's app on every tab click, and an in-progress upload would
-              be lost by switching to Documents and back. Keying on the page id
-              means each tab keeps its own scroll position and state for as long
-              as the panel is mounted.
-            */}
-            {page.id === tab && src ? (
-              <iframe
-                key={page.id}
-                src={src}
-                title={`Extractor — ${page.label}`}
-                className="h-[75vh] w-full rounded-lg border border-border bg-background"
-                /*
-                 * `clipboard-write` is what the vendor's guide asks for — their
-                 * UI offers copy buttons on extracted values. Nothing else is
-                 * granted: this frame has no reason to reach a camera, a
-                 * microphone or the device's location.
-                 */
-                allow="clipboard-write"
-              />
-            ) : null}
-          </TabsPanel>
-        ))}
-      </Tabs>
-
-      {/*
-        ⚠️ The one failure this page cannot see.
-
-        A cross-origin frame does not report its own errors, so if the session
-        dies inside it the vendor renders "Invalid session" and this page still
-        believes everything is fine. There is no event to listen for — hence a
-        visible button rather than automatic recovery.
-      */}
-      <Alert variant="info" title="Seeing “invalid session” inside the panel?">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm">
-            Sessions last a day. Reconnecting mints a new one and reloads the panel.
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void reset.mutateAsync().catch(() => undefined)}
-            disabled={reset.isPending}
-          >
-            {reset.isPending ? <Spinner label="Reconnecting" /> : <RotateCcwIcon aria-hidden />}
-            Reconnect
-          </Button>
-        </div>
-      </Alert>
+      {src ? (
+        <iframe
+          src={src}
+          title="Extractor"
+          className="h-[80vh] w-full rounded-lg border border-border bg-background"
+          /*
+           * `clipboard-write` is what the vendor's guide asks for — their UI
+           * offers copy buttons on extracted values. Nothing else is granted:
+           * this frame has no reason to reach a camera, a microphone or the
+           * device's location.
+           */
+          allow="clipboard-write"
+        />
+      ) : null}
     </div>
   );
-}
-
-function isPageId(value: string | null): value is ExtractorPageId {
-  return value !== null && EXTRACTOR_PAGES.some((page) => page.id === value);
 }
 
 /**

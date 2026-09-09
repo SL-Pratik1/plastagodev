@@ -3,7 +3,6 @@ import {
   clearOutbound,
   makeFakeNotificationRepository,
   recordingProviders,
-  sentMessages,
 } from './helpers/fake-outbound.js';
 import type { JobDraft, Role } from '@plastago/shared';
 import type { BookablePurchaseOrder } from '../src/domains/queues/purchase-order.repository.js';
