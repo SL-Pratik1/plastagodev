@@ -20,6 +20,7 @@
     "seed:auth": "tsx src/scripts/seed-auth.ts",
     "seed:settings": "tsx src/scripts/seed-settings.ts",
     "seed:places": "tsx src/scripts/seed-places.ts",
+    "seed:driver-demo": "tsx src/scripts/seed-driver-demo.ts",
     "setup:extractor": "tsx src/scripts/setup-extractor.ts"
   },
   "dependencies": {
@@ -35,7 +36,7 @@
     "express-rate-limit": "^8.6.2",
     "helmet": "^8.3.0",
     "ioredis": "^6.0.0",
-    "mongodb": "^7.5.0",
+    "mongodb": "~7.5.0",
     "mongoose": "^9.9.3",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
