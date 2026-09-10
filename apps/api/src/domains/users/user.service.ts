@@ -11,7 +11,6 @@ import type {
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { buildInviteEmail, buildInviteSms } from '../../integrations/notice-messages.js';
-import { auditService } from '../audit/audit.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { outboundService } from '../notifications/outbound.service.js';
 import { userRepository, type ListUsersQuery } from './user.repository.js';
@@ -88,37 +87,13 @@ export const userService = {
     if (!created) throw new Error('User vanished immediately after being created');
 
     /*
-     * M1.6. Who granted whom access, and at what role — the single most
-     * consequential thing an administrator does, and the one currently invisible
-     * behind a shared mailbox.
-     */
-    await auditService.record({
-      actorId: caller.userId,
-      actorName: caller.name,
-      actorRole: caller.roles[0] ?? null,
-      action: 'invited',
-      entity: 'user',
-      entityId: id,
-      entityLabel: created.name,
-      summary: `${created.name} invited as ${draft.role}`,
-      changes: [
-        { field: 'role', from: null, to: draft.role },
-        // The full set, not just the main one: an allocator who is also a driver
-        // was granted two things, and the log has to show both.
-        { field: 'roles', from: null, to: normalised.roles.join(', ') },
-        { field: 'status', from: null, to: 'invited' },
-      ],
-      href: `/admin/users/${id}`,
-    });
-
-    /*
      * The invitation itself.
      *
-     * ⚠️ AFTER the audit row, and unable to throw. An account that exists and
-     * an audit row that records it are the durable outcome; the message is the
-     * best-effort part, and the office is told which it got so they can fall
-     * back to the phone. Sending first — or letting a provider error escape —
-     * would mean a mail outage silently stopped anybody being onboarded.
+     * ⚠️ Unable to throw. The account that exists is the durable outcome; the
+     * message is the best-effort part, and the office is told which it got so
+     * they can fall back to the phone. Sending first — or letting a provider
+     * error escape — would mean a mail outage silently stopped anybody being
+     * onboarded.
      */
     const invitation = await sendInvitation(created, caller.name);
 
@@ -179,24 +154,6 @@ export const userService = {
     const updated = await userRepository.findById(id);
     if (!updated) throw AppError.notFound('No such user');
 
-    /*
-     * M1.6. Restricted to the fields that carry consequence — a changed role or
-     * account is a changed permission, and a changed mobile is a changed login.
-     * A corrected job title is not worth a row, and logging it would bury the
-     * ones that are.
-     */
-    await auditService.recordUpdate({
-      actor: caller,
-      entity: 'user',
-      entityId: id,
-      entityLabel: updated.name,
-      summary: `${updated.name} updated`,
-      before: { ...existing, roles: existing.roles.join(', ') },
-      after: { ...updated, roles: updated.roles.join(', ') },
-      fields: ['name', 'email', 'mobile', 'role', 'roles', 'accountId'],
-      href: `/admin/users/${id}`,
-    });
-
     log.info({ userId: id, by: caller.name }, 'user updated');
     return updated;
   },
@@ -234,24 +191,6 @@ export const userService = {
 
     const updated = await userRepository.findById(id);
     if (!updated) throw AppError.notFound('No such user');
-
-    /*
-     * M1.6. `suspended` and `reactivated` are their own actions in the contract
-     * rather than a generic update, because "who turned this login back on, and
-     * when" is a question asked on its own — usually after something went wrong.
-     */
-    await auditService.record({
-      actorId: caller.userId,
-      actorName: caller.name,
-      actorRole: caller.roles[0] ?? null,
-      action: status === 'active' ? 'reactivated' : status === 'suspended' ? 'suspended' : 'invited',
-      entity: 'user',
-      entityId: id,
-      entityLabel: updated.name,
-      summary: `${updated.name} ${status === 'active' ? 'reactivated' : status}`,
-      changes: [{ field: 'status', from: existing.status, to: status }],
-      href: `/admin/users/${id}`,
-    });
 
     log.info({ userId: id, status, by: caller.name }, 'user status changed');
     return updated;
@@ -293,24 +232,6 @@ export const userService = {
      * have left, and an invitation signed by nobody reads like a scam.
      */
     const result = await sendInvitation(user, user.invitedBy ?? caller.name, { force: true });
-
-    // M1.6 — a re-send is a real act with a real cost, and "how many times did
-    // we chase them?" is asked in onboarding reviews.
-    await auditService.record({
-      actorId: caller.userId,
-      actorName: caller.name,
-      actorRole: caller.roles[0] ?? null,
-      action: 'sent',
-      entity: 'user',
-      entityId: id,
-      entityLabel: user.name,
-      summary:
-        result.outcome === 'sent'
-          ? `Invitation re-sent to ${user.name} by ${result.channel ?? 'unknown'}`
-          : `Invitation to ${user.name} could not be re-sent — ${result.detail ?? result.outcome}`,
-      changes: [],
-      href: `/admin/users/${id}`,
-    });
 
     log.info(
       { userId: id, channel: result.channel, outcome: result.outcome, by: caller.name },

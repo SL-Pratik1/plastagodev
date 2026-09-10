@@ -1,7 +1,6 @@
 import { API_PREFIX } from '@plastago/shared';
 import { Router, type Express } from 'express';
 import { accountRouter } from './domains/accounts/account.router.js';
-import { auditRouter } from './domains/audit/audit.router.js';
 import { authRouter } from './domains/auth/auth.router.js';
 import { dashboardRouter } from './domains/dashboard/dashboard.router.js';
 import { dispatchRouter } from './domains/dispatch/dispatch.router.js';
@@ -116,12 +115,6 @@ export function mountRoutes(app: Express): void {
 
   // M9.4 · F15 — the admin dashboard. One call for the whole screen.
   v1.use('/dashboard', dashboardRouter);
-
-  /*
-   * M1.6 — the audit log. Read-only by design: entries arrive from other
-   * services and from the change-stream backstop, never over HTTP.
-   */
-  v1.use('/audit', auditRouter);
 
   /*
    * M9.8 · F53 / M9.9 · F22 — the office's view of the driver: credentials,

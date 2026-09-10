@@ -26,7 +26,6 @@ export * from './schemas/invoices.js';
 export * from './schemas/dashboard.js';
 export * from './schemas/fleet.js';
 export * from './schemas/notifications.js';
-export * from './schemas/audit.js';
 export * from './schemas/reports.js';
 export * from './schemas/settings.js';
 export * from './openapi/index.js';

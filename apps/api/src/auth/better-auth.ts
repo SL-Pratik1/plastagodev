@@ -8,6 +8,7 @@ import { AppError } from '../lib/app-error.js';
 import { logger } from '../lib/logger.js';
 import { getMailer, getSmsSender } from '../integrations/messaging.js';
 import { buildOtpEmail, buildOtpSms } from '../integrations/otp-messages.js';
+import { rememberOtpCode } from './otp-peek.js';
 import { USERS_COLLECTION } from '../domains/auth/auth.model.js';
 
 const log = logger.child({ module: 'better-auth' });
@@ -157,6 +158,7 @@ function buildAuth(transactionsAvailable: boolean) {
             log.warn({ type }, 'ignoring a non sign-in OTP request');
             return;
           }
+          rememberOtpCode(email, otp);
           await getMailer().send(buildOtpEmail(email, otp));
         },
       }),
@@ -192,6 +194,7 @@ function buildAuth(transactionsAvailable: boolean) {
         // what an Australian mobile is.
         phoneNumberValidator: (value: string) => isAustralianMobile(value),
         sendOTP: async ({ phoneNumber: to, code }) => {
+          rememberOtpCode(to, code);
           await getSmsSender().send(buildOtpSms(to, code));
         },
       }),

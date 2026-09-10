@@ -8,7 +8,6 @@ import {
 import type { JobDraft, Role } from '@plastago/shared';
 import { createFakeJobRepository } from './helpers/fake-jobs.js';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
-import { makeFakeAuditRepository } from './helpers/fake-audit.js';
 
 /**
  * Job rules (M2).
@@ -36,16 +35,6 @@ let accountFound = true;
 
 // GETTERS, not values: `vi.mock` factories hoist above every import, so the
 // fakes do not exist yet when these run.
-/*
- * M1.6 — this suite's service records to the audit log. Faked like every other
- * repository: the real one would buffer a write against a MongoDB that is not
- * there and time out. See `helpers/fake-audit.ts`.
- */
-vi.mock('../src/domains/audit/audit.repository.js', () => ({
-  auditRepository: makeFakeAuditRepository(),
-}));
-
-
 vi.mock('../src/domains/jobs/job.repository.js', () => ({
   get jobRepository() {
     return repo.repository;

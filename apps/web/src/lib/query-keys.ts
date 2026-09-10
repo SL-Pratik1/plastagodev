@@ -109,12 +109,6 @@ export const queryKeys = {
     session: () => [...queryKeys.extractor.all, 'session'] as const,
   },
 
-  audit: {
-    all: ['audit'] as const,
-    list: (query: ListQuery) => [...queryKeys.audit.all, 'list', query] as const,
-    detail: (id: string) => [...queryKeys.audit.all, 'detail', id] as const,
-  },
-
   /**
    * The five office queues. One domain key, because one decision usually moves
    * more than one queue — approving a charge on a PO-required account empties a

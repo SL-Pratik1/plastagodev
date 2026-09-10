@@ -5,7 +5,6 @@ import type {
   AccountListItem,
   AccountOnboarding,
   AllocationBoard,
-  AuditEntry,
   AwaitingPoItem,
   Certificate,
   ChargeApprovalDetail,
@@ -583,17 +582,6 @@ export interface QueueService {
   ) => Promise<{ accountId: string; customerCode: string }>;
 }
 
-/**
- * M1.6 — the audit log.
- *
- * Read-only by design: the collection is append-only, fed by Change Streams. An
- * audit log with a write method is not an audit log.
- */
-export interface AuditService {
-  list: (query: ListQuery) => Promise<ListResult<AuditEntry>>;
-  get: (id: string) => Promise<AuditEntry>;
-}
-
 export type { DriverRunService } from './driver-run.types.js';
 
 /**
@@ -638,7 +626,6 @@ export interface Services {
   readonly notifications: NotificationService;
   readonly settings: SettingsService;
   readonly extractor: ExtractorService;
-  readonly audit: AuditService;
   readonly queues: QueueService;
   readonly portal: CustomerPortalService;
   /**

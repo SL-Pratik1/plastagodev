@@ -1,7 +1,6 @@
 import { Suspense, type ReactNode } from 'react';
 import { createBrowserRouter } from 'react-router';
 import {
-  AuditLogPage,
   CustomerCreatePage,
   CustomerDetailPage,
   CustomersPage,
@@ -20,7 +19,6 @@ import {
   DriverRunSheetPage,
   DriversPage,
   DriverTipOffPage,
-  FoundationPage,
   InvoiceDetailPage,
   InvoicesPage,
   JobCreatePage,
@@ -259,16 +257,6 @@ export const router = createBrowserRouter([
                   {
                     element: <RequireCapability capability="settings:manage" />,
                     children: [{ path: 'settings', element: load(<SettingsPage />) }],
-                  },
-
-                  // System
-                  {
-                    element: <RequireCapability capability="audit:read" />,
-                    children: [{ path: 'audit-log', element: load(<AuditLogPage />) }],
-                  },
-                  {
-                    element: <RequireCapability capability="foundation:view" />,
-                    children: [{ path: 'foundation', element: load(<FoundationPage />) }],
                   },
                 ],
               },

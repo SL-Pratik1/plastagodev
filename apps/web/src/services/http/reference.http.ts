@@ -1,7 +1,6 @@
 import type { ApiClient } from '@plastago/api-client';
 import {
   API_PREFIX,
-  AuditEntrySchema,
   DashboardSummarySchema,
   DriverListItemSchema,
   DriverProfileSchema,
@@ -20,7 +19,6 @@ import {
 } from '@plastago/shared';
 import * as z from 'zod';
 import type {
-  AuditService,
   DashboardService,
   DriverService,
   ListQuery,
@@ -34,7 +32,7 @@ import { listParams, pageOf } from './list-params.js';
 import { viaService } from './to-service-error.js';
 
 /**
- * The small, mostly-read domains: lookups, users, dashboard, audit,
+ * The small, mostly-read domains: lookups, users, dashboard,
  * notifications, settings and the driver roster.
  *
  * Grouped into one file because each is three or four passthrough methods and a
@@ -163,24 +161,6 @@ export function createHttpDashboardService(api: ApiClient): DashboardService {
       viaService(() =>
         api.request(`${API_PREFIX}/dashboard`, { schema: DashboardSummarySchema }),
       ),
-  };
-}
-
-/* ── M1.6 — the audit log ────────────────────────────────────────────────── */
-
-export function createHttpAuditService(api: ApiClient): AuditService {
-  const base = `${API_PREFIX}/audit`;
-
-  return {
-    // Read-only, and there is nothing else to implement: the collection is
-    // append-only and the API exposes no write route at all.
-    list: (query: ListQuery) =>
-      viaService(() =>
-        api.request(base, { searchParams: listParams(query), schema: pageOf(AuditEntrySchema) }),
-      ),
-
-    get: (id: string) =>
-      viaService(() => api.request(`${base}/${id}`, { schema: AuditEntrySchema })),
   };
 }
 

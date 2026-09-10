@@ -137,14 +137,6 @@ export const SettingsPage = lazy(async () => ({
   default: (await import('@/pages/admin/settings')).AdminSettingsPage,
 }));
 
-export const AuditLogPage = lazy(async () => ({
-  default: (await import('@/pages/admin/audit-log')).AdminAuditLogPage,
-}));
-
-export const FoundationPage = lazy(async () => ({
-  default: (await import('@/pages/admin/foundation')).AdminFoundationPage,
-}));
-
 // ── Customer portal (M5 Part 1) ─────────────────────────────────────────────
 export const PortalDashboardPage = lazy(async () => ({
   default: (await import('@/pages/portal/dashboard')).PortalDashboardPage,

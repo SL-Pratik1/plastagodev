@@ -1,6 +1,5 @@
 import type { Role, UserDraft } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { makeFakeAuditRepository } from './helpers/fake-audit.js';
 import {
   clearOutbound,
   makeFakeNotificationRepository,
@@ -13,7 +12,7 @@ import {
 /**
  * User administration (M1.5).
  *
- * ── What is actually under test ───────────────────────────────────────────
+ * ── What is actually under test ────────────────────────────────────
  * Three rules the database cannot express.
  *
  * The one that matters most is the LAST-ADMIN guard: suspending or demoting the
@@ -34,16 +33,6 @@ let stored: Record<string, unknown> | null = null;
 let identifierTaken = false;
 let otherActiveAdmins = 1;
 let accountFound = true;
-
-/*
- * M1.6 — this suite's service records to the audit log. Faked like every other
- * repository: the real one would buffer a write against a MongoDB that is not
- * there and time out. See `helpers/fake-audit.ts`.
- */
-vi.mock('../src/domains/audit/audit.repository.js', () => ({
-  auditRepository: makeFakeAuditRepository(),
-}));
-
 
 vi.mock('../src/domains/users/user.repository.js', () => ({
   userRepository: {
@@ -76,7 +65,8 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
 
 /*
  * M1.5 — creating a user now SENDS them their way in, and the send is logged.
- * The log is faked for the same reason as the audit repository above; the real
+ * The log is faked like every other repository — the real one would buffer a
+ * write against a MongoDB that is not there and time out. The real
  * `outboundService` is left in place, because which channel it picks is part of
  * what this suite is testing.
  */

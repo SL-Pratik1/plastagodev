@@ -1,4 +1,4 @@
-import mongoose from 'mongoose';
+import type mongoose from 'mongoose';
 import { connectMongo, disconnectMongo, isMongoConnected } from '../db/mongo.js';
 import { UserModel } from '../domains/auth/auth.model.js';
 import { RunModel } from '../domains/dispatch/run.model.js';

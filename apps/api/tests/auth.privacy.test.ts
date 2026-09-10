@@ -1,20 +1,19 @@
 import { OtpChallengeSchema } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeAuth, createFakeRepository, VALID_CODE } from './helpers/fake-auth.js';
-import { makeFakeAuditRepository } from './helpers/fake-audit.js';
 
 /**
  * Production sign-in privacy: the response must not reveal whether an account
  * exists (§9).
  *
- * ── Why this is a separate file ─────────────────────────────────────────────
+ * ── Why this is a separate file ─────────────────────────────────────
  * `revealUnknownIdentifier` is resolved once, at module load, from NODE_ENV.
  * That is the right shape for the application — a security posture should not
  * be a runtime toggle something can flip mid-process — but it means the two
  * behaviours cannot be exercised in one file. This file mocks the environment
  * as production; `auth.service.test.ts` covers the development behaviour.
  *
- * ── What is being protected ─────────────────────────────────────────────────
+ * ── What is being protected ─────────────────────────────────────────
  * The customer portal's sign-in form is on the public internet. "Does this
  * address have an account with PlastaGo" is the question an attacker answers
  * first, because a confirmed list of a builder's staff addresses is what makes
@@ -24,15 +23,6 @@ import { makeFakeAuditRepository } from './helpers/fake-audit.js';
 
 let repo: ReturnType<typeof createFakeRepository>;
 let auth: ReturnType<typeof createFakeAuth>;
-
-/*
- * M1.6 — this suite's service records to the audit log. Faked like every other
- * repository: the real one would buffer a write against a MongoDB that is not
- * there and time out. See `helpers/fake-audit.ts`.
- */
-vi.mock('../src/domains/audit/audit.repository.js', () => ({
-  auditRepository: makeFakeAuditRepository(),
-}));
 
 /*
  * §9 — every sign-in attempt is recorded, so the auth service reaches the users
@@ -51,7 +41,6 @@ vi.mock('../src/domains/users/user.repository.js', () => ({
 /** Sign-in rows the service wrote. Asserted where the trail is under test. */
 const signInsRecorded: string[] = [];
 
-
 vi.mock('../src/config/env.js', () => ({
   env: {
     NODE_ENV: 'production',
@@ -68,6 +57,8 @@ vi.mock('../src/config/env.js', () => ({
   requireDatabase: true,
   // The whole point of this file.
   revealUnknownIdentifier: false,
+  // Production, so the code is never handed back — same as the real guard.
+  revealOtpCode: false,
 }));
 
 vi.mock('../src/domains/auth/auth.repository.js', () => ({

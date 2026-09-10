@@ -146,10 +146,19 @@ export const dashboardRepository = {
       ]),
       /*
        * Overdue is computed from the DUE DATE, not read off the status. Nothing
-       * flips a row to `overdue` at midnight, so a status-based count would
-       * report zero until somebody ran a sweep.
+       * flips a row to `overdue` at midnight, so a status-based count alone
+       * would report zero until somebody ran a sweep.
+       *
+       * ⚠️ But it counts an explicit `overdue` too, rather than only deriving.
+       * The status is part of `INVOICE_STATUSES`, the invoices screen offers it
+       * as a filter and the portal counts it as outstanding — so a row can
+       * genuinely carry it. Deriving alone made this tile read zero while the
+       * list beside it showed seven overdue invoices, and a dashboard that
+       * disagrees with the screen it links to is worse than no dashboard.
        */
-      InvoiceModel.countDocuments({ status: 'sent', dueOn: { $lt: today } }),
+      InvoiceModel.countDocuments({
+        $or: [{ status: 'overdue' }, { status: 'sent', dueOn: { $lt: today } }],
+      }),
     ]);
 
     return {

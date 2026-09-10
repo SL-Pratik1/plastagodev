@@ -12,7 +12,6 @@ import type {
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
-import { auditService } from '../audit/audit.service.js';
 import { pricingService } from '../settings/pricing.service.js';
 import { queueRepository, type QueueListQuery } from './queue.repository.js';
 
@@ -185,41 +184,6 @@ export const queueService = {
         'None of those charges could be decided — they may already have been approved or rejected',
       );
     }
-
-    /*
-     * M1.6 — one entry PER CHARGE, not one per batch.
-     *
-     * The office approves a screenful at a time, so a single "approved 9
-     * charges" row would be the easiest thing in the world to write and useless
-     * to read: the question that gets asked later is always about one charge on
-     * one job, and it has to be findable by that job's number. The amount is
-     * carried because a charge decision is a money decision.
-     */
-    await Promise.all(
-      result.decided.map((charge) =>
-        auditService.record({
-          actorId: caller.userId,
-          actorName: caller.name,
-          actorRole: caller.roles[0] ?? null,
-          action: decision.decision === 'approve' ? 'approved' : 'rejected',
-          entity: 'charge',
-          entityId: charge.id,
-          entityLabel: charge.description,
-          summary:
-            `${charge.description} ($${charge.amountExGst}) ` +
-            `${decision.decision === 'approve' ? 'approved' : 'rejected'}` +
-            (note ? ` — ${note}` : ''),
-          changes: [
-            {
-              field: 'approvalState',
-              from: 'pending',
-              to: decision.decision === 'approve' ? 'approved' : 'rejected',
-            },
-          ],
-          href: `/admin/jobs/${charge.jobId}?tab=charges`,
-        }),
-      ),
-    );
 
     log.info(
       {

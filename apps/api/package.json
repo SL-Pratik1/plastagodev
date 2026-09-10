@@ -21,7 +21,10 @@
     "seed:settings": "tsx src/scripts/seed-settings.ts",
     "seed:places": "tsx src/scripts/seed-places.ts",
     "seed:driver-demo": "tsx src/scripts/seed-driver-demo.ts",
-    "setup:extractor": "tsx src/scripts/setup-extractor.ts"
+    "setup:extractor": "tsx src/scripts/setup-extractor.ts",
+    "seed:reset": "tsx src/scripts/seed-reset.ts",
+    "seed:demo": "tsx src/scripts/seed-demo.ts",
+    "seed:all": "npm run seed:reset && npm run seed:auth && npm run seed:settings && npm run seed:places && npm run seed:demo"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",

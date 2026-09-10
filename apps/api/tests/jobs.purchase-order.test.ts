@@ -8,7 +8,6 @@ import type { JobDraft, Role } from '@plastago/shared';
 import type { BookablePurchaseOrder } from '../src/domains/queues/purchase-order.repository.js';
 import { createFakeJobRepository } from './helpers/fake-jobs.js';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
-import { makeFakeAuditRepository } from './helpers/fake-audit.js';
 
 /**
  * M2.12 — booking a job against a confirmed purchase order.
@@ -91,10 +90,6 @@ let taken = new Map<string, number>();
 
 /** What `pricingService.quote` was asked for. The assertion that matters most. */
 let quotedFor: Array<{ expectedAreaM2: number | null; bagCount: number }> = [];
-
-vi.mock('../src/domains/audit/audit.repository.js', () => ({
-  auditRepository: makeFakeAuditRepository(),
-}));
 
 vi.mock('../src/domains/jobs/job.repository.js', () => ({
   get jobRepository() {

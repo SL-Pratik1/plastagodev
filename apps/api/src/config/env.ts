@@ -161,6 +161,24 @@ const EnvSchema = z
       .default('true')
       .transform((value) => value === 'true'),
 
+    /**
+     * ⚠️ SECURITY. Returns the sign-in code in the `POST /auth/otp/request`
+     * response body.
+     *
+     * For a shared environment running `MAIL_PROVIDER=stub` and
+     * `SMS_PROVIDER=stub`, where the code only ever reaches the server log: a
+     * client developer building against it otherwise cannot sign in without
+     * dashboard access to somebody else's hosting account.
+     *
+     * While it is on the code is NOT a second factor — anyone who can name an
+     * identifier can sign in as that person. Defaults OFF, and is forced OFF in
+     * production regardless of this value; see `revealOtpCode` below.
+     */
+    AUTH_REVEAL_OTP_CODE: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+
     // ─── Outbound channels (I5 email · I2 SMS) ────────────────────────────────
 
     /**
@@ -437,5 +455,16 @@ export const requireDatabase = isProduction;
  * question an attacker enumerates before a phishing run.
  */
 export const revealUnknownIdentifier = !isProduction && env.AUTH_REVEAL_UNKNOWN_IDENTIFIER;
+
+/**
+ * Whether to hand the sign-in code back in the response body.
+ *
+ * Production never does, whatever the variable says. This one is deliberately
+ * belt-and-braces: unlike the flag above, a mistake here does not merely leak
+ * whether an account exists — it hands out a working credential for it. The
+ * `!isProduction` guard means the variable cannot be the only thing standing
+ * between a live deployment and an unauthenticated sign-in.
+ */
+export const revealOtpCode = !isProduction && env.AUTH_REVEAL_OTP_CODE;
 
 export type Env = typeof env;

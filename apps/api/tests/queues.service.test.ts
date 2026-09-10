@@ -1,11 +1,10 @@
 import type { Role } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { makeFakeAuditRepository } from './helpers/fake-audit.js';
 
 /**
  * The office's worklists (M2.6, M2.7, M7.3).
  *
- * ── What is actually under test ───────────────────────────────────────────
+ * ── What is actually under test ────────────────────────────────────
  * The rules that stop a queue lying. Two people deciding the same row must not
  * both win; a rejection must say why, because the driver is told; and the futile
  * decision must never touch the money — Matt was explicit that *either way the
@@ -38,16 +37,6 @@ let chasesChanged = 1;
 let feeLookupFails = false;
 
 let listedFee: string | null = null;
-
-/*
- * M1.6 — this suite's service records to the audit log. Faked like every other
- * repository: the real one would buffer a write against a MongoDB that is not
- * there and time out. See `helpers/fake-audit.ts`.
- */
-vi.mock('../src/domains/audit/audit.repository.js', () => ({
-  auditRepository: makeFakeAuditRepository(),
-}));
-
 
 vi.mock('../src/domains/queues/queue.repository.js', () => ({
   queueRepository: {
@@ -83,7 +72,7 @@ vi.mock('../src/domains/queues/queue.repository.js', () => ({
       return Promise.resolve({
         changed: chargesChanged,
         jobIds: ['job1'],
-        // M1.6 — the rows the service audits, one entry per charge.
+        // The charges the repository reports as decided.
         decided: Array.from({ length: chargesChanged }, (_unused, index) => ({
           id: `65000000000000000000000${String(index + 1)}`,
           jobId: 'job1',

@@ -51,7 +51,13 @@ const driverRosterSchema = new Schema(
     dailyJobCapacity: { type: Number, required: true, min: 1, default: 8 },
 
     startedOn: { type: String, default: null },
-    notes: { type: String, required: true, default: '', trim: true },
+    /**
+     * ⚠️ `required: false`, not `true` — most rosters have no note, and
+     * Mongoose's `required` validator counts `''` as missing, so
+     * required-with-an-empty-default rejects the exact value it defaults to.
+     * See the note at the top of `jobs/job.model.ts`.
+     */
+    notes: { type: String, required: false, default: '', trim: true },
   },
   { collection: DRIVER_ROSTER_COLLECTION, timestamps: true, versionKey: false },
 );

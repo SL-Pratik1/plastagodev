@@ -9,13 +9,13 @@ import {
   type Session,
 } from '@plastago/shared';
 import { getAuth } from '../../auth/better-auth.js';
+import { takeOtpCode } from '../../auth/otp-peek.js';
 import { env, revealUnknownIdentifier } from '../../config/env.js';
 import { AppError, isAppError } from '../../lib/app-error.js';
 import { authError } from '../../lib/auth-error.js';
 import { logger } from '../../lib/logger.js';
 import { maskIdentifier } from '../../lib/mask-identifier.js';
 import { userRepository } from '../users/user.repository.js';
-import { auditService } from '../audit/audit.service.js';
 import { authRepository, type ChallengeRecord, type UserRecord } from './auth.repository.js';
 
 const log = logger.child({ module: 'auth-service' });
@@ -100,7 +100,7 @@ export const authService = {
     });
 
     log.info({ userId: user.id, channel, challengeId: challenge.challengeId }, 'code sent');
-    return toOtpChallenge(challenge);
+    return toOtpChallenge(challenge, takeOtpCode(normalised));
   },
 
   /** POST /auth/otp/resend */
@@ -129,11 +129,15 @@ export const authService = {
 
     log.info({ challengeId, channel: existing.channel }, 'code resent');
 
-    return toOtpChallenge({
-      ...existing,
-      ...window,
-      attemptsRemaining: env.OTP_MAX_ATTEMPTS,
-    });
+    return toOtpChallenge(
+      {
+        ...existing,
+        ...window,
+        attemptsRemaining: env.OTP_MAX_ATTEMPTS,
+      },
+      // A decoy never sent anything, so there is nothing to reveal.
+      existing.decoy ? null : takeOtpCode(existing.identifier),
+    );
   },
 
   /** POST /auth/otp/verify */
@@ -185,7 +189,7 @@ export const authService = {
 
     const signedInAt = new Date();
     await authRepository.markSignedIn(user.id, signedInAt);
-    await noteSignIn(challenge, 'success', ctx, user);
+    await noteSignIn(challenge, 'success', ctx);
 
     log.info({ userId: user.id, role: user.role, channel: challenge.channel }, 'signed in');
 
@@ -249,30 +253,22 @@ async function resolveUser(normalised: string, channel: AuthChannel): Promise<Us
 }
 
 /**
- * Records one sign-in attempt, in both places it belongs (§9 — "an audit of all
- * logins").
- *
- * ── Why two writes and not one ────────────────────────────────────────────
- * `usersignins` is the per-user list on the Users screen — "here are Priya's
- * last 20 sign-ins", read while looking AT Priya. The audit log is the
- * chronological cross-cutting record — "what happened around 4pm on Tuesday",
- * read without knowing who to look at yet. Same event, two genuinely different
- * questions, and answering the second from the first would mean scanning every
- * user's list.
+ * Records one sign-in attempt into `usersignins` — the per-user list on the
+ * Users screen, "here are Priya's last 20 sign-ins", read while looking AT
+ * Priya.
  *
  * ⚠️ FAILURES ARE RECORDED, and that is the point. A successful sign-in is
  * routine; six failed ones against a director's address at 2am is the thing
- * somebody needs to be able to find. `identifierMasked` keeps the log useful
+ * somebody needs to be able to find. `identifierMasked` keeps the list useful
  * without turning it into a list of everybody's email addresses.
  *
- * Never throws: a sign-in must not fail because its own audit row could not be
- * written.
+ * Never throws: a sign-in must not fail because its own history row could not
+ * be written.
  */
 async function noteSignIn(
   challenge: ChallengeRecord,
   outcome: 'success' | 'failed-code' | 'expired-code' | 'locked-out',
   ctx: RequestContext,
-  user?: UserRecord,
 ): Promise<void> {
   const device = ctx.headers.get('user-agent') ?? '';
   const masked = mask(challenge.identifier, challenge.channel);
@@ -288,37 +284,7 @@ async function noteSignIn(
   } catch (error) {
     log.error({ err: error, outcome }, 'could not record the sign-in attempt');
   }
-
-  await auditService.record({
-    /*
-     * The user id where there is one — a failed attempt against a real account
-     * still belongs on that account's history. A decoy has none, and inventing
-     * one would attach the attempt to somebody who does not exist.
-     */
-    actorId: challenge.userId,
-    // The masked identifier is the only name a failed attempt has.
-    actorName: user?.name ?? masked,
-    actorRole: user?.role ?? null,
-    action: outcome === 'success' ? 'signed-in' : 'sign-in-failed',
-    entity: 'session',
-    // A session is not a row anybody can link to; the user is.
-    entityId: challenge.userId,
-    entityLabel: user?.name ?? masked,
-    summary:
-      outcome === 'success'
-        ? `Signed in with ${challenge.channel === 'sms' ? 'an SMS' : 'an email'} code`
-        : `Sign-in failed — ${FAILURE_REASONS[outcome]}`,
-    changes: [],
-    href: challenge.userId ? `/admin/users/${challenge.userId}?tab=sign-ins` : '',
-    device: device || null,
-  });
 }
-
-const FAILURE_REASONS: Record<string, string> = {
-  'failed-code': 'wrong code',
-  'expired-code': 'code expired',
-  'locked-out': 'too many attempts',
-};
 
 /**
  * Moved to `lib/mask-identifier.ts` — the outbound message log masks recipients
@@ -346,14 +312,22 @@ function purgeFrom(now: Date): Date {
   return new Date(now.getTime() + env.OTP_TTL_SECONDS * 1000 + 60 * 60 * 1000);
 }
 
-function toOtpChallenge(challenge: {
-  challengeId: string;
-  channel: AuthChannel;
-  sentTo: string;
-  expiresAt: Date;
-  resendAvailableAt: Date;
-  attemptsRemaining: number;
-}): OtpChallenge {
+function toOtpChallenge(
+  challenge: {
+    challengeId: string;
+    channel: AuthChannel;
+    sentTo: string;
+    expiresAt: Date;
+    resendAvailableAt: Date;
+    attemptsRemaining: number;
+  },
+  /**
+   * Passed only on the two paths that actually sent a code. A decoy has no code
+   * to reveal, and must not be distinguishable from a real send by the presence
+   * or absence of this field — so it is omitted on both.
+   */
+  devCode: string | null = null,
+): OtpChallenge {
   return {
     challengeId: challenge.challengeId,
     channel: challenge.channel,
@@ -361,6 +335,7 @@ function toOtpChallenge(challenge: {
     expiresAt: challenge.expiresAt.toISOString(),
     resendAvailableAt: challenge.resendAvailableAt.toISOString(),
     attemptsRemaining: challenge.attemptsRemaining,
+    ...(devCode === null ? {} : { devCode }),
   };
 }
 

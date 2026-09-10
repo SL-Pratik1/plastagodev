@@ -134,6 +134,19 @@ export const OtpChallengeSchema = z
     expiresAt: IsoDateTimeSchema,
     resendAvailableAt: IsoDateTimeSchema,
     attemptsRemaining: z.number().int().nonnegative(),
+    /**
+     * ⚠️ NON-PRODUCTION ONLY. The code itself, present only when the server sets
+     * `AUTH_REVEAL_OTP_CODE=true`, which it cannot do in production.
+     *
+     * It exists so a client developer can sign in against a shared environment
+     * whose stub mail and SMS providers only ever write the code to the server
+     * log. Treat it as absent: a client that requires it will stop working the
+     * moment it points at a real deployment.
+     */
+    devCode: z
+      .string()
+      .nullish()
+      .describe('The sign-in code. Non-production environments only; never present in production.'),
   })
   .meta({ id: 'OtpChallenge' });
 

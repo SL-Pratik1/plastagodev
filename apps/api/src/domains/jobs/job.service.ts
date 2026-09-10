@@ -12,7 +12,6 @@ import type {
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { withTransaction } from '../../lib/transaction.js';
-import { auditService } from '../audit/audit.service.js';
 import { jobNotices } from '../notifications/job-notices.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { placeService } from '../places/place.service.js';
@@ -310,52 +309,9 @@ export const jobService = {
     );
 
     /*
-     * M1.6. A creation has no before-values, so `changes` records the fields a
-     * later dispute is actually about — who it is for, and when it was promised.
-     */
-    await auditService.record({
-      actorId: caller.userId,
-      actorName: caller.name,
-      actorRole: caller.roles[0] ?? null,
-      action: 'created',
-      entity: 'job',
-      entityId: created.id,
-      entityLabel: `Job #${String(jobNumber)}`,
-      summary: `Job booked — ${account.name}, ${created.siteName}`,
-      changes: [
-        { field: 'accountName', from: null, to: account.name },
-        { field: 'readyDate', from: null, to: created.readyDate },
-        { field: 'targetDate', from: null, to: created.targetDate },
-      ],
-      href: `/admin/jobs/${created.id}`,
-    });
-
-    /*
-     * M1.6. A creation has no before-values, so `changes` records the fields a
-     * later dispute is actually about — who it is for, where, and when it was
-     * promised.
-     */
-    await auditService.record({
-      actorId: caller.userId,
-      actorName: caller.name,
-      actorRole: caller.roles[0] ?? null,
-      action: 'created',
-      entity: 'job',
-      entityId: created.id,
-      entityLabel: `Job #${String(jobNumber)}`,
-      summary: `Job booked — ${account.name}, ${created.siteName}`,
-      changes: [
-        { field: 'accountName', from: null, to: account.name },
-        { field: 'readyDate', from: null, to: created.readyDate },
-        { field: 'targetDate', from: null, to: created.targetDate },
-      ],
-      href: `/admin/jobs/${created.id}`,
-    });
-
-    /*
      * M8.1 — the site contact is told it is coming.
      *
-     * ⚠️ AFTER the transaction and the audit row, and unable to throw. The
+     * ⚠️ AFTER the transaction, and unable to throw. The
      * booking is the durable act; a message is not worth losing it for. The job
      * is re-read rather than assembled from `created` because a notice needs
      * the site contact, which the grid row does not carry.
@@ -423,48 +379,6 @@ export const jobService = {
       detail: note.trim() || null,
     });
 
-    /*
-     * M1.6. Recorded as `status-changed` rather than `deleted`: the job is still
-     * there, and a log implying it was destroyed would send somebody looking for
-     * a row that was never removed.
-     */
-    await auditService.record({
-      actorId: caller.userId,
-      actorName: caller.name,
-      actorRole: caller.roles[0] ?? null,
-      action: 'status-changed',
-      entity: 'job',
-      entityId: id,
-      entityLabel: `Job #${String(job.jobNumber)}`,
-      summary: `Job cancelled — ${reason}`,
-      changes: [
-        { field: 'status', from: job.status, to: 'cancelled' },
-        { field: 'cancellationReason', from: null, to: reason },
-      ],
-      href: `/admin/jobs/${id}?tab=timeline`,
-    });
-
-    /*
-     * M1.6. Recorded as `status-changed` rather than `deleted`: the job is
-     * still there, and a log implying it was destroyed would send somebody
-     * looking for a row that was never removed.
-     */
-    await auditService.record({
-      actorId: caller.userId,
-      actorName: caller.name,
-      actorRole: caller.roles[0] ?? null,
-      action: 'status-changed',
-      entity: 'job',
-      entityId: id,
-      entityLabel: `Job #${String(job.jobNumber)}`,
-      summary: `Job cancelled — ${reason}`,
-      changes: [
-        { field: 'status', from: job.status, to: 'cancelled' },
-        { field: 'cancellationReason', from: null, to: reason },
-      ],
-      href: `/admin/jobs/${id}?tab=timeline`,
-    });
-
     log.info({ jobId: id, jobNumber: job.jobNumber, reason }, 'job cancelled');
   },
 
@@ -492,27 +406,6 @@ export const jobService = {
       actor: caller.name,
       status: null,
       detail: `Moved to ${readyDate}`,
-    });
-
-    /*
-     * M1.6, and the example the scope names by number: *"who changed job
-     * 61402's ready date from 12 Aug to 19 Aug?"* — currently unanswerable.
-     * This is the row that answers it.
-     *
-     * `targetDate` is recorded alongside because it moved too, derived from the
-     * SLA. A log showing only the date somebody typed, while the date the
-     * customer is actually promised silently shifted with it, tells half the
-     * story.
-     */
-    await auditService.recordUpdate({
-      actor: caller,
-      entity: 'job',
-      entityId: id,
-      entityLabel: `Job #${String(job.jobNumber)}`,
-      summary: `Ready date changed — ${previous.accountName}`,
-      before: { readyDate: previous.readyDate, targetDate: previous.targetDate },
-      after: { readyDate, targetDate },
-      href: `/admin/jobs/${id}?tab=timeline`,
     });
 
     log.info({ jobId: id, jobNumber: job.jobNumber, readyDate, targetDate }, 'job rescheduled');

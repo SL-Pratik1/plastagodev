@@ -179,10 +179,6 @@ export const CAPABILITIES = [
   'extractor:use',
   'notifications:manage',
   'settings:manage',
-  // System
-  'audit:read',
-  /** The design-system showcase. Development aid, not a business screen. */
-  'foundation:view',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -270,7 +266,6 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'users:manage-customers',
     'drivers:manage',
     'vehicles:manage',
-    'audit:read',
     'extractor:use',
   ],
 
@@ -488,14 +483,6 @@ export const CAPABILITY_GROUPS: ReadonlyArray<{
       { capability: 'integrations:manage', label: 'Integrations' },
       { capability: 'notifications:manage', label: 'Notification rules' },
       { capability: 'settings:manage', label: 'Settings' },
-    ],
-  },
-  {
-    title: 'System',
-    note: 'Read-only oversight, plus the design-system showcase.',
-    capabilities: [
-      { capability: 'audit:read', label: 'Audit log' },
-      { capability: 'foundation:view', label: 'Design foundation' },
     ],
   },
   {
