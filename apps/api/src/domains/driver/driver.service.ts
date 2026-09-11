@@ -967,7 +967,14 @@ function toRunStop(row: DriverStopRow): RunStop {
     // read the job directly — not to a driver looking at a stop card.
     expectedAreaM2: row.expectedAreaM2 ?? 0,
     bagCount: row.bagCount,
-    collectedBagCount: row.collectedBagCount,
+    /*
+     * `?? null` because a job booked before per-bag capture shipped has no such
+     * field at all, and the contract declares this one nullable-but-present. An
+     * absent key is not the same as a null to a generated client: the phone's
+     * model requires it, so omitting it fails to parse the whole stop rather
+     * than reading as "the driver has not counted yet".
+     */
+    collectedBagCount: row.collectedBagCount ?? null,
     loadType: row.loadType,
     capturesWeight: row.capturesWeight,
     poNumber: row.poNumber,
