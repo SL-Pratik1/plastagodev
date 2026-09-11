@@ -83,6 +83,34 @@ export function normaliseMobile(value: string): string {
   return digits;
 }
 
+/**
+ * The same mobile in E.164, for a vendor that will not accept anything else.
+ *
+ * ── Why this is separate from `normaliseMobile` ───────────────────────────
+ * They answer different questions and both answers are needed. `normaliseMobile`
+ * produces the STORAGE form — `0412345678` — which is what a user typed, what
+ * an operator recognises on screen, and what the unique index on the users
+ * collection is built from. Changing it to E.164 would silently fail to match
+ * every mobile already in the database.
+ *
+ * E.164 is the WIRE form, required by Twilio and rejected-with-21211 without
+ * it. Keeping the two apart means the display and the lookup never change
+ * shape just because a messaging vendor did.
+ *
+ * ⚠️ Australia only, which is the whole customer base. A number that does not
+ * look like an Australian mobile is returned untouched rather than guessed at:
+ * a mangled international number fails at the vendor with a clear error, while
+ * a wrongly-prefixed one is delivered to a stranger.
+ */
+export function toE164Mobile(value: string): string {
+  const local = normaliseMobile(value);
+  if (!AU_MOBILE.test(local)) return local;
+
+  // `normaliseMobile` has already reduced every accepted form to `04xxxxxxxx`,
+  // so dropping the trunk zero is all that is left.
+  return `+61${local.slice(1)}`;
+}
+
 export function looksLikeEmail(value: string): boolean {
   return value.includes('@');
 }

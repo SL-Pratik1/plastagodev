@@ -438,6 +438,369 @@ describe('weights (M4.3)', () => {
   });
 });
 
+/*
+ * Matt, 06:34: *"bag one, my way 320, bag 2, my way 290, bag 3, you know what I
+ * mean? The each bag[']s weight needs to be recorded."*
+ *
+ * The total stays the figure that gets priced and printed — these tests pin
+ * down that it is DERIVED from the readings rather than typed a second time.
+ */
+describe('a reading per bag (M4.3, Matt 06:34)', () => {
+  it('stores every reading and derives the total from them', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, craneAvailable: true });
+
+    await driverService.captureWeights(
+      stop.id,
+      {
+        ...envelope(),
+        bagCount: 4,
+        loadType: 'bagged',
+        bagWeights: [320, 290, 310, 320],
+        craneScaleKg: null,
+      },
+      CALLER,
+    );
+
+    expect(driver.stop(stop.id)?.bagWeights).toEqual([320, 290, 310, 320]);
+    // 320 + 290 + 310 + 320. The client sent no total at all.
+    expect(driver.stop(stop.id)?.recoveredWeightKg).toBe(1240);
+    expect(driver.stop(stop.id)?.recoveredWeightBasis).toBe('actual');
+  });
+
+  /*
+   * A typed total is a second source of truth for one quantity, and it is the
+   * copy that reaches the invoice. Where both arrive, the bags win.
+   */
+  it('ignores a client-sent total that disagrees with the bags', async () => {
+    const stop = driver.addStop({ jobNumber: 61302, craneAvailable: true });
+
+    await driverService.captureWeights(
+      stop.id,
+      {
+        ...envelope(),
+        bagCount: 2,
+        loadType: 'bagged',
+        bagWeights: [400, 350],
+        craneScaleKg: 9999,
+      },
+      CALLER,
+    );
+
+    expect(driver.stop(stop.id)?.recoveredWeightKg).toBe(750);
+  });
+
+  /*
+   * Half-kilo readings are normal on a crane scale. Summing them as floats
+   * yields 1239.9999999999998, and that is the number a builder would read.
+   */
+  it('rounds the derived total to the kilogram', async () => {
+    const stop = driver.addStop({ jobNumber: 61303, craneAvailable: true });
+
+    await driverService.captureWeights(
+      stop.id,
+      {
+        ...envelope(),
+        bagCount: 3,
+        loadType: 'bagged',
+        bagWeights: [310.1, 310.1, 310.1],
+        craneScaleKg: null,
+      },
+      CALLER,
+    );
+
+    expect(driver.stop(stop.id)?.recoveredWeightKg).toBe(930);
+  });
+
+  it('refuses a breakdown that does not account for every bag', async () => {
+    const stop = driver.addStop({ jobNumber: 61304, craneAvailable: true });
+
+    await expect(
+      driverService.captureWeights(
+        stop.id,
+        {
+          ...envelope(),
+          bagCount: 4,
+          loadType: 'bagged',
+          bagWeights: [320, 290],
+          craneScaleKg: null,
+        },
+        CALLER,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('refuses per-bag readings on a hand load', async () => {
+    const stop = driver.addStop({ jobNumber: 61305 });
+
+    await expect(
+      driverService.captureWeights(
+        stop.id,
+        {
+          ...envelope(),
+          bagCount: 0,
+          loadType: 'hand-load',
+          bagWeights: [120],
+          craneScaleKg: null,
+        },
+        CALLER,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('refuses per-bag readings for an account that records square metres only', async () => {
+    const stop = driver.addStop({ jobNumber: 61306, capturesWeight: false, craneAvailable: true });
+
+    await expect(
+      driverService.captureWeights(
+        stop.id,
+        {
+          ...envelope(),
+          bagCount: 1,
+          loadType: 'bagged',
+          bagWeights: [400],
+          craneScaleKg: null,
+        },
+        CALLER,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('refuses a breakdown heavier than the truck can carry', async () => {
+    const stop = driver.addStop({ jobNumber: 61307, craneAvailable: true });
+
+    await expect(
+      driverService.captureWeights(
+        stop.id,
+        {
+          ...envelope(),
+          bagCount: 2,
+          loadType: 'bagged',
+          bagWeights: [15000, 15000],
+          craneScaleKg: null,
+        },
+        CALLER,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  /*
+   * ⚠️ The regression that matters on deploy day. A phone that queued a pickup
+   * before per-bag capture shipped replays a payload with a total and NO
+   * `bagWeights` key. Rejecting it would discard a collection that happened.
+   */
+  it('still accepts a legacy payload that carries only a total', async () => {
+    const stop = driver.addStop({ jobNumber: 61308, craneAvailable: true });
+
+    await driverService.captureWeights(
+      stop.id,
+      { ...envelope(), bagCount: 4, loadType: 'bagged', craneScaleKg: 820 },
+      CALLER,
+    );
+
+    expect(driver.stop(stop.id)?.recoveredWeightKg).toBe(820);
+    expect(driver.stop(stop.id)?.recoveredWeightBasis).toBe('actual');
+    // No breakdown exists for it, and none is invented.
+    expect(driver.stop(stop.id)?.bagWeights).toEqual([]);
+  });
+
+  /* The office has to be able to see WHICH bag was heavy, not just the total. */
+  it('writes the individual readings onto the job timeline', async () => {
+    const stop = driver.addStop({ jobNumber: 61309, craneAvailable: true });
+
+    await driverService.captureWeights(
+      stop.id,
+      {
+        ...envelope(),
+        bagCount: 2,
+        loadType: 'bagged',
+        bagWeights: [320, 290],
+        craneScaleKg: null,
+      },
+      CALLER,
+    );
+
+    const entry = driver.events.find((event) => event.label === 'Weights captured');
+    expect(entry?.detail).toBe('2 bags, 610 kg on the crane scale (320, 290 kg)');
+  });
+});
+
+/*
+ * Matt, 07:37: *"if the purchase order's only got two bags on it and there's
+ * three bags on a site… that extra bag needs to be on a separate invoice like
+ * for an overage."* And 09:02, on who does the work: *"the driver doesn't
+ * really know, he's just going to tell us what's on site. The system has to
+ * sort of understand that this job's got an extra bag on it."*
+ *
+ * So every test here drives the ordinary weights screen and then asks what the
+ * OFFICE ended up with. None of them tells the driver anything about a PO.
+ */
+describe('bags beyond the purchase order (M6.5, Matt 07:37)', () => {
+  /** The weights payload, with the driver's own count of what was on site. */
+  const collected = (bags: number) => ({
+    ...envelope(),
+    bagCount: bags,
+    loadType: 'bagged' as const,
+    bagWeights: Array.from({ length: bags }, () => 300),
+    craneScaleKg: null,
+  });
+
+  const extraBagCharge = () => driver.charges.find((charge) => charge.code === 'extra-bags');
+
+  /*
+   * ⚠️ The regression this whole feature rests on. The driver's count used to
+   * be written over `bagCount`, which is the allowance copied off the order and
+   * the quantity the base invoice is priced on. Once it was gone, nothing could
+   * tell that a two-bag order had come back with four.
+   */
+  it('keeps the order allowance intact when the driver saves a different count', async () => {
+    const stop = driver.addStop({ jobNumber: 61401, bagCount: 2, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(4), CALLER);
+
+    expect(driver.stop(stop.id)?.bagCount).toBe(2);
+    expect(driver.stop(stop.id)?.collectedBagCount).toBe(4);
+  });
+
+  it('charges only the excess, and only once', async () => {
+    const stop = driver.addStop({ jobNumber: 61402, bagCount: 2, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(4), CALLER);
+
+    const charge = extraBagCharge();
+    // Two bags over, at the same $30 an ordered bag costs.
+    expect(charge?.quantity).toBe(2);
+    expect(charge?.unitRate).toBe('30.00');
+    expect(charge?.amount).toBe('60.00');
+  });
+
+  /*
+   * The charge has to reach the office as a DRIVER charge, because that is the
+   * flag invoicing splits on: driver charges go onto their own invoice with no
+   * PO number and wait for the builder to issue a second order (M7.3). Marked
+   * pending because Matt, 08:28, wants it approved before it is billed.
+   */
+  it('queues the excess for office approval rather than billing it', async () => {
+    const stop = driver.addStop({ jobNumber: 61403, bagCount: 1, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(2), CALLER);
+
+    expect(extraBagCharge()?.approvalState).toBe('pending');
+  });
+
+  it('raises nothing when the driver collects exactly the allowance', async () => {
+    const stop = driver.addStop({ jobNumber: 61404, bagCount: 3, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(3), CALLER);
+
+    expect(extraBagCharge()).toBeUndefined();
+  });
+
+  it('raises nothing when the driver collects fewer than the allowance', async () => {
+    const stop = driver.addStop({ jobNumber: 61405, bagCount: 4, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(2), CALLER);
+
+    expect(extraBagCharge()).toBeUndefined();
+  });
+
+  /*
+   * A job with no order behind it — a contractor, or a phone booking — states
+   * no allowance. Every bag the driver finds is then work nobody has authorised
+   * yet, and letting it through unbilled is how the money quietly goes missing.
+   */
+  it('charges every bag on a job whose order allowed for none', async () => {
+    const stop = driver.addStop({ jobNumber: 61406, bagCount: 0, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(3), CALLER);
+
+    expect(extraBagCharge()?.quantity).toBe(3);
+  });
+
+  /*
+   * ⚠️ Replay. The phone queues weights offline and can send them twice hours
+   * apart. A second charge here bills the builder for four extra bags when two
+   * were collected.
+   */
+  it('does not raise a second charge when the phone replays the same weights', async () => {
+    const stop = driver.addStop({ jobNumber: 61407, bagCount: 2, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(4), CALLER);
+    await driverService.captureWeights(stop.id, collected(4), CALLER);
+
+    expect(driver.charges.filter((charge) => charge.code === 'extra-bags')).toHaveLength(1);
+    expect(extraBagCharge()?.quantity).toBe(2);
+  });
+
+  /* An overage is a quantity, so a corrected count has to move the charge. */
+  it('follows a revised bag count upwards', async () => {
+    const stop = driver.addStop({ jobNumber: 61408, bagCount: 2, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(4), CALLER);
+    await driverService.captureWeights(stop.id, collected(6), CALLER);
+
+    expect(driver.charges.filter((charge) => charge.code === 'extra-bags')).toHaveLength(1);
+    expect(extraBagCharge()?.quantity).toBe(4);
+    expect(extraBagCharge()?.amount).toBe('120.00');
+  });
+
+  it('withdraws the charge when a miscount is corrected back within the allowance', async () => {
+    const stop = driver.addStop({ jobNumber: 61409, bagCount: 2, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(5), CALLER);
+    expect(extraBagCharge()?.quantity).toBe(3);
+
+    await driverService.captureWeights(stop.id, collected(2), CALLER);
+    expect(extraBagCharge()).toBeUndefined();
+  });
+
+  /*
+   * Once the office has approved an amount, a person has acted on that number.
+   * Rewriting it underneath them would change an approved charge with no trace,
+   * so the count moves and the charge is flagged instead.
+   */
+  it('leaves an already-approved charge alone and flags the change', async () => {
+    const stop = driver.addStop({ jobNumber: 61410, bagCount: 2, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(4), CALLER);
+    const approved = extraBagCharge();
+    if (approved) approved.approvalState = 'approved';
+
+    await driverService.captureWeights(stop.id, collected(7), CALLER);
+
+    expect(extraBagCharge()?.quantity).toBe(2);
+    expect(extraBagCharge()?.approvalState).toBe('approved');
+    expect(
+      driver.events.some(
+        (event) => event.label === 'Extra bags' && /already been decided/i.test(event.detail ?? ''),
+      ),
+    ).toBe(true);
+  });
+
+  /* Matt, 09:02 — the office needs to see it. Nothing goes to the phone. */
+  it('records the overage on the job timeline for the office', async () => {
+    const stop = driver.addStop({ jobNumber: 61411, bagCount: 2, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(4), CALLER);
+
+    const entry = driver.events.find((event) => event.label === 'Extra bags');
+    expect(entry?.detail).toContain('4 bags collected against an order for 2');
+    expect(entry?.detail).toContain('needs its own purchase order');
+  });
+
+  /* A hand load has no bags at all, so there is nothing to exceed. */
+  it('ignores hand loads entirely', async () => {
+    const stop = driver.addStop({ jobNumber: 61412, bagCount: 2 });
+
+    await driverService.captureWeights(
+      stop.id,
+      { ...envelope(), bagCount: 0, loadType: 'hand-load', bagWeights: [], craneScaleKg: null },
+      CALLER,
+    );
+
+    expect(extraBagCharge()).toBeUndefined();
+  });
+});
+
 describe('charges raised from the phone', () => {
   /*
    * ⚠️ The idempotency that costs money. A replayed contamination report would

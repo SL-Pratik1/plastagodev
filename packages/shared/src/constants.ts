@@ -27,3 +27,13 @@ export const ROLES = [
 ] as const;
 
 export type Role = (typeof ROLES)[number];
+
+/**
+ * The ceiling on any direct-to-storage upload — 20 MB.
+ *
+ * A modern phone photo is 3–5 MB; a burst of HEIC frames is not. Declared here
+ * rather than in the API because the number is part of the contract: it is
+ * signed into every presigned upload URL, and a file picker that accepts more
+ * than the signature allows is a picker that wastes somebody's upload.
+ */
+export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;

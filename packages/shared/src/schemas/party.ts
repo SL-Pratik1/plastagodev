@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { IsoDateTimeSchema, NonEmptyStringSchema, ObjectIdSchema } from './primitives.js';
+import { AbnSchema, IsoDateTimeSchema, NonEmptyStringSchema, ObjectIdSchema } from './primitives.js';
 
 /**
  * The party model (M1.2): **Account ≠ Builder ≠ Site ≠ Contact.**
@@ -102,20 +102,57 @@ export const PO_POLICY_LABELS: Record<PoPolicy, string> = {
   'required-before-invoice': 'Required before invoicing',
 };
 
-/** M6.1 — resolution order is named card → tier → default. */
-export const RATE_CARDS = [
+/**
+ * M6.1 — resolution order is named card → tier → default.
+ *
+ * ── Why this is a slug and not an enum ────────────────────────────────────
+ * It WAS an enum of seven, which meant the seven were fixed at compile time:
+ * an administrator could not add an eighth card for a new builder without a
+ * deploy, and `accounts.rateCardId` carried the same enum so Mongo would have
+ * rejected the value even if the UI had offered it.
+ *
+ * Rate cards are business data — one per negotiated agreement — so they live in
+ * the `ratecards` collection and this validates the SHAPE of an id rather than
+ * enumerating which ones exist. Lowercase, digits and hyphens only, because the
+ * id appears in URLs and in Xero exports.
+ *
+ * ⚠️ Consequence: a card's human name is no longer derivable from its id. Read
+ * `label` off the record — `RateCardSummary.label`, `AccountListItem`'s
+ * `rateCardLabel` — never a lookup table. `SEEDED_RATE_CARD_LABELS` below is
+ * for the seed script only.
+ */
+export const RateCardIdSchema = z
+  .string()
+  .trim()
+  .min(1, 'A rate card needs an id')
+  .max(40, 'Keep the id short — it appears in URLs')
+  .regex(/^[a-z0-9][a-z0-9-]*$/, 'Lowercase letters, digits and hyphens only')
+  .meta({ id: 'RateCardId' });
+export type RateCardId = z.infer<typeof RateCardIdSchema>;
+
+/**
+ * The card every account falls back to, and the one card that may never be
+ * deleted: `settingsRepository.resolveRate` uses it when a named card has no
+ * entry for a zone, so removing it would turn a priced job into a failed one.
+ */
+export const DEFAULT_RATE_CARD_ID = 'default';
+
+/**
+ * The cards the seed installs. NOT the set of cards that exist — an
+ * administrator adds more at runtime, and nothing may assume this list is
+ * complete. It exists so `seed-settings` has something to write.
+ */
+export const SEEDED_RATE_CARDS = [
   'clarendon-domaine',
   'wisdom',
   'tier-1',
   'tier-2',
   'tier-3',
   'tier-4',
-  'default',
+  DEFAULT_RATE_CARD_ID,
 ] as const;
-export const RateCardIdSchema = z.enum(RATE_CARDS).meta({ id: 'RateCardId' });
-export type RateCardId = z.infer<typeof RateCardIdSchema>;
 
-export const RATE_CARD_LABELS: Record<RateCardId, string> = {
+export const SEEDED_RATE_CARD_LABELS: Record<(typeof SEEDED_RATE_CARDS)[number], string> = {
   'clarendon-domaine': 'Clarendon & Domaine',
   wisdom: 'Wisdom Properties Group',
   'tier-1': 'Tier 1',
@@ -291,24 +328,21 @@ export const AccountDraftSchema = z
       .string()
       .trim()
       .regex(/^[A-Z]{3}[0-9]{3}$/, 'Three letters then three digits, e.g. NEW001'),
-    legalName: z.string().trim().min(1, 'Enter the registered company name').max(120),
-    abn: z
-      .string()
-      .trim()
-      .regex(/^\d{11}$/, 'An ABN is 11 digits'),
+    legalName: z.string().trim().min(1, 'Enter the registered company name').max(120, 'Keep the registered name under 120 characters'),
+    abn: AbnSchema,
     accountType: AccountTypeSchema,
     brandId: BrandIdSchema,
     rateCardId: RateCardIdSchema,
     poPolicy: PoPolicySchema,
     captureMode: CaptureModeSchema,
-    paymentTermsDays: z.number().int().min(0).max(90),
+    paymentTermsDays: z.number().int().min(0, 'Payment terms cannot be negative').max(90, 'Payment terms are at most 90 days'),
     primaryZone: ZoneSchema,
     /** Where their invoices go. The one contact an account cannot trade without. */
-    accountsContactName: z.string().trim().max(80),
+    accountsContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
     accountsContactEmail: z
       .string()
       .trim()
-      .max(160)
+      .max(160, 'Keep the email under 160 characters')
       .refine(
         (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
         'Enter a valid email address, or leave it blank',
@@ -329,6 +363,18 @@ export const AccountDraftSchema = z
 export type AccountDraft = z.infer<typeof AccountDraftSchema>;
 
 export const AccountSchema = AccountListItemSchema.extend({
+  /**
+   * M7.5 — which invoice template this account's invoices print on.
+   *
+   * Null means "follow the brand", resolved when the PDF is rendered rather
+   * than stamped here: a new account should look right without anybody
+   * choosing, and changing the brand's default should carry those accounts
+   * with it.
+   *
+   * ⚠️ Resolved at render time, then FROZEN onto the invoice. Reassigning an
+   * account changes the next invoice, never one already sent.
+   */
+  invoiceTemplateId: z.string().nullable(),
   /**
    * M4.8b — this builder requires a Site Risk Assessment before a driver starts.
    *

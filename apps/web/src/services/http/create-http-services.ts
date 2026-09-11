@@ -13,6 +13,7 @@ import { createHttpDriverRunService } from './driver-run.http.js';
 import { createHttpExtractorService } from './extractor.http.js';
 import { createHttpPortalService } from './portal.http.js';
 import { createHttpQueueService } from './queues.http.js';
+import { createHttpXeroService } from './xero.http.js';
 import {
   createHttpDashboardService,
   createHttpDriverService,
@@ -52,6 +53,7 @@ export function createHttpServices(api: ApiClient): Services {
     notifications: createHttpNotificationService(api),
     settings: createHttpSettingsService(api),
     extractor: createHttpExtractorService(api),
+    xero: createHttpXeroService(api),
     queues: createHttpQueueService(api),
     portal: createHttpPortalService(api),
     driverRun: createHttpDriverRunService(api),

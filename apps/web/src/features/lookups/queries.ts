@@ -40,6 +40,23 @@ export function useDriverOptions() {
 }
 
 /**
+ * M6.1 — the rate cards an account can be assigned to.
+ *
+ * ⚠️ Invalidated whenever a card is added, renamed or retired, through
+ * `queryKeys.lookups.all` — the settings mutations already do that. Without it
+ * a card created on the Pricing tab would not appear in the new-customer form
+ * until the hour-long reference cache expired.
+ */
+export function useRateCardOptions() {
+  const { lookups } = useServices();
+  return useQuery({
+    queryKey: queryKeys.lookups.rateCards(),
+    queryFn: () => lookups.rateCards(),
+    ...REFERENCE_CACHE,
+  });
+}
+
+/**
  * Address lookup (Matt, 7:25).
  *
  * Keyed by the query so each distinct set of keystrokes is cached separately —

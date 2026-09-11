@@ -98,11 +98,18 @@ export const invoiceController = {
     res.status(202).json(result);
   },
 
+  /**
+   * ── Why 200 and a body, where this used to be a bodyless 202 ───────────
+   * 202 was honest while the retry only re-queued: the work had been accepted
+   * and had not happened. It now pushes to Xero and waits, so by the time this
+   * responds the answer is known — and reporting "accepted" for something that
+   * has already failed leaves the page telling the user it worked while the
+   * badge beside it says otherwise.
+   */
   retryXero: async (
     req: ValidatedRequest<{ params: typeof InvoiceIdParamsSchema }>,
     res: Response,
   ): Promise<void> => {
-    await invoiceService.retryXero(req.validated.params.id, callerFrom(req));
-    res.status(202).send();
+    res.json(await invoiceService.retryXero(req.validated.params.id, callerFrom(req)));
   },
 };

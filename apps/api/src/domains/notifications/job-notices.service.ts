@@ -60,7 +60,7 @@ export type NoticeJob = Pick<
 
 /** What a completion summary adds: what was actually taken away. */
 type CompletedJob = NoticeJob &
-  Pick<Job, 'expectedAreaM2' | 'recoveredWeightKg' | 'bagCount' | 'photos'>;
+  Pick<Job, 'expectedAreaM2' | 'recoveredWeightKg' | 'bagCount' | 'collectedBagCount' | 'photos'>;
 
 /**
  * Runs a notice and swallows whatever it throws.
@@ -147,7 +147,12 @@ export const jobNotices = {
         ...contextFor(job),
         areaM2: job.expectedAreaM2,
         weightKg: job.recoveredWeightKg,
-        bagCount: job.bagCount,
+        /*
+         * What the driver actually took, not what the order allowed for — this
+         * email says "Recovered". Falls back to the allowance for a job saved
+         * before the two were told apart, where it was the same field.
+         */
+        bagCount: job.collectedBagCount ?? job.bagCount,
         photoCount: job.photos.length,
       };
 

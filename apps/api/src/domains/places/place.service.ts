@@ -18,6 +18,17 @@ export const placeService = {
   },
 
   /**
+   * The place a job was booked into, from the suburb and postcode it kept.
+   *
+   * For rebuilding a booking out of an existing job — a job stores the suburb
+   * and the frozen zone, never the `placeId` it was picked from. Null when the
+   * suburb is no longer served; the caller decides what that means.
+   */
+  async findForJob(suburb: string, postcode: string): Promise<Place | null> {
+    return placeRepository.findBySuburb(suburb, postcode);
+  },
+
+  /**
    * The place behind a chosen id, for anything that must not proceed without it.
    *
    * Throws rather than returning null so no caller can accidentally continue

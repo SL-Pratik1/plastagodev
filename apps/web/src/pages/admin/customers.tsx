@@ -8,8 +8,6 @@ import {
   ONBOARDING_STATE_LABELS,
   ONBOARDING_STATES,
   PO_POLICY_LABELS,
-  RATE_CARD_LABELS,
-  RATE_CARDS,
   type AccountListItem,
 } from '@plastago/shared';
 import { Badge, Card, Pagination, buttonVariants } from '@plastago/ui';
@@ -22,6 +20,7 @@ import type { DataTableColumn, FilterDefinition } from '@/components/data-table/
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { PageHeader } from '@/components/page-header';
 import { useCustomerList } from '@/features/customers/queries';
+import { useRateCardOptions } from '@/features/lookups/queries';
 import { formatRelative } from '@/lib/format';
 
 /**
@@ -81,12 +80,15 @@ const FILTERS: readonly FilterDefinition[] = [
       label: ONBOARDING_STATE_LABELS[state],
     })),
   },
-  {
-    key: 'rateCard',
-    label: 'Rate card',
-    allLabel: 'All rate cards',
-    options: RATE_CARDS.map((card) => ({ value: card, label: RATE_CARD_LABELS[card] })),
-  },
+  /*
+   * ⚠️ Rate card is NOT here.
+   *
+   * Every other facet on this bar is a closed set fixed in the build — two
+   * account types, four PO policies. Rate cards are records an administrator
+   * creates, so their options have to be loaded, and a module-level constant
+   * cannot hold something that arrives over the network. It is appended in the
+   * component instead; see `filtersWith` below.
+   */
   {
     key: 'poPolicy',
     label: 'PO policy',
@@ -101,102 +103,157 @@ const FILTERS: readonly FilterDefinition[] = [
   },
 ];
 
-const COLUMNS: readonly DataTableColumn<AccountListItem>[] = [
-  {
-    id: 'name',
-    header: 'Account',
-    sortKey: 'name',
-    priority: 'primary',
-    cell: (row) => (
-      <span className="block">
-        <span className="font-medium">{row.name}</span>
-        <span className="block font-mono text-xs text-muted-foreground">{row.code}</span>
-      </span>
-    ),
-  },
-  {
-    id: 'brand',
-    header: 'Brand',
-    priority: 'secondary',
-    cell: (row) => <Badge variant="secondary">{BRAND_LABELS[row.brandId]}</Badge>,
-  },
-  {
-    id: 'status',
-    header: 'Status',
-    priority: 'secondary',
-    cell: (row) => (
-      <Badge variant={row.status === 'active' ? 'success' : 'outline'}>
-        {row.status === 'active' ? 'Active' : 'Inactive'}
-      </Badge>
-    ),
-  },
-  {
-    id: 'accountType',
-    header: 'Type',
-    priority: 'primary',
-    cell: (row) => (
-      <span className="flex flex-wrap items-center gap-1.5">
-        <AccountTypeBadge type={row.accountType} />
-        {/* Only worth showing when it is outstanding — "signed" is the norm. */}
-        {row.onboardingState === 'awaiting-terms' && (
-          <Badge variant="warning">Terms unsigned</Badge>
-        )}
-      </span>
-    ),
-  },
-  {
-    id: 'rateCard',
-    header: 'Rate card',
-    priority: 'detail',
-    cell: (row) => (
-      <span className="text-muted-foreground">{RATE_CARD_LABELS[row.rateCardId]}</span>
-    ),
-  },
-  {
-    id: 'poPolicy',
-    header: 'PO',
-    priority: 'detail',
-    cell: (row) =>
-      row.poPolicy === 'required-before-invoice' ? (
-        <Badge variant="warning">Required</Badge>
-      ) : (
-        <span className="text-muted-foreground">Not required</span>
+/**
+ * The filter bar, with the loaded rate cards spliced into position.
+ *
+ * Inserted where the constant used to declare it — after Terms, before PO
+ * policy — rather than appended to the end. The order of a filter bar is a
+ * design decision, and letting it depend on which lists happen to be loaded
+ * would move controls around under somebody's cursor.
+ */
+function filtersWith(rateCards: readonly { value: string; label: string }[]): FilterDefinition[] {
+  const rateCardFilter: FilterDefinition = {
+    key: 'rateCard',
+    label: 'Rate card',
+    allLabel: 'All rate cards',
+    options: rateCards,
+  };
+
+  const index = FILTERS.findIndex((filter) => filter.key === 'poPolicy');
+  return [...FILTERS.slice(0, index), rateCardFilter, ...FILTERS.slice(index)];
+}
+
+/**
+ * The grid's columns, given the rate-card names.
+ *
+ * ── Why this is a function and not a constant ─────────────────────────────
+ * It was a constant until rate cards stopped being a compile-time enum. The
+ * "Rate card" cell has to turn `tier-2` into "Tier 2", and that mapping now
+ * arrives over the network — so the columns depend on loaded data and cannot
+ * be frozen at module scope.
+ *
+ * Everything else about them is still static, which is why the map is the only
+ * parameter: the alternative, threading a hook through every cell, would make
+ * twelve columns re-render on a lookup none of them read.
+ */
+function columnsWith(
+  rateCardLabels: ReadonlyMap<string, string>,
+): readonly DataTableColumn<AccountListItem>[] {
+  return [
+    {
+      id: 'name',
+      header: 'Account',
+      sortKey: 'name',
+      priority: 'primary',
+      cell: (row) => (
+        <span className="block">
+          <span className="font-medium">{row.name}</span>
+          <span className="block font-mono text-xs text-muted-foreground">{row.code}</span>
+        </span>
       ),
-  },
-  {
-    id: 'captureMode',
-    header: 'Capture',
-    priority: 'detail',
-    cell: (row) => (
-      <span className="text-muted-foreground">{CAPTURE_MODE_LABELS[row.captureMode]}</span>
-    ),
-  },
-  {
-    id: 'openJobCount',
-    header: 'Open jobs',
-    sortKey: 'openJobCount',
-    numeric: true,
-    priority: 'detail',
-    className: 'w-24',
-    cell: (row) =>
-      row.openJobCount > 0 ? (
-        <span className="font-medium">{row.openJobCount}</span>
-      ) : (
-        <span className="text-muted-foreground">0</span>
+    },
+    {
+      id: 'brand',
+      header: 'Brand',
+      priority: 'secondary',
+      cell: (row) => <Badge variant="secondary">{BRAND_LABELS[row.brandId]}</Badge>,
+    },
+    {
+      id: 'status',
+      header: 'Status',
+      priority: 'secondary',
+      cell: (row) => (
+        <Badge variant={row.status === 'active' ? 'success' : 'outline'}>
+          {row.status === 'active' ? 'Active' : 'Inactive'}
+        </Badge>
       ),
-  },
-  {
-    id: 'lastJobAt',
-    header: 'Last job',
-    sortKey: 'lastJobAt',
-    priority: 'detail',
-    cell: (row) => <span className="text-muted-foreground">{formatRelative(row.lastJobAt)}</span>,
-  },
-];
+    },
+    {
+      id: 'accountType',
+      header: 'Type',
+      priority: 'primary',
+      cell: (row) => (
+        <span className="flex flex-wrap items-center gap-1.5">
+          <AccountTypeBadge type={row.accountType} />
+          {/* Only worth showing when it is outstanding — "signed" is the norm. */}
+          {row.onboardingState === 'awaiting-terms' && (
+            <Badge variant="warning">Terms unsigned</Badge>
+          )}
+        </span>
+      ),
+    },
+    {
+      id: 'rateCard',
+      header: 'Rate card',
+      priority: 'detail',
+      /*
+       * Rendered through the loaded lookup, falling back to the id.
+       *
+       * The fallback is deliberate rather than a blank: a card that has since
+       * been retired still priced these jobs, and showing `tier-2` is a fact
+       * somebody can act on where an empty cell just looks broken.
+       */
+      cell: (row) => (
+        <span className="text-muted-foreground">
+          {rateCardLabels.get(row.rateCardId) ?? row.rateCardId}
+        </span>
+      ),
+    },
+    {
+      id: 'poPolicy',
+      header: 'PO',
+      priority: 'detail',
+      cell: (row) =>
+        row.poPolicy === 'required-before-invoice' ? (
+          <Badge variant="warning">Required</Badge>
+        ) : (
+          <span className="text-muted-foreground">Not required</span>
+        ),
+    },
+    {
+      id: 'captureMode',
+      header: 'Capture',
+      priority: 'detail',
+      cell: (row) => (
+        <span className="text-muted-foreground">{CAPTURE_MODE_LABELS[row.captureMode]}</span>
+      ),
+    },
+    {
+      id: 'openJobCount',
+      header: 'Open jobs',
+      sortKey: 'openJobCount',
+      numeric: true,
+      priority: 'detail',
+      className: 'w-24',
+      cell: (row) =>
+        row.openJobCount > 0 ? (
+          <span className="font-medium">{row.openJobCount}</span>
+        ) : (
+          <span className="text-muted-foreground">0</span>
+        ),
+    },
+    {
+      id: 'lastJobAt',
+      header: 'Last job',
+      sortKey: 'lastJobAt',
+      priority: 'detail',
+      cell: (row) => <span className="text-muted-foreground">{formatRelative(row.lastJobAt)}</span>,
+    },
+  ];
+}
 
 export function AdminCustomersPage() {
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultSort: 'name' });
   const { data, error, isPending, isFetching, refetch } = useCustomerList(controller.query);
+
+  /*
+   * M6.1 — the rate cards, for the filter's options and the column's labels.
+   *
+   * Cached for an hour by `useRateCardOptions`, so this costs one request per
+   * session rather than one per visit to the grid.
+   */
+  const rateCards = useRateCardOptions().data ?? [];
+  const rateCardLabels = new Map(rateCards.map((card) => [card.value, card.label]));
 
   return (
     <div className="space-y-6">
@@ -216,12 +273,12 @@ export function AdminCustomersPage() {
         <DataTableToolbar
           controller={controller}
           searchPlaceholder="Search account name or code…"
-          filters={FILTERS}
+          filters={filtersWith(rateCards)}
         />
 
         <DataTable
           caption="Customer accounts"
-          columns={COLUMNS}
+          columns={columnsWith(rateCardLabels)}
           rows={data?.data ?? []}
           getRowId={(row) => row.id}
           isPending={isPending}

@@ -121,7 +121,12 @@ export const reportRepository = {
           weighedJobs: {
             $sum: { $cond: [{ $ne: ['$recoveredWeightKg', null] }, 1, 0] },
           },
-          bags: { $sum: '$bagCount' },
+          /*
+           * Collected, not ordered — this sits beside `weightKg` and answers
+           * "what came off site". `$ifNull` covers jobs saved before the
+           * allowance and the driver's count were separate fields.
+           */
+          bags: { $sum: { $ifNull: ['$collectedBagCount', '$bagCount'] } },
         },
       },
       { $sort: { areaM2: -1 } },

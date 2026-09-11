@@ -1,4 +1,4 @@
-import type { PageMeta, PortalAccount, PortalSupervisor } from '@plastago/shared';
+import type { AccountType, PageMeta, PortalAccount, PortalSupervisor } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { AccountModel, ContactModel } from '../accounts/account.model.js';
 import { UserModel } from '../auth/auth.model.js';
@@ -91,6 +91,27 @@ export const supervisorRepository = {
         totalPages: Math.max(1, Math.ceil(total / query.pageSize)),
       },
     };
+  },
+
+  /**
+   * How many supervisors on this account can still sign in.
+   *
+   * ── Why "live" and not "all" ──────────────────────────────────────────────
+   * Used to decide whether an account may be moved from builder to contractor,
+   * a journey with no supervisors in it. A SUSPENDED supervisor cannot sign in,
+   * so they are not a reason to block the change — but their user record has to
+   * stay, because a job is scoped by `bookedByUserId` and deleting them would
+   * orphan every pickup they raised. Counting them would make the switch
+   * permanently impossible for any account that ever had staff turnover.
+   */
+  async countLive(accountId: string): Promise<number> {
+    if (!mongoose.isValidObjectId(accountId)) return 0;
+
+    return UserModel.countDocuments({
+      accountId: new mongoose.Types.ObjectId(accountId),
+      roles: SUPERVISOR_ROLE,
+      status: { $ne: 'suspended' },
+    });
   },
 
   /** One supervisor, but only if they belong to this account. */
@@ -213,6 +234,29 @@ interface RawAccount {
 }
 
 export const portalAccountRepository = {
+  /**
+   * Just the account's type — builder or contractor.
+   *
+   * ── Why a one-field read and not `find()` ─────────────────────────────────
+   * Every supervisor endpoint has to know this before it does anything (site
+   * supervisors are a builder concept — Matt, 20:09), and `find()` joins the
+   * contacts to build the whole portal account view. Paying for a join and a
+   * second collection on the way to reading one enum would put the cost of a
+   * screen onto a guard that runs four times as often.
+   *
+   * `null` means no such account, which the caller must treat as a refusal
+   * rather than as "not a builder".
+   */
+  async accountTypeOf(accountId: string): Promise<AccountType | null> {
+    if (!mongoose.isValidObjectId(accountId)) return null;
+
+    const row = await AccountModel.findById(accountId)
+      .select('accountType')
+      .lean<{ accountType: AccountType }>();
+
+    return row?.accountType ?? null;
+  },
+
   async find(accountId: string): Promise<PortalAccount | null> {
     if (!mongoose.isValidObjectId(accountId)) return null;
 

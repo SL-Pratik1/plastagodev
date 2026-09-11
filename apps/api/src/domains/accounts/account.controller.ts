@@ -5,6 +5,7 @@ import { AppError } from '../../lib/app-error.js';
 import { accountService, type Caller } from './account.service.js';
 import type {
   AccountIdParamsSchema,
+  AccountTypeBodySchema,
   ListAccountsQuerySchema,
   RiskAssessmentBodySchema,
 } from './account.schemas.js';
@@ -51,6 +52,21 @@ export const accountController = {
     const account = await accountService.setRiskAssessmentRequired(
       req.validated.params.id,
       req.validated.body.required,
+      callerOf(req),
+    );
+    res.json(account);
+  },
+
+  setAccountType: async (
+    req: ValidatedRequest<{
+      params: typeof AccountIdParamsSchema;
+      body: typeof AccountTypeBodySchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const account = await accountService.setAccountType(
+      req.validated.params.id,
+      req.validated.body.accountType,
       callerOf(req),
     );
     res.json(account);

@@ -8,6 +8,7 @@ import { AppError } from '../../lib/app-error.js';
 import { asyncHandler } from '../../lib/async-handler.js';
 import {
   MAX_UPLOAD_BYTES,
+  contentTypeForKey,
   getStorage,
   stubPathFor,
   verifyStubToken,
@@ -103,8 +104,20 @@ storageRouter.get(
 
     if (!(await getStorage().exists(key))) throw AppError.notFound('No such object');
 
-    // This route serves user-supplied bytes, so it refuses to let a browser
-    // treat them as a document regardless of what the type claims.
+    /*
+     * The type declared when the key was built, and nothing else. Sending it
+     * matters: the PO review screen displays the original PDF beside the
+     * extracted fields, and with `nosniff` and no `Content-Type` a browser
+     * downloads the file rather than rendering it — so the stub would behave
+     * differently from S3, which is the one thing the stub exists to avoid.
+     *
+     * ⚠️ Still `nosniff`, and still only the six types `buildKey` can encode.
+     * These are user-supplied bytes; an unknown extension is served with no
+     * type at all rather than a guess.
+     */
+    const contentType = contentTypeForKey(key);
+    if (contentType) res.setHeader('Content-Type', contentType);
+
     res.setHeader('Content-Disposition', 'inline');
     res.setHeader('X-Content-Type-Options', 'nosniff');
 

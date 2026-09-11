@@ -1,4 +1,5 @@
 import type {
+  AppliedRate,
   MapPin,
   RunSheetStop,
   BrandId,
@@ -122,6 +123,8 @@ export interface CreateJobInput {
   totalExGst: string;
   gst: string;
   totalIncGst: string;
+  /** M6.2 — the rates as applied, frozen so nothing can reprice this job. */
+  appliedRate: AppliedRate;
   riskAssessmentRequired: boolean;
 }
 
@@ -183,6 +186,7 @@ interface RawJob {
   recoveredWeightKg: number | null;
   recoveredWeightBasis: WeightBasis | null;
   bagCount: number;
+  collectedBagCount: number | null;
   freightItem: FreightItem;
   totalExGst: mongoose.Types.Decimal128;
   gst: mongoose.Types.Decimal128;
@@ -567,6 +571,20 @@ export const jobRepository = {
       totalExGst: toDecimal128(input.totalExGst),
       gst: toDecimal128(input.gst),
       totalIncGst: toDecimal128(input.totalIncGst),
+      /*
+       * Both rates converted to `Decimal128` here rather than stored as the
+       * strings they arrive as (§6A.10 #1). A rate that round-trips through a
+       * string is a rate that can be compared with `>` and get the wrong
+       * answer, and these are the figures a credit note is derived from.
+       */
+      appliedRate: {
+        rateCardId: input.appliedRate.rateCardId,
+        rateCardLabel: input.appliedRate.rateCardLabel,
+        zone: input.appliedRate.zone,
+        scheduleFrom: input.appliedRate.scheduleFrom,
+        serviceCharge: toDecimal128(input.appliedRate.serviceCharge),
+        ratePerM2: toDecimal128(input.appliedRate.ratePerM2),
+      },
       invoiceStatus: 'not-invoiced',
       notes: input.notes,
       riskAssessmentRequired: input.riskAssessmentRequired,
@@ -820,7 +838,10 @@ function toListItem(row: RawJob, hasPendingCharges: boolean): JobListItem {
     expectedAreaM2: row.expectedAreaM2,
     recoveredWeightKg: row.recoveredWeightKg,
     recoveredWeightBasis: row.recoveredWeightBasis,
+    // The order's allowance and the driver's count, kept apart — the gap
+    // between them is what gets charged separately (Matt, 08:28).
     bagCount: row.bagCount,
+    collectedBagCount: row.collectedBagCount ?? null,
     totalExGst: fromDecimal128(row.totalExGst),
     invoiceStatus: row.invoiceStatus,
     hasPendingCharges,

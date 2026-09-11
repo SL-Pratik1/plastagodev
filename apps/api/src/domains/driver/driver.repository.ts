@@ -60,12 +60,17 @@ interface RawJobForDriver {
   poNumber: string | null;
   notes: string;
   expectedAreaM2: number | null;
+  /** What the ORDER allowed for. Frozen at booking — never the driver's count. */
   bagCount: number;
+  /** What the driver found. Null until the weights screen is saved. */
+  collectedBagCount: number | null;
   serviceLevel: 'standard' | 'urgent';
   readyDate: string;
   riskAssessmentRequired: boolean;
   recoveredWeightKg: number | null;
   recoveredWeightBasis: WeightBasis | null;
+  /** Per-bag crane readings behind `recoveredWeightKg`. Empty on a hand load. */
+  bagWeights?: number[];
   runId: mongoose.Types.ObjectId | null;
   runSequence: number | null;
   driverId: mongoose.Types.ObjectId | null;
@@ -215,8 +220,11 @@ export const driverRepository = {
   async recordWeights(input: {
     jobId: string;
     driverId: string;
+    /** What the driver counted on site — stored as `collectedBagCount`. */
     bagCount: number;
     loadType: LoadType;
+    /** Per-bag readings. Empty on a hand load or an m²-only account. */
+    bagWeights: number[];
     craneScaleKg: number | null;
   }): Promise<boolean> {
     const result = await JobModel.updateOne(
@@ -226,8 +234,14 @@ export const driverRepository = {
       },
       {
         $set: {
-          bagCount: input.bagCount,
+          /*
+           * ⚠️ `collectedBagCount`, NOT `bagCount`. The allowance copied off
+           * the purchase order is what the base invoice is priced on, and
+           * overwriting it here is what previously made an overage invisible.
+           */
+          collectedBagCount: input.bagCount,
           loadType: input.loadType,
+          bagWeights: input.bagWeights,
           recoveredWeightKg: input.craneScaleKg,
           /*
            * Matt, 56:11 — a crane-weighed load is ACTUAL; anything else is
@@ -445,6 +459,104 @@ export const driverRepository = {
     });
 
     return created._id.toHexString();
+  },
+
+  /**
+   * Bring a pending charge into line with a figure the driver has just revised.
+   *
+   * ── Why this is not `raiseChargeOnce` ────────────────────────────────────
+   * A contamination charge is a yes/no event, so raising it at most once is
+   * exactly right. An overage is a QUANTITY: a driver who saves four bags and
+   * then corrects it to six must not leave a charge for two extras behind, and
+   * must not gain a second charge either.
+   *
+   * ⚠️ An already-decided charge is left alone. Once the office has approved or
+   * rejected it a person has acted on that number, and rewriting it underneath
+   * them would change an approved amount with no trace. Those cases return
+   * `'locked'` so the caller can say so on the timeline instead.
+   */
+  async syncPendingCharge(input: {
+    jobId: string;
+    code: ChargeCode;
+    description: string;
+    quantity: number;
+    unitRate: string;
+    amount: string;
+    raisedBy: string;
+    raisedAt: Date;
+    note: string | null;
+  }): Promise<'created' | 'updated' | 'unchanged' | 'locked'> {
+    const jobId = new mongoose.Types.ObjectId(input.jobId);
+
+    const decided = await JobChargeModel.countDocuments({
+      jobId,
+      code: input.code,
+      approvalState: { $in: ['approved', 'rejected'] },
+    });
+    if (decided > 0) return 'locked';
+
+    const existing = await JobChargeModel.findOne({
+      jobId,
+      code: input.code,
+      approvalState: 'pending',
+    }).lean<{ _id: mongoose.Types.ObjectId; quantity: number }>();
+
+    if (!existing) {
+      await JobChargeModel.create({
+        jobId,
+        code: input.code,
+        description: input.description,
+        quantity: input.quantity,
+        unitRate: toDecimal128(input.unitRate),
+        amount: toDecimal128(input.amount),
+        /*
+         * `driver` because it came off the phone, and because that is the
+         * source invoicing splits on — this is precisely a charge that needs
+         * its own purchase order (M7.3).
+         */
+        source: 'driver',
+        approvalState: 'pending',
+        raisedBy: input.raisedBy,
+        raisedAt: input.raisedAt,
+        photoCount: 0,
+        note: input.note,
+      });
+      return 'created';
+    }
+
+    if (existing.quantity === input.quantity) return 'unchanged';
+
+    await JobChargeModel.updateOne(
+      { _id: existing._id, approvalState: 'pending' },
+      {
+        $set: {
+          description: input.description,
+          quantity: input.quantity,
+          unitRate: toDecimal128(input.unitRate),
+          amount: toDecimal128(input.amount),
+          raisedBy: input.raisedBy,
+          raisedAt: input.raisedAt,
+          note: input.note,
+        },
+      },
+    );
+    return 'updated';
+  },
+
+  /**
+   * Drops a pending charge that no longer applies — the driver corrected six
+   * bags back down to the two the order allowed for.
+   *
+   * Only ever removes a PENDING row, for the same reason `syncPendingCharge`
+   * refuses to rewrite a decided one.
+   */
+  async removePendingCharge(jobId: string, code: ChargeCode): Promise<boolean> {
+    const result = await JobChargeModel.deleteOne({
+      jobId: new mongoose.Types.ObjectId(jobId),
+      code,
+      approvalState: 'pending',
+    });
+    return result.deletedCount === 1;
   },
 
   async hasCharge(jobId: string, code: ChargeCode): Promise<boolean> {

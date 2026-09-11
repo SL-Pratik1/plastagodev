@@ -106,6 +106,7 @@ interface RawAccount {
   abn: string;
   paymentTermsDays: number;
   primaryZone: Zone;
+  invoiceTemplateId: string | null;
   riskAssessmentRequired: boolean;
   certificateEmail: string | null;
   preferredPickupWindow: string | null;
@@ -226,6 +227,8 @@ export const accountRepository = {
 
     return {
       ...toListItem(account, terms !== null),
+      // M7.5 — null means "follow the brand", resolved when the PDF renders.
+      invoiceTemplateId: account.invoiceTemplateId ?? null,
       riskAssessmentRequired: account.riskAssessmentRequired,
       certificateEmail: resolveCertificateEmail(account, contacts),
       abn: account.abn,
@@ -242,6 +245,43 @@ export const accountRepository = {
   async codeExists(code: string): Promise<boolean> {
     const existing = await AccountModel.exists({ code: code.trim().toUpperCase() });
     return existing !== null;
+  },
+
+  /**
+   * The next unused code on the same three-letter prefix, e.g. TES001 → TES002.
+   *
+   * ── Why the server answers this and not the form ──────────────────────────
+   * The convert dialog suggests a code from the company name — first three
+   * letters plus 001 — and every second builder called "Test…", "Thrive…" or
+   * "Thornton…" therefore collides on the same one. Rejecting that with "code
+   * already in use" and no alternative leaves the person guessing at numbers
+   * against a list only the server can see.
+   *
+   * Returns `null` when the prefix is not the expected shape or all 999 are
+   * taken — the caller then falls back to plain "choose another code", because
+   * a suggestion that is itself wrong is worse than none.
+   */
+  async nextFreeCode(code: string): Promise<string | null> {
+    const prefix = code.trim().toUpperCase().slice(0, 3);
+    if (!/^[A-Z]{3}$/.test(prefix)) return null;
+
+    /*
+     * Anchored so the prefix cannot match mid-string, and the suffix must be
+     * exactly three digits — `TES0012` is somebody else's numbering scheme,
+     * not a higher number in ours.
+     */
+    const taken = await AccountModel.find({ code: new RegExp(`^${prefix}[0-9]{3}$`) })
+      .select({ code: 1 })
+      .lean<{ code: string }[]>();
+
+    const used = new Set(taken.map((row) => row.code));
+
+    for (let n = 1; n <= 999; n += 1) {
+      const candidate = `${prefix}${String(n).padStart(3, '0')}`;
+      if (!used.has(candidate)) return candidate;
+    }
+
+    return null;
   },
 
   /**
@@ -331,10 +371,7 @@ export const accountRepository = {
           );
         }
 
-        return toListItem(
-          account.toObject<RawAccount>(),
-          input.termsAgreedOffSystem !== null,
-        );
+        return toListItem(account.toObject<RawAccount>(), input.termsAgreedOffSystem !== null);
       },
       {
         label: 'accounts.create',
@@ -365,6 +402,19 @@ export const accountRepository = {
       { _id: id },
       { $set: { riskAssessmentRequired: required } },
     );
+    return result.matchedCount > 0;
+  },
+
+  /**
+   * The account's journey — builder or contractor.
+   *
+   * A targeted `$set` for the same reason as the rule above: the account is
+   * written by more than one flow, and a whole-document save would clobber
+   * whatever else changed in between.
+   */
+  async setAccountType(id: string, accountType: AccountType): Promise<boolean> {
+    if (!mongoose.isValidObjectId(id)) return false;
+    const result = await AccountModel.updateOne({ _id: id }, { $set: { accountType } });
     return result.matchedCount > 0;
   },
 
@@ -423,10 +473,7 @@ export const accountRepository = {
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
-async function buildFilter(
-  query: ListAccountsQuery,
-  scope: AccountScope,
-): Promise<AccountFilter> {
+async function buildFilter(query: ListAccountsQuery, scope: AccountScope): Promise<AccountFilter> {
   const filter: AccountFilter = {};
 
   /*

@@ -13,6 +13,24 @@ export const PortalJobIdParamsSchema = z
   .object({ id: ObjectIdSchema })
   .meta({ id: 'PortalJobIdParams' });
 
+/**
+ * M2.12b — one of this account's purchase orders.
+ *
+ * ⚠️ An ORDER id, not an account id. No portal route takes an account id — the
+ * scope comes from the session — and the service refuses an order belonging to
+ * anybody else with a 404.
+ */
+export const PortalPurchaseOrderIdParamsSchema = z
+  .object({ purchaseOrderId: ObjectIdSchema })
+  .meta({ id: 'PortalPurchaseOrderIdParams' });
+
+export const PortalAwaitingQuerySchema = z
+  .object({
+    page: z.coerce.number().int().min(1).default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  })
+  .meta({ id: 'PortalAwaitingQuery' });
+
 export const PortalJobsQuerySchema = z
   .object({
     page: z.coerce.number().int().min(1).default(1),

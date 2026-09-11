@@ -24,6 +24,19 @@ vi.mock('../src/domains/settings/settings.repository.js', () => ({
 
 const { pricingService } = await import('../src/domains/settings/pricing.service.js');
 
+/**
+ * The date these quotes are priced as at (M6.2).
+ *
+ * ⚠️ Fixed, not `today`. A quote is priced by the schedule in force on the
+ * JOB's date, so a test that used the current date would start failing on
+ * whatever day the seeded schedule's window happened to end — which is a test
+ * that fails for a reason unrelated to the arithmetic it is asserting.
+ *
+ * On or after the seeded `2026-04-01`, so the seeded rates are the ones in
+ * force. `resolveRate` returning null for a date before them is its own test.
+ */
+const PRICED_ON = '2026-06-15';
+
 beforeEach(() => {
   repo = createFakeSettingsRepository();
 });
@@ -40,6 +53,7 @@ describe('quoting a job', () => {
       zone: 'sydney',
       expectedAreaM2: 823.41,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
 
     expect(quote.subtotalExGst).toBe('351.75'); // $220.00 + $131.75
@@ -53,6 +67,7 @@ describe('quoting a job', () => {
       zone: 'sydney',
       expectedAreaM2: 1000,
       bagCount: 2,
+      onDate: PRICED_ON,
     });
 
     // "Why is it $416?" is the immediate next question, and a total with no
@@ -72,6 +87,7 @@ describe('quoting a job', () => {
       zone: 'newcastle',
       expectedAreaM2: 500,
       bagCount: 1,
+      onDate: PRICED_ON,
     });
 
     // The browser parses this with the same schema, so a shape the contract
@@ -85,18 +101,21 @@ describe('quoting a job', () => {
       zone: 'sydney',
       expectedAreaM2: 1000,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
     const wollongong = await pricingService.quote({
       rateCardId: 'default',
       zone: 'wollongong',
       expectedAreaM2: 1000,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
     const newcastle = await pricingService.quote({
       rateCardId: 'default',
       zone: 'newcastle',
       expectedAreaM2: 1000,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
 
     expect(sydney.subtotalExGst).toBe('380.00'); // 220 + 160
@@ -115,6 +134,7 @@ describe('quoting a job', () => {
       zone: 'sydney',
       expectedAreaM2: null,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
 
     expect(quote.lines).toHaveLength(1);
@@ -128,6 +148,7 @@ describe('quoting a job', () => {
       zone: 'sydney',
       expectedAreaM2: 0,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
 
     expect(quote.lines.some((line) => line.code === 'area-charge')).toBe(false);
@@ -142,6 +163,7 @@ describe('quoting a job', () => {
       zone: 'sydney',
       expectedAreaM2: 823.41,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
 
     expect(quote.gst).toBe('35.18');
@@ -156,6 +178,7 @@ describe('quoting a job', () => {
       zone: 'sydney',
       expectedAreaM2: 100,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
 
     // It prices rather than failing a booking mid-form, but against `default`.
@@ -177,6 +200,7 @@ describe('quoting a job', () => {
         zone: 'newcastle',
         expectedAreaM2: 100,
         bagCount: 0,
+        onDate: PRICED_ON,
       }),
     ).rejects.toMatchObject({ status: 503 });
   });
@@ -187,11 +211,19 @@ describe('quoting a job', () => {
       zone: 'wollongong',
       expectedAreaM2: 10,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
 
-    // A quote that silently priced against the wrong card would still return a
-    // plausible number, so the lookup itself is asserted.
-    expect(repo.calls.resolveRate).toEqual([{ rateCardId: 'wisdom', zone: 'wollongong' }]);
+    /*
+     * A quote that silently priced against the wrong card — or on the wrong
+     * DATE — would still return a plausible number, so the lookup itself is
+     * asserted. `onDate` is part of it: pricing on today instead of the job's
+     * own date is the exact bug effective dating exists to prevent, and it is
+     * invisible in the total.
+     */
+    expect(repo.calls.resolveRate).toEqual([
+      { rateCardId: 'wisdom', zone: 'wollongong', onDate: PRICED_ON },
+    ]);
   });
 
   it('does not go looking for bag rates when there are no bags', async () => {
@@ -200,6 +232,7 @@ describe('quoting a job', () => {
       zone: 'sydney',
       expectedAreaM2: 100,
       bagCount: 0,
+      onDate: PRICED_ON,
     });
 
     expect(repo.calls.findAdditionalService).toEqual([]);

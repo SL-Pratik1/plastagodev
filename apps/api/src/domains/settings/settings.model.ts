@@ -1,11 +1,4 @@
-import {
-  CREDENTIAL_TYPES,
-  INTEGRATION_IDS,
-  INTEGRATION_STATES,
-  NOTIFICATION_EVENTS,
-  RATE_CARDS,
-  ZONES,
-} from '@plastago/shared';
+import { INVOICE_LAYOUTS, ZONES } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
 export const SETTINGS_COLLECTION = 'settings';
@@ -33,9 +26,6 @@ export type SequenceField = keyof typeof SEQUENCE_STARTS;
 export const RATE_CARDS_COLLECTION = 'ratecards';
 export const ZONE_RATES_COLLECTION = 'zonerates';
 export const ADDITIONAL_SERVICES_COLLECTION = 'additionalservices';
-export const NOTIFICATION_RULES_COLLECTION = 'notificationrules';
-export const INTEGRATIONS_COLLECTION = 'integrations';
-export const CREDENTIAL_TYPES_COLLECTION = 'credentialtypesettings';
 export const INVOICE_TEMPLATES_COLLECTION = 'invoicetemplates';
 
 /**
@@ -111,23 +101,40 @@ const settingsSchema = new Schema(
      */
     invoiceNumberPrefix: { type: String, required: false, default: '', trim: true },
 
+    /*
+     * ── What the invoice PDF prints besides the invoice (M7.5) ───────────
+     *
+     * All optional, all defaulting to empty. The renderer omits an empty field
+     * rather than substituting a placeholder: a document that went to a
+     * builder saying "Company Name Here" is worse than one with a gap.
+     *
+     * ⚠️ `logoKey` is a STORAGE KEY, not a URL. The renderer reads the bytes
+     * through `StorageProvider.get`, so producing an invoice never depends on
+     * a public bucket or on a signed URL that may have expired.
+     */
+    logoKey: { type: String, required: false, default: '', trim: true },
+    companyName: { type: String, required: false, default: '', trim: true },
+    /** Absent means the document is not a valid tax invoice over $82.50. */
+    companyAbn: { type: String, required: false, default: '', trim: true },
+    companyAddress: { type: String, required: false, default: '', trim: true },
+    companyPhone: { type: String, required: false, default: '', trim: true },
+    companyEmail: { type: String, required: false, default: '', trim: true },
+
+    termsText: { type: String, required: false, default: '' },
     footerText: { type: String, required: false, default: '' },
     bankBsb: { type: String, required: false, default: '' },
     bankAccount: { type: String, required: false, default: '' },
+    /** A BSB and number with no account name is a payment that bounces back. */
+    bankAccountName: { type: String, required: false, default: '', trim: true },
     showGbcaBadge: { type: Boolean, required: true, default: false },
-
-    /* ── Notifications (M8) ──────────────────────────────────────────── */
-    reminderLeadDays: { type: Number, required: true, min: 1, max: 7, default: 2 },
-    reminderIncludeRescheduleLink: { type: Boolean, required: true, default: true },
-    queueDigestEnabled: { type: Boolean, required: true, default: true },
-    queueDigestHour: { type: Number, required: true, min: 0, max: 23, default: 7 },
 
     /**
      * M6.8 — the flat per-job cost the margin figure assumes today.
      *
-     * `Decimal128` like every other amount. A placeholder until real cost data
-     * exists, which is exactly why it is a setting rather than a constant: the
-     * office can correct it without a deploy.
+     * `Decimal128` like every other amount. No longer on the settings screen —
+     * the margin card was removed — but still load-bearing: every figure on the
+     * financial summary report (M9.6) is computed from it. A seed-time value
+     * now, like the SLA above.
      */
     assumedCostPerJob: { type: Schema.Types.Decimal128, required: true },
   },
@@ -147,14 +154,24 @@ export const SettingsModel = model('Settings', settingsSchema);
  */
 const rateCardSchema = new Schema(
   {
-    /** The slug the contract uses — `clarendon-domaine`, `tier-1`. */
-    _id: { type: String, enum: RATE_CARDS },
+    /**
+     * The slug the contract uses — `clarendon-domaine`, `tier-1`.
+     *
+     * ⚠️ No `enum`. Rate cards are business data an administrator adds; a
+     * compile-time list here is what previously made "add a card for a new
+     * builder" impossible even once the UI offered it. `RateCardIdSchema`
+     * validates the shape on the way in.
+     */
+    _id: { type: String },
     label: { type: String, required: true, trim: true },
 
     /**
-     * M6.2 — rates are versioned: a job is priced by the date it RAN, not by
-     * today's card. Re-pricing history when a rate changes would rewrite
-     * invoices that have already been paid.
+     * When the card itself came into use, and when the relationship ended.
+     *
+     * ⚠️ Distinct from a SCHEDULE's dates below. The card is the commercial
+     * relationship and does not end when its prices change; the schedule is the
+     * prices. Conflating the two is what made rates un-editable — every price
+     * change looked like a new customer.
      */
     effectiveFrom: { type: Date, required: true },
     effectiveTo: { type: Date, default: null },
@@ -165,17 +182,27 @@ const rateCardSchema = new Schema(
 export const RateCardModel = model('RateCard', rateCardSchema);
 
 /**
- * What one rate card charges in one zone (M6.3).
+ * What one rate card charges in one zone, for one effective period (M6.2/M6.3).
  *
  * ⚠️ Both amounts are `Decimal128`, never `Number` (§6A.10 #1). Sydney is
  * $220 + $0.16/m²; Wollongong $250 + $0.18; Newcastle $250 + $0.20. These
  * figures must match TransVirtual to the cent (Risk 1), which a double cannot
  * guarantee.
+ *
+ * ── Why a row is a VERSION and not a rate ─────────────────────────────────
+ * There used to be one row per card per zone, enforced by a unique index on
+ * exactly those two fields — which meant two versions of "Sydney on Tier 1"
+ * could not be stored at all, and so a rate could only ever be overwritten.
+ * Overwriting reprices history: pricing a job reads the rates in force on that
+ * job's date, and a March invoice reissued in June has to use March's rates.
+ *
+ * Now a row carries its own window. Issuing a new schedule closes the current
+ * row and inserts a new one, so nothing that priced a job is ever mutated.
  */
 const zoneRateSchema = new Schema(
   {
     /** REFERENCE → `ratecards._id`. */
-    rateCardId: { type: String, required: true, ref: 'RateCard', enum: RATE_CARDS },
+    rateCardId: { type: String, required: true, ref: 'RateCard' },
     zone: { type: String, required: true, enum: ZONES },
     /** The call-out fee, charged once per job regardless of size. */
     serviceCharge: { type: Schema.Types.Decimal128, required: true },
@@ -184,12 +211,57 @@ const zoneRateSchema = new Schema(
      * rounding it to cents before multiplying by 823.41 m² loses real money.
      */
     ratePerM2: { type: Schema.Types.Decimal128, required: true },
+
+    /**
+     * The window this row prices, inclusive at both ends.
+     *
+     * `effectiveTo: null` means open-ended, and there must be at most one such
+     * row per card per zone — enforced by the partial index below. Dates are
+     * stored as the START OF THE SYDNEY DAY (see `lib/business-day.ts`), never
+     * UTC midnight: a schedule starting "1 October" must not begin at 11am on
+     * 30 September for a business that runs in Sydney.
+     */
+    effectiveFrom: { type: Date, required: true },
+    effectiveTo: { type: Date, default: null },
   },
   { collection: ZONE_RATES_COLLECTION, timestamps: true, versionKey: false },
 );
 
-/** One rate per card per zone. A duplicate would make pricing ambiguous. */
-zoneRateSchema.index({ rateCardId: 1, zone: 1 }, { unique: true, name: 'card_zone_unique' });
+/**
+ * One row per card, per zone, per start date.
+ *
+ * ⚠️ Replaces `card_zone_unique`, which forbade versioning outright. Dropping
+ * the old index is part of the migration — Mongo will not remove it just
+ * because this file stopped declaring it, and leaving it in place would reject
+ * every new schedule with a duplicate-key error.
+ */
+zoneRateSchema.index(
+  { rateCardId: 1, zone: 1, effectiveFrom: 1 },
+  { unique: true, name: 'card_zone_from_unique' },
+);
+
+/**
+ * At most one OPEN schedule per card per zone.
+ *
+ * Without this, a bug that forgot to close the previous row would leave two
+ * rows both claiming to price today, and `resolveRate` would pick whichever
+ * sorted first — a silent mispricing rather than a loud failure. A partial
+ * unique index makes that state unrepresentable.
+ */
+zoneRateSchema.index(
+  { rateCardId: 1, zone: 1 },
+  {
+    unique: true,
+    name: 'card_zone_open_unique',
+    partialFilterExpression: { effectiveTo: null },
+  },
+);
+
+/** The hot path: the row pricing one card + zone on one date. */
+zoneRateSchema.index(
+  { rateCardId: 1, zone: 1, effectiveFrom: -1 },
+  { name: 'card_zone_resolve' },
+);
 
 export const ZoneRateModel = model('ZoneRate', zoneRateSchema);
 
@@ -225,61 +297,35 @@ const additionalServiceSchema = new Schema(
 
 export const AdditionalServiceModel = model('AdditionalService', additionalServiceSchema);
 
-/** M8 — one rule per notifiable event. Its own collection so a rule is a row. */
-const notificationRuleSchema = new Schema(
-  {
-    _id: { type: String, enum: NOTIFICATION_EVENTS },
-    sms: { type: Boolean, required: true, default: false },
-    email: { type: Boolean, required: true, default: true },
-    includePhotos: { type: Boolean, required: true, default: false },
-  },
-  {
-    collection: NOTIFICATION_RULES_COLLECTION,
-    timestamps: true,
-    versionKey: false,
-    _id: false,
-  },
-);
-
-export const NotificationRuleModel = model('NotificationRule', notificationRuleSchema);
+/*
+ * ── Three collections used to live here ───────────────────────────────────
+ *
+ * `notificationrules`, `integrations` and `credentialtypesettings` are gone.
+ * Each was a settings surface nothing downstream read: the per-event SMS/email
+ * matrix was never consulted by `outboundService` (it picks a channel from the
+ * recipient's own M8.4 preferences), the integrations board could not configure
+ * anything, and the credential-type register's lead times reached no reminder.
+ *
+ * ⚠️ Their DOCUMENTS are not dropped by this change — removing the models only
+ * stops the app reading and writing them. Dropping the three collections is a
+ * separate, deliberate migration step.
+ *
+ * ⚠️ Unrelated and still live: `notifications` and `outboundmessages` in the
+ * notifications domain. Those are the bell and the delivery log, not this.
+ */
 
 /**
- * W7 — connection state for each external service.
+ * M7.5 — one invoice template: a named, branded configuration of a layout.
  *
- * ⚠️ NO CREDENTIALS. This records whether a connection works and when it last
- * did; secrets stay in the environment. A settings screen that could read a
- * Twilio token is one XSS away from leaking it.
+ * ── What an administrator controls, and what they do not ─────────────────
+ * They control what the document SAYS — its name, brand, accent colour and
+ * whether kilograms print beside square metres. They do not control where the
+ * logo sits or how the table is ruled: `layout` names one of the shipped
+ * drawings, and the renderer owns those. Adding a sixth layout is a deploy;
+ * adding a sixth template is a click.
+ *
+ * That split is the whole defence against the layout-authoring scope trap.
  */
-const integrationSchema = new Schema(
-  {
-    _id: { type: String, enum: INTEGRATION_IDS },
-    name: { type: String, required: true, trim: true },
-    purpose: { type: String, required: true, trim: true },
-    state: { type: String, required: true, enum: INTEGRATION_STATES, default: 'not-configured' },
-    lastSuccessAt: { type: Date, default: null },
-    detail: { type: String, default: null },
-    /** Known limitation worth saying out loud — e.g. M365 needs IP whitelisting. */
-    caveat: { type: String, default: null },
-  },
-  { collection: INTEGRATIONS_COLLECTION, timestamps: true, versionKey: false, _id: false },
-);
-
-export const IntegrationModel = model('Integration', integrationSchema);
-
-/** F53 — driver licences and tickets, and how far ahead to warn (M9.8). */
-const credentialTypeSchema = new Schema(
-  {
-    _id: { type: String, enum: CREDENTIAL_TYPES },
-    label: { type: String, required: true, trim: true },
-    reminderLeadDays: { type: Number, required: true, min: 1, max: 180, default: 30 },
-    requiredForDrivers: { type: Boolean, required: true, default: false },
-  },
-  { collection: CREDENTIAL_TYPES_COLLECTION, timestamps: true, versionKey: false, _id: false },
-);
-
-export const CredentialTypeModel = model('CredentialTypeSetting', credentialTypeSchema);
-
-/** M7.5 — the invoice layouts, and which brand each belongs to. */
 const invoiceTemplateSchema = new Schema(
   {
     _id: { type: String },
@@ -287,6 +333,10 @@ const invoiceTemplateSchema = new Schema(
     brandId: { type: String, required: true, ref: 'Brand' },
     /** Whether it prints kg alongside m² — depends on the account's capture mode. */
     showsWeight: { type: Boolean, required: true, default: false },
+    /** Which shipped drawing renders it. See `INVOICE_LAYOUTS`. */
+    layout: { type: String, required: true, enum: INVOICE_LAYOUTS, default: 'standard' },
+    /** `#rrggbb` for the heading rule and table accent. */
+    accentColour: { type: String, required: true, default: '#1a4d3a', trim: true },
   },
   {
     collection: INVOICE_TEMPLATES_COLLECTION,

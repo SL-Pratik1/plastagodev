@@ -1,4 +1,10 @@
-import type { Account, AccountListItem, PageMeta, TermsAcceptance } from '@plastago/shared';
+import type {
+  Account,
+  AccountListItem,
+  AccountType,
+  PageMeta,
+  TermsAcceptance,
+} from '@plastago/shared';
 import type {
   AccountScope,
   CreateAccountInput,
@@ -22,6 +28,15 @@ interface SeedOptions {
   code: string;
   /** Force a specific id, so a test can make the caller own this account. */
   id?: string | null;
+  /** Which journey the account starts on. Defaults to `contractor`. */
+  accountType?: AccountType;
+}
+
+/** What the fake stores per account. */
+interface StoredAccount {
+  code: string;
+  riskAssessmentRequired: boolean;
+  accountType: AccountType;
 }
 
 let counter = 0;
@@ -31,14 +46,14 @@ function nextId(): string {
   return counter.toString(16).padStart(24, '0');
 }
 
-function listItemOf(id: string, code: string): AccountListItem {
+function listItemOf(id: string, code: string, accountType: AccountType): AccountListItem {
   return {
     id,
     code,
     name: `${code} Pty Ltd`,
     brandId: 'plastago',
     rateCardId: 'tier-1',
-    accountType: 'contractor',
+    accountType,
     onboardingState: 'awaiting-terms',
     poPolicy: 'not-required',
     captureMode: 'area-only',
@@ -48,10 +63,13 @@ function listItemOf(id: string, code: string): AccountListItem {
   };
 }
 
-function accountOf(id: string, code: string, riskAssessmentRequired: boolean): Account {
+function accountOf(id: string, row: StoredAccount): Account {
   return {
-    ...listItemOf(id, code),
-    riskAssessmentRequired,
+    ...listItemOf(id, row.code, row.accountType),
+    // Null means "follow the brand" — the common case, and the one the
+    // render path resolves rather than reads.
+    invoiceTemplateId: null,
+    riskAssessmentRequired: row.riskAssessmentRequired,
     certificateEmail: null,
     abn: '12345678901',
     paymentTermsDays: 7,
@@ -64,7 +82,7 @@ function accountOf(id: string, code: string, riskAssessmentRequired: boolean): A
 }
 
 export function createFakeAccountRepository() {
-  const accounts = new Map<string, { code: string; riskAssessmentRequired: boolean }>();
+  const accounts = new Map<string, StoredAccount>();
   const takenCodes = new Set<string>();
 
   const state = {
@@ -76,7 +94,11 @@ export function createFakeAccountRepository() {
     /** Put an account in the store and return its id. */
     seedAccount(options: SeedOptions): string {
       const id = options.id ?? nextId();
-      accounts.set(id, { code: options.code, riskAssessmentRequired: false });
+      accounts.set(id, {
+        code: options.code,
+        riskAssessmentRequired: false,
+        accountType: options.accountType ?? 'contractor',
+      });
       takenCodes.add(options.code);
       return id;
     },
@@ -98,7 +120,7 @@ export function createFakeAccountRepository() {
         // repository would apply, without a database to apply it.
         const rows = [...accounts.entries()]
           .filter(([id]) => scope.accountId === null || scope.accountId === id)
-          .map(([id, row]) => listItemOf(id, row.code));
+          .map(([id, row]) => listItemOf(id, row.code, row.accountType));
 
         return {
           data: rows,
@@ -115,7 +137,7 @@ export function createFakeAccountRepository() {
         state.lastScope = scope;
         if (scope.accountId !== null && scope.accountId !== id) return null;
         const row = accounts.get(id);
-        return row ? accountOf(id, row.code, row.riskAssessmentRequired) : null;
+        return row ? accountOf(id, row) : null;
       },
 
       async codeExists(code: string): Promise<boolean> {
@@ -125,10 +147,14 @@ export function createFakeAccountRepository() {
       async create(input: CreateAccountInput): Promise<AccountListItem> {
         state.lastCreate = input;
         const id = nextId();
-        accounts.set(id, { code: input.code, riskAssessmentRequired: false });
+        accounts.set(id, {
+          code: input.code,
+          riskAssessmentRequired: false,
+          accountType: input.accountType,
+        });
         takenCodes.add(input.code);
         return {
-          ...listItemOf(id, input.code),
+          ...listItemOf(id, input.code, input.accountType),
           onboardingState: input.termsAgreedOffSystem ? 'complete' : 'awaiting-terms',
         };
       },
@@ -137,6 +163,13 @@ export function createFakeAccountRepository() {
         const row = accounts.get(id);
         if (!row) return false;
         row.riskAssessmentRequired = required;
+        return true;
+      },
+
+      async setAccountType(id: string, accountType: AccountType): Promise<boolean> {
+        const row = accounts.get(id);
+        if (!row) return false;
+        row.accountType = accountType;
         return true;
       },
 

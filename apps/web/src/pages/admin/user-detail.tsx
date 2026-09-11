@@ -1,4 +1,4 @@
-import { BRAND_LABELS, ROLE_LABELS } from '@plastago/shared';
+import { BRAND_LABELS, ROLE_LABELS, ROLE_PRIMARY_CHANNEL } from '@plastago/shared';
 import {
   Alert,
   Badge,
@@ -15,7 +15,7 @@ import {
   TabsPanel,
   TabsTrigger,
 } from '@plastago/ui';
-import { LockIcon, PencilIcon, SmartphoneIcon } from 'lucide-react';
+import { LockIcon, PencilIcon } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
@@ -27,9 +27,19 @@ import { ROLE_CAPABILITIES } from '@/features/auth/permissions';
 import { useUser } from '@/features/users/queries';
 import { isCustomerRole } from '@/features/users/roles';
 import { describeError } from '@/lib/error-message';
-import { formatDateTime, formatMobile, formatRelative } from '@/lib/format';
+import { formatDateTime, formatMobile } from '@/lib/format';
 
-const TABS = ['overview', 'permissions', 'devices', 'sign-ins'] as const;
+/**
+ * Two tabs, deliberately.
+ *
+ * Devices and the sign-in log used to sit here as well. They are §9 material
+ * and the API still returns both on the record, but on this screen they were
+ * two tabs an administrator opened once and never again — the questions people
+ * actually bring to a user row are "what can they reach" and "how do we contact
+ * them". The device and login audit belongs with the security/audit surface
+ * that owns it, not bolted to a person's profile.
+ */
+const TABS = ['overview', 'permissions'] as const;
 type TabKey = (typeof TABS)[number];
 
 /**
@@ -125,7 +135,17 @@ export function AdminUserDetailPage() {
     );
   }
 
-  const capabilities = ROLE_CAPABILITIES[user.role];
+  /*
+   * The union of every role they hold, not just the main one.
+   *
+   * Matt's driver manager is an allocator who also drives (27:01). Reading the
+   * main role alone hid `driver:access` from this list, so the screen said he
+   * could not open the driver app on the very day he is covering a shift —
+   * the one question this tab exists to answer.
+   */
+  const heldRoles = [user.role, ...user.roles.filter((held) => held !== user.role)];
+  const capabilities = [...new Set(heldRoles.flatMap((held) => ROLE_CAPABILITIES[held]))];
+  const signsInBy = ROLE_PRIMARY_CHANNEL[user.role];
 
   return (
     <div className="space-y-6">
@@ -158,12 +178,6 @@ export function AdminUserDetailPage() {
         <TabsList label="User sections">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="permissions">Permissions</TabsTrigger>
-          <TabsTrigger value="devices" badge={user.devices.length || undefined}>
-            Devices
-          </TabsTrigger>
-          <TabsTrigger value="sign-ins" badge={user.recentSignIns.length || undefined}>
-            Sign-ins
-          </TabsTrigger>
         </TabsList>
 
         <TabsPanel value="overview">
@@ -172,8 +186,26 @@ export function AdminUserDetailPage() {
               <DetailList
                 columns={3}
                 items={[
-                  { label: 'Email', value: user.email ?? '—' },
-                  { label: 'Mobile', value: formatMobile(user.mobile) },
+                  /*
+                   * Each blank says which of the two it is: nothing was ever
+                   * recorded, or nothing is expected for this role. A dash made
+                   * "no email because they sign in by SMS" look identical to
+                   * "somebody forgot the email", and only one of those is worth
+                   * chasing.
+                   */
+                  {
+                    label: 'Email',
+                    value:
+                      user.email ??
+                      (signsInBy === 'sms' ? 'Not provided — signs in by SMS' : 'Not provided'),
+                  },
+                  {
+                    label: 'Mobile',
+                    value: formatMobile(
+                      user.mobile,
+                      signsInBy === 'email' ? 'Not provided — signs in by email' : 'Not provided',
+                    ),
+                  },
                   {
                     label: user.roles.length > 1 ? 'Roles' : 'Role',
                     // Both roles listed, main one first. A driver manager who
@@ -183,7 +215,14 @@ export function AdminUserDetailPage() {
                       .map((held) => ROLE_LABELS[held])
                       .join(' · '),
                   },
-                  { label: 'Account', value: user.accountName ?? 'Not tied to an account' },
+                  {
+                    label: 'Account',
+                    value:
+                      user.accountName ??
+                      (isCustomerRole(user.role)
+                        ? 'No account linked — the portal will show them nothing'
+                        : 'Not applicable — staff roles are not tied to an account'),
+                  },
                   {
                     label: 'Brands',
                     value: (
@@ -196,10 +235,16 @@ export function AdminUserDetailPage() {
                       </span>
                     ),
                   },
-                  { label: 'Last sign-in', value: formatDateTime(user.lastSignedInAt) },
-                  { label: 'Invited by', value: user.invitedBy ?? '—' },
-                  { label: 'Created', value: formatDateTime(user.createdAt) },
-                  { label: 'Notes', value: user.notes || '—', wide: true },
+                  {
+                    label: 'Last sign-in',
+                    value: formatDateTime(
+                      user.lastSignedInAt,
+                      user.status === 'invited' ? 'Never — invitation pending' : 'Never signed in',
+                    ),
+                  },
+                  { label: 'Invited by', value: user.invitedBy ?? 'Not recorded' },
+                  { label: 'Created', value: formatDateTime(user.createdAt, 'Not recorded') },
+                  { label: 'Notes', value: user.notes || 'No notes', wide: true },
                 ]}
               />
             </CardContent>
@@ -209,7 +254,9 @@ export function AdminUserDetailPage() {
         <TabsPanel value="permissions">
           <Card>
             <CardHeader>
-              <CardTitle>What {ROLE_LABELS[user.role]} can reach</CardTitle>
+              <CardTitle>
+              What {heldRoles.map((held) => ROLE_LABELS[held]).join(' + ')} can reach
+            </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               {/*
@@ -222,6 +269,13 @@ export function AdminUserDetailPage() {
                 Access is granted to a role, never to an individual. To change what this person can
                 reach, change their role — or change the role’s permissions for everyone who holds
                 it.
+                {heldRoles.length > 1 && (
+                  <>
+                    {' '}
+                    This person holds two roles, so the list below is everything both of them
+                    reach.
+                  </>
+                )}
               </Alert>
 
               {capabilities.length === 0 ? (
@@ -229,7 +283,7 @@ export function AdminUserDetailPage() {
                   This role has no console access. Drivers work in the separate driver app.
                 </p>
               ) : (
-                <ul className="grid gap-2 text-sm sm:grid-cols-2">
+                <ul className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
                   {capabilities.map((capability) => (
                     <li key={capability} className="flex items-center gap-2">
                       <span aria-hidden className="text-brand-500">
@@ -244,81 +298,6 @@ export function AdminUserDetailPage() {
           </Card>
         </TabsPanel>
 
-        <TabsPanel value="devices">
-          <Card>
-            <CardHeader>
-              <CardTitle>Registered devices</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {user.devices.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No registered devices. Only the driver app registers a device.
-                </p>
-              ) : (
-                <ul className="divide-y divide-border">
-                  {user.devices.map((device) => (
-                    <li key={device.id} className="flex items-center gap-3 py-3">
-                      <SmartphoneIcon
-                        aria-hidden
-                        className="size-4 shrink-0 text-muted-foreground"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium">{device.label}</p>
-                        <p className="text-xs text-muted-foreground">
-                          Last seen {formatRelative(device.lastSeenAt)} · synced{' '}
-                          {formatRelative(device.lastSyncAt)}
-                        </p>
-                      </div>
-                      {/* §6A.8 — a stuck offline queue has to be visible here. */}
-                      <Badge variant={device.pendingSyncActions > 0 ? 'warning' : 'success'}>
-                        {device.pendingSyncActions > 0
-                          ? `${String(device.pendingSyncActions)} queued`
-                          : 'In sync'}
-                      </Badge>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
-        </TabsPanel>
-
-        <TabsPanel value="sign-ins">
-          <Card>
-            <CardHeader>
-              <CardTitle>Recent sign-ins</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {user.recentSignIns.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No sign-ins recorded yet.</p>
-              ) : (
-                <ul className="divide-y divide-border">
-                  {user.recentSignIns.map((signIn) => (
-                    <li
-                      key={signIn.id}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5 text-sm"
-                    >
-                      <span className="font-medium tabular-nums">{formatDateTime(signIn.at)}</span>
-                      <Badge variant="outline">
-                        {signIn.channel === 'sms' ? 'SMS code' : 'Email code'}
-                      </Badge>
-                      <Badge variant={signIn.outcome === 'success' ? 'success' : 'destructive'}>
-                        {signIn.outcome === 'success'
-                          ? 'Signed in'
-                          : signIn.outcome === 'failed-code'
-                            ? 'Wrong code'
-                            : signIn.outcome === 'expired-code'
-                              ? 'Code expired'
-                              : 'Locked out'}
-                      </Badge>
-                      <span className="text-xs text-muted-foreground">{signIn.device}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
-        </TabsPanel>
       </Tabs>
 
       <UserFormDialog

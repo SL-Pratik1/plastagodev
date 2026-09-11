@@ -1,6 +1,7 @@
 import { ROLE_LABELS, type BrandId, type Role, type UserStatus } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { connectMongo, disconnectMongo, isMongoConnected } from '../db/mongo.js';
+import { AccountModel } from '../domains/accounts/account.model.js';
 import { authRepository } from '../domains/auth/auth.repository.js';
 import { UserModel } from '../domains/auth/auth.model.js';
 import { logger } from '../lib/logger.js';
@@ -33,6 +34,16 @@ interface SeedUser {
   jobTitle: string;
   brandIds: BrandId[];
   status?: UserStatus;
+  /**
+   * The customer account this login is scoped to, by code.
+   *
+   * ⚠️ Required for a customer role and forbidden for a staff one — the same
+   * rule the users service enforces. Seeding a customer user with no account
+   * produced a record the console could not even save back: the portal scoped
+   * to nothing, "Account" was blank on the grid, and opening Edit failed
+   * validation on a field the seeder had left empty.
+   */
+  accountCode?: string;
 }
 
 const SEED_USERS: readonly SeedUser[] = [
@@ -91,6 +102,7 @@ const SEED_USERS: readonly SeedUser[] = [
     roles: ['customer-administrator'],
     jobTitle: 'Accounts Manager, iPlasta Pty Ltd',
     brandIds: ['plastago'],
+    accountCode: 'IPL001',
   },
   {
     name: 'Dave Nguyen',
@@ -100,6 +112,7 @@ const SEED_USERS: readonly SeedUser[] = [
     roles: ['customer-site-supervisor'],
     jobTitle: 'Site Supervisor, iPlasta',
     brandIds: ['plastago'],
+    accountCode: 'IPL001',
   },
   {
     // Present so the "that account has been suspended" path is reachable.
@@ -130,6 +143,27 @@ async function main(): Promise<void> {
   log.info('brands seeded');
 
   for (const seed of SEED_USERS) {
+    /*
+     * Resolved per user rather than assumed. seed:auth can run on a database
+     * that has never seen seed:demo, and a missing account has to be a loud
+     * warning rather than a dangling id pointing at nothing.
+     */
+    let accountId: mongoose.Types.ObjectId | null = null;
+    if (seed.accountCode) {
+      const account = await AccountModel.findOne({ code: seed.accountCode }, { _id: 1 })
+        .lean<{ _id: mongoose.Types.ObjectId } | null>()
+        .exec();
+
+      if (account) {
+        accountId = account._id;
+      } else {
+        log.warn(
+          { user: seed.name, accountCode: seed.accountCode },
+          'account not found — seeding this customer login without one. Run seed:demo first, then re-run seed:auth',
+        );
+      }
+    }
+
     // Upsert on the identifier so re-running does not duplicate anyone, and
     // never overwrite `lastSignedInAt` — that is real activity, not seed data.
     const filter = seed.email ? { email: seed.email } : { phoneNumber: seed.mobile };
@@ -146,7 +180,7 @@ async function main(): Promise<void> {
           status: seed.status ?? 'active',
           jobTitle: seed.jobTitle,
           brandIds: seed.brandIds,
-          accountId: null,
+          accountId,
         },
         $setOnInsert: {
           // Better Auth's fields. An OTP sign-in verifies the channel it was

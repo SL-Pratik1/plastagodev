@@ -1,5 +1,6 @@
 import * as z from 'zod';
 import {
+  AbnSchema,
   IsoDateSchema,
   IsoDateTimeSchema,
   MoneySchema,
@@ -503,10 +504,7 @@ export const AccountOnboardingSchema = z
   .object({
     legalName: z.string().trim().min(2, 'Enter the registered company name').max(120),
     tradingName: z.string().trim().max(120),
-    abn: z
-      .string()
-      .trim()
-      .regex(/^\d{11}$/, 'An ABN is 11 digits — check it on ABN Lookup'),
+    abn: AbnSchema,
     addressLine: z.string().trim().min(1, 'Enter the registered business address').max(160),
     suburb: z.string().trim().min(1, 'Enter the suburb').max(80),
     postcode: z.string().trim().regex(/^\d{4}$/, 'Four digits'),

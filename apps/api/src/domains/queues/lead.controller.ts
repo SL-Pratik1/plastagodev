@@ -29,6 +29,11 @@ export const leadController = {
     res.json(await leadService.list(req.validated.query, callerFrom(req)));
   },
 
+  /** The Won / Conversion cards. Counted across every lead, never per page. */
+  stats: async (req: ValidatedRequest<object>, res: Response): Promise<void> => {
+    res.json(await leadService.stats(callerFrom(req)));
+  },
+
   get: async (
     req: ValidatedRequest<{ params: typeof LeadIdParamsSchema }>,
     res: Response,
@@ -87,6 +92,8 @@ export const leadController = {
   ): Promise<void> => {
     res
       .status(201)
-      .json(await leadService.convert(req.validated.params.id, req.validated.body, callerFrom(req)));
+      .json(
+        await leadService.convert(req.validated.params.id, req.validated.body, callerFrom(req)),
+      );
   },
 };

@@ -31,7 +31,7 @@ import { UserStatusBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
 import { useAuth } from '@/features/auth/auth-context';
 import { UserFormDialog } from '@/features/users/components/user-form-dialog';
-import { assignableRoles } from '@/features/users/roles';
+import { assignableRoles, isCustomerRole } from '@/features/users/roles';
 import { useAccountOptions } from '@/features/lookups/queries';
 import { useResendInvite, useSetUserStatus, useUser, useUserList } from '@/features/users/queries';
 import { describeError } from '@/lib/error-message';
@@ -191,7 +191,18 @@ export function AdminUsersPage() {
       header: 'Account',
       sortKey: 'account',
       priority: 'detail',
-      cell: (row) => <span className="text-muted-foreground">{row.accountName ?? '—'}</span>,
+      /*
+       * Never a bare dash. "—" reads as missing data whichever way it is taken,
+       * and the two cases behind it are opposites: a staff account has no
+       * account BY DESIGN, while a customer user without one is a broken record
+       * whose portal would scope to nothing. Naming which is which turns the
+       * column into something worth scanning.
+       */
+      cell: (row) => (
+        <span className="text-muted-foreground">
+          {row.accountName ?? (isCustomerRole(row.role) ? 'No account linked' : 'Not applicable')}
+        </span>
+      ),
     },
     {
       id: 'lastSignedInAt',
@@ -202,7 +213,7 @@ export function AdminUsersPage() {
         <span className="text-muted-foreground">
           {row.status === 'invited'
             ? 'Never — invitation pending'
-            : formatDateTime(row.lastSignedInAt)}
+            : formatDateTime(row.lastSignedInAt, 'Never signed in')}
         </span>
       ),
     },

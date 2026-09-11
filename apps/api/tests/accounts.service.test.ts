@@ -14,11 +14,44 @@ import { createFakeAccountRepository } from './helpers/fake-accounts.js';
 
 let repo: ReturnType<typeof createFakeAccountRepository>;
 
+/**
+ * How many supervisors on the account can still sign in.
+ *
+ * Faked because it is a users query in the portal domain, and the rule under
+ * test is about what the office may do with that number — not how it is counted.
+ */
+let liveSupervisors = 0;
+
 // A GETTER, not a value: `vi.mock` factories hoist above every import, so the
 // fake does not exist yet when this runs.
 vi.mock('../src/domains/accounts/account.repository.js', () => ({
   get accountRepository() {
     return repo.repository;
+  },
+}));
+
+vi.mock('../src/domains/portal/supervisor.repository.js', () => ({
+  supervisorRepository: {
+    countLive: () => Promise.resolve(liveSupervisors),
+  },
+}));
+
+/**
+ * Which rate cards exist (M6.1).
+ *
+ * `create` checks the card is real before writing, because rate cards stopped
+ * being a compile-time enum — Mongo no longer refuses an unknown one, so the
+ * service has to. Faked to a set rather than stubbed to `true`, so the refusal
+ * itself is testable.
+ */
+let knownRateCards = new Set<string>(['default', 'tier-1', 'clarendon-domaine']);
+
+vi.mock('../src/domains/settings/settings.repository.js', () => ({
+  settingsRepository: {
+    findRateCard: (id: string) =>
+      Promise.resolve(
+        knownRateCards.has(id) ? { id, label: `${id} rates`, effectiveFrom: '2026-04-01' } : null,
+      ),
   },
 }));
 
@@ -51,6 +84,7 @@ function draft(overrides: Partial<AccountDraft> = {}): AccountDraft {
 
 beforeEach(() => {
   repo = createFakeAccountRepository();
+  liveSupervisors = 0;
 });
 
 describe('creating an account', () => {
@@ -183,6 +217,81 @@ describe('scoping the list', () => {
       OFFICE,
     );
     expect(repo.lastQuery?.onboarding).toBe('awaiting-terms');
+  });
+});
+
+describe('changing the account type (builder ↔ contractor)', () => {
+  it('moves a contractor onto the builder journey', async () => {
+    const id = repo.seedAccount({ code: 'CON001', accountType: 'contractor' });
+
+    const account = await accountService.setAccountType(id, 'builder', OFFICE);
+
+    expect(account.accountType).toBe('builder');
+  });
+
+  /*
+   * ⚠️ The rule this whole endpoint turns on.
+   *
+   * A contractor account has no supervisor screen, so their logins would keep
+   * working with nobody able to see, suspend or replace them — an account whose
+   * own administrator cannot answer "who can book on my account". Suspending
+   * them first is the customer administrator's act, and it is deliberate.
+   */
+  it('refuses builder → contractor while supervisors can still sign in', async () => {
+    const id = repo.seedAccount({ code: 'BLD001', accountType: 'builder' });
+    liveSupervisors = 3;
+
+    const error = await accountService
+      .setAccountType(id, 'contractor', OFFICE)
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ status: 409, code: 'CONFLICT' });
+    // The message has to say how many, or the office cannot tell whether this is
+    // one forgotten login or a working site team.
+    expect((error as { message: string }).message).toContain('3 site supervisors');
+
+    // And nothing moved.
+    const unchanged = await accountService.get(id, OFFICE);
+    expect(unchanged.accountType).toBe('builder');
+  });
+
+  it('allows builder → contractor once none of them can sign in', async () => {
+    const id = repo.seedAccount({ code: 'BLD002', accountType: 'builder' });
+    liveSupervisors = 0;
+
+    const account = await accountService.setAccountType(id, 'contractor', OFFICE);
+
+    expect(account.accountType).toBe('contractor');
+  });
+
+  /*
+   * A retried request must not fail on a check for a change it is not making —
+   * the supervisor count is irrelevant when the type is already what was asked
+   * for.
+   */
+  it('is idempotent, and does not consult the supervisor count', async () => {
+    const id = repo.seedAccount({ code: 'CON002', accountType: 'contractor' });
+    liveSupervisors = 5;
+
+    const account = await accountService.setAccountType(id, 'contractor', OFFICE);
+
+    expect(account.accountType).toBe('contractor');
+  });
+
+  // It decides what a CUSTOMER's own portal shows them. Not their call.
+  it('refuses a customer', async () => {
+    const id = repo.seedAccount({ code: 'OWN002', id: CUSTOMER.accountId });
+
+    await expect(accountService.setAccountType(id, 'builder', CUSTOMER)).rejects.toMatchObject({
+      status: 403,
+    });
+  });
+
+  it('404s an account that does not exist', async () => {
+    await expect(
+      accountService.setAccountType('d'.repeat(24), 'builder', OFFICE),
+    ).rejects.toMatchObject({ status: 404 });
   });
 });
 

@@ -25,6 +25,7 @@ export const queryKeys = {
     accounts: () => [...queryKeys.lookups.all, 'accounts'] as const,
     builders: () => [...queryKeys.lookups.all, 'builders'] as const,
     drivers: () => [...queryKeys.lookups.all, 'drivers'] as const,
+    rateCards: () => [...queryKeys.lookups.all, 'rate-cards'] as const,
     places: (query: string) => [...queryKeys.lookups.all, 'places', query] as const,
   },
 
@@ -99,6 +100,18 @@ export const queryKeys = {
   },
 
   /**
+   * I1 · M7.8 — the Xero connection's state.
+   *
+   * Its own domain rather than a key under `settings`, for the same reason as
+   * the extractor below: a settings save neither invalidates it nor should
+   * cause a round trip to a third party's status.
+   */
+  xero: {
+    all: ['xero'] as const,
+    status: () => [...queryKeys.xero.all, 'status'] as const,
+  },
+
+  /**
    * I6 — the Extractor tab's brokered session.
    *
    * Its own domain rather than a key under `settings`, because it is neither
@@ -122,9 +135,16 @@ export const queryKeys = {
     approvalList: (query: ListQuery) => [...queryKeys.queues.all, 'approvals', query] as const,
     approvalDetail: (id: string) => [...queryKeys.queues.all, 'approvals', 'detail', id] as const,
     awaitingPoList: (query: ListQuery) => [...queryKeys.queues.all, 'awaiting-po', query] as const,
+    /* M2.12b — orders waiting for a date, and the call-ups that arrived. */
+    awaitingCallUpList: (query: ListQuery) =>
+      [...queryKeys.queues.all, 'call-ups', 'awaiting', query] as const,
+    callUpList: (query: ListQuery & { state?: string }) =>
+      [...queryKeys.queues.all, 'call-ups', query] as const,
+    callUpDetail: (id: string) => [...queryKeys.queues.all, 'call-ups', 'detail', id] as const,
     poReviewList: (query: ListQuery) => [...queryKeys.queues.all, 'po-review', query] as const,
     poReviewDetail: (id: string) => [...queryKeys.queues.all, 'po-review', 'detail', id] as const,
     leadList: (query: ListQuery) => [...queryKeys.queues.all, 'leads', query] as const,
+    leadStats: () => [...queryKeys.queues.all, 'leads', 'stats'] as const,
     leadDetail: (id: string) => [...queryKeys.queues.all, 'leads', 'detail', id] as const,
   },
 
@@ -139,6 +159,9 @@ export const queryKeys = {
     scope: () => [...queryKeys.portal.all, 'scope'] as const,
     dashboard: () => [...queryKeys.portal.all, 'dashboard'] as const,
     jobs: (query: ListQuery) => [...queryKeys.portal.all, 'jobs', query] as const,
+    /** M2.12b — this account's orders with no pickup booked against them. */
+    awaitingCallUp: (query: ListQuery) =>
+      [...queryKeys.portal.all, 'purchase-orders', 'awaiting', query] as const,
     job: (id: string) => [...queryKeys.portal.all, 'job', id] as const,
     quote: (draft: unknown) => [...queryKeys.portal.all, 'quote', draft] as const,
     invoices: (query: ListQuery) => [...queryKeys.portal.all, 'invoices', query] as const,

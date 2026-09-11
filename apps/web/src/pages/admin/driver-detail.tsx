@@ -126,7 +126,7 @@ export function AdminDriverDetailPage() {
 
         {/* ── Profile ──────────────────────────────────────────────────── */}
         <TabsPanel value="profile">
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <Card className="lg:col-span-2">
               <CardHeader>
                 <CardTitle>Details</CardTitle>
@@ -214,9 +214,10 @@ export function AdminDriverDetailPage() {
                 ))}
               </ul>
 
-              <Alert variant="info" title="Reminders run a month out" className="mt-4">
-                Lead times are set per credential type in Settings, so a new type inherits a
-                reminder without code changes.
+              <Alert variant="info" title="Why expiry is tracked here" className="mt-4">
+                Chain of Responsibility under the Heavy Vehicle National Law makes licence currency
+                an operator obligation, not just the driver’s — so an expiring ticket is the
+                office’s problem before it is theirs.
               </Alert>
             </CardContent>
           </Card>
@@ -274,7 +275,7 @@ export function AdminDriverDetailPage() {
               time are measurable because the driver app captures continuous location.
             </Alert>
 
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <StatCard
                 label="Jobs completed"
                 value={driver.performance.jobsCompleted}

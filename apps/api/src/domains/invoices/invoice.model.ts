@@ -80,7 +80,32 @@ const invoiceSchema = new Schema(
     totalIncGst: { type: Schema.Types.Decimal128, required: true },
 
     /* ── Presentation (M7.4, M7.5) ───────────────────────────────────── */
+    /**
+     * The template's NAME as it read when this invoice was rendered.
+     *
+     * ⚠️ A frozen copy, not a reference. Renaming a template, recolouring it
+     * or deleting it outright must not change what an invoice already sent
+     * says it was printed on — the customer is holding the version that
+     * disagrees.
+     */
     templateName: { type: String, required: true, trim: true, default: 'Standard' },
+    /** REFERENCE → `invoicetemplates._id`. Null until the PDF is rendered. */
+    templateId: { type: String, default: null, ref: 'InvoiceTemplate' },
+
+    /**
+     * Storage key for the rendered PDF (M7.6). Null until one exists.
+     *
+     * ── Why the document is STORED and not re-rendered on demand ─────────
+     * Re-rendering would read today's branding, today's template and today's
+     * settings, so an invoice reprinted a year later could come back looking
+     * different from the one in the builder's filing system — different bank
+     * details, a different logo, a different colour. The bytes that were sent
+     * are the record. A reissue writes a NEW key rather than overwriting this
+     * one.
+     */
+    pdfKey: { type: String, default: null },
+    pdfRenderedAt: { type: Date, default: null },
+
     notes: { type: String, required: false, default: '', trim: true },
 
     /**

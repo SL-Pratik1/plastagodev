@@ -235,6 +235,25 @@ const EnvSchema = z
     S3_REGION: z.string().min(1).optional(),
     S3_BUCKET: z.string().min(1).optional(),
     /**
+     * The single folder every object lives under, e.g. `plastago/jobs/<id>/…`.
+     *
+     * ── Why a prefix rather than the bucket root ──────────────────────────
+     * A bucket is rarely PlastaGo's alone — the one configured today is shared
+     * test infrastructure. Rooting everything at one prefix means a lifecycle
+     * rule, an IAM policy or a "delete everything of ours" can be written
+     * against `plastago/*` without reaching a neighbour's objects, and it keeps
+     * the console listing legible.
+     *
+     * Configurable rather than hard-coded so staging and production can share a
+     * bucket without sharing objects (§8). Slashes are trimmed here so the one
+     * place that joins it cannot produce `plastago//jobs` or a leading `/`,
+     * either of which is a DIFFERENT and valid S3 key.
+     */
+    S3_KEY_PREFIX: z
+      .string()
+      .default('plastago')
+      .transform((value) => value.replace(/^\/+|\/+$/g, '')),
+    /**
      * Optional. Omit on EC2/ECS/Lambda so the SDK uses the instance role, which
      * is better than a long-lived key sitting in an environment variable.
      */
@@ -290,6 +309,22 @@ const EnvSchema = z
     EXTRACTOR_DOCUMENT_ID: z.string().min(1).optional(),
 
     /**
+     * The template id for CALL-UP emails (M2.12b), the second document type in
+     * the same mailbox.
+     *
+     * Matt, 23:37: *"I've just created yesterday a new shared mailbox which is
+     * builder doc processing, so all purchase orders and call-ups will go to the
+     * same email address."* One mailbox, two kinds of document — so the template
+     * the extractor matched is the only thing that tells them apart.
+     *
+     * ⚠️ Optional, and until it is set no call-up is ever read from an email.
+     * That is the safe default: without it, a call-up extraction would fall
+     * through to the purchase-order path and arrive as an order with no figures
+     * on it. Booking still works by hand in the meantime (Matt, 30:40).
+     */
+    EXTRACTOR_CALL_UP_DOCUMENT_ID: z.string().min(1).optional(),
+
+    /**
      * Shared secret the webhook must present, as `?token=` on the callback URL.
      *
      * ⚠️ This authenticates the PING, not the payload. The webhook body is never
@@ -297,6 +332,70 @@ const EnvSchema = z
      * caller making us fetch arbitrary extraction ids.
      */
     EXTRACTOR_WEBHOOK_SECRET: z.string().min(16).optional(),
+
+    /**
+     * I1 · M7.8 — Xero.
+     *
+     * `off` is a working state, not a broken one: invoices behave exactly as
+     * they do today and every sync badge stays on "Not sent to Xero". Turning
+     * the integration on is this variable plus credentials — never a code
+     * change (§8).
+     *
+     * ⚠️ Unlike every other integration here, credentials alone are not enough.
+     * Xero has no static key for a company's books: the organisation owner must
+     * authorise PlastaGo from a browser, once, and only then does a connection
+     * exist. See `domains/xero`.
+     */
+    XERO_PROVIDER: z.enum(['off', 'xero']).default('off'),
+
+    XERO_CLIENT_ID: z.string().min(1).optional(),
+    /** ⚠️ Never reaches a browser. Used only on the server-to-server token calls. */
+    XERO_CLIENT_SECRET: z.string().min(1).optional(),
+
+    /**
+     * Where Xero sends the organisation owner back to after they approve.
+     *
+     * ── Why this is configuration and not derived ─────────────────────────
+     * Xero compares it against the app's registered redirect URIs as an exact
+     * string — scheme, port and trailing slash included — and rejects the whole
+     * sign-in with `invalid_grant` if it differs by a character. Deriving it
+     * from `AUTH_BASE_URL` is right in every environment we control, but the
+     * override exists for the one that sits behind a proxy whose public origin
+     * is not the origin the process knows about.
+     */
+    XERO_REDIRECT_URI: z.string().url().optional(),
+
+    /**
+     * Encrypts the Xero refresh token at rest (AES-256-GCM). 32 bytes, hex.
+     *
+     * ── Why this one credential is encrypted when others are not ──────────
+     * Everything else in this file is a credential we hold for ourselves. The
+     * Xero refresh token is a credential a CUSTOMER granted us over their own
+     * accounting records, it is long-lived, and it lives in a database rather
+     * than in an environment variable — a different exposure with a different
+     * blast radius. A leaked Mongo backup should not be a leaked ledger.
+     *
+     * ⚠️ Rotating this does not corrupt anything, but it does make the stored
+     * connection undecryptable: the page reports "reconnect required" and
+     * Matthew reconnects once.
+     */
+    XERO_ENCRYPTION_KEY: z
+      .string()
+      .regex(/^[0-9a-fA-F]{64}$/, 'Must be 64 hex characters — generate with: openssl rand -hex 32')
+      .optional(),
+
+    /**
+     * The status a pushed invoice takes ON in Xero.
+     *
+     * ⚠️ Defaults to `DRAFT` deliberately, and the default is the safe one.
+     * `AUTHORISED` puts the invoice straight into the ledger with no human
+     * between PlastaGo and the books — so an invoice this platform got wrong is
+     * already a real accounting document by the time anyone notices. DRAFT
+     * lands it in Xero's own draft list where the accountant approves it.
+     *
+     * This is the client's accountant's decision, not a technical one.
+     */
+    XERO_INVOICE_STATUS: z.enum(['DRAFT', 'AUTHORISED']).default('DRAFT'),
   })
   .superRefine((value, ctx) => {
     const isProd = value.NODE_ENV === 'production';
@@ -408,6 +507,28 @@ const EnvSchema = z
       }
     }
 
+    /*
+     * Selecting Xero without its credentials would fail the moment somebody
+     * clicks Connect — in front of them, on a page whose only purpose is that
+     * button. Fail at boot instead.
+     *
+     * The redirect URI is absent from this list because it has a sane default
+     * (AUTH_BASE_URL + the callback path); the encryption key is NOT, because
+     * its absence would mean writing a customers refresh token to the database
+     * in clear text, which is a thing to refuse rather than to default.
+     */
+    if (value.XERO_PROVIDER === "xero") {
+      for (const key of ["XERO_CLIENT_ID", "XERO_CLIENT_SECRET", "XERO_ENCRYPTION_KEY"] as const) {
+        if (!value[key]) {
+          ctx.addIssue({
+            code: "custom",
+            path: [key],
+            message: "Required when XERO_PROVIDER=xero",
+          });
+        }
+      }
+    }
+
     // A production deployment that cannot send a code cannot let anyone in.
     if (isProd && value.MAIL_PROVIDER === 'stub') {
       ctx.addIssue({
@@ -466,5 +587,15 @@ export const revealUnknownIdentifier = !isProduction && env.AUTH_REVEAL_UNKNOWN_
  * between a live deployment and an unauthenticated sign-in.
  */
 export const revealOtpCode = !isProduction && env.AUTH_REVEAL_OTP_CODE;
+
+/**
+ * Where Xero returns the organisation owner after they approve.
+ *
+ * Derived from `AUTH_BASE_URL` so there is one origin to change per
+ * environment, but overridable because Xero matches this string EXACTLY
+ * against the app registration and a proxy can make the two differ.
+ */
+export const xeroRedirectUri = (): string =>
+  env.XERO_REDIRECT_URI ?? `${env.AUTH_BASE_URL}/api/v1/xero/callback`;
 
 export type Env = typeof env;

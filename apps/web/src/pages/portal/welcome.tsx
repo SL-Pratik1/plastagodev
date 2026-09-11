@@ -153,7 +153,7 @@ export function PortalWelcomePage() {
           <CardHeader>
             <CardTitle>Your business</CardTitle>
           </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
+          <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field
               id="onb-legal-name"
               label="Registered company name"
@@ -215,7 +215,7 @@ export function PortalWelcomePage() {
           <CardHeader>
             <CardTitle>Where things go</CardTitle>
           </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
+          <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field
               id="onb-accounts-name"
               label="Who handles your invoices"
@@ -307,7 +307,7 @@ export function PortalWelcomePage() {
               </p>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field
                 id="onb-accepted-name"
                 label="Full name of the person accepting"

@@ -22,6 +22,7 @@ import {
   VehicleSchema,
   ZoneVolumeReportSchema,
   type AccountDraft,
+  type AccountType,
   type CreateRunInput,
   type ExceptionReason,
   type JobCommentDraft,
@@ -97,6 +98,18 @@ export function createHttpCustomerService(api: ApiClient): CustomerService {
         api.request(`${API_PREFIX}/invoices`, {
           searchParams: { ...listParams(query), account: accountId },
           schema: pageOf(InvoiceListItemSchema),
+        }),
+      ),
+
+    setAccountType: (accountId: string, accountType: AccountType) =>
+      viaService(() =>
+        api.request(`${base}/${accountId}/type`, {
+          method: 'PATCH',
+          body: { accountType },
+          // The whole account, so the page renders the stored journey. The
+          // server can refuse this (409) when supervisors can still sign in,
+          // in which case nothing comes back and the caller shows the message.
+          schema: AccountSchema,
         }),
       ),
 
@@ -306,6 +319,14 @@ export function createHttpInvoiceService(api: ApiClient): InvoiceService {
 
     get: (id: string) => viaService(() => api.request(`${base}/${id}`, { schema: InvoiceSchema })),
 
+    raiseForJob: (jobId: string) =>
+      viaService(() =>
+        api.request(`${base}/jobs/${jobId}`, {
+          method: 'POST',
+          schema: z.array(InvoiceListItemSchema),
+        }),
+      ),
+
     send: async (ids: readonly string[]) => {
       // The count is returned rather than thrown on: a grid selection is
       // expected to contain rows somebody else already actioned, and failing
@@ -344,15 +365,30 @@ export function createHttpInvoiceService(api: ApiClient): InvoiceService {
       );
     },
 
-    retryXero: async (id: string) => {
-      await viaService(() =>
-        api.request(`${base}/${id}/xero-retry`, { method: 'POST', schema: NoContentSchema }),
-      );
-    },
+    /*
+     * ⚠️ Answers with an OUTCOME, not 204.
+     *
+     * The push happens while this request is open, so `pushed: false` is a
+     * successful HTTP call reporting that Xero said no. Treating it as a bare
+     * success — which a 204 forces — is how the page ends up saying "Re-sent
+     * to Xero" directly above a badge reading "Xero push failed".
+     */
+    retryXero: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/${id}/xero-retry`, {
+          method: 'POST',
+          schema: XeroRetryResultSchema,
+        }),
+      ),
   };
 }
 
 /* ── M9 · reports ────────────────────────────────────────────────────────── */
+
+const XeroRetryResultSchema = z.object({
+  pushed: z.boolean(),
+  message: z.string().nullable(),
+});
 
 export function createHttpReportService(api: ApiClient): ReportService {
   const base = `${API_PREFIX}/reports`;

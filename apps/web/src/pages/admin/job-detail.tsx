@@ -36,6 +36,7 @@ import {
   FileIcon,
   ImageIcon,
   MapPinIcon,
+  ReceiptIcon,
   TriangleAlertIcon,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -52,6 +53,7 @@ import {
 import { PageHeader } from '@/components/page-header';
 import { useAuth } from '@/features/auth/auth-context';
 import { JobCommentThreads } from '@/features/jobs/components/comment-thread';
+import { useRaiseInvoiceForJob } from '@/features/invoices/queries';
 import { useCancelJob, useJob, useRescheduleJob } from '@/features/jobs/queries';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatDateTime, formatMoney, formatWeight } from '@/lib/format';
@@ -96,6 +98,7 @@ export function AdminJobDetailPage() {
   const { data: job, error, isPending, refetch } = useJob(jobId);
   const cancelJob = useCancelJob();
   const rescheduleJob = useRescheduleJob();
+  const raiseInvoice = useRaiseInvoiceForJob();
 
   /*
    * ── The Allocator sees the job, not the price (M1.5) ──────────────────────
@@ -103,9 +106,10 @@ export function AdminJobDetailPage() {
    * rather than emptied: a tab that opens onto "you cannot see this" is worse
    * than no tab, because it advertises exactly what it withholds.
    *
-   * ⚠️ This is a UI courtesy, not a security boundary. The server must scope
-   * what it returns; a role that cannot see money still receives `totalExGst`
-   * in this build because the mock has no per-role projection.
+   * This is a UI courtesy rather than the boundary — the boundary is the server,
+   * which now nulls `totalExGst`, `gst`, `totalIncGst` and drops `charges` for a
+   * caller without `pricing:view` (see `redactPricing` in `job.service.ts`).
+   * Until it did, the numbers arrived anyway and were one devtools panel away.
    */
   const seesPricing = can('pricing:view');
 
@@ -172,6 +176,16 @@ export function AdminJobDetailPage() {
   const complianceGaps = countComplianceGaps(job);
 
   const isTerminal = (TERMINAL as readonly string[]).includes(job.status);
+
+  /*
+   * Finished work that has not been billed yet, in front of somebody allowed to
+   * see money. The server checks all three again — this only decides whether
+   * offering the button makes sense.
+   */
+  const canRaiseInvoice =
+    seesPricing &&
+    job.invoiceStatus === 'not-invoiced' &&
+    (job.status === 'completed' || job.status === 'admin-complete' || job.status === 'futile');
   const atRisk =
     !isTerminal &&
     job.status !== 'futile' &&
@@ -207,6 +221,30 @@ export function AdminJobDetailPage() {
     }
   };
 
+  const doRaiseInvoice = async () => {
+    try {
+      const raised = await raiseInvoice.mutateAsync(job.id);
+
+      /*
+       * Named, because a split account gets TWO — the job as sold, and a second
+       * for the driver's extras that needs its own purchase order before it can
+       * go anywhere. "Invoice raised" would hide the one still blocked.
+       */
+      const blocked = raised.filter((invoice) => invoice.status === 'awaiting-po');
+      toast.success(
+        raised.length === 1
+          ? `Invoice #${String(raised[0]?.invoiceNumber)} raised`
+          : `${String(raised.length)} invoices raised`,
+        blocked.length > 0
+          ? `${blocked.map((invoice) => `#${String(invoice.invoiceNumber)}`).join(' and ')} needs a purchase order before it can be sent.`
+          : 'Ready to send from the invoices screen.',
+      );
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -221,29 +259,60 @@ export function AdminJobDetailPage() {
           </span>
         }
         actions={
-          !isTerminal ? (
-            <>
+          <>
+            {!isTerminal && (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setNewReadyDate(job.readyDate);
+                    setRescheduleOpen(true);
+                  }}
+                >
+                  <CalendarIcon aria-hidden />
+                  Reschedule
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setCancelOpen(true);
+                  }}
+                >
+                  <BanIcon aria-hidden />
+                  Cancel job
+                </Button>
+              </>
+            )}
+            {/*
+              M7.1 — the step that turns finished work into money.
+
+              ⚠️ There was no way to do this anywhere in the product. The
+              endpoint existed and was guarded, and nothing called it: no
+              screen, no completion hook, no worker. Invoices were only ever
+              present because the seed wrote them, so in real use a completed
+              job's charges would have sat on the job for ever.
+
+              Deliberately a human pressing a button rather than something that
+              fires on completion: the driver's charges go to the approvals
+              queue first, and invoicing the moment the truck leaves would bill
+              a contamination fee nobody has agreed to yet.
+
+              Sits ALONGSIDE reschedule and cancel rather than replacing them,
+              because a futile job is both — still reschedulable, and already
+              billable for the attendance fee.
+            */}
+            {canRaiseInvoice && (
               <Button
-                variant="outline"
                 onClick={() => {
-                  setNewReadyDate(job.readyDate);
-                  setRescheduleOpen(true);
+                  void doRaiseInvoice();
                 }}
+                disabled={raiseInvoice.isPending}
               >
-                <CalendarIcon aria-hidden />
-                Reschedule
+                <ReceiptIcon aria-hidden />
+                {raiseInvoice.isPending ? 'Raising…' : 'Raise invoice'}
               </Button>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setCancelOpen(true);
-                }}
-              >
-                <BanIcon aria-hidden />
-                Cancel job
-              </Button>
-            </>
-          ) : undefined
+            )}
+          </>
         }
       />
 
@@ -305,7 +374,7 @@ export function AdminJobDetailPage() {
 
         {/* ── Overview ─────────────────────────────────────────────────── */}
         <TabsPanel value="overview">
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <Card className="lg:col-span-2">
               <CardHeader>
                 <CardTitle>Job</CardTitle>
@@ -326,7 +395,28 @@ export function AdminJobDetailPage() {
                       ),
                     },
                     { label: 'Builder on site', value: job.builderName },
-                    { label: 'Site', value: `${job.siteName}, ${job.suburb}` },
+                    { label: 'Site', value: job.siteName },
+                    /*
+                     * The street address and the lot, which the office types at
+                     * booking and could not read back anywhere.
+                     *
+                     * This row used to be `siteName, suburb` and nothing else.
+                     * `addressLine` and `lotNumber` were stored, and rendered
+                     * only in the DRIVER app — so the one person who could check
+                     * the address was right was the one already standing at it.
+                     * The office answering "which site is this?" on the phone
+                     * had the site name and a suburb.
+                     */
+                    {
+                      label: 'Address',
+                      value: [
+                        job.lotNumber ? `Lot ${job.lotNumber}` : null,
+                        job.addressLine,
+                        `${job.suburb} ${job.postcode}`,
+                      ]
+                        .filter(Boolean)
+                        .join(', '),
+                    },
                     { label: 'Zone', value: ZONE_LABELS[job.zone] },
                     { label: 'Customer reference', value: job.poNumber ?? '—' },
                     { label: 'Purchase order', value: job.poNumber ?? 'Not supplied' },
@@ -358,6 +448,25 @@ export function AdminJobDetailPage() {
                     items={[
                       { label: 'Expected area', value: formatArea(job.expectedAreaM2) },
                       { label: 'Recycling bags', value: job.bagCount },
+                      /*
+                       * Matt, 07:37 — what came off site against what the order
+                       * allowed for. Shown only once the driver has counted,
+                       * and only when the two disagree: on the great majority
+                       * of jobs they match, and a row repeating the figure above
+                       * would just be noise on every screen.
+                       */
+                      ...(job.collectedBagCount !== null &&
+                      job.collectedBagCount !== job.bagCount
+                        ? [
+                            {
+                              label:
+                                job.collectedBagCount > job.bagCount
+                                  ? `Bags collected (${String(job.collectedBagCount - job.bagCount)} over the PO)`
+                                  : 'Bags collected',
+                              value: job.collectedBagCount,
+                            },
+                          ]
+                        : []),
                       // Only shown where the account captures it — a zero would
                       // read as "we recovered nothing", which is not the same
                       // thing as "we do not measure it here".

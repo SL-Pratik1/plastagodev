@@ -224,7 +224,7 @@ function AllocationBoardView({ date }: { date: string }) {
 
   if (isPending || !data) {
     return (
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         {[0, 1, 2].map((index) => (
           <Card key={index} className="p-4">
             <Skeleton className="h-4 w-32" />
@@ -260,7 +260,15 @@ function AllocationBoardView({ date }: { date: string }) {
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      {/*
+        `grid-cols-1` rather than relying on the implicit single column.
+
+        The implicit column is `auto`-sized and its items keep `min-width: auto`,
+        so below `lg` the board sized itself to the longest site name on it and
+        the page scrolled sideways on a phone. Tailwind's `grid-cols-1` is
+        `minmax(0, 1fr)`, which lets the column win and the cards wrap.
+      */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <UnallocatedColumn
           board={data}
           onAddToRun={(runId, runName, job) => void doAddJob(runId, runName, job)}
@@ -538,7 +546,17 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
                 <MenuItem
                   key={driver.driverId}
                   icon={TruckIcon}
-                  disabled={driver.driverId === run.driverId || !editable}
+                  /*
+                   * A driver who is not working is shown and disabled, not
+                   * hidden: the board is also how the allocator sees who is off
+                   * today, and somebody who vanishes from the list reads as a
+                   * bug to whoever was expecting them. The API refuses this
+                   * assignment too — a disabled item is a courtesy, not a
+                   * boundary.
+                   */
+                  disabled={
+                    driver.driverId === run.driverId || !editable || driver.status === 'off'
+                  }
                   onSelect={() => {
                     void guard(
                       () =>
@@ -551,7 +569,10 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
                     );
                   }}
                 >
-                  {driver.driverName} ({driver.assignedCount}/{driver.capacity})
+                  {driver.driverName}{' '}
+                  {driver.status === 'off'
+                    ? '(not working)'
+                    : `(${String(driver.assignedCount)}/${String(driver.capacity)})`}
                 </MenuItem>
               ))}
 
@@ -1083,7 +1104,7 @@ function MapView({ date }: { date: string }) {
         route; route optimisation is out of scope.
       </Alert>
 
-      <div className="grid gap-4 lg:grid-cols-5">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         <Card className="lg:col-span-3">
           <CardHeader>
             <CardTitle>Job locations · {formatDate(date)}</CardTitle>

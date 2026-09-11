@@ -89,6 +89,15 @@ interface RawInvoice {
   gst: mongoose.Types.Decimal128;
   totalIncGst: mongoose.Types.Decimal128;
   templateName: string;
+  /**
+   * ⚠️ Optional, not `string | null`.
+   *
+   * `.lean()` returns the stored document, and an invoice raised before PDFs
+   * existed has no `pdfKey` path at all — so this is `undefined` there, not
+   * `null`. Typing it as nullable would let `undefined` reach a
+   * `z.string().nullable()` and fail the whole invoice payload.
+   */
+  pdfKey?: string | null;
   notes: string;
   xeroState: XeroSyncState;
   xeroLastSyncAt: Date | null;
@@ -194,6 +203,9 @@ export const invoiceRepository = {
         }),
       ),
       templateName: row.templateName,
+      // Coalesced for the reason on the raw shape above: absent means "no PDF
+      // yet", which the contract expresses as null.
+      pdfKey: row.pdfKey ?? null,
       sentAt: row.sentAt ? row.sentAt.toISOString() : null,
       xeroState: row.xeroState,
       xeroLastSyncAt: row.xeroLastSyncAt ? row.xeroLastSyncAt.toISOString() : null,
@@ -324,6 +336,35 @@ export const invoiceRepository = {
    * sitting there with a PO printed beside it, which is how a queue stops being
    * trusted.
    */
+  /**
+   * Point an invoice at its rendered PDF (M7.6).
+   *
+   * ⚠️ Deliberately UNSCOPED, and deliberately not a status transition. It is
+   * called by the render service after it has already loaded the invoice
+   * through the caller's scope, and it records a fact about a document rather
+   * than a decision about an invoice — so it must not be able to move a row
+   * between statuses by accident.
+   */
+  async recordPdf(
+    id: string,
+    input: { pdfKey: string; templateId: string; templateName: string },
+  ): Promise<void> {
+    if (!mongoose.isValidObjectId(id)) return;
+
+    await InvoiceModel.updateOne(
+      { _id: new mongoose.Types.ObjectId(id) },
+      {
+        $set: {
+          pdfKey: input.pdfKey,
+          templateId: input.templateId,
+          // Frozen copy — see the note on the model.
+          templateName: input.templateName,
+          pdfRenderedAt: new Date(),
+        },
+      },
+    );
+  },
+
   async recordPo(
     id: string,
     poNumber: string,

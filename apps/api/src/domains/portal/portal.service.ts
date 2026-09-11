@@ -1,4 +1,6 @@
 import type {
+  AwaitingCallUp,
+  CallUpRequest,
   PageMeta,
   PortalBookingDraft,
   PortalChangeRequest,
@@ -15,6 +17,7 @@ import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { jobService, type Caller as JobCaller } from '../jobs/job.service.js';
+import { callUpService, type CallUpOutcome } from '../queues/call-up.service.js';
 import { settingsRepository } from '../settings/settings.repository.js';
 import {
   portalRepository,
@@ -279,6 +282,57 @@ export const portalService = {
    * ⚠️ Refused outright for a site supervisor (M1.5). Not hidden in the UI:
    * the figure never leaves the server.
    */
+  /**
+   * The orders on this account with no job yet (M2.12b).
+   *
+   * ── Why the customer sees this list at all ────────────────────────────────
+   * Matt, 30:40: *"this guy, he can log into his portal and that job, that PO
+   * that we got will be sitting there on his account and he can go call this up
+   * for the 21st because this email is not coming to us."*
+   *
+   * The builders' own systems drop these notices, and when they do the work
+   * still has to happen. This is the screen that makes that recoverable without
+   * a phone call to the office.
+   */
+  async awaitingCallUp(
+    query: { page: number; pageSize: number },
+    caller: Caller,
+  ): Promise<{ data: AwaitingCallUp[]; meta: PageMeta }> {
+    const account = await requireAccount(caller);
+
+    /*
+     * ⚠️ The account comes from the SESSION, never from the request. No portal
+     * route takes an account id, which is what stops a URL widening what a
+     * customer can see — see the note on the router.
+     */
+    return callUpService.listAwaiting(
+      { accountId: account.id, page: query.page, pageSize: query.pageSize },
+      { ...caller, accountId: account.id },
+    );
+  },
+
+  /**
+   * Calling one of their own orders up (Matt, 29:03).
+   *
+   * Two taps rather than a booking form: everything about the job is already on
+   * the order, which is the whole reason a supervisor can do this at all — they
+   * cannot answer an area or a bag allowance, and should not be asked.
+   */
+  async callUp(
+    purchaseOrderId: string,
+    request: CallUpRequest,
+    caller: Caller,
+  ): Promise<CallUpOutcome> {
+    const account = await requireAccount(caller);
+
+    // Scoped in the service by `accountId`, so an order belonging to another
+    // account is a 404 here exactly as it is in the office queue.
+    return callUpService.callUpByHand(purchaseOrderId, request, {
+      ...caller,
+      accountId: account.id,
+    });
+  },
+
   async quote(draft: PortalBookingDraft, caller: Caller): Promise<PricePreview> {
     const account = await requireAccount(caller);
 

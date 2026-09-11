@@ -12,7 +12,12 @@ import {
   SettingsSchema,
   UserListItemSchema,
   UserSchema,
-  type Integration,
+  type AdditionalServiceCreate,
+  type AdditionalServiceUpdate,
+  type InvoiceTemplateWrite,
+  type RateCardCreate,
+  type RateCardUpdate,
+  type RateScheduleCreate,
   type Settings,
   type UserDraft,
   type UserStatus,
@@ -61,6 +66,7 @@ export function createHttpLookupService(api: ApiClient): LookupService {
     accounts: () => list('accounts'),
     builders: () => list('builders'),
     drivers: () => list('drivers'),
+    rateCards: () => list('rate-cards'),
 
     places: (query: string) =>
       viaService(() =>
@@ -208,9 +214,13 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
 
   /*
    * Saves are per SECTION, matching the API. One giant PUT would mean a failure
-   * in the pricing form discards what somebody typed in notifications — and
-   * each section returns only its own slice, so a save cannot silently
-   * overwrite a sibling with stale values from this tab.
+   * in one form discards what somebody typed in another — and each section
+   * returns only its own slice, so a save cannot silently overwrite a sibling
+   * with stale values from this tab.
+   *
+   * Invoicing is the only writable section: pricing is read-only because rates
+   * are effective-dated, and the notification-rules, integrations and
+   * credential-type sections were removed.
    */
   const section = <TKey extends keyof Settings>(
     path: string,
@@ -219,28 +229,115 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
     (input: Settings[TKey]): Promise<Settings[TKey]> =>
       viaService(() => api.request(`${base}/${path}`, { method: 'PUT', body: input, schema }));
 
+  /*
+   * A rate-card write returns the card AS STORED, not the input echoed back.
+   * The response carries the derived id, the account count, the closed window
+   * on the schedule this one superseded, and whether the card is still
+   * deletable — none of which the caller could compute.
+   */
+  const cardSchema = SettingsSchema.shape.pricing.shape.rateCards.element;
+  const serviceSchema = SettingsSchema.shape.pricing.shape.additionalServices.element;
+
   return {
     get: () => viaService(() => api.request(base, { schema: SettingsSchema })),
 
-    saveNotifications: section<'notifications'>(
-      'notifications',
-      SettingsSchema.shape.notifications,
-    ),
     saveInvoicing: section<'invoicing'>('invoicing', SettingsSchema.shape.invoicing),
-    saveCredentialTypes: section<'credentialTypes'>(
-      'credential-types',
-      SettingsSchema.shape.credentialTypes,
-    ),
 
-    testIntegration: (id: Integration['id']) =>
+    /* ── Rate cards (M6.1, M6.2) ───────────────────────────────────────── */
+
+    createRateCard: (input: RateCardCreate) =>
       viaService(() =>
-        api.request(`${base}/integrations/${id}/check`, {
-          method: 'POST',
-          // W7 — a connectivity check. No credentials are handled in the
-          // browser; the server holds them and reports only the outcome.
-          schema: SettingsSchema.shape.integrations.element,
+        api.request(`${base}/rate-cards`, { method: 'POST', body: input, schema: cardSchema }),
+      ),
+
+    renameRateCard: (id: string, input: RateCardUpdate) =>
+      viaService(() =>
+        api.request(`${base}/rate-cards/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          body: input,
+          schema: cardSchema,
         }),
       ),
+
+    /* POST to a sub-collection: a schedule is ADDED, never overwritten. */
+    issueSchedule: (id: string, input: RateScheduleCreate) =>
+      viaService(() =>
+        api.request(`${base}/rate-cards/${encodeURIComponent(id)}/schedules`, {
+          method: 'POST',
+          body: input,
+          schema: cardSchema,
+        }),
+      ),
+
+    deleteRateCard: async (id: string) => {
+      await viaService(() =>
+        api.request(`${base}/rate-cards/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          // 204, so there is no body to parse. `z.unknown()` rather than a
+          // shape: asserting one would fail on an empty response.
+          schema: z.unknown(),
+        }),
+      );
+    },
+
+    /* ── Additional services (M6.5) ────────────────────────────────────── */
+
+    createAdditionalService: (input: AdditionalServiceCreate) =>
+      viaService(() =>
+        api.request(`${base}/additional-services`, {
+          method: 'POST',
+          body: input,
+          schema: serviceSchema,
+        }),
+      ),
+
+    updateAdditionalService: (code: string, input: AdditionalServiceUpdate) =>
+      viaService(() =>
+        api.request(`${base}/additional-services/${encodeURIComponent(code)}`, {
+          method: 'PATCH',
+          body: input,
+          schema: serviceSchema,
+        }),
+      ),
+
+    deleteAdditionalService: async (code: string) => {
+      await viaService(() =>
+        api.request(`${base}/additional-services/${encodeURIComponent(code)}`, {
+          method: 'DELETE',
+          schema: z.unknown(),
+        }),
+      );
+    },
+
+    /* ── Invoice templates (M7.5) ────────────────────────────────────────── */
+
+    createInvoiceTemplate: (input: InvoiceTemplateWrite) =>
+      viaService(() =>
+        api.request(`${base}/invoice-templates`, {
+          method: 'POST',
+          body: input,
+          schema: SettingsSchema.shape.invoicing.shape.templates.element,
+        }),
+      ),
+
+    updateInvoiceTemplate: (id: string, input: InvoiceTemplateWrite) =>
+      viaService(() =>
+        api.request(`${base}/invoice-templates/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          body: input,
+          schema: SettingsSchema.shape.invoicing.shape.templates.element,
+        }),
+      ),
+
+    deleteInvoiceTemplate: async (id: string) => {
+      await viaService(() =>
+        api.request(`${base}/invoice-templates/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          schema: z.unknown(),
+        }),
+      );
+    },
   };
 }
+
 

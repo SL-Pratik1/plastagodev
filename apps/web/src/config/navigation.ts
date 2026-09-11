@@ -1,11 +1,13 @@
-import type { QueueCounts } from '@plastago/shared';
 import {
   BellIcon,
   BriefcaseIcon,
+  CalendarClockIcon,
+  CalendarXIcon,
   Building2Icon,
   ClipboardCheckIcon,
   FileScanIcon,
   FileSearchIcon,
+  LandmarkIcon,
   FileTextIcon,
   IdCardIcon,
   LayoutDashboardIcon,
@@ -31,14 +33,6 @@ export interface NavItem {
   end?: boolean;
   /** Tooltip on the collapsed rail, and the scope reference for developers. */
   scope?: string;
-  /**
-   * Renders a live count beside the label, read from `QueueCounts`.
-   *
-   * Only the queues carry one. A badge on "Jobs" would show 240 forever and
-   * teach people to ignore every badge in the rail — a count only earns its
-   * place when reaching zero is the goal.
-   */
-  countKey?: keyof QueueCounts;
 }
 
 export interface NavGroup {
@@ -114,7 +108,6 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         label: 'Futile review',
         icon: TriangleAlertIcon,
         capability: 'queues:action',
-        countKey: 'futileReview',
         scope: 'M2.6 — driver-marked futile pickups; reschedule or cancel, fee applies either way',
       },
       {
@@ -122,7 +115,6 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         label: 'Approvals',
         icon: ClipboardCheckIcon,
         capability: 'queues:action',
-        countKey: 'serviceApprovals',
         scope: 'M2.7 — driver-raised charges with photo evidence, approved before invoicing',
       },
       {
@@ -130,7 +122,6 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         label: 'Awaiting PO',
         icon: WalletIcon,
         capability: 'queues:action',
-        countKey: 'awaitingPo',
         scope: 'M7.3 — approved charges that cannot be invoiced until a PO arrives',
       },
       {
@@ -138,15 +129,32 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         label: 'PO review',
         icon: FileScanIcon,
         capability: 'queues:action',
-        countKey: 'poReview',
         scope: 'M2.12 · I6 + I8 — emailed POs the AI could not match with confidence',
+      },
+      {
+        to: '/admin/queues/call-ups',
+        label: 'Waiting for a date',
+        icon: CalendarClockIcon,
+        capability: 'queues:action',
+        scope: 'M2.12b — confirmed orders whose call-up has not arrived, bookable by hand',
+      },
+      {
+        to: '/admin/queues/call-up-review',
+        label: 'Call-ups to check',
+        icon: CalendarXIcon,
+        capability: 'queues:action',
+        /*
+         * Listed after "Waiting for a date" but the more urgent of the two: a
+         * waiting order is normal until it is not, whereas a row here means a
+         * builder has already given us a date nobody has acted on.
+         */
+        scope: 'M2.12b — call-up messages the system could not apply on its own',
       },
       {
         to: '/admin/queues/leads',
         label: 'Leads',
         icon: SproutIcon,
         capability: 'leads:manage',
-        countKey: 'leads',
         scope: 'M5 · Journey A — enquiries, onboarding, and convert to account',
       },
       /*
@@ -237,6 +245,14 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         icon: FileSearchIcon,
         capability: 'extractor:use',
         scope: 'I6 · M2.12 — the embedded 3PM Extractor: upload, templates, mailbox activity',
+      },
+      {
+        to: '/admin/xero',
+        label: 'Xero',
+        icon: LandmarkIcon,
+        capability: 'integrations:manage',
+        scope:
+          'I1 · M7.8 — connect the accounting books, then invoices and payment status sync on their own',
       },
       {
         to: '/admin/settings',

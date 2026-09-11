@@ -99,30 +99,51 @@ vi.mock('../src/domains/settings/pricing.service.js', () => ({
   },
 }));
 
+/**
+ * A "rescheduled" decision books a replacement pickup, so the queue reaches
+ * into the jobs domain. Recorded rather than exercised — what the new job looks
+ * like belongs to `jobs`; what this suite asserts is that the queue asks for one
+ * on a reschedule and never on a cancel.
+ */
+const rebooked: Array<{ jobId: string; newReadyDate: string }> = [];
+
+vi.mock('../src/domains/jobs/job.service.js', () => ({
+  jobService: {
+    rebookFromFutile: (jobId: string, newReadyDate: string) => {
+      rebooked.push({ jobId, newReadyDate });
+      return Promise.resolve({ id: 'newjob1', jobNumber: 99001 });
+    },
+  },
+}));
+
 const { queueService } = await import('../src/domains/queues/queue.service.js');
 
 const OFFICE = {
   userId: 'usr0000000000000000000f1',
   name: 'Priya Raman',
   roles: ['office-staff'] as Role[],
+  accountId: null,
 };
 
 const ALLOCATOR = {
   userId: 'usr0000000000000000000a1',
   name: 'Dean Kelly',
   roles: ['allocator', 'driver'] as Role[],
+  accountId: null,
 };
 
 const CUSTOMER = {
   userId: 'usr0000000000000000000c1',
   name: 'Angela Fitzgerald',
   roles: ['customer-administrator'] as Role[],
+  accountId: 'acc0000000000000000000a1',
 };
 
 const DRIVER = {
   userId: 'usr0000000000000000000d1',
   name: 'Troy Holm',
   roles: ['driver'] as Role[],
+  accountId: null,
 };
 
 const ID = 'a'.repeat(24);
@@ -136,6 +157,7 @@ beforeEach(() => {
   chasesChanged = 1;
   feeLookupFails = false;
   listedFee = null;
+  rebooked.length = 0;
 });
 
 describe('who can see a worklist', () => {
@@ -186,6 +208,34 @@ describe('futile review (M2.6)', () => {
       newReadyDate: '2026-09-20',
       decidedBy: 'Priya Raman',
     });
+  });
+
+  /*
+   * The screen promises "Rescheduling books a new pickup" and the toast says
+   * the job was rescheduled. For a long time neither was true: the decision was
+   * recorded, `newReadyDate` was written and read by nothing, and no pickup was
+   * ever booked — so the queue cleared and the customer was never collected.
+   */
+  it('books a replacement pickup when the outcome is rescheduled', async () => {
+    await queueService.futileDecide(
+      ID,
+      { outcome: 'rescheduled', newReadyDate: '2026-09-20', cancelReason: null, note: '' },
+      OFFICE,
+    );
+
+    expect(rebooked).toEqual([{ jobId: 'job1', newReadyDate: '2026-09-20' }]);
+  });
+
+  /* Cancelling books nothing: the job stays futile, which is what invoicing
+   * accepts, so the $120 still reaches the invoice. */
+  it('books nothing when the outcome is cancelled', async () => {
+    await queueService.futileDecide(
+      ID,
+      { outcome: 'cancelled', newReadyDate: null, cancelReason: 'site-not-ready', note: '' },
+      OFFICE,
+    );
+
+    expect(rebooked).toHaveLength(0);
   });
 
   it('refuses a reschedule with no date', async () => {

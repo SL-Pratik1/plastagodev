@@ -50,6 +50,16 @@ import { currentPosition } from '@/lib/geolocation';
  *     hand-load job on the run.
  *
  * So the field is absent, and the reason is on screen.
+ *
+ * ── Why there is a box per bag, not one total ─────────────────────────────
+ * Matt, 06:34: *"bag one, my way 320, bag 2, my way 290, bag 3, you know what I
+ * mean? The each bag's weight needs to be recorded."*
+ *
+ * A single 1240 kg figure cannot answer "which bag was overloaded?", and that is
+ * the question a builder asks when they dispute a docket. So the bag count drives
+ * the number of readings asked for, and the total underneath is derived — shown
+ * read-only here and recomputed on the server from the same readings, so there is
+ * never a second typed figure for one quantity competing to reach the invoice.
  */
 export function DriverJobWeightsPage() {
   const { jobId } = useParams();
@@ -83,26 +93,85 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
   const capture = useCaptureWeights();
 
   const [loadType, setLoadType] = useState<LoadType>(job.loadType);
-  const [bags, setBags] = useState(String(job.bagCount));
-  const [craneKg, setCraneKg] = useState(job.craneScaleKg === null ? '' : String(job.craneScaleKg));
+  /*
+   * Starts from what the driver last counted, falling back to the order's
+   * allowance as the expected figure on a first visit. Not `bagCount` alone:
+   * re-opening the screen after saving six bags must not silently offer the
+   * two the order allowed for and invite them to be saved over the top.
+   */
+  const [bags, setBags] = useState(String(job.collectedBagCount ?? job.bagCount));
+  const [weights, setWeights] = useState<string[]>(() => job.bagWeights.map(String));
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const weighable = loadType === 'bagged' && job.capturesWeight;
 
+  /*
+   * The bag count drives how many readings are asked for, derived rather than
+   * held in state so the two can never disagree. A driver who corrects 4 bags
+   * to 3 must not leave a fourth weight behind — still submitted, still on the
+   * invoice, and belonging to a bag that was never there.
+   */
+  const bagValue = Number(bags);
+  const bagsValid = Number.isInteger(bagValue) && bagValue >= 0 && bagValue <= 200;
+  const rows = weighable && bagsValid ? Array.from({ length: bagValue }, (_, index) => index) : [];
+
+  const entered = rows.map((index) => (weights[index] ?? '').trim());
+  const total =
+    rows.length > 0 && entered.every((raw) => raw !== '' && Number.isFinite(Number(raw)))
+      ? Math.round(entered.reduce((sum, raw) => sum + Number(raw), 0))
+      : null;
+
+  /*
+   * A job weighed before per-bag capture shipped carries a total and no
+   * breakdown. Putting that total against bag 1 would be a claim about which bag
+   * it came off, so it is surfaced as history and the boxes start empty.
+   */
+  const legacyTotal = job.bagWeights.length === 0 ? job.craneScaleKg : null;
+
+  const setWeight = (index: number, value: string) => {
+    setWeights((previous) => {
+      const next = [...previous];
+      while (next.length <= index) next.push('');
+      next[index] = value;
+      return next;
+    });
+    setErrors(({ [`bag-${String(index)}`]: _drop, total: _dropTotal, ...rest }) => rest);
+  };
+
   const save = async () => {
     const next: Record<string, string> = {};
-    const bagValue = Number(bags);
-    const craneValue = craneKg.trim() === '' ? null : Number(craneKg);
 
-    if (!Number.isInteger(bagValue) || bagValue < 0 || bagValue > 200) {
+    if (!bagsValid) {
       next.bags = 'Whole bags, 0 to 200.';
     }
 
-    if (weighable) {
-      if (craneValue === null || !Number.isFinite(craneValue) || craneValue <= 0) {
-        next.crane = 'Enter the crane scale reading — the tip-off maths needs it.';
-      } else if (craneValue > 20000) {
-        next.crane = 'That is heavier than the truck can lift. Check the scale.';
+    if (weighable && bagsValid) {
+      /*
+       * "Bagged" is the driver's own statement that there are bags to lift, so
+       * zero of them is a half-filled form rather than an empty site. A site
+       * with nothing on it is a futile job or a hand load, both recorded
+       * elsewhere — and saving 0 here would quietly put no weight at all on a
+       * job that had four bags sitting on it.
+       */
+      if (bagValue === 0) {
+        next.bags = 'How many bags did you collect?';
+      }
+
+      rows.forEach((index) => {
+        const raw = entered[index];
+        const value = Number(raw);
+
+        if (raw === '') {
+          next[`bag-${String(index)}`] = 'Weigh this bag before saving.';
+        } else if (!Number.isFinite(value) || value <= 0) {
+          next[`bag-${String(index)}`] = 'A bag weighs more than nothing.';
+        } else if (value > 20000) {
+          next[`bag-${String(index)}`] = 'Heavier than the truck can lift. Check the scale.';
+        }
+      });
+
+      if (total !== null && total > 20000) {
+        next.total = `Those bags add up to ${total.toLocaleString('en-AU')} kg, which is more than the truck can carry.`;
       }
     }
 
@@ -118,7 +187,14 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
           position,
           bagCount: bagValue,
           loadType,
-          craneScaleKg: weighable ? craneValue : null,
+          bagWeights: rows.map((index) => Number(entered[index])),
+          /*
+           * Null on purpose. The server adds the readings up, and sending a
+           * total as well would put two figures for one quantity on the wire —
+           * with the one that reaches the certificate decided by whichever the
+           * server happened to trust.
+           */
+          craneScaleKg: null,
         },
       });
       toast.success('Saved on this phone', 'It goes to the office when you have signal.');
@@ -210,30 +286,71 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
         )}
       </Field>
 
-      {weighable && (
-        <Field
-          id="weights-crane"
-          label="Crane scale reading (kg)"
-          required
-          error={errors.crane}
-          hint="The measured weight of this load. The tip-off reconciliation subtracts it."
-        >
-          {(control) => (
-            <Input
-              {...control}
-              type="number"
-              inputMode="decimal"
-              min={1}
-              step={5}
-              className="h-16 text-2xl font-semibold tabular-nums"
-              value={craneKg}
-              onChange={(event) => {
-                setCraneKg(event.target.value);
-                setErrors(({ crane: _drop, ...rest }) => rest);
-              }}
-            />
-          )}
-        </Field>
+      {weighable && rows.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between">
+            <p className="text-sm font-medium">Crane scale reading</p>
+            <p className="text-xs text-muted-foreground">One weight per bag</p>
+          </div>
+
+          {rows.map((index) => (
+            <Field
+              key={index}
+              id={`weights-bag-${String(index)}`}
+              label={`Bag ${String(index + 1)} (kg)`}
+              required
+              error={errors[`bag-${String(index)}`]}
+            >
+              {(control) => (
+                <Input
+                  {...control}
+                  type="number"
+                  inputMode="decimal"
+                  min={1}
+                  step={5}
+                  className="h-14 text-xl font-semibold tabular-nums"
+                  value={weights[index] ?? ''}
+                  onChange={(event) => setWeight(index, event.target.value)}
+                />
+              )}
+            </Field>
+          ))}
+
+          {/*
+           * Read-only, and added up again on the server from the same readings.
+           * The driver still needs to see it — it is how they sanity-check the
+           * load against the docket they are about to get at the weighbridge.
+           */}
+          <div className="flex items-baseline justify-between rounded-xl border border-border bg-muted/40 px-3 py-2.5">
+            <div>
+              <p className="text-sm font-medium">Total collected</p>
+              <p className="text-xs text-muted-foreground">Added up for you</p>
+            </div>
+            <p className="font-display text-lg font-semibold tabular-nums">
+              {total === null ? '—' : `${total.toLocaleString('en-AU')} kg`}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {errors.total && (
+        <Alert variant="destructive" title="Check the scale readings">
+          {errors.total}
+        </Alert>
+      )}
+
+      {weighable && bagsValid && bagValue === 0 && !errors.bags && (
+        <Alert variant="info" title="Start with the bag count">
+          Enter how many bags you collected and a weight box appears for each one.
+        </Alert>
+      )}
+
+      {legacyTotal !== null && (
+        <Alert variant="info" title="Recorded as a single total">
+          This job was saved as {legacyTotal.toLocaleString('en-AU')} kg before per-bag weights
+          existed, so there is no record of which bag was which. Weigh each bag now and that one
+          figure is replaced.
+        </Alert>
       )}
 
       {loadType === 'hand-load' && (

@@ -189,6 +189,15 @@ export const poExtractionRepository = {
 
     return {
       ...toItem(row),
+      /*
+       * Always null here, and filled in by the service.
+       *
+       * Minting a presigned URL is a storage concern with an expiry attached,
+       * and a repository that returned one would hand every caller a credential
+       * whether it needed it or not. `poReviewService.get` overrides this with
+       * a fresh link; the storage key itself never leaves that boundary.
+       */
+      documentUrl: null,
       documentText: row.documentText,
       fields: row.fields,
       accountCandidates: row.accountCandidates,

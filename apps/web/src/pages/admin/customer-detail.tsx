@@ -1,12 +1,14 @@
 import {
+  ACCOUNT_TYPES,
   ACCOUNT_TYPE_DESCRIPTIONS,
+  ACCOUNT_TYPE_LABELS,
   BRAND_LABELS,
   CAPTURE_MODE_LABELS,
   CONTACT_ROLE_LABELS,
   PO_POLICY_LABELS,
-  RATE_CARD_LABELS,
   ZONE_LABELS,
   type Account,
+  type AccountType,
   type InvoiceListItem,
   type JobListItem,
 } from '@plastago/shared';
@@ -19,6 +21,7 @@ import {
   CardTitle,
   ErrorState,
   Pagination,
+  Select,
   Skeleton,
   Switch,
   Tabs,
@@ -31,6 +34,7 @@ import {
   BriefcaseIcon,
   MailIcon,
   ReceiptIcon,
+  RouteIcon,
   ShieldCheckIcon,
   SmartphoneIcon,
 } from 'lucide-react';
@@ -46,8 +50,10 @@ import {
   useCustomer,
   useCustomerInvoices,
   useCustomerJobs,
+  useSetAccountType,
   useSetRiskAssessmentRequired,
 } from '@/features/customers/queries';
+import { useRateCardOptions } from '@/features/lookups/queries';
 import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
 import { formatDate, formatInvoiceNumber, formatMobile, formatMoney } from '@/lib/format';
@@ -73,7 +79,28 @@ export function AdminCustomerDetailPage() {
   const [params, setParams] = useSearchParams();
 
   const { data: account, error, isPending, refetch } = useCustomer(customerId);
-  const invoicePrefix = useSettings().data?.invoicing.invoiceNumberPrefix ?? '';
+  const settings = useSettings().data;
+  const invoicePrefix = settings?.invoicing.invoiceNumberPrefix ?? '';
+  /* M6.1 — a card's name is on the record, not derivable from its id any more. */
+  const rateCardLabels = new Map(
+    (useRateCardOptions().data ?? []).map((card) => [card.value, card.label]),
+  );
+
+  /*
+   * M7.5 — the NAME of the template this account names, or null.
+   *
+   * Resolved from the settings list rather than stored on the account,
+   * because a template can be renamed and the account only carries its id.
+   * Null covers both "nothing chosen" and "the chosen one has since been
+   * deleted" — and both render the same way, as the brand fallback, which is
+   * exactly what the server would do.
+   */
+  const templateName =
+    account?.invoiceTemplateId == null
+      ? null
+      : (settings?.invoicing.templates.find(
+          (template) => template.id === account.invoiceTemplateId,
+        )?.name ?? null);
 
   const rawTab = params.get('tab');
   const tab: TabKey = (TABS as readonly string[]).includes(rawTab ?? '')
@@ -162,7 +189,7 @@ export function AdminCustomerDetailPage() {
 
         {/* ── Overview ─────────────────────────────────────────────────── */}
         <TabsPanel value="overview">
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <Card className="lg:col-span-2">
               <CardHeader>
                 <CardTitle>Billing and terms</CardTitle>
@@ -187,7 +214,32 @@ export function AdminCustomerDetailPage() {
                     },
                     { label: 'ABN', value: account.abn },
                     { label: 'Payment terms', value: `${String(account.paymentTermsDays)} days` },
-                    { label: 'Rate card', value: RATE_CARD_LABELS[account.rateCardId] },
+                    /*
+                     * The card's NAME, from the loaded lookup, falling back to
+                     * its id. The fallback matters on a detail page: a retired
+                     * card still priced this account's history, and `tier-2`
+                     * tells the office something a blank row does not.
+                     */
+                    {
+                      label: 'Rate card',
+                      value: rateCardLabels.get(account.rateCardId) ?? account.rateCardId,
+                    },
+                    {
+                      /*
+                       * M7.5 — which template this account's invoices print
+                       * on. Null is the common case and is stated as a
+                       * FALLBACK rather than as "none": the invoice still
+                       * renders, on the brand's own template, and "not set"
+                       * alone would read as broken.
+                       */
+                      label: 'Invoice template',
+                      value:
+                        templateName ?? (
+                          <span className="text-muted-foreground">
+                            Follows the {BRAND_LABELS[account.brandId]} default
+                          </span>
+                        ),
+                    },
                     { label: 'Primary zone', value: ZONE_LABELS[account.primaryZone] },
                     { label: 'PO policy', value: PO_POLICY_LABELS[account.poPolicy] },
                     { label: 'Capture', value: CAPTURE_MODE_LABELS[account.captureMode] },
@@ -377,6 +429,16 @@ export function AdminCustomerDetailPage() {
           */}
           <RiskAssessmentCard account={account} />
 
+          {/*
+            The journey, changeable — see `AccountTypeCard`.
+
+            Below site safety because it is a correction rather than a standing
+            obligation: most accounts are set right at conversion and nobody
+            comes back to this card. It sits on Preferences and not on Overview
+            so the Overview stays a page you can read without changing anything.
+          */}
+          <AccountTypeCard account={account} />
+
           <Card className="mt-4">
             <CardHeader>
               <CardTitle>Service preferences</CardTitle>
@@ -469,6 +531,97 @@ function RiskAssessmentCard({ account }: { account: Account }) {
             onCheckedChange={(next) => void toggle(next)}
             aria-label="Site Risk Assessment required"
           />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Builder or contractor — the account's journey (Matt, 21:55).
+ *
+ * ── Why this became editable ──────────────────────────────────────────────
+ * The type was write-once at creation, and conversion from a lead did not even
+ * ask — every converted account was a builder. So a contractor onboarded that
+ * way was stuck with site supervisors they never use and a booking form that
+ * omits the area and bag count, which are the only figures a contractor can
+ * give us. The workaround was a second account on the same ABN, which splits
+ * the customer's invoices and their history.
+ *
+ * ── Why the copy names what changes ───────────────────────────────────────
+ * This is not a label. It changes the portal under a customer who is not in the
+ * room: a menu item appears or vanishes, and their booking form gains or loses
+ * two required fields. The card says which, so nobody flips it to correct a
+ * badge.
+ *
+ * The server refuses builder → contractor while supervisors can still sign in,
+ * and that refusal arrives here as the toast — the office cannot leave a
+ * customer with logins nobody can manage.
+ */
+function AccountTypeCard({ account }: { account: Account }) {
+  const toast = useToast();
+  const setType = useSetAccountType(account.id);
+
+  const change = async (next: AccountType) => {
+    if (next === account.accountType) return;
+
+    try {
+      const updated = await setType.mutateAsync(next);
+      toast.success(
+        `${account.name} is now a ${ACCOUNT_TYPE_LABELS[updated.accountType].toLowerCase()}`,
+        updated.accountType === 'builder'
+          ? 'Their portal gains the Site supervisors screen, and their booking form no longer asks for the area and bag count — those come off the purchase order.'
+          : 'Their portal loses the Site supervisors screen, and their booking form now asks for the area and bag count.',
+      );
+    } catch (error) {
+      const described = describeError(error);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Card className="mt-4">
+      <CardHeader>
+        <CardTitle>Customer type</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 gap-3">
+            <span className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full bg-accent text-accent-foreground">
+              <RouteIcon aria-hidden className="size-5" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
+                {ACCOUNT_TYPE_LABELS[account.accountType]} journey
+              </p>
+              <p className="text-sm text-muted-foreground">
+                {ACCOUNT_TYPE_DESCRIPTIONS[account.accountType]}
+              </p>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                Changing this changes their portal: the Site supervisors screen, and whether their
+                booking form asks for the area and bag count.
+              </p>
+            </div>
+          </div>
+
+          {/*
+            `w-full sm:w-auto` so this is a full-width control on a phone and a
+            compact one beside the copy on a desktop — the office opens accounts
+            on both.
+          */}
+          <Select
+            className="w-full sm:w-44"
+            value={account.accountType}
+            disabled={setType.isPending}
+            aria-label="Customer type"
+            onChange={(event) => void change(event.target.value as AccountType)}
+          >
+            {ACCOUNT_TYPES.map((type) => (
+              <option key={type} value={type}>
+                {ACCOUNT_TYPE_LABELS[type]}
+              </option>
+            ))}
+          </Select>
         </div>
       </CardContent>
     </Card>

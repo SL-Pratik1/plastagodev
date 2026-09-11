@@ -34,6 +34,115 @@ import { describeError } from '@/lib/error-message';
 import { formatDateTime, formatMoney } from '@/lib/format';
 
 /**
+ * The original, beside the figures that were read off it.
+ *
+ * ── Why the page and not just the OCR text ────────────────────────────────
+ * Matt, 28:30: *"I'd be looking at a copy of the PDF too."* The extracted text
+ * proves what the model saw; it does not let a reviewer check a lot number
+ * against the box it was printed in, or notice that the supervisor's mobile is
+ * in eight-point type at the foot of page two. Confirming eight values against
+ * nothing is not a review, and it is the step Matt agreed to do on every order.
+ *
+ * ── Why the text stays ────────────────────────────────────────────────────
+ * A poor scan is exactly when the OCR text is most useful — it shows what the
+ * model actually managed to read, which is what explains a bad extraction. So
+ * it moves behind a toggle rather than being replaced.
+ *
+ * ── Why an `<object>` and not an `<iframe>` ──────────────────────────────
+ * It degrades. A browser with no inline PDF viewer renders the children instead
+ * of an empty grey box, so the reviewer gets a link rather than something that
+ * looks broken.
+ */
+function SourceDocument({ extraction }: { extraction: PoExtraction }): React.JSX.Element {
+  const [showText, setShowText] = useState(false);
+
+  const url = extraction.documentUrl;
+
+  /*
+   * Images are stored alongside PDFs — a supervisor photographs an order as
+   * often as the office is emailed one. The stored type is not in the response,
+   * but the attachment's own name is, and that is what it was saved under.
+   */
+  const isImage = /\.(jpe?g|png|heic|heif|webp)$/i.test(extraction.attachmentName);
+
+  const textPane = (
+    <pre className="max-h-[32rem] overflow-auto rounded-md bg-muted p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap">
+      {extraction.documentText.trim() === ''
+        ? 'The extractor returned no text for this document.'
+        : extraction.documentText}
+    </pre>
+  );
+
+  /*
+   * No stored copy. Honest about why, rather than an empty embed that reads as
+   * a broken page — see the warning on `documentUrl`.
+   */
+  if (url === null) {
+    return (
+      <>
+        {textPane}
+        <p className="mt-2 text-xs text-muted-foreground">
+          Only the extracted text is available — the original could not be copied into storage when
+          this order arrived. Check the source email if a figure looks wrong.
+        </p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <Button type="button" variant="ghost" size="sm" onClick={() => setShowText(!showText)}>
+          {showText ? 'Show the document' : 'Show the extracted text'}
+        </Button>
+        {/*
+          A single-window embed is no way to read a four-page order. The link
+          hands it to the browser's own viewer, where it can be zoomed, searched
+          and printed.
+        */}
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="focus-ring rounded text-xs text-muted-foreground underline underline-offset-4"
+        >
+          Open full size ↗
+        </a>
+      </div>
+
+      {showText ? (
+        textPane
+      ) : isImage ? (
+        <img
+          src={url}
+          alt={`Purchase order ${extraction.attachmentName}`}
+          className="max-h-[32rem] w-full rounded-md border border-border bg-muted object-contain"
+        />
+      ) : (
+        <object
+          data={url}
+          type="application/pdf"
+          aria-label={`Purchase order ${extraction.attachmentName}`}
+          className="h-[32rem] w-full rounded-md border border-border bg-muted"
+        >
+          <div className="p-4 text-sm">
+            <p className="mb-2">This browser will not display the PDF inline.</p>
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="focus-ring rounded underline underline-offset-4"
+            >
+              Open {extraction.attachmentName}
+            </a>
+          </div>
+        </object>
+      )}
+    </>
+  );
+}
+
+/**
  * One emailed purchase order, reviewed (M2.12).
  *
  * ── The layout is the requirement ─────────────────────────────────────────
@@ -58,7 +167,7 @@ export function AdminQueuePoReviewDetailPage() {
     return (
       <div className="space-y-6">
         <Skeleton className="h-8 w-72" />
-        <div className="grid gap-6 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Skeleton className="h-96" />
           <Skeleton className="h-96" />
         </div>
@@ -237,7 +346,7 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
         Side-by-side above `lg`, stacked below. `items-start` so the two cards do
         not stretch to a shared height — the document is long and the form is not.
       */}
-      <div className="grid items-start gap-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -253,18 +362,7 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
             </p>
           </CardHeader>
           <CardContent>
-            {/*
-              A plain-text rendering, not a PDF viewer. The demo has no document
-              files, and showing an empty embed would look broken; showing the
-              extracted text is honest about what the OCR actually saw — which is
-              also what a reviewer needs when the scan is poor.
-            */}
-            <pre className="max-h-[32rem] overflow-auto rounded-md bg-muted p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap">
-              {extraction.documentText}
-            </pre>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Text as extracted. In production the original PDF or photograph renders here.
-            </p>
+            <SourceDocument extraction={extraction} />
           </CardContent>
         </Card>
 

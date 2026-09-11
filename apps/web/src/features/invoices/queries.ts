@@ -50,6 +50,19 @@ function useInvoiceMutation<TInput, TResult>(mutationFn: (input: TInput) => Prom
   });
 }
 
+/**
+ * M7.1 — raise the invoice for a finished job.
+ *
+ * Goes through `useInvoiceMutation` like every other write here, and the jobs
+ * invalidation is the part that matters on this one: the job's own invoice
+ * badge is what the office reads to know the work is billed, and it changes as
+ * a result of this call.
+ */
+export function useRaiseInvoiceForJob() {
+  const { invoices } = useServices();
+  return useInvoiceMutation((jobId: string) => invoices.raiseForJob(jobId));
+}
+
 export function useSendInvoices() {
   const { invoices } = useServices();
   return useInvoiceMutation((ids: readonly string[]) => invoices.send(ids));

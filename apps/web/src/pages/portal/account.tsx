@@ -145,7 +145,7 @@ function AccountSettings({ account }: { account: PortalAccount }) {
         </p>
       </header>
 
-      <div className="grid items-start gap-5 lg:grid-cols-3">
+      <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-3">
         <div className="space-y-5 lg:col-span-2">
           {/* ── M8.4 · per-contact, per-channel preferences ───────────── */}
           <Card>

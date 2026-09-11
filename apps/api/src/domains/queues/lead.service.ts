@@ -5,10 +5,12 @@ import type {
   LeadConversion,
   LeadCreate,
   LeadListItem,
+  LeadPipelineStats,
   LeadUpdate,
   PageMeta,
   Role,
 } from '@plastago/shared';
+import { LEAD_ATTACHABLE_TYPES } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import {
@@ -21,6 +23,7 @@ import { buildLeadAckEmail, buildWelcomeEmail } from '../../integrations/notice-
 import { accountRepository } from '../accounts/account.repository.js';
 import { notificationService } from '../notifications/notification.service.js';
 import { outboundService } from '../notifications/outbound.service.js';
+import { settingsRepository } from '../settings/settings.repository.js';
 import { leadRepository, type ListLeadsQuery } from './lead.repository.js';
 
 const log = logger.child({ module: 'leads' });
@@ -50,13 +53,13 @@ const SALES_ROLES = new Set<Role>(['super-admin', 'operations', 'office-staff'])
 /** A.4 creates an ACCOUNT, which is a commercial decision. Narrower. */
 const CONVERTER_ROLES = new Set<Role>(['super-admin', 'operations']);
 
-/** Proposals are PDFs. An allow-list, for the same reason as driver photos. */
-const ATTACHABLE_TYPES = new Set([
-  'application/pdf',
-  'image/jpeg',
-  'image/png',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-]);
+/**
+ * Proposals are PDFs. An allow-list, for the same reason as driver photos.
+ *
+ * The list itself lives in `@plastago/shared` because the console's file
+ * pickers advertise it — see `LEAD_ATTACHABLE_TYPES`.
+ */
+const ATTACHABLE_TYPES = new Set<string>(LEAD_ATTACHABLE_TYPES);
 
 export const leadService = {
   async list(
@@ -65,6 +68,20 @@ export const leadService = {
   ): Promise<{ data: LeadListItem[]; meta: PageMeta }> {
     assertSales(caller);
     return leadRepository.list(query);
+  },
+
+  /**
+   * The three cards above the grid.
+   *
+   * ⚠️ Its own call rather than a field on the list response, because the list
+   * is PAGED and FILTERED and these three numbers are neither. Hanging them off
+   * the list response would make them change when somebody typed in the search
+   * box — a conversion rate that moves when you filter is a number nobody can
+   * quote.
+   */
+  async stats(caller: Caller): Promise<LeadPipelineStats> {
+    assertSales(caller);
+    return leadRepository.pipelineStats();
   },
 
   async get(id: string, caller: Caller): Promise<Lead> {
@@ -308,15 +325,49 @@ export const leadService = {
     }
 
     if (await accountRepository.codeExists(input.customerCode)) {
+      /*
+       * The suggestion is the point.
+       *
+       * The dialog proposes "first three letters + 001", so every builder whose
+       * name starts the same way collides on the same code — and the old
+       * message ("choose a code that is not already taken") asked the office to
+       * guess against a list only the server can see.
+       */
+      const suggestion = await accountRepository.nextFreeCode(input.customerCode);
+
       throw AppError.validation(`Customer code ${input.customerCode} is already in use`, [
-        { path: 'customerCode', message: 'Choose a code that is not already taken' },
+        {
+          path: 'customerCode',
+          message: suggestion
+            ? `${suggestion} is free — use that, or type another code.`
+            : 'Choose a code that is not already taken',
+        },
+      ]);
+    }
+
+    /*
+     * Same reason as the accounts domain: rate cards are runtime data now, so an
+     * id that names nothing has to be refused HERE. Converting a lead onto a
+     * card that no longer exists would create an account that cannot price its
+     * first booking.
+     */
+    if (!(await settingsRepository.findRateCard(input.rateCardId))) {
+      throw AppError.validation('That rate card does not exist', [
+        { path: 'rateCardId', message: 'Pick a card from the list — it may have been retired' },
       ]);
     }
 
     const account = await accountRepository.create({
       code: input.customerCode,
       name: input.legalName,
-      accountType: 'builder',
+      /*
+       * Asked on the form, never defaulted. It decides whether the customer
+       * gets site supervisors and which booking form they see (Matt, 21:55),
+       * and nothing changes it afterwards without the office doing it
+       * deliberately — so a silent `builder` here was a wrong journey that
+       * surfaced as a support call weeks later.
+       */
+      accountType: input.accountType,
       brandId: input.brandId,
       rateCardId: input.rateCardId,
       poPolicy: input.poPolicy,
@@ -389,10 +440,7 @@ export const leadService = {
         accountId: account.id,
       });
 
-      log.info(
-        { accountId: account.id, outcome: welcome.outcome },
-        'welcome email attempted',
-      );
+      log.info({ accountId: account.id, outcome: welcome.outcome }, 'welcome email attempted');
     }
 
     return { accountId: account.id, customerCode: input.customerCode, welcome };
@@ -407,16 +455,31 @@ export const leadService = {
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 /** Mints a short-lived URL per attachment. The storage key never leaves here. */
-async function withUrls(
-  attachments: LeadAttachment[],
-  leadId: string,
-): Promise<LeadAttachment[]> {
+async function withUrls(attachments: LeadAttachment[], leadId: string): Promise<LeadAttachment[]> {
+  if (attachments.length === 0) return attachments;
+
+  const storage = getStorage();
+  const keys = await leadRepository.attachmentKeys(leadId);
+
   return Promise.all(
     attachments.map(async (attachment) => {
-      const stored = await leadRepository.findAttachment(attachment.id, leadId);
-      if (!stored) return attachment;
+      const key = keys.get(attachment.id);
+      if (!key) return attachment;
 
-      return { ...attachment, url: await getStorage().presignDownload(stored.storageKey) };
+      /*
+       * ⚠️ Checked, not assumed. `attach` writes the row when it hands out the
+       * upload URL — BEFORE the browser has PUT anything — so a row can exist
+       * for an object that was never written: a dialog abandoned mid-upload, a
+       * dropped connection, a signature the client got wrong.
+       *
+       * Handing out a URL for one of those renders a link that 404s when
+       * clicked, which reads as a broken feature rather than an unfinished
+       * upload. `url: null` is exactly what the shared schema already means by
+       * "still in flight", and the screen renders it as plain text.
+       */
+      if (!(await storage.exists(key))) return attachment;
+
+      return { ...attachment, url: await storage.presignDownload(key) };
     }),
   );
 }

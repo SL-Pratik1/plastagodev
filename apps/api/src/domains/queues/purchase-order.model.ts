@@ -217,6 +217,23 @@ const purchaseOrderSchema = new Schema(
 
     siteSupervisorName: { type: String, default: null, trim: true },
     siteSupervisorMobile: { type: String, default: null, trim: true },
+    /**
+     * REFERENCE → `users._id`, the portal login provisioned for the name above.
+     *
+     * ── Why an id as well as the name ─────────────────────────────────────
+     * The name and mobile are what the page said, kept verbatim as the audit
+     * record. This is who that turned out to BE in the system, and it is what
+     * the job booked against this order is scoped to — Matt, 33:57: *"that job
+     * should get assigned to that site supervisor."* Matching on the name at
+     * booking time would break on "Matt French" versus "Matthew French".
+     *
+     * ⚠️ Null is a normal, common state, not a failure:
+     *  • the order named nobody (Matt, 34:52: *"sometimes they're blank"*),
+     *  • the account is a contractor, which has no supervisors at all,
+     *  • or that mobile already belongs to a login on another account, which is
+     *    a person the office has to sort out rather than something to guess at.
+     */
+    siteSupervisorUserId: { type: Schema.Types.ObjectId, default: null, ref: 'User' },
 
     amountExGst: { type: Schema.Types.Decimal128, default: null },
     /** REFERENCE → the stored original in object storage. */

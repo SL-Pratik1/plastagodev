@@ -95,6 +95,29 @@ export const placeRepository = {
     return row ? toPlace(row) : null;
   },
 
+  /**
+   * The place a job was booked into, found from what the job kept.
+   *
+   * ⚠️ A job stores `suburb`, `postcode` and the frozen `zone` — never the
+   * `placeId` it was picked from. That is right for the job (the zone must not
+   * move when a suburb is re-zoned) but it means anything rebuilding a booking
+   * from an existing job — rebooking a futile pickup, say — has to find the
+   * place again, and the id is not derivable from the suburb with any rule that
+   * survives "Lot 1" or a renamed estate.
+   *
+   * Matched on both fields because suburb names repeat across postcodes.
+   * Returns null when the suburb is no longer served, which is a real answer:
+   * the caller must not quietly book into somewhere we do not go.
+   */
+  async findBySuburb(suburb: string, postcode: string): Promise<Place | null> {
+    const row = await PlaceModel.findOne({
+      suburb: new RegExp(`^${suburb.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+      postcode: postcode.trim(),
+    }).lean<RawPlace>();
+
+    return row ? toPlace(row) : null;
+  },
+
   /** Seeds the serviceable suburbs. Idempotent, so it is safe on every deploy. */
   async seed(places: Array<Omit<Place, 'label'>>): Promise<void> {
     await Promise.all(

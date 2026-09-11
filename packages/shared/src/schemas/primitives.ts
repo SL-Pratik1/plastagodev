@@ -26,6 +26,48 @@ export const MoneySchema = z
   .regex(/^-?\d+(\.\d{1,4})?$/, 'Must be a decimal string, e.g. "220.00"')
   .meta({ id: 'Money', description: 'Decimal string. Never a float.', example: '220.00' });
 
+/**
+ * The ATO's check on an ABN: subtract 1 from the first digit, weight each digit,
+ * and the total must divide by 89.
+ *
+ * Exported so it can be unit-tested against real numbers rather than only
+ * exercised through a form.
+ */
+const ABN_WEIGHTS = [10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19] as const;
+
+export function isValidAbn(value: string): boolean {
+  const digits = value.replace(/\s/g, '');
+  if (!/^\d{11}$/.test(digits)) return false;
+
+  const total = ABN_WEIGHTS.reduce(
+    (sum, weight, index) => sum + (Number(digits[index]) - (index === 0 ? 1 : 0)) * weight,
+    0,
+  );
+
+  return total % 89 === 0;
+}
+
+/**
+ * An Australian Business Number.
+ *
+ * ⚠️ Eleven digits is NOT the check. Every writable `abn` field used to be
+ * `/^\d{11}$/` alone, so `11111111111` was accepted — and an ABN reaches a tax
+ * invoice, where a wrong one is the customer's problem to explain to their
+ * accountant. The checksum catches a transposed or mistyped digit, which is the
+ * way this goes wrong in practice.
+ *
+ * Spaces are tolerated on the way in because ABNs are written "51 824 753 556"
+ * everywhere they are printed, and re-typing one without them is a pointless
+ * thing to ask of somebody reading it off a letterhead.
+ */
+export const AbnSchema = z
+  .string()
+  .trim()
+  .transform((value) => value.replace(/\s/g, ''))
+  .refine((value) => /^\d{11}$/.test(value), 'An ABN is 11 digits')
+  .refine(isValidAbn, 'That is not a valid ABN — check it on ABN Lookup')
+  .meta({ id: 'Abn', description: '11 digits, ATO checksum valid.', example: '51824753556' });
+
 /** Trimmed, non-empty free text. */
 export const NonEmptyStringSchema = z.string().trim().min(1);
 

@@ -1,13 +1,17 @@
 import type { ApiClient } from '@plastago/api-client';
 import {
   API_PREFIX,
+  AwaitingCallUpSchema,
   AwaitingPoItemSchema,
+  CallUpOutcomeSchema,
+  CallUpSchema,
   ChargeApprovalDetailSchema,
   ChargeApprovalItemSchema,
   FutileReviewItemSchema,
   FutileReviewSchema,
   LeadAttachmentSchema,
   LeadListItemSchema,
+  LeadPipelineStatsSchema,
   LeadSchema,
   InvitationResultSchema,
   ObjectIdSchema,
@@ -36,6 +40,32 @@ import { viaService } from './to-service-error.js';
 
 const ChangedSchema = z.object({ changed: z.number().int().nonnegative() });
 
+/**
+ * The media type to declare for a picked file.
+ *
+ * ── Why the browser's own answer is not always enough ─────────────────────
+ * `File.type` is empty whenever the OS has no handler registered for the
+ * extension — routine on a fresh Windows machine with a .docx — and the API's
+ * allow-list refuses a blank type. The extension is the only other thing known
+ * about the file, so it stands in.
+ *
+ * Only the types the API actually accepts are listed. Guessing more widely
+ * would move the rejection from the picker to the upload, which is the thing
+ * this is here to avoid.
+ */
+const TYPE_BY_EXTENSION: Record<string, string> = {
+  pdf: 'application/pdf',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
+
+function declaredType(file: File): string {
+  if (file.type) return file.type;
+  return TYPE_BY_EXTENSION[file.name.split('.').pop()?.toLowerCase() ?? ''] ?? '';
+}
+
 /** What `POST /queues/leads/:id/attachments` answers with. */
 const AttachResponseSchema = z.object({
   attachmentId: ObjectIdSchema,
@@ -53,6 +83,62 @@ export function createHttpQueueService(api: ApiClient): QueueService {
   return {
     /** One call for every nav badge. Polled by the shell, not by each screen. */
     counts: () => viaService(() => api.request(`${base}/counts`, { schema: QueueCountsSchema })),
+
+    /* ── M2.12b · call-ups ────────────────────────────────────────────────── */
+
+    awaitingCallUpList: (query: ListQuery) =>
+      viaService(() =>
+        api.request(`${base}/call-ups/awaiting`, {
+          searchParams: listParams(query),
+          schema: pageOf(AwaitingCallUpSchema),
+        }),
+      ),
+
+    /*
+     * Answers with what it DID, not just that it worked — see
+     * `CallUpOutcomeSchema`. A call-up that landed in the queue instead of
+     * booking looks identical to a booked one without this.
+     */
+    callUpOrder: (purchaseOrderId, request) =>
+      viaService(() =>
+        api.request(`${base}/call-ups/orders/${purchaseOrderId}`, {
+          method: 'POST',
+          body: request,
+          schema: CallUpOutcomeSchema,
+        }),
+      ),
+
+    callUpList: (query) =>
+      viaService(() =>
+        api.request(`${base}/call-ups`, {
+          searchParams: {
+            ...listParams(query),
+            ...(query.state ? { state: query.state } : {}),
+          },
+          schema: pageOf(CallUpSchema),
+        }),
+      ),
+
+    callUpGet: (id: string) =>
+      viaService(() => api.request(`${base}/call-ups/${id}`, { schema: CallUpSchema })),
+
+    callUpRetry: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/call-ups/${id}/retry`, {
+          method: 'POST',
+          schema: CallUpOutcomeSchema,
+        }),
+      ),
+
+    callUpReject: async (id: string, note: string) => {
+      await viaService(() =>
+        api.request(`${base}/call-ups/${id}/reject`, {
+          method: 'POST',
+          body: { note },
+          schema: NoContentSchema,
+        }),
+      );
+    },
 
     /* ── M2.6 · futile review ─────────────────────────────────────────────── */
 
@@ -177,6 +263,15 @@ export function createHttpQueueService(api: ApiClient): QueueService {
         }),
       ),
 
+    /**
+     * The Won / Conversion cards.
+     *
+     * Its own request rather than a field on `leadList`, because the grid is
+     * paged and filtered and these three numbers are neither.
+     */
+    leadStats: () =>
+      viaService(() => api.request(`${base}/leads/stats`, { schema: LeadPipelineStatsSchema })),
+
     leadGet: (id: string) =>
       viaService(() => api.request(`${base}/leads/${id}`, { schema: LeadSchema })),
 
@@ -215,16 +310,35 @@ export function createHttpQueueService(api: ApiClient): QueueService {
      * disagrees with itself after a refresh.
      */
     leadAttach: async (leadId: string, file: File): Promise<LeadAttachment> => {
+      const contentType = declaredType(file);
+      if (!contentType) {
+        throw new ServiceError('VALIDATION_FAILED', 'Attach a PDF, a Word document or an image', {
+          fieldErrors: { file: 'That file type cannot be attached' },
+        });
+      }
+
+      if (file.size === 0) {
+        throw new ServiceError('VALIDATION_FAILED', 'That file is empty', {
+          fieldErrors: { file: 'The file has no contents' },
+        });
+      }
+
       const { attachmentId, upload } = await viaService(() =>
         api.request(`${base}/leads/${leadId}/attachments`, {
           method: 'POST',
-          body: { fileName: file.name, contentType: file.type, sizeBytes: file.size },
+          body: { fileName: file.name, contentType, sizeBytes: file.size },
           schema: AttachResponseSchema,
         }),
       );
 
       // Straight to storage — this one request does NOT go through the api
       // client, because it is not going to the API.
+      //
+      // ⚠️ `upload.headers` is sent VERBATIM and nothing is added or dropped.
+      // The server signs the headers it expects (content type, length, and the
+      // encryption S3 is told to apply) and storage recomputes the signature
+      // from what actually arrives — so editing this map here is how an upload
+      // starts failing with a signature error.
       const stored = await fetch(upload.uploadUrl, {
         method: 'PUT',
         headers: upload.headers,
@@ -232,6 +346,22 @@ export function createHttpQueueService(api: ApiClient): QueueService {
       }).catch(() => null);
 
       if (!stored?.ok) {
+        /*
+         * Take the record back down with it.
+         *
+         * The API wrote the attachment row when it issued the URL, so leaving
+         * it there after a failed PUT means the lead lists a file that was
+         * never stored. Best-effort and deliberately un-awaited for its result
+         * — the upload error is the one worth reporting, and a failed cleanup
+         * must not replace it with a confusing second error.
+         */
+        await api
+          .request(`${base}/leads/${leadId}/attachments/${attachmentId}`, {
+            method: 'DELETE',
+            schema: NoContentSchema,
+          })
+          .catch(() => undefined);
+
         throw new ServiceError('UNEXPECTED', 'The file could not be uploaded');
       }
 

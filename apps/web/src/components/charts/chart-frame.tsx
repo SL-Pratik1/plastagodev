@@ -53,8 +53,18 @@ export function ChartFrame({
 }: ChartFrameProps) {
   const [showTable, setShowTable] = useState(false);
 
+  /*
+   * `min-w-0` on the card below is load-bearing, not tidying.
+   *
+   * Every caller drops this card into a grid, and a grid item's `min-width` is
+   * `auto` — it refuses to shrink below its content. Recharts' own
+   * `ResponsiveContainer` measures the box it is given, so on a phone the two
+   * sized each other upwards: the chart asked for its natural width, the column
+   * grew to fit it, and the dashboard scrolled sideways by 200px. This lets the
+   * column win, and the chart then measures the width it actually has.
+   */
   return (
-    <Card className={cn('flex flex-col', className)}>
+    <Card className={cn('flex min-w-0 flex-col', className)}>
       <CardHeader className="gap-2">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">

@@ -1,5 +1,5 @@
 import { ChevronLeftIcon, ChevronRightIcon } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { Select } from './select.js';
 import { cn } from '../lib/utils.js';
 
@@ -39,6 +39,22 @@ export function Pagination({
   const current = Math.min(page, totalPages);
   const firstRow = total === 0 ? 0 : (current - 1) * pageSize + 1;
   const lastRow = Math.min(current * pageSize, total);
+
+  /*
+   * A page past the end asks the server for rows that are not there, and the
+   * server answers honestly with none — but `current` above clamps the LABEL,
+   * so the screen then read "Showing 181–182 of 182" above an empty table.
+   *
+   * This is reached by ordinary use rather than by tampering: list state lives
+   * in the URL precisely so the office can send a view to somebody, and by the
+   * time it is opened the rows behind page 9 may have been invoiced away.
+   * Moving to the last real page shows what the link was pointing at instead of
+   * a contradiction. It settles in one step — after the change `page` equals
+   * `totalPages`, so the condition is false.
+   */
+  useEffect(() => {
+    if (total > 0 && page > totalPages) onPageChange(totalPages);
+  }, [page, totalPages, total, onPageChange]);
 
   return (
     <div

@@ -27,6 +27,10 @@ let stored: Record<string, unknown> | null = null;
 let updateMatches = true;
 let convertMatches = true;
 let codeTaken = false;
+/** What the account repository suggests in place of a taken code. */
+let nextFreeCode: string | null | undefined;
+/** Whether the stored object behind an attachment row actually exists. */
+let objectExists = true;
 
 vi.mock('../src/domains/queues/lead.repository.js', () => ({
   leadRepository: {
@@ -49,6 +53,7 @@ vi.mock('../src/domains/queues/lead.repository.js', () => ({
     },
     addAttachment: () => Promise.resolve({ id: 'att1' }),
     findAttachment: () => Promise.resolve({ id: 'att1', storageKey: 'leads/x/f.pdf' }),
+    attachmentKeys: () => Promise.resolve(new Map([['att1', 'leads/x/f.pdf']])),
     removeAttachment: () => Promise.resolve(true),
     markConverted: (id: string) => {
       if (!convertMatches) return Promise.resolve(false);
@@ -62,6 +67,15 @@ vi.mock('../src/domains/queues/lead.repository.js', () => ({
 vi.mock('../src/domains/accounts/account.repository.js', () => ({
   accountRepository: {
     codeExists: () => Promise.resolve(codeTaken),
+    /*
+     * The double has to answer this: `convert` asks for the next free code on
+     * the same prefix so a taken one comes back with "TES002 is free — use
+     * that" instead of asking the office to guess against a list only the
+     * server can see. Without it the refusal path threw a TypeError rather
+     * than the 422 it is supposed to produce.
+     */
+    nextFreeCode: (code: string) =>
+      Promise.resolve(nextFreeCode === undefined ? `${code.slice(0, 3)}002` : nextFreeCode),
     create: (input: Record<string, unknown>) => {
       accountsCreated.push(input);
       return Promise.resolve({ id: 'acc-new', ...input });
@@ -86,7 +100,12 @@ vi.mock('../src/integrations/storage.js', async (importOriginal) => {
       put: () => Promise.resolve(),
       get: () => Promise.reject(new Error('not used')),
       remove: () => Promise.resolve(),
-      exists: () => Promise.resolve(true),
+      /*
+       * Switchable, because "the row exists but the object does not" is a real
+       * state: the row is written when the upload URL is handed out, before the
+       * browser has PUT anything.
+       */
+      exists: () => Promise.resolve(objectExists),
     }),
   };
 });
@@ -98,6 +117,24 @@ vi.mock('../src/integrations/storage.js', async (importOriginal) => {
  */
 vi.mock('../src/domains/notifications/notification.repository.js', () => ({
   notificationRepository: makeFakeNotificationRepository(),
+}));
+
+/**
+ * Which rate cards exist (M6.1).
+ *
+ * Conversion checks the chosen card is real before creating the account —
+ * rate cards are records an administrator adds now, so an id naming nothing
+ * would otherwise produce an account that cannot price its first booking.
+ */
+const knownRateCards = new Set<string>(['default', 'tier-1', 'tier-2', 'clarendon-domaine']);
+
+vi.mock('../src/domains/settings/settings.repository.js', () => ({
+  settingsRepository: {
+    findRateCard: (id: string) =>
+      Promise.resolve(
+        knownRateCards.has(id) ? { id, label: `${id} rates`, effectiveFrom: '2026-04-01' } : null,
+      ),
+  },
 }));
 
 const { leadService } = await import('../src/domains/queues/lead.service.js');
@@ -170,6 +207,7 @@ function conversion(overrides: Partial<LeadConversion> = {}): LeadConversion {
     customerCode: 'NEW001',
     legalName: 'Newlands Constructions Pty Ltd',
     abn: '12345678901',
+    accountType: 'builder',
     brandId: 'plastago',
     rateCardId: 'default',
     poPolicy: 'required-before-invoice',
@@ -191,6 +229,8 @@ beforeEach(() => {
   updateMatches = true;
   convertMatches = true;
   codeTaken = false;
+  nextFreeCode = undefined;
+  objectExists = true;
   clearOutbound();
   setMessagingProvidersForTests(recordingProviders());
 });
@@ -388,6 +428,61 @@ describe('proposals (Matt, 5:53)', () => {
     // for seeing it.
     expect(result.attachments[0]?.url).toContain('leads/x/f.pdf');
   });
+
+  /**
+   * ⚠️ The row is written when the upload URL is issued, BEFORE the browser has
+   * PUT anything — so a row whose object was never stored is a state the screen
+   * has to survive: an abandoned dialog, a dropped connection, a signature the
+   * client got wrong.
+   *
+   * `url: null` is what the shared schema already means by "still in flight",
+   * and the screen renders it as plain text. Handing out a link instead would
+   * render something that 404s on click, which reads as a broken feature rather
+   * than an unfinished upload.
+   */
+  it('offers no link for a row whose file never arrived', async () => {
+    objectExists = false;
+    stored = lead({
+      attachments: [
+        {
+          id: 'att1',
+          fileName: 'Proposal.pdf',
+          sizeBytes: 1000,
+          contentType: 'application/pdf',
+          uploadedAt: '2026-09-01T00:00:00.000Z',
+          uploadedBy: 'Priya Raman',
+          url: null,
+        },
+      ],
+    });
+
+    const result = await leadService.get(ID, OFFICE);
+
+    // Still listed — the office needs to see that something was started, and
+    // needs the Remove button to clear it.
+    expect(result.attachments).toHaveLength(1);
+    expect(result.attachments[0]?.url).toBeNull();
+  });
+
+  it('accepts the Word documents a proposal actually gets written in', async () => {
+    const result = await leadService.attach(
+      ID,
+      {
+        fileName: 'Proposal.docx',
+        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        sizeBytes: 90_000,
+      },
+      OFFICE,
+    );
+
+    /*
+     * ⚠️ `.docx`, not `.bin`. The type is in the lead's allow-list, so it must
+     * also be in storage's extension map — a missing entry builds a `.bin` key,
+     * and a key with no recognised extension reads back with no content type at
+     * all, which makes the browser download a nameless file.
+     */
+    expect(result.upload.key).toMatch(/\.docx$/);
+  });
 });
 
 describe('converting a lead (A.4)', () => {
@@ -403,6 +498,26 @@ describe('converting a lead (A.4)', () => {
       poPolicy: 'required-before-invoice',
       paymentTermsDays: 7,
     });
+  });
+
+  /*
+   * ── Why the account type gets its own test ────────────────────────────────
+   * It used to be hardcoded to `builder` here, so a contractor converted
+   * through this queue landed on the wrong journey: site supervisors they never
+   * use, and a short booking form that omits the area and bag count — the only
+   * figures a contractor can actually supply. The value must come from the
+   * form, both ways, or the bug returns silently.
+   */
+  it('creates a contractor as a contractor, not a builder', async () => {
+    await leadService.convert(ID, conversion({ accountType: 'contractor' }), OPERATIONS);
+
+    expect(accountsCreated[0]?.accountType).toBe('contractor');
+  });
+
+  it('creates a builder as a builder', async () => {
+    await leadService.convert(ID, conversion({ accountType: 'builder' }), OPERATIONS);
+
+    expect(accountsCreated[0]?.accountType).toBe('builder');
   });
 
   /* Otherwise the first thing the office does with a new account is retype
@@ -442,11 +557,18 @@ describe('converting a lead (A.4)', () => {
     expect(accountsCreated).toHaveLength(0);
   });
 
-  it('refuses a customer code somebody else has', async () => {
+  it('refuses a customer code somebody else has, and offers a free one', async () => {
     codeTaken = true;
+    nextFreeCode = 'NEW002';
 
+    /*
+     * The suggestion is the point of the refusal. "Choose a code that is not
+     * already taken" asks the office to guess against a list only the server
+     * can see; naming the next free code answers it.
+     */
     await expect(leadService.convert(ID, conversion(), OPERATIONS)).rejects.toMatchObject({
       status: 422,
+      issues: [{ path: 'customerCode', message: 'NEW002 is free — use that, or type another code.' }],
     });
     expect(accountsCreated).toHaveLength(0);
   });

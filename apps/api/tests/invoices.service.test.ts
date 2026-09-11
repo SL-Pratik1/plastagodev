@@ -122,6 +122,30 @@ vi.mock('../src/domains/notifications/notification.repository.js', () => ({
   notificationRepository: makeFakeNotificationRepository(),
 }));
 
+/**
+ * I1 — Xero, faked like every other collaborator.
+ *
+ * ⚠️ Not optional, and not merely for speed. `config/env.ts` calls
+ * `dotenv/config`, so a developer whose `.env` holds real Xero credentials
+ * runs this suite with `XERO_PROVIDER=xero` — and the un-faked service would
+ * reach for Mongo to read the connection and then for Xero itself. Sending a
+ * test fixture's invoice into a real set of accounting books is a considerably
+ * worse outcome than a slow test.
+ *
+ * The push's own behaviour is covered properly in `xero.service.test.ts`;
+ * here it only has to exist and resolve.
+ */
+const xeroPushes: string[] = [];
+
+vi.mock('../src/domains/xero/xero.service.js', () => ({
+  xeroService: {
+    pushInvoice: (id: string) => {
+      xeroPushes.push(id);
+      return Promise.resolve({ pushed: true, message: null });
+    },
+  },
+}));
+
 const { invoiceService } = await import('../src/domains/invoices/invoice.service.js');
 const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 
@@ -173,6 +197,23 @@ const DRIVER_CHARGE = {
   amount: '90.00',
   source: 'driver' as const,
   raisedBy: 'Troy Holm',
+};
+
+/**
+ * Bags the order never authorised (M6.5, Matt 07:37).
+ *
+ * Raised with `source: 'driver'` for exactly the same reason a contamination
+ * charge is: it needs a purchase order the builder has not issued yet.
+ */
+const EXTRA_BAGS_CHARGE = {
+  id: 'chg4',
+  code: 'extra-bags',
+  description: '2 bags beyond the 2 on the purchase order',
+  quantity: 2,
+  unitRate: '30.00',
+  amount: '60.00',
+  source: 'driver' as const,
+  raisedBy: 'System · counted by Troy Holm',
 };
 
 beforeEach(() => {
@@ -261,6 +302,40 @@ describe('the split (M7.2)', () => {
     expect(extra?.status).toBe('awaiting-po');
     expect(extra?.poNumber).toBeNull();
     expect(extra?.subtotalExGst).toBe('90.00');
+  });
+
+  /*
+   * Matt, 09:55: *"the original invoice for the job… has to go out exactly
+   * matching what the build has given us."*
+   *
+   * The base invoice is priced on the order's two bags and must stay at that
+   * figure. The two extra bags the driver found are worth real money, and they
+   * belong on the invoice that waits for a second PO — not folded into the
+   * ordered line, where they would make the base invoice disagree with the
+   * builder's order and be rejected weeks later (Matt, 09:56).
+   */
+  it('keeps extra bags off the invoice that has to match the order', async () => {
+    charges = [...BASE_CHARGES, EXTRA_BAGS_CHARGE];
+
+    const created = await invoiceService.generateForJob(JOB.id, OFFICE);
+
+    expect(created).toHaveLength(2);
+
+    const base = invoices.byKind('base');
+    const extra = invoices.byKind('additional-charges');
+
+    // Unchanged by the overage — still the job exactly as ordered.
+    expect(base?.poNumber).toBe('PO-88213');
+    expect(base?.subtotalExGst).toBe('351.75');
+    // Invoice lines carry a description, not a code — so this asserts on the
+    // wording the overage charge is raised with.
+    expect(base?.lines).toHaveLength(2);
+    expect(base?.lines.some((line) => /purchase order/i.test(line.description))).toBe(false);
+
+    // The excess, on its own invoice, waiting on a purchase order.
+    expect(extra?.status).toBe('awaiting-po');
+    expect(extra?.poNumber).toBeNull();
+    expect(extra?.subtotalExGst).toBe('60.00');
   });
 
   it('puts driver charges on the second invoice and nothing else', async () => {
@@ -353,9 +428,16 @@ describe('not billing twice', () => {
    */
   it('does not raise a second invoice for the same job and kind', async () => {
     await invoiceService.generateForJob(JOB.id, OFFICE);
-    const second = await invoiceService.generateForJob(JOB.id, OFFICE);
 
-    expect(second).toHaveLength(0);
+    /*
+     * An explanation, not an empty list. This used to resolve with `[]` and a
+     * 201, which reads to the caller as "done" — so pressing it twice looked
+     * like it worked twice while the second press silently did nothing.
+     */
+    await expect(invoiceService.generateForJob(JOB.id, OFFICE)).rejects.toMatchObject({
+      status: 409,
+    });
+
     expect(invoices.all).toHaveLength(1);
   });
 
@@ -526,20 +608,41 @@ describe('customers see their own and no more', () => {
 });
 
 describe('Xero (I1)', () => {
-  it('re-queues a failed push', async () => {
+  beforeEach(() => {
+    xeroPushes.length = 0;
+  });
+
+  /*
+   * ⚠️ This used to assert that a retry set `xeroState` to `unknown`.
+   *
+   * That was correct while the retry only re-queued: the push was a job that
+   * had not happened, and `unknown` said so. The retry now performs the push
+   * and waits, so the invoice ends on a real outcome and `unknown` would be a
+   * state nothing ever leaves.
+   */
+  it('actually pushes, and reports what Xero did', async () => {
     const failed = invoices.seed({ status: 'sent', xeroState: 'failed' });
 
-    await invoiceService.retryXero(failed.id, OFFICE);
+    const result = await invoiceService.retryXero(failed.id, OFFICE);
 
-    // `unknown` while in flight, which is honest: we have asked and do not yet
-    // know. Their current list genuinely shows this state.
-    expect(invoices.all[0]?.xeroState).toBe('unknown');
-    expect(invoices.all[0]?.xeroMessage).toBeNull();
+    expect(xeroPushes).toEqual([failed.id]);
+    expect(result).toEqual({ pushed: true, message: null });
   });
 
   it('refuses to push an invoice that has not been sent', async () => {
     const draft = invoices.seed({ status: 'draft' });
 
     await expect(invoiceService.retryXero(draft.id, OFFICE)).rejects.toMatchObject({ status: 409 });
+    // And nothing reached Xero — a draft must never enter the ledger.
+    expect(xeroPushes).toEqual([]);
+  });
+
+  it('pushes every invoice in a batch that was actually sent', async () => {
+    const a = invoices.seed({ status: 'draft' });
+    const b = invoices.seed({ status: 'draft' });
+
+    await invoiceService.send([a.id, b.id], OFFICE);
+
+    expect(xeroPushes).toEqual([a.id, b.id]);
   });
 });

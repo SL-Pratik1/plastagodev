@@ -24,6 +24,10 @@ function callerFrom(req: { auth?: Express.Request['auth'] }): Caller {
     userId: req.auth.userId,
     name: req.auth.name,
     roles: req.auth.roles as Caller['roles'],
+    // Carried so a queue decision that reaches into another domain — rebooking
+    // a futile pickup through `jobService` — passes a caller that domain can
+    // scope by. Null for office staff, which is every caller these queues admit.
+    accountId: req.auth.accountId,
   };
 }
 

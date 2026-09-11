@@ -10,6 +10,7 @@ import type {
   PortalSupervisorInvite,
   Role,
 } from '@plastago/shared';
+import { hasSiteSupervisors } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { accountRepository } from '../accounts/account.repository.js';
@@ -84,7 +85,7 @@ export const portalAccountService = {
     query: { page: number; pageSize: number; q?: string | undefined },
     caller: Caller,
   ): Promise<{ data: PortalSupervisor[]; meta: PageMeta }> {
-    const accountId = assertAdministrator(caller);
+    const accountId = await assertBuilderAdministrator(caller);
     return supervisorRepository.list(accountId, query);
   },
 
@@ -100,7 +101,7 @@ export const portalAccountService = {
     input: PortalSupervisorInvite,
     caller: Caller,
   ): Promise<PortalSupervisor> {
-    const accountId = assertAdministrator(caller);
+    const accountId = await assertBuilderAdministrator(caller);
 
     const email = input.email.trim().toLowerCase() || null;
     const mobile = input.mobile.trim() || null;
@@ -159,7 +160,7 @@ export const portalAccountService = {
     state: PortalSupervisor['state'],
     caller: Caller,
   ): Promise<PortalSupervisor> {
-    const accountId = assertAdministrator(caller);
+    const accountId = await assertBuilderAdministrator(caller);
 
     if (state === 'invited') {
       /*
@@ -186,7 +187,7 @@ export const portalAccountService = {
 
   /** B.2 — approve somebody who joined using the customer code. */
   async approveSupervisor(id: string, caller: Caller): Promise<PortalSupervisor> {
-    const accountId = assertAdministrator(caller);
+    const accountId = await assertBuilderAdministrator(caller);
 
     const approved = await supervisorRepository.approve(id, accountId);
     if (!approved) {
@@ -364,6 +365,42 @@ function assertAdministrator(caller: Caller): string {
   }
 
   return caller.accountId;
+}
+
+/**
+ * An administrator on a BUILDER account, or a refusal.
+ *
+ * ── Why the account type is a server check and not a hidden menu ───────────
+ * Site supervisors are a builder concept: a contractor gets one login, no
+ * supervisors, and a booking form that asks for everything, because that form IS
+ * the authorisation (Matt, 21:55 · 22:53). The portal already hides the menu item
+ * for them — but hiding a screen is a courtesy to the user, not a boundary, and
+ * `/portal/supervisors` typed into the address bar reached a working page that
+ * could mint logins on a journey with no supervisors in it.
+ *
+ * So the refusal lives here, beside the role check, and every one of the four
+ * supervisor endpoints goes through it.
+ */
+async function assertBuilderAdministrator(caller: Caller): Promise<string> {
+  const accountId = assertAdministrator(caller);
+
+  const accountType = await portalAccountRepository.accountTypeOf(accountId);
+
+  // Unknown is a refusal, not a pass. A customer session pointing at an account
+  // that no longer exists is broken, and the safe direction to fail is closed.
+  if (accountType === null) {
+    throw AppError.forbidden('Your customer account could not be found');
+  }
+
+  // The shared helper, not an inline `=== 'builder'`: the rule that supervisors
+  // are a builder concept is stated once, beside the enum it reads.
+  if (!hasSiteSupervisors(accountType)) {
+    throw AppError.forbidden(
+      'Site supervisors are for builder accounts. Your login books pickups directly.',
+    );
+  }
+
+  return accountId;
 }
 
 /* ── M5.12 · F52 · diversion certificates ────────────────────────────────── */

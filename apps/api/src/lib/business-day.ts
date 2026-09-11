@@ -105,3 +105,40 @@ function offsetMinutesAt(at: Date): number {
 
   return (wallClockAsUtc - at.getTime()) / 60_000;
 }
+
+/**
+ * How far either side of today a ready date may sit.
+ *
+ * Back-dating is legitimate and stays allowed: the office keys in a pickup that
+ * was ready last week, and refusing that would make them lie about the date to
+ * get the job in. What is refused is the absurd — and the reason is that the SLA
+ * target is computed FROM this date, so `2020-01-01` does not read as a typo on
+ * screen, it reads as a job that has been overdue for six years and sorts to the
+ * top of every at-risk list until somebody notices. A mistyped year is how it
+ * happens.
+ *
+ * A year is deliberately generous. This guards a slipped keystroke, not
+ * scheduling policy.
+ *
+ * ⚠️ Lives here rather than in the jobs domain because a ready date is set from
+ * two places — booking and rescheduling in `jobs`, and the reschedule that
+ * closes a futile review in `queues`. It was in `jobs` first, and the futile
+ * queue quietly walked past it.
+ */
+export const READY_DATE_WINDOW_DAYS = 365;
+
+export function isPlausibleReadyDate(
+  isoDate: string,
+  now: Date = new Date(),
+): { ok: true } | { ok: false; direction: 'past' | 'future' } {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return { ok: false, direction: 'past' };
+
+  // Sydney's today, not the server's.
+  const today = new Date(`${todayInSydney(now)}T00:00:00Z`);
+  const days = Math.round((date.getTime() - today.getTime()) / 86_400_000);
+
+  if (days < -READY_DATE_WINDOW_DAYS) return { ok: false, direction: 'past' };
+  if (days > READY_DATE_WINDOW_DAYS) return { ok: false, direction: 'future' };
+  return { ok: true };
+}

@@ -54,6 +54,18 @@ export const QueueAwaitingPoPage = lazy(async () => ({
   default: (await import('@/pages/admin/queue-awaiting-po')).AdminQueueAwaitingPoPage,
 }));
 
+export const PortalPurchaseOrdersPage = lazy(async () => ({
+  default: (await import('@/pages/portal/purchase-orders')).PortalPurchaseOrdersPage,
+}));
+
+export const QueueCallUpReviewPage = lazy(async () => ({
+  default: (await import('@/pages/admin/queue-call-up-review')).AdminQueueCallUpReviewPage,
+}));
+
+export const QueueCallUpsPage = lazy(async () => ({
+  default: (await import('@/pages/admin/queue-call-ups')).AdminQueueCallUpsPage,
+}));
+
 export const QueuePoReviewPage = lazy(async () => ({
   default: (await import('@/pages/admin/queue-po-review')).AdminQueuePoReviewPage,
 }));
@@ -131,6 +143,10 @@ export const NotificationsPage = lazy(async () => ({
 
 export const ExtractorPage = lazy(async () => ({
   default: (await import('@/pages/admin/extractor')).AdminExtractorPage,
+}));
+
+export const XeroPage = lazy(async () => ({
+  default: (await import('@/pages/admin/xero')).AdminXeroPage,
 }));
 
 export const SettingsPage = lazy(async () => ({

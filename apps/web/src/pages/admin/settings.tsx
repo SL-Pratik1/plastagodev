@@ -1,12 +1,22 @@
 import {
+  BRAND_IDS,
   BRAND_LABELS,
-  NOTIFICATION_EVENT_LABELS,
-  RATE_CARD_LABELS,
+  INVOICE_LAYOUT_DESCRIPTIONS,
+  INVOICE_LAYOUT_LABELS,
+  INVOICE_LAYOUTS,
   ROLE_LABELS,
   ROLES,
-  type Integration,
-  type NotificationEvent,
+  ZONE_LABELS,
+  ZONES,
+  type AdditionalServiceSetting,
+  type BrandId,
+  type InvoiceLayout,
+  type InvoiceTemplate,
+  type InvoiceTemplateWrite,
+  type RateCardSummary,
+  type RateSchedule,
   type Settings,
+  type ZoneRateInput,
 } from '@plastago/shared';
 import {
   Alert,
@@ -18,9 +28,12 @@ import {
   CardHeader,
   CardTitle,
   Checkbox,
+  ConfirmDialog,
+  Dialog,
   ErrorState,
   Field,
   Input,
+  Select,
   Skeleton,
   Spinner,
   Switch,
@@ -31,33 +44,39 @@ import {
   Textarea,
   useToast,
 } from '@plastago/ui';
-import { CheckIcon, ChevronDownIcon, PlugIcon, TriangleAlertIcon } from 'lucide-react';
+import { ChevronDownIcon, PlusIcon, Trash2Icon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { DetailList } from '@/components/detail-list';
 import { PageHeader } from '@/components/page-header';
 import { UnsavedBar } from '@/components/unsaved-bar';
 import { CAPABILITY_GROUPS, ROLE_CAPABILITIES, can } from '@/features/auth/permissions';
 import {
-  useSaveCredentialTypes,
+  useCreateAdditionalService,
+  useCreateInvoiceTemplate,
+  useCreateRateCard,
+  useDeleteAdditionalService,
+  useDeleteInvoiceTemplate,
+  useDeleteRateCard,
+  useIssueSchedule,
+  useRenameRateCard,
   useSaveInvoicingSettings,
-  useSaveNotificationSettings,
   useSettings,
-  useTestIntegration,
+  useUpdateAdditionalService,
+  useUpdateInvoiceTemplate,
 } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
-import { formatMoney, formatRelative } from '@/lib/format';
+import { formatMoney } from '@/lib/format';
 import { useUnsavedChanges } from '@/lib/use-unsaved-changes';
 
-const TABS = ['roles', 'notifications', 'pricing', 'invoicing', 'integrations'] as const;
+const TABS = ['roles', 'pricing', 'invoicing'] as const;
 type TabKey = (typeof TABS)[number];
 
 /** The tab shown when the URL carries no `?tab=`, and the one it omits. */
 const DEFAULT_TAB: TabKey = 'roles';
 
 /**
- * Settings (W3), plus brands (M1.1), rate cards (M6), invoice branding (M7.5)
- * and integrations (W7).
+ * Settings (W3), plus brands (M1.1), rate cards (M6) and invoice branding
+ * (M7.5).
  *
  * ── Editable versus stated ─────────────────────────────────────────────────
  * Several things that belong on a settings screen are not settings, and a text
@@ -81,10 +100,27 @@ const DEFAULT_TAB: TabKey = 'roles';
  * `settingsRepository.slaBusinessDays()`. Re-homing it on another tab means
  * adding a route back, not just a field.
  *
+ * ── Three sections were removed for the same reason ───────────────────────
+ * Notifications, Integrations and Driver credential types are gone, and so is
+ * the Margin assumption card. Each was a control over a value nothing read:
+ *
+ *  • the per-event SMS/email matrix was never consulted — `outboundService`
+ *    picks a channel from the RECIPIENT's own M8.4 preferences
+ *  • the integrations board could configure nothing, and its "test connection"
+ *    button recorded an outcome instead of performing a check
+ *  • credential-type lead times reached no reminder
+ *  • the margin card was read-only prose around one number
+ *
+ * ⚠️ Two of those VALUES are still live and must not be mistaken for dead:
+ * `assumedCostPerJob` is what every figure on the financial summary report is
+ * computed from (seed-time now), and driver credentials themselves — licences,
+ * tickets, expiry states — are untouched on the driver profile. So is the
+ * notification centre, the bell, and all outbound email and SMS.
+ *
  * ── The invoice-template trap ─────────────────────────────────────────────
- * Branding and content control are in scope: logo, colours, company details,
- * terms, bank details, footer, visible columns. Layout authoring is not — there
- * is deliberately no concept of a band, expression or drag-and-drop canvas
+ * Branding and content control are in scope: bank details, footer and the
+ * member badge are editable here today. Layout authoring is not — there is
+ * deliberately no concept of a band, expression or drag-and-drop canvas
  * anywhere on this screen. That absence is the design.
  */
 export function AdminSettingsPage() {
@@ -140,41 +176,31 @@ export function AdminSettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Settings"
-        description="The values the whole platform reads, the brands it trades under, and the six systems it talks to."
+        description="The values the whole platform reads, and the brands it trades under."
       />
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList label="Settings sections">
           <TabsTrigger value="roles">Users & roles</TabsTrigger>
-          <TabsTrigger value="notifications">Notifications</TabsTrigger>
           <TabsTrigger value="pricing">Pricing</TabsTrigger>
           <TabsTrigger value="invoicing">Invoicing</TabsTrigger>
-          <TabsTrigger value="integrations" badge={data.integrations.length}>
-            Integrations
-          </TabsTrigger>
         </TabsList>
 
         {/*
-          Each section is keyed on its own saved slice, so a successful save
-          remounts it and the form re-initialises from the new values. That is
-          React's documented way to reset state when data changes — the
+          Each editable section is keyed on its own saved slice, so a successful
+          save remounts it and the form re-initialises from the new values. That
+          is React's documented way to reset state when data changes — the
           alternative, an effect that calls setState, cascades a render and was
           what the linter caught here.
         */}
         <TabsPanel value="roles">
-          <RolesSection key={JSON.stringify(data.credentialTypes)} settings={data} />
-        </TabsPanel>
-        <TabsPanel value="notifications">
-          <NotificationsSection key={JSON.stringify(data.notifications)} settings={data} />
+          <RolesSection />
         </TabsPanel>
         <TabsPanel value="pricing">
           <PricingSection settings={data} />
         </TabsPanel>
         <TabsPanel value="invoicing">
           <InvoicingSection key={JSON.stringify(data.invoicing)} settings={data} />
-        </TabsPanel>
-        <TabsPanel value="integrations">
-          <IntegrationsSection settings={data} />
         </TabsPanel>
       </Tabs>
     </div>
@@ -183,26 +209,9 @@ export function AdminSettingsPage() {
 
 /* ── Users & roles ───────────────────────────────────────────────────────── */
 
-function RolesSection({ settings }: { settings: Settings }) {
-  const toast = useToast();
-  const save = useSaveCredentialTypes();
-  const [types, setTypes] = useState(settings.credentialTypes);
-
+function RolesSection() {
   /* Groups start open; the portal block is the one an office admin rarely needs. */
   const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(new Set());
-
-  const dirty = JSON.stringify(types) !== JSON.stringify(settings.credentialTypes);
-  useUnsavedChanges(dirty);
-
-  const submit = async () => {
-    try {
-      await save.mutateAsync(types);
-      toast.success('Credential types updated');
-    } catch (caught) {
-      const described = describeError(caught);
-      toast.error(described.title, described.detail);
-    }
-  };
 
   return (
     <div className="space-y-4">
@@ -354,293 +363,16 @@ function RolesSection({ settings }: { settings: Settings }) {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Driver credential types</CardTitle>
-          <CardDescription>
-            Define the type once and set its reminder lead time; it then applies to every driver
-            profile.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <ul className="divide-y divide-border">
-            {types.map((type, index) => (
-              <li key={type.type} className="flex flex-wrap items-center gap-3 py-3">
-                <span className="min-w-0 flex-1 text-sm font-medium">{type.label}</span>
+      {/*
+        The "Driver credential types" card used to sit here. It set a reminder
+        lead time per credential type — and nothing ever read one, so no
+        reminder was ever sent from it.
 
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  Remind
-                  <Input
-                    type="number"
-                    min={1}
-                    max={180}
-                    value={type.reminderLeadDays}
-                    onChange={(event) => {
-                      const next = [...types];
-                      next[index] = { ...type, reminderLeadDays: Number(event.target.value) };
-                      setTypes(next);
-                    }}
-                    className="w-20"
-                    aria-label={`Reminder lead days for ${type.label}`}
-                  />
-                  days before
-                </label>
-
-                <label className="flex items-center gap-2 text-sm">
-                  <Checkbox
-                    checked={type.requiredForDrivers}
-                    onChange={() => {
-                      const next = [...types];
-                      next[index] = { ...type, requiredForDrivers: !type.requiredForDrivers };
-                      setTypes(next);
-                    }}
-                  />
-                  Required
-                </label>
-              </li>
-            ))}
-          </ul>
-
-          <p className="text-xs text-muted-foreground">
-            Chain of Responsibility under the Heavy Vehicle National Law makes licence currency an
-            operator obligation, not just the driver’s — which is why the reminder is the feature.
-          </p>
-        </CardContent>
-      </Card>
-
-      <UnsavedBar
-        visible={dirty}
-        pending={save.isPending}
-        onSave={() => void submit()}
-        onDiscard={() => {
-          setTypes(settings.credentialTypes);
-        }}
-      />
-    </div>
-  );
-}
-
-/* ── Notifications ───────────────────────────────────────────────────────── */
-
-function NotificationsSection({ settings }: { settings: Settings }) {
-  const toast = useToast();
-  const save = useSaveNotificationSettings();
-  const [draft, setDraft] = useState(settings.notifications);
-
-  const dirty = JSON.stringify(draft) !== JSON.stringify(settings.notifications);
-  useUnsavedChanges(dirty);
-
-  const setRule = (event: NotificationEvent, patch: Partial<(typeof draft.rules)[number]>) => {
-    setDraft({
-      ...draft,
-      rules: draft.rules.map((rule) => (rule.event === event ? { ...rule, ...patch } : rule)),
-    });
-  };
-
-  const submit = async () => {
-    try {
-      await save.mutateAsync(draft);
-      toast.success('Notification settings saved');
-    } catch (caught) {
-      const described = describeError(caught);
-      toast.error(described.title, described.detail);
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>Customer notifications</CardTitle>
-          <CardDescription>Which events reach the customer, and on which channel.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <caption className="sr-only">Notification events and channels</caption>
-              <thead>
-                <tr className="border-b border-border">
-                  <th
-                    scope="col"
-                    className="py-2 text-left text-xs font-semibold tracking-wide text-muted-foreground uppercase"
-                  >
-                    Event
-                  </th>
-                  <th
-                    scope="col"
-                    className="py-2 text-center text-xs font-semibold tracking-wide text-muted-foreground uppercase"
-                  >
-                    SMS
-                  </th>
-                  <th
-                    scope="col"
-                    className="py-2 text-center text-xs font-semibold tracking-wide text-muted-foreground uppercase"
-                  >
-                    Email
-                  </th>
-                  <th
-                    scope="col"
-                    className="py-2 text-center text-xs font-semibold tracking-wide text-muted-foreground uppercase"
-                  >
-                    Photos
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {draft.rules.map((rule) => (
-                  <tr key={rule.event} className="border-b border-border">
-                    <td className="py-2.5">{NOTIFICATION_EVENT_LABELS[rule.event]}</td>
-                    <td className="py-2.5 text-center">
-                      <Checkbox
-                        checked={rule.sms}
-                        onChange={() => {
-                          setRule(rule.event, { sms: !rule.sms });
-                        }}
-                        aria-label={`SMS for ${NOTIFICATION_EVENT_LABELS[rule.event]}`}
-                      />
-                    </td>
-                    <td className="py-2.5 text-center">
-                      <Checkbox
-                        checked={rule.email}
-                        onChange={() => {
-                          setRule(rule.event, { email: !rule.email });
-                        }}
-                        aria-label={`Email for ${NOTIFICATION_EVENT_LABELS[rule.event]}`}
-                      />
-                    </td>
-                    <td className="py-2.5 text-center">
-                      <Checkbox
-                        checked={rule.includePhotos}
-                        disabled={!rule.email}
-                        onChange={() => {
-                          setRule(rule.event, { includePhotos: !rule.includePhotos });
-                        }}
-                        aria-label={`Attach photos for ${NOTIFICATION_EVENT_LABELS[rule.event]}`}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <p className="mt-3 text-xs text-muted-foreground">
-            Photos ride on the completion email — a promise their booking form already makes: “job
-            alerts and photos will be sent to this email address”. Today that is a link on a PDF.
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Upcoming-job reminder</CardTitle>
-          <CardDescription>
-            The reminder that asks a site whether the job is actually ready.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="sm:max-w-xs">
-            <Field
-              id="reminder-lead"
-              label="Days before the ready date"
-              required
-              hint="Between 1 and 7."
-            >
-              {(aria) => (
-                <Input
-                  {...aria}
-                  type="number"
-                  min={1}
-                  max={7}
-                  value={draft.reminderLeadDays}
-                  onChange={(event) => {
-                    setDraft({ ...draft, reminderLeadDays: Number(event.target.value) });
-                  }}
-                />
-              )}
-            </Field>
-          </div>
-
-          <div className="flex items-start gap-3">
-            <Switch
-              checked={draft.reminderIncludeRescheduleLink}
-              onCheckedChange={(checked) => {
-                setDraft({ ...draft, reminderIncludeRescheduleLink: checked });
-              }}
-              id="reschedule-link"
-              aria-label="Include a reschedule link"
-            />
-            <label htmlFor="reschedule-link" className="text-sm">
-              Include a tap-through reschedule link
-              <span className="block text-xs text-muted-foreground">
-                “Not ready? Pick a new date →”. A link rather than SMS-reply parsing: cheaper,
-                unambiguous, fully audited, and identical for email and SMS.
-              </span>
-            </label>
-          </div>
-
-          <Alert variant="info" title="If they do not reply, go anyway">
-            That is the stated rule. If they reply not-ready they supply a new date and the job
-            reschedules — which attacks futile pickups directly, the most expensive failure mode in
-            the business.
-          </Alert>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Internal queue digest</CardTitle>
-          <CardDescription>The daily email that stops a queue being forgotten.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-start gap-3">
-            <Switch
-              checked={draft.queueDigestEnabled}
-              onCheckedChange={(checked) => {
-                setDraft({ ...draft, queueDigestEnabled: checked });
-              }}
-              id="queue-digest"
-              aria-label="Send the daily queue digest"
-            />
-            <label htmlFor="queue-digest" className="text-sm">
-              Send a daily digest of the futile, approvals and awaiting-PO queues
-            </label>
-          </div>
-
-          {draft.queueDigestEnabled && (
-            <div className="sm:max-w-xs">
-              <Field id="digest-hour" label="Send at" hint="24-hour, Australia/Sydney.">
-                {(aria) => (
-                  <Input
-                    {...aria}
-                    type="number"
-                    min={0}
-                    max={23}
-                    value={draft.queueDigestHour}
-                    onChange={(event) => {
-                      setDraft({ ...draft, queueDigestHour: Number(event.target.value) });
-                    }}
-                  />
-                )}
-              </Field>
-            </div>
-          )}
-
-          <Alert variant="warning" title="Why this exists">
-            One futile pickup has sat unactioned in the current system since August 2025 — a year,
-            at $120, because nothing ever chased it. The system has to chase.
-          </Alert>
-        </CardContent>
-      </Card>
-
-      <UnsavedBar
-        visible={dirty}
-        pending={save.isPending}
-        onSave={() => void submit()}
-        onDiscard={() => {
-          setDraft(settings.notifications);
-        }}
-      />
+        ⚠️ Driver credentials THEMSELVES are untouched: licences, tickets,
+        medicals, their expiry states and the "expiring this month" filter are
+        all still on the driver profile and the Drivers list. What went is the
+        settings register above them, not the compliance data.
+      */}
     </div>
   );
 }
@@ -648,128 +380,1167 @@ function NotificationsSection({ settings }: { settings: Settings }) {
 /* ── Pricing ─────────────────────────────────────────────────────────────── */
 
 function PricingSection({ settings }: { settings: Settings }) {
+  const [newCardOpen, setNewCardOpen] = useState(false);
+
   return (
     <div className="space-y-4">
       {/*
-        Read-only, and that is a deliberate safety decision rather than an
-        omission. Rates are effective-dated: pricing a job always uses the rates
-        in force on that job's date, so editing a rate in place would silently
-        reprice history. Invoice correctness is the highest-rated risk in the
-        project, so issuing a new schedule is a guarded workflow, not a text box.
+        Editable, but only through the one operation that is safe.
+
+        Rates are effective-dated: pricing a job reads the rates in force on
+        that job's date. So there is no "edit these rates" control anywhere on
+        this tab — changing a price means ISSUING A NEW SCHEDULE with its own
+        start date, and the old one stays exactly as it was. Every job also
+        carries a frozen copy of the rates it was priced on, so even deleting a
+        card cannot move a figure on an invoice somebody has already been sent.
       */}
-      <Alert variant="warning" title="Rates are effective-dated, so they are not edited in place">
-        Pricing a job always uses the rates in force on that job’s date. Changing a rate means
-        issuing a new schedule with its own start date — reissuing or crediting a March invoice has
-        to use March’s rates. Editing here would silently reprice history.
+      <Alert variant="info" title="Changing a rate issues a new schedule — it never overwrites">
+        Pricing a job always uses the rates in force on that job’s date, so reissuing or crediting
+        a March invoice uses March’s rates. Add a schedule with a start date and the current one is
+        closed the day before; nothing already priced moves.
       </Alert>
 
       <Card>
-        <CardHeader>
-          <CardTitle>Rate cards</CardTitle>
-          <CardDescription>Resolution order is named card → tier → default.</CardDescription>
+        <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+          <span>
+            <CardTitle>Rate cards</CardTitle>
+            <CardDescription>Resolution order is named card → tier → default.</CardDescription>
+          </span>
+          <Button
+            size="sm"
+            onClick={() => {
+              setNewCardOpen(true);
+            }}
+          >
+            <PlusIcon aria-hidden />
+            New rate card
+          </Button>
         </CardHeader>
-        <CardContent>
-          <ul className="divide-y divide-border">
-            {settings.pricing.rateCards.map((card) => (
-              <li key={card.id} className="flex flex-wrap items-center gap-3 py-3">
-                <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-medium">{RATE_CARD_LABELS[card.id]}</span>
-                  <span className="block text-xs text-muted-foreground tabular-nums">
-                    Effective {card.effectiveFrom} → {card.effectiveTo}
-                  </span>
-                </span>
-                <Badge variant="secondary">
-                  {card.accountCount} account{card.accountCount === 1 ? '' : 's'}
-                </Badge>
-              </li>
-            ))}
-          </ul>
+        <CardContent className="space-y-2">
+          {settings.pricing.rateCards.map((card) => (
+            <RateCardRow key={card.id} card={card} />
+          ))}
+
+          {settings.pricing.rateCards.length === 0 && (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              No rate cards yet. Every account needs one before it can be priced.
+            </p>
+          )}
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Additional services</CardTitle>
-          <CardDescription>All nine, fixed and percentage.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <caption className="sr-only">Additional service charges</caption>
-              <thead>
-                <tr className="border-b border-border">
-                  {['Charge', 'Rate', 'Raised by', 'Approval'].map((heading, index) => (
-                    <th
-                      key={heading}
-                      scope="col"
-                      className={`py-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase ${index === 1 ? 'text-right' : 'text-left'}`}
-                    >
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {settings.pricing.additionalServices.map((service) => (
-                  <tr key={service.code} className="border-b border-border">
-                    <td className="py-2.5">{service.label}</td>
-                    <td className="py-2.5 text-right tabular-nums">
-                      {service.kind === 'percentage'
-                        ? `${service.value}%`
-                        : formatMoney(service.value)}
-                    </td>
-                    <td className="py-2.5">
-                      <Badge variant="outline">
-                        {service.systemGenerated
-                          ? 'System'
-                          : service.driverRaisable
-                            ? 'Driver'
-                            : 'Office'}
-                      </Badge>
-                    </td>
-                    <td className="py-2.5">
-                      {service.requiresApproval ? (
-                        <Badge variant="warning">Requires approval</Badge>
-                      ) : (
-                        <span className="text-muted-foreground">Automatic</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <NewRateCardDialog
+        open={newCardOpen}
+        onClose={() => {
+          setNewCardOpen(false);
+        }}
+      />
 
-          <p className="mt-3 text-xs text-muted-foreground">
-            Extra load time is system-generated from on-site duration and cannot be raised by a
-            driver — which is why the approvals queue shows it as “Created By: System”. Its
-            free-time threshold is still an open question with the client.
-          </p>
-        </CardContent>
-      </Card>
+      <AdditionalServicesCard services={settings.pricing.additionalServices} />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Margin assumption</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <DetailList
-            columns={2}
-            items={[
-              {
-                label: 'Assumed cost per job',
-                value: formatMoney(settings.pricing.assumedCostPerJob),
-              },
-              { label: 'Used by', value: 'Job margin view and the financial summary report' },
-            ]}
-          />
-          <p className="mt-3 text-xs text-muted-foreground">
-            Reproduces the flat per-job cost the current system applies. Real per-vehicle cost is
-            the improvement to make once the vehicle expense log has history.
-          </p>
-        </CardContent>
-      </Card>
+      {/*
+        The "Margin assumption" card used to sit here. It was two read-only
+        facts and a paragraph, which is a document rather than a screen.
+
+        ⚠️ `assumedCostPerJob` itself is NOT dead — the financial summary report
+        computes every margin figure from it, and says so in its own footnote,
+        which is where a reader actually needs the number. It is a seed-time
+        value now, like the SLA.
+      */}
     </div>
+  );
+}
+
+/**
+ * One rate card: its name, its current prices, and its history.
+ *
+ * ── Why history is collapsed rather than absent ───────────────────────────
+ * The current schedule is what the office reads ninety-nine times out of a
+ * hundred. The hundredth is "what were we charging Clarendon in March?", asked
+ * while somebody is on the phone disputing an invoice — and that question has
+ * no other home in the product. Collapsed keeps the common case clean without
+ * making the rare one a database query.
+ */
+function RateCardRow({ card }: { card: RateCardSummary }) {
+  const toast = useToast();
+  const [expanded, setExpanded] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const remove = useDeleteRateCard();
+
+  const current = card.schedules.find(
+    (schedule) => schedule.effectiveFrom === currentScheduleFrom(card),
+  );
+  const history = card.schedules.filter((schedule) => schedule !== current);
+
+  const submitDelete = async () => {
+    try {
+      await remove.mutateAsync(card.id);
+      setConfirmDelete(false);
+      toast.success(`${card.label} deleted`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-border">
+      <div className="flex flex-wrap items-center gap-3 p-3">
+        <button
+          type="button"
+          onClick={() => {
+            setExpanded(!expanded);
+          }}
+          aria-expanded={expanded}
+          className="focus-ring flex min-w-0 flex-1 items-center gap-2 rounded text-left"
+        >
+          <ChevronDownIcon
+            className={`size-4 shrink-0 text-muted-foreground transition-transform ${
+              expanded ? '' : '-rotate-90'
+            }`}
+            aria-hidden
+          />
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-medium">{card.label}</span>
+            <span className="block font-mono text-xs text-muted-foreground">{card.id}</span>
+          </span>
+        </button>
+
+        {/*
+          The current prices inline, so the common question is answered without
+          expanding anything. Hidden on phones, where three zones and six
+          figures cannot fit beside a name.
+        */}
+        {current ? (
+          <span className="hidden gap-4 text-xs tabular-nums text-muted-foreground md:flex">
+            {current.zones.map((zone) => (
+              <span key={zone.zone}>
+                <span className="block">{ZONE_LABELS[zone.zone]}</span>
+                <span className="block font-medium text-foreground">
+                  {formatMoney(zone.serviceCharge)} + ${zone.ratePerM2}/m²
+                </span>
+              </span>
+            ))}
+          </span>
+        ) : (
+          /*
+            A card with no schedule covering today prices NOTHING — every quote
+            against it silently falls back to the default card. That is worth a
+            warning rather than an empty space.
+          */
+          <Badge variant="warning">No rates in force today</Badge>
+        )}
+
+        <Badge variant="secondary">
+          {card.accountCount} account{card.accountCount === 1 ? '' : 's'}
+        </Badge>
+
+        <span className="flex items-center gap-1">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setScheduleOpen(true);
+            }}
+          >
+            New schedule
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setRenaming(true);
+            }}
+          >
+            Rename
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            /*
+              Disabled from the SERVER's answer, not from a rule the browser
+              re-derives. `deletable` already folds in "is this the default
+              card" and "does an account still use it", so the button cannot
+              offer something that comes back a 409.
+            */
+            disabled={!card.deletable}
+            title={
+              card.deletable
+                ? undefined
+                : card.accountCount > 0
+                  ? 'Accounts still price against this card'
+                  : 'The default card cannot be deleted'
+            }
+            onClick={() => {
+              setConfirmDelete(true);
+            }}
+          >
+            <Trash2Icon aria-hidden />
+            <span className="sr-only">Delete {card.label}</span>
+          </Button>
+        </span>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-border p-3">
+          <ScheduleTable schedule={current} label="In force now" />
+
+          {history.length > 0 && (
+            <div className="mt-4 space-y-3">
+              <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                Superseded
+              </p>
+              {history.map((schedule) => (
+                <ScheduleTable
+                  key={schedule.effectiveFrom}
+                  schedule={schedule}
+                  label={`${schedule.effectiveFrom} → ${schedule.effectiveTo || 'open'}`}
+                  muted
+                />
+              ))}
+            </div>
+          )}
+
+          {card.schedules.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              No schedule yet. Add one so this card can price a job.
+            </p>
+          )}
+        </div>
+      )}
+
+      <IssueScheduleDialog
+        card={card}
+        open={scheduleOpen}
+        onClose={() => {
+          setScheduleOpen(false);
+        }}
+      />
+      <RenameCardDialog
+        card={card}
+        open={renaming}
+        onClose={() => {
+          setRenaming(false);
+        }}
+      />
+      <ConfirmDialog
+        open={confirmDelete}
+        onCancel={() => {
+          setConfirmDelete(false);
+        }}
+        onConfirm={() => void submitDelete()}
+        title={`Delete ${card.label}?`}
+        description="Its rate schedules go with it. Jobs already priced on this card keep the figures they were invoiced at — each one stores its own copy — so no invoice changes."
+        confirmLabel="Delete rate card"
+        tone="destructive"
+        pending={remove.isPending}
+      />
+    </div>
+  );
+}
+
+/** Which schedule is in force today, by the same rule the server applies. */
+function currentScheduleFrom(card: RateCardSummary): string | undefined {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+
+  return card.schedules.find(
+    (schedule) =>
+      schedule.effectiveFrom <= today &&
+      (schedule.effectiveTo === '' || schedule.effectiveTo >= today),
+  )?.effectiveFrom;
+}
+
+function ScheduleTable({
+  schedule,
+  label,
+  muted = false,
+}: {
+  schedule: RateSchedule | undefined;
+  label: string;
+  muted?: boolean;
+}) {
+  if (!schedule) return null;
+
+  return (
+    <div className={muted ? 'opacity-70' : undefined}>
+      <p className="mb-1 text-xs text-muted-foreground">
+        {label}
+        {!muted && ` · from ${schedule.effectiveFrom}`}
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[24rem] text-sm">
+          <caption className="sr-only">Zone rates {label}</caption>
+          <thead>
+            <tr className="border-b border-border">
+              <th scope="col" className="py-1.5 text-left text-xs font-medium">
+                Zone
+              </th>
+              <th scope="col" className="py-1.5 text-right text-xs font-medium">
+                Service charge
+              </th>
+              <th scope="col" className="py-1.5 text-right text-xs font-medium">
+                Rate per m²
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {schedule.zones.map((zone) => (
+              <tr key={zone.zone} className="border-b border-border/60 last:border-b-0">
+                <td className="py-1.5">{ZONE_LABELS[zone.zone]}</td>
+                <td className="py-1.5 text-right tabular-nums">
+                  {formatMoney(zone.serviceCharge)}
+                </td>
+                <td className="py-1.5 text-right tabular-nums">${zone.ratePerM2}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ── Editing rates ───────────────────────────────────────────────────────── */
+
+/**
+ * Today in Sydney, as `YYYY-MM-DD`.
+ *
+ * ⚠️ Not `new Date().toISOString().slice(0, 10)`. That is UTC, which is the
+ * previous day for the first ten or eleven hours of every Sydney morning — so
+ * a schedule someone meant to start "today" would be back-dated by one day,
+ * and the server would reject it against an invoiced job for no reason the
+ * person could see.
+ */
+function todayInSydney(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+}
+
+/** A blank set of zone rates — one row per zone, every one required. */
+function emptyZoneRates(): ZoneRateInput[] {
+  return ZONES.map((zone) => ({ zone, serviceCharge: '', ratePerM2: '' }));
+}
+
+/**
+ * The three-zone rate grid, shared by "new card" and "new schedule".
+ *
+ * One component because the two forms ask for exactly the same thing, and a
+ * second copy is how the create form ends up accepting a precision the issue
+ * form rejects.
+ */
+function ZoneRateFields({
+  zones,
+  onChange,
+  disabled,
+}: {
+  zones: readonly ZoneRateInput[];
+  onChange: (next: ZoneRateInput[]) => void;
+  disabled?: boolean;
+}) {
+  const setZone = (index: number, patch: Partial<ZoneRateInput>) => {
+    onChange(zones.map((zone, i) => (i === index ? { ...zone, ...patch } : zone)));
+  };
+
+  return (
+    <div className="space-y-3">
+      {zones.map((zone, index) => (
+        <div key={zone.zone} className="grid grid-cols-1 gap-2 sm:grid-cols-[8rem_1fr_1fr] sm:items-center">
+          <span className="text-sm font-medium">{ZONE_LABELS[zone.zone]}</span>
+
+          <label className="text-xs text-muted-foreground">
+            Service charge
+            <Input
+              value={zone.serviceCharge}
+              disabled={disabled}
+              inputMode="decimal"
+              placeholder="220.00"
+              className="mt-1 font-mono"
+              aria-label={`Service charge for ${ZONE_LABELS[zone.zone]}`}
+              onChange={(event) => {
+                setZone(index, { serviceCharge: event.target.value });
+              }}
+            />
+          </label>
+
+          <label className="text-xs text-muted-foreground">
+            Rate per m²
+            <Input
+              value={zone.ratePerM2}
+              disabled={disabled}
+              inputMode="decimal"
+              placeholder="0.1600"
+              className="mt-1 font-mono"
+              aria-label={`Rate per square metre for ${ZONE_LABELS[zone.zone]}`}
+              onChange={(event) => {
+                setZone(index, { ratePerM2: event.target.value });
+              }}
+            />
+          </label>
+        </div>
+      ))}
+
+      {/*
+        Said out loud because it is the one thing a person keying these in will
+        get wrong. $0.1625 rounded to $0.16 before multiplying by 823 m² loses
+        real money on every large job, and the loss is invisible per invoice.
+      */}
+      <p className="text-xs text-muted-foreground">
+        Rates take four decimal places — 0.1625 is kept as 0.1625, not rounded to cents.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Client-side check on a zone grid.
+ *
+ * Duplicated deliberately with the server's, which is the authority. This one
+ * exists so the person typing gets told at the field rather than after a round
+ * trip that clears nothing.
+ */
+function zoneRateErrors(zones: readonly ZoneRateInput[]): string | null {
+  for (const zone of zones) {
+    if (zone.serviceCharge.trim() === '' || zone.ratePerM2.trim() === '') {
+      return `Every zone needs both figures — ${ZONE_LABELS[zone.zone]} is incomplete`;
+    }
+    if (!/^\d+(\.\d{1,4})?$/.test(zone.serviceCharge.trim())) {
+      return `${ZONE_LABELS[zone.zone]}'s service charge is not a valid amount`;
+    }
+    if (!/^\d+(\.\d{1,4})?$/.test(zone.ratePerM2.trim())) {
+      return `${ZONE_LABELS[zone.zone]}'s rate per m² is not a valid amount`;
+    }
+  }
+  return null;
+}
+
+function NewRateCardDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const toast = useToast();
+  const create = useCreateRateCard();
+
+  const [label, setLabel] = useState('');
+  const [effectiveFrom, setEffectiveFrom] = useState(todayInSydney);
+  const [zones, setZones] = useState<ZoneRateInput[]>(emptyZoneRates);
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = () => {
+    setLabel('');
+    setEffectiveFrom(todayInSydney());
+    setZones(emptyZoneRates());
+    setError(null);
+  };
+
+  const submit = async () => {
+    if (label.trim() === '') {
+      setError('Give the card a name — it appears wherever an account is assigned one');
+      return;
+    }
+    const zoneError = zoneRateErrors(zones);
+    if (zoneError) {
+      setError(zoneError);
+      return;
+    }
+    setError(null);
+
+    try {
+      const card = await create.mutateAsync({
+        label: label.trim(),
+        effectiveFrom,
+        zones: zones.map((zone) => ({
+          zone: zone.zone,
+          serviceCharge: zone.serviceCharge.trim(),
+          ratePerM2: zone.ratePerM2.trim(),
+        })),
+      });
+      reset();
+      onClose();
+      toast.success(`${card.label} created`, `Accounts can be assigned to it now.`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={() => {
+        reset();
+        onClose();
+      }}
+      title="New rate card"
+      description="A card is one negotiated agreement. Its prices are a dated schedule underneath it."
+      size="lg"
+      footer={
+        <>
+          <Button
+            variant="outline"
+            onClick={() => {
+              reset();
+              onClose();
+            }}
+          >
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} disabled={create.isPending}>
+            {create.isPending && <Spinner className="text-current" />}
+            Create rate card
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error !== null && (
+          <Alert variant="destructive" title="Check the schedule">
+            {error}
+          </Alert>
+        )}
+
+        <Field
+          id="rc-label"
+          label="Name"
+          required
+          hint="What the office calls this agreement — “Metricon Homes”, “Tier 5”."
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={label}
+              placeholder="Metricon Homes"
+              onChange={(event) => {
+                setLabel(event.target.value);
+              }}
+            />
+          )}
+        </Field>
+
+        <Field
+          id="rc-from"
+          label="Rates effective from"
+          required
+          hint="A job on or after this date is priced on these rates."
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              type="date"
+              value={effectiveFrom}
+              onChange={(event) => {
+                setEffectiveFrom(event.target.value);
+              }}
+            />
+          )}
+        </Field>
+
+        <div>
+          <p className="mb-2 text-sm font-medium">Zone rates</p>
+          <ZoneRateFields zones={zones} onChange={setZones} disabled={create.isPending} />
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+/**
+ * Issue a new schedule on an existing card (M6.2).
+ *
+ * ── Why it opens pre-filled with today's figures ──────────────────────────
+ * Because a price change is almost always a change to ONE number. Making
+ * somebody retype three service charges and three rates to put the Sydney rate
+ * up by two cents is how a typo gets into the other five.
+ */
+function IssueScheduleDialog({
+  card,
+  open,
+  onClose,
+}: {
+  card: RateCardSummary;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const issue = useIssueSchedule();
+
+  const seed = (): ZoneRateInput[] =>
+    card.zones.length > 0
+      ? ZONES.map((zone) => {
+          const existing = card.zones.find((rate) => rate.zone === zone);
+          return {
+            zone,
+            serviceCharge: existing?.serviceCharge ?? '',
+            ratePerM2: existing?.ratePerM2 ?? '',
+          };
+        })
+      : emptyZoneRates();
+
+  const [effectiveFrom, setEffectiveFrom] = useState(todayInSydney);
+  const [zones, setZones] = useState<ZoneRateInput[]>(seed);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    const zoneError = zoneRateErrors(zones);
+    if (zoneError) {
+      setError(zoneError);
+      return;
+    }
+    setError(null);
+
+    try {
+      await issue.mutateAsync({
+        id: card.id,
+        schedule: {
+          effectiveFrom,
+          zones: zones.map((zone) => ({
+            zone: zone.zone,
+            serviceCharge: zone.serviceCharge.trim(),
+            ratePerM2: zone.ratePerM2.trim(),
+          })),
+        },
+      });
+      onClose();
+      toast.success(
+        `New schedule for ${card.label}`,
+        `In force from ${effectiveFrom}. Jobs already priced are unchanged.`,
+      );
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title={`New schedule — ${card.label}`}
+      description="The current schedule closes the day before this one starts. Nothing already priced moves."
+      size="lg"
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} disabled={issue.isPending}>
+            {issue.isPending && <Spinner className="text-current" />}
+            Issue schedule
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error !== null && (
+          <Alert variant="destructive" title="Check the schedule">
+            {error}
+          </Alert>
+        )}
+
+        <Field
+          id="sched-from"
+          label="Effective from"
+          required
+          hint="A job on or after this date is priced on the rates below."
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              type="date"
+              value={effectiveFrom}
+              onChange={(event) => {
+                setEffectiveFrom(event.target.value);
+              }}
+            />
+          )}
+        </Field>
+
+        <div>
+          <p className="mb-2 text-sm font-medium">Zone rates</p>
+          <ZoneRateFields zones={zones} onChange={setZones} disabled={issue.isPending} />
+        </div>
+
+        <Alert variant="neutral" title="Pre-filled with today’s rates">
+          Change only what is changing. Everything here is written as a new dated version — the
+          figures currently in force stay exactly as they are.
+        </Alert>
+      </div>
+    </Dialog>
+  );
+}
+
+function RenameCardDialog({
+  card,
+  open,
+  onClose,
+}: {
+  card: RateCardSummary;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const rename = useRenameRateCard();
+  const [label, setLabel] = useState(card.label);
+
+  const submit = async () => {
+    if (label.trim() === '') return;
+
+    try {
+      await rename.mutateAsync({ id: card.id, label: label.trim() });
+      onClose();
+      toast.success('Rate card renamed');
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Rename rate card"
+      description="Only the name changes. The id and every rate stay as they are."
+      size="sm"
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} disabled={rename.isPending}>
+            {rename.isPending && <Spinner className="text-current" />}
+            Save name
+          </Button>
+        </>
+      }
+    >
+      <Field id="rc-rename" label="Name" required>
+        {(aria) => (
+          <Input
+            {...aria}
+            value={label}
+            onChange={(event) => {
+              setLabel(event.target.value);
+            }}
+          />
+        )}
+      </Field>
+    </Dialog>
+  );
+}
+
+/* ── Additional services ─────────────────────────────────────────────────── */
+
+/**
+ * The chargeable extras, editable in place.
+ *
+ * ── Why editing here IS safe, unlike a rate ───────────────────────────────
+ * A job's charges are written onto the job when they are raised, with the
+ * amount as it stood — so repricing "Futile pickup" from $120 to $135 changes
+ * what the NEXT futile costs and nothing that has already happened. Rates are
+ * different because they are read at pricing time, which is why those get
+ * dated schedules and these get a text box.
+ */
+function AdditionalServicesCard({
+  services,
+}: {
+  services: readonly AdditionalServiceSetting[];
+}) {
+  const [adding, setAdding] = useState(false);
+
+  return (
+    <>
+      <Card>
+        <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+          <span>
+            <CardTitle>Additional services</CardTitle>
+            <CardDescription>
+              Fixed amounts and percentages. Editing one changes what the next job is charged, not
+              what has already been invoiced.
+            </CardDescription>
+          </span>
+          <Button
+            size="sm"
+            onClick={() => {
+              setAdding(true);
+            }}
+          >
+            <PlusIcon aria-hidden />
+            New charge
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {services.map((service) => (
+            <ServiceRow key={service.code} service={service} />
+          ))}
+        </CardContent>
+      </Card>
+
+      <NewServiceDialog
+        open={adding}
+        onClose={() => {
+          setAdding(false);
+        }}
+      />
+    </>
+  );
+}
+
+function ServiceRow({ service }: { service: AdditionalServiceSetting }) {
+  const toast = useToast();
+  const update = useUpdateAdditionalService();
+  const remove = useDeleteAdditionalService();
+
+  const [value, setValue] = useState(service.value);
+  const [label, setLabel] = useState(service.label);
+  const [requiresApproval, setRequiresApproval] = useState(service.requiresApproval);
+  const [driverRaisable, setDriverRaisable] = useState(service.driverRaisable);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const dirty =
+    value !== service.value ||
+    label !== service.label ||
+    requiresApproval !== service.requiresApproval ||
+    driverRaisable !== service.driverRaisable;
+
+  const submit = async () => {
+    if (!/^\d+(\.\d{1,4})?$/.test(value.trim())) {
+      toast.error('That amount does not look right', 'Use digits and at most four decimals.');
+      return;
+    }
+
+    try {
+      await update.mutateAsync({
+        code: service.code,
+        patch: {
+          label: label.trim(),
+          value: value.trim(),
+          requiresApproval,
+          driverRaisable,
+        },
+      });
+      toast.success(`${label.trim()} updated`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  const submitDelete = async () => {
+    try {
+      await remove.mutateAsync(service.code);
+      setConfirmDelete(false);
+      toast.success(`${service.label} removed`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-border p-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_9rem_auto] sm:items-end">
+        <label className="text-xs text-muted-foreground">
+          Charge
+          <Input
+            value={label}
+            className="mt-1"
+            aria-label={`Name for ${service.code}`}
+            onChange={(event) => {
+              setLabel(event.target.value);
+            }}
+          />
+          <span className="mt-1 block font-mono text-[11px]">{service.code}</span>
+        </label>
+
+        <label className="text-xs text-muted-foreground">
+          {service.kind === 'percentage' ? 'Percentage' : 'Amount'}
+          <Input
+            value={value}
+            inputMode="decimal"
+            className="mt-1 font-mono"
+            aria-label={`${service.kind === 'percentage' ? 'Percentage' : 'Amount'} for ${service.label}`}
+            onChange={(event) => {
+              setValue(event.target.value);
+            }}
+          />
+        </label>
+
+        <span className="flex items-center gap-1">
+          <Button
+            size="sm"
+            variant={dirty ? 'default' : 'outline'}
+            disabled={!dirty || update.isPending}
+            onClick={() => void submit()}
+          >
+            {update.isPending && <Spinner className="text-current" />}
+            Save
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            /*
+              The five codes the application looks up by literal name cannot be
+              removed — deleting one turns a driver tapping "Report
+              contamination" into a 500. The server refuses it too; this just
+              stops the button being offered.
+            */
+            disabled={!service.deletable}
+            title={
+              service.deletable
+                ? undefined
+                : 'The system raises this charge by name — set it to 0.00 instead'
+            }
+            onClick={() => {
+              setConfirmDelete(true);
+            }}
+          >
+            <Trash2Icon aria-hidden />
+            <span className="sr-only">Delete {service.label}</span>
+          </Button>
+        </span>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-4">
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox
+            checked={requiresApproval}
+            onChange={() => {
+              setRequiresApproval(!requiresApproval);
+            }}
+          />
+          Requires approval
+        </label>
+
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox
+            checked={driverRaisable}
+            /*
+              A system-generated charge is derived from what the driver already
+              captured — bag counts, on-site minutes. Offering it as a button
+              on their phone as well would let one job be charged twice.
+            */
+            disabled={service.systemGenerated}
+            onChange={() => {
+              setDriverRaisable(!driverRaisable);
+            }}
+          />
+          Driver can raise it
+        </label>
+
+        {service.systemGenerated && (
+          <Badge variant="outline">System — derived, not raised by hand</Badge>
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onCancel={() => {
+          setConfirmDelete(false);
+        }}
+        onConfirm={() => void submitDelete()}
+        title={`Delete ${service.label}?`}
+        description="Jobs already charged for it keep their line — the amount was copied onto the job when it was raised. It just stops being offered."
+        confirmLabel="Delete charge"
+        tone="destructive"
+        pending={remove.isPending}
+      />
+    </div>
+  );
+}
+
+function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const toast = useToast();
+  const create = useCreateAdditionalService();
+
+  const [code, setCode] = useState('');
+  const [label, setLabel] = useState('');
+  const [kind, setKind] = useState<'fixed' | 'percentage'>('fixed');
+  const [value, setValue] = useState('');
+  const [requiresApproval, setRequiresApproval] = useState(true);
+  const [driverRaisable, setDriverRaisable] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = () => {
+    setCode('');
+    setLabel('');
+    setKind('fixed');
+    setValue('');
+    setRequiresApproval(true);
+    setDriverRaisable(false);
+    setError(null);
+  };
+
+  const submit = async () => {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(code.trim())) {
+      setError('The code is lowercase letters, digits and hyphens — “site-access-fee”.');
+      return;
+    }
+    if (label.trim() === '') {
+      setError('Give the charge a name — it prints on the invoice line.');
+      return;
+    }
+    if (!/^\d+(\.\d{1,4})?$/.test(value.trim())) {
+      setError('The amount is digits and at most four decimals.');
+      return;
+    }
+    setError(null);
+
+    try {
+      await create.mutateAsync({
+        code: code.trim(),
+        label: label.trim(),
+        kind,
+        value: value.trim(),
+        requiresApproval,
+        driverRaisable,
+      });
+      reset();
+      onClose();
+      toast.success(`${label.trim()} added`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={() => {
+        reset();
+        onClose();
+      }}
+      title="New charge"
+      description="An extra the office or a driver can add to a job."
+      footer={
+        <>
+          <Button
+            variant="outline"
+            onClick={() => {
+              reset();
+              onClose();
+            }}
+          >
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} disabled={create.isPending}>
+            {create.isPending && <Spinner className="text-current" />}
+            Add charge
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error !== null && (
+          <Alert variant="destructive" title="Check the charge">
+            {error}
+          </Alert>
+        )}
+
+        <Field
+          id="svc-code"
+          label="Code"
+          required
+          hint="Permanent — it identifies the charge on invoices and in Xero."
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={code}
+              placeholder="site-access-fee"
+              className="font-mono"
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => {
+                setCode(event.target.value.toLowerCase());
+              }}
+            />
+          )}
+        </Field>
+
+        <Field id="svc-label" label="Name" required hint="What prints on the invoice line.">
+          {(aria) => (
+            <Input
+              {...aria}
+              value={label}
+              placeholder="Site access fee"
+              onChange={(event) => {
+                setLabel(event.target.value);
+              }}
+            />
+          )}
+        </Field>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field
+            id="svc-kind"
+            label="Kind"
+            required
+            /*
+              Chosen once and never changed. Switching a $90 fixed charge to a
+              90% one would reprice every future job by a factor of thousands,
+              so the API has no route for it — retiring the charge and adding a
+              new one is the deliberate path.
+            */
+            hint="Cannot be changed later."
+          >
+            {(aria) => (
+              <Select
+                {...aria}
+                value={kind}
+                onChange={(event) => {
+                  setKind(event.target.value as 'fixed' | 'percentage');
+                }}
+              >
+                <option value="fixed">Fixed amount</option>
+                <option value="percentage">Percentage of the job</option>
+              </Select>
+            )}
+          </Field>
+
+          <Field
+            id="svc-value"
+            label={kind === 'percentage' ? 'Percentage' : 'Amount'}
+            required
+            hint={kind === 'percentage' ? '10 means ten percent.' : 'Dollars, e.g. 90.00.'}
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={value}
+                inputMode="decimal"
+                className="font-mono"
+                placeholder={kind === 'percentage' ? '10' : '90.00'}
+                onChange={(event) => {
+                  setValue(event.target.value);
+                }}
+              />
+            )}
+          </Field>
+        </div>
+
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={requiresApproval}
+              onChange={() => {
+                setRequiresApproval(!requiresApproval);
+              }}
+            />
+            The office approves it before it can be invoiced
+          </label>
+
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={driverRaisable}
+              onChange={() => {
+                setDriverRaisable(!driverRaisable);
+              }}
+            />
+            A driver can raise it from the job screen
+          </label>
+        </div>
+      </div>
+    </Dialog>
   );
 }
 
@@ -899,31 +1670,102 @@ function InvoicingSection({ settings }: { settings: Settings }) {
 
       <Card>
         <CardHeader>
-          <CardTitle>Branding and content</CardTitle>
+          <CardTitle>Your business, as it prints</CardTitle>
           <CardDescription>
-            What appears on the invoice PDF. Layout authoring is a separate decision.
+            These appear on every invoice PDF. Leave a field blank and it is left off the page.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <Field id="footer-text" label="Footer text">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field id="company-name" label="Company name">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={draft.companyName}
+                  placeholder="PlastaGo Pty Ltd"
+                  onChange={(event) => {
+                    setDraft({ ...draft, companyName: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
+            {/*
+              ⚠️ Not decoration. A tax invoice over $82.50 must carry the
+              supplier's ABN, and a customer may lawfully withhold payment on
+              one that does not — so the hint says what it is FOR.
+            */}
+            <Field
+              id="company-abn"
+              label="ABN"
+              hint="Required on a tax invoice. Without it a customer can refuse to pay."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={draft.companyAbn}
+                  placeholder="51 824 753 556"
+                  onChange={(event) => {
+                    setDraft({ ...draft, companyAbn: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
+          </div>
+
+          <Field id="company-address" label="Address">
             {(aria) => (
-              <Textarea
+              <Input
                 {...aria}
-                rows={2}
-                value={draft.footerText}
+                value={draft.companyAddress}
+                placeholder="1 Recycling Way, Smithfield NSW 2164"
                 onChange={(event) => {
-                  setDraft({ ...draft, footerText: event.target.value });
+                  setDraft({ ...draft, companyAddress: event.target.value });
                 }}
               />
             )}
           </Field>
 
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field id="company-phone" label="Phone">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={draft.companyPhone}
+                  onChange={(event) => {
+                    setDraft({ ...draft, companyPhone: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
+            <Field id="company-email" label="Accounts email">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  type="email"
+                  value={draft.companyEmail}
+                  onChange={(event) => {
+                    setDraft({ ...draft, companyEmail: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Payment details</CardTitle>
+          <CardDescription>Printed under the totals, with the invoice number as the reference.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Field id="bank-bsb" label="BSB">
               {(aria) => (
                 <Input
                   {...aria}
                   value={draft.bankBsb}
+                  placeholder="062-000"
                   onChange={(event) => {
                     setDraft({ ...draft, bankBsb: event.target.value });
                   }}
@@ -941,7 +1783,50 @@ function InvoicingSection({ settings }: { settings: Settings }) {
                 />
               )}
             </Field>
+            {/*
+              The payer's own banking software asks for this. An invoice
+              without it generates a phone call on every first payment.
+            */}
+            <Field id="bank-account-name" label="Account name">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={draft.bankAccountName}
+                  placeholder="PlastaGo Pty Ltd"
+                  onChange={(event) => {
+                    setDraft({ ...draft, bankAccountName: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
           </div>
+
+          <Field id="terms-text" label="Payment terms wording">
+            {(aria) => (
+              <Textarea
+                {...aria}
+                rows={2}
+                value={draft.termsText}
+                placeholder="Payment due within 7 days of the invoice date."
+                onChange={(event) => {
+                  setDraft({ ...draft, termsText: event.target.value });
+                }}
+              />
+            )}
+          </Field>
+
+          <Field id="footer-text" label="Footer text" hint="One line, at the foot of every page.">
+            {(aria) => (
+              <Textarea
+                {...aria}
+                rows={2}
+                value={draft.footerText}
+                onChange={(event) => {
+                  setDraft({ ...draft, footerText: event.target.value });
+                }}
+              />
+            )}
+          </Field>
 
           <div className="flex items-center gap-3">
             <Switch
@@ -956,38 +1841,10 @@ function InvoicingSection({ settings }: { settings: Settings }) {
               Show the GBCA member badge
             </label>
           </div>
-
-          <Alert variant="neutral" title="Branding is in scope; layout authoring is not">
-            Logo, colours, company details, terms, bank details, footer and visible columns are all
-            editable. A drag-and-drop band designer is a product in its own right and the single
-            biggest scope trap in this project.
-          </Alert>
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Templates</CardTitle>
-          <CardDescription>
-            Resolved per customer — the granular priority-and-filter model was explicitly not
-            wanted.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ul className="divide-y divide-border">
-            {settings.invoicing.templates.map((template) => (
-              <li key={template.id} className="flex flex-wrap items-center gap-3 py-3">
-                <span className="min-w-0 flex-1 text-sm font-medium">{template.name}</span>
-                <Badge variant="outline">{BRAND_LABELS[template.brandId]}</Badge>
-                <Badge variant="secondary">{template.showsWeight ? 'kg & m²' : 'm² only'}</Badge>
-                <span className="text-xs text-muted-foreground">
-                  {template.assignedAccountCount} assigned
-                </span>
-              </li>
-            ))}
-          </ul>
-        </CardContent>
-      </Card>
+      <InvoiceTemplatesCard templates={settings.invoicing.templates} />
 
       <UnsavedBar
         visible={dirty}
@@ -1002,102 +1859,308 @@ function InvoicingSection({ settings }: { settings: Settings }) {
   );
 }
 
-/* ── Integrations ────────────────────────────────────────────────────────── */
 
-function IntegrationsSection({ settings }: { settings: Settings }) {
+/* ── Invoice templates (M7.5) ────────────────────────────────────────────── */
+
+/**
+ * The templates, and the controls to manage them.
+ *
+ * ── What is editable here, and what is deliberately not ──────────────────
+ * A template is a NAMED CONFIGURATION of a shipped layout: its name, brand,
+ * accent colour, and whether kilograms print. The layout itself — where the
+ * logo sits, how the table is ruled — is drawn by the renderer and chosen
+ * from a fixed list.
+ *
+ * That split is the entire defence against the layout-authoring scope trap.
+ * Offering a canvas here would be a product in its own right; offering a
+ * dropdown of four drawings answers the real requirement, which is that
+ * EasyLift and PlastaGo invoices look different and an RCTI looks different
+ * from both.
+ */
+function InvoiceTemplatesCard({ templates }: { templates: readonly InvoiceTemplate[] }) {
+  const [adding, setAdding] = useState(false);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-center justify-between gap-2">
+          <span>Templates</span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setAdding(true);
+            }}
+          >
+            <PlusIcon aria-hidden />
+            New template
+          </Button>
+        </CardTitle>
+        <CardDescription>
+          Assigned per customer. An account with none chosen falls back to its brand.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ul className="divide-y divide-border">
+          {templates.map((template) => (
+            <InvoiceTemplateRow key={template.id} template={template} />
+          ))}
+        </ul>
+
+        {templates.length === 0 && (
+          <p className="py-3 text-sm text-muted-foreground">
+            No templates yet. An invoice cannot be rendered until its brand has one.
+          </p>
+        )}
+      </CardContent>
+
+      <InvoiceTemplateDialog
+        open={adding}
+        onClose={() => {
+          setAdding(false);
+        }}
+      />
+    </Card>
+  );
+}
+
+function InvoiceTemplateRow({ template }: { template: InvoiceTemplate }) {
   const toast = useToast();
-  const test = useTestIntegration();
-  const [testing, setTesting] = useState<string | null>(null);
+  const remove = useDeleteInvoiceTemplate();
+  const [editing, setEditing] = useState(false);
 
-  const run = async (integration: Integration) => {
-    setTesting(integration.id);
+  const destroy = async () => {
     try {
-      await test.mutateAsync(integration.id);
-      toast.success(`${integration.name} responded`, 'Connection is working.');
+      await remove.mutateAsync(template.id);
+      toast.success(`${template.name} deleted`);
     } catch (caught) {
       const described = describeError(caught);
-      toast.error(`${integration.name} test failed`, described.detail ?? described.title);
-    } finally {
-      setTesting(null);
+      toast.error(described.title, described.detail);
     }
   };
 
   return (
-    <div className="space-y-4">
-      <Alert variant="neutral" title="Credentials are never handled in the browser">
-        Testing a connection asks the server to make one call and report back. Keys and tokens live
-        on the API only.
-      </Alert>
+    <li className="flex flex-wrap items-center gap-3 py-3">
+      <span
+        aria-hidden
+        className="size-3 shrink-0 rounded-full border border-border"
+        style={{ backgroundColor: template.accentColour }}
+      />
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium">{template.name}</span>
+        <span className="block text-xs text-muted-foreground">
+          {INVOICE_LAYOUT_LABELS[template.layout]}
+        </span>
+      </span>
 
-      <div className="grid gap-3 lg:grid-cols-2">
-        {settings.integrations.map((integration) => (
-          <Card key={integration.id}>
-            <CardHeader>
-              <CardTitle className="flex flex-wrap items-center justify-between gap-2">
-                <span className="flex items-center gap-2">
-                  <PlugIcon aria-hidden className="size-4 text-muted-foreground" />
-                  {integration.name}
-                </span>
-                <Badge
-                  variant={
-                    integration.state === 'connected'
-                      ? 'success'
-                      : integration.state === 'error'
-                        ? 'destructive'
-                        : 'outline'
-                  }
-                >
-                  {integration.state === 'connected'
-                    ? 'Connected'
-                    : integration.state === 'error'
-                      ? 'Needs attention'
-                      : 'Not configured'}
-                </Badge>
-              </CardTitle>
-              <CardDescription>{integration.purpose}</CardDescription>
-            </CardHeader>
+      <Badge variant="outline">{BRAND_LABELS[template.brandId]}</Badge>
+      <Badge variant="secondary">{template.showsWeight ? 'kg & m²' : 'm² only'}</Badge>
 
-            <CardContent className="space-y-3">
-              <p className="text-xs text-muted-foreground">
-                Last successful call {formatRelative(integration.lastSuccessAt)}
-              </p>
+      <span className="text-xs text-muted-foreground">
+        {template.assignedAccountCount} assigned
+      </span>
 
-              {integration.detail && (
-                <p className="text-sm text-muted-foreground">{integration.detail}</p>
-              )}
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => {
+          setEditing(true);
+        }}
+      >
+        Edit
+      </Button>
 
-              {/* Stated caveats belong on screen, not in a document nobody reopens. */}
-              {integration.caveat && (
-                <Alert variant="warning" title="Worth knowing">
-                  {integration.caveat}
-                </Alert>
-              )}
+      {/*
+        Disabled from the server's own flag rather than re-derived here. A
+        button that offered a delete the API answers with a 409 is worse than
+        no button at all.
+      */}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={!template.deletable || remove.isPending}
+        title={
+          template.deletable
+            ? undefined
+            : 'Accounts still invoice on this template — move them first'
+        }
+        onClick={() => void destroy()}
+      >
+        Delete
+      </Button>
 
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void run(integration)}
-                disabled={testing !== null}
+      <InvoiceTemplateDialog
+        open={editing}
+        template={template}
+        onClose={() => {
+          setEditing(false);
+        }}
+      />
+    </li>
+  );
+}
+
+/** One dialog for both create and edit — the fields are identical. */
+function InvoiceTemplateDialog({
+  open,
+  template,
+  onClose,
+}: {
+  open: boolean;
+  template?: InvoiceTemplate;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const create = useCreateInvoiceTemplate();
+  const update = useUpdateInvoiceTemplate();
+
+  const [form, setForm] = useState<InvoiceTemplateWrite>(() => ({
+    name: template?.name ?? '',
+    brandId: template?.brandId ?? 'plastago',
+    showsWeight: template?.showsWeight ?? false,
+    layout: template?.layout ?? 'standard',
+    accentColour: template?.accentColour ?? '#1a4d3a',
+  }));
+  const [error, setError] = useState<string | null>(null);
+
+  const pending = create.isPending || update.isPending;
+
+  const submit = async () => {
+    if (form.name.trim() === '') {
+      setError('Give the template a name');
+      return;
+    }
+    if (!/^#[0-9a-fA-F]{6}$/.test(form.accentColour)) {
+      setError('Use a six-digit hex colour, e.g. #1a4d3a');
+      return;
+    }
+    setError(null);
+
+    try {
+      if (template) await update.mutateAsync({ id: template.id, body: form });
+      else await create.mutateAsync(form);
+
+      toast.success(template ? `${form.name} updated` : `${form.name} created`);
+      onClose();
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title={template ? `Edit ${template.name}` : 'New invoice template'}
+      description="What the document says and which brand it carries. The drawing itself is chosen from the list."
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} disabled={pending}>
+            {pending && <Spinner className="text-current" />}
+            {template ? 'Save' : 'Create template'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error !== null && <Alert variant="destructive" title={error} />}
+
+        <Field id="template-name" label="Name" required>
+          {(aria) => (
+            <Input
+              {...aria}
+              value={form.name}
+              placeholder="PlastaGo Recycling Invoice (m²)"
+              onChange={(event) => {
+                setForm({ ...form, name: event.target.value });
+              }}
+            />
+          )}
+        </Field>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field id="template-brand" label="Brand" required>
+            {(aria) => (
+              <Select
+                {...aria}
+                value={form.brandId}
+                onChange={(event) => {
+                  setForm({ ...form, brandId: event.target.value as BrandId });
+                }}
               >
-                {testing === integration.id ? (
-                  <Spinner className="text-current" />
-                ) : integration.state === 'connected' ? (
-                  <CheckIcon aria-hidden />
-                ) : (
-                  <TriangleAlertIcon aria-hidden />
-                )}
-                Test connection
-              </Button>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+                {BRAND_IDS.map((id) => (
+                  <option key={id} value={id}>
+                    {BRAND_LABELS[id]}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
 
-      <p className="text-xs text-muted-foreground">
-        Two integrations were dropped by the client: card payments, because payment is 7-day EFT
-        against a purchase order, and the old public form, because two intake paths mean two sources
-        of truth.
-      </p>
-    </div>
+          <Field
+            id="template-accent"
+            label="Accent colour"
+            hint="The heading rule and table accent."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={form.accentColour}
+                placeholder="#1a4d3a"
+                className="font-mono"
+                onChange={(event) => {
+                  setForm({ ...form, accentColour: event.target.value });
+                }}
+              />
+            )}
+          </Field>
+        </div>
+
+        <Field
+          id="template-layout"
+          label="Layout"
+          required
+          hint={INVOICE_LAYOUT_DESCRIPTIONS[form.layout]}
+        >
+          {(aria) => (
+            <Select
+              {...aria}
+              value={form.layout}
+              onChange={(event) => {
+                setForm({ ...form, layout: event.target.value as InvoiceLayout });
+              }}
+            >
+              {INVOICE_LAYOUTS.map((layout) => (
+                <option key={layout} value={layout}>
+                  {INVOICE_LAYOUT_LABELS[layout]}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+
+        <div className="flex items-start gap-3">
+          <Switch
+            checked={form.showsWeight}
+            onCheckedChange={(checked) => {
+              setForm({ ...form, showsWeight: checked });
+            }}
+            id="template-weight"
+            aria-label="Print kilograms alongside square metres"
+          />
+          <label htmlFor="template-weight" className="text-sm">
+            Print kilograms alongside square metres
+            <span className="block text-xs text-muted-foreground">
+              For accounts whose capture mode records weight. An m²-only account has none to
+              print.
+            </span>
+          </label>
+        </div>
+      </div>
+    </Dialog>
   );
 }

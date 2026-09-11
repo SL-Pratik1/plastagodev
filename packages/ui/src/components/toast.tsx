@@ -136,15 +136,53 @@ function ToastViewport({
   toasts: ToastRecord[];
   onDismiss: (id: number) => void;
 }) {
+  const element = useRef<HTMLDivElement>(null);
+  const showing = toasts.length > 0;
+
+  /*
+   * ⚠️ Promoted to the top layer, and re-promoted on every arrival.
+   *
+   * A modal <dialog> lives in the browser's TOP LAYER, above every z-index
+   * there is, so a plain fixed viewport puts its toasts BEHIND any open dialog
+   * — and a dialog is where most of them are raised. Pressing a failing "Create
+   * account" therefore looked like it did nothing at all.
+   *
+   * The top layer stacks in promotion order, so hiding and re-showing as each
+   * toast arrives is what keeps the bar above a dialog that opened after this
+   * provider mounted. Positioning lives in `theme.css` under
+   * `[data-toast-viewport]`, because the UA stylesheet for [popover] sets six
+   * properties that utilities would have to beat one at a time.
+   *
+   * Guarded: `showPopover` throws when the element is already open or not yet
+   * connected, and neither is worth taking a screen down for.
+   */
+  useEffect(() => {
+    const node = element.current;
+    if (!node) return;
+
+    try {
+      if (showing) {
+        if (node.matches(':popover-open')) node.hidePopover();
+        node.showPopover();
+      } else if (node.matches(':popover-open')) {
+        node.hidePopover();
+      }
+    } catch {
+      // An engine without the popover API. The toasts still render, and the
+      // stylesheet leaves them where they have always been.
+    }
+  }, [showing, toasts]);
+
   return (
     <div
+      ref={element}
+      popover="manual"
+      data-toast-viewport=""
       // The live region wraps the viewport, not each toast, so it exists in the
       // DOM before the first toast arrives — a region created at the same moment
       // as its content is frequently not announced.
       role="region"
       aria-label="Notifications"
-      className="pointer-events-none fixed inset-x-0 bottom-0 z-[100] flex flex-col items-center gap-2 p-4 sm:inset-x-auto sm:right-0 sm:items-end"
-      style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
     >
       {toasts.map((item) => (
         <ToastItem key={item.id} toast={item} onDismiss={onDismiss} />

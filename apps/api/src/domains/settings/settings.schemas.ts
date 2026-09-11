@@ -1,4 +1,4 @@
-import { INTEGRATION_IDS, RATE_CARDS, ZONES } from '@plastago/shared';
+import { IsoDateSchema, RateCardIdSchema, ServiceCodeSchema, ZONES } from '@plastago/shared';
 import * as z from 'zod';
 
 /**
@@ -10,24 +10,21 @@ import * as z from 'zod';
  * What lives in this file is only what HTTP adds: path params and query facets.
  */
 
-/** `:id` on the integration routes. */
-export const IntegrationIdParamsSchema = z
-  .object({ id: z.enum(INTEGRATION_IDS) })
-  .meta({ id: 'IntegrationIdParams' });
-
 /**
- * W7 — the result of a connection check.
+ * `:id` on the rate-card routes.
  *
- * `detail` is what gets shown on the settings card when a check fails, so it is
- * bounded: an unbounded error string from a third-party SDK is a stack trace on
- * somebody's screen.
+ * Validated with the same schema that guards a card being created, so a path
+ * that could never name a real card is refused as a 422 before it reaches a
+ * database lookup that would 404.
  */
-export const IntegrationCheckBodySchema = z
-  .object({
-    ok: z.boolean(),
-    detail: z.string().max(300).optional(),
-  })
-  .meta({ id: 'IntegrationCheckBody' });
+export const RateCardIdParamsSchema = z
+  .object({ id: RateCardIdSchema })
+  .meta({ id: 'RateCardIdParams' });
+
+/** `:code` on the additional-service routes. */
+export const ServiceCodeParamsSchema = z
+  .object({ code: ServiceCodeSchema })
+  .meta({ id: 'ServiceCodeParams' });
 
 /**
  * A price preview asked for directly (M6).
@@ -39,7 +36,7 @@ export const IntegrationCheckBodySchema = z
  */
 export const QuoteQuerySchema = z
   .object({
-    rateCardId: z.enum(RATE_CARDS),
+    rateCardId: RateCardIdSchema,
     zone: z.enum(ZONES),
     /**
      * Nullable, not optional-and-defaulted-to-zero. A fixed-price builder's job
@@ -48,5 +45,22 @@ export const QuoteQuerySchema = z
      */
     expectedAreaM2: z.coerce.number().positive().max(100_000).nullable().optional(),
     bagCount: z.coerce.number().int().min(0).max(500).optional(),
+    /**
+     * The date to price AS AT (M6.2) — the job's ready date.
+     *
+     * Optional here and only here, because this endpoint answers "what would
+     * this cost?" before there is a job, and the office previews a price while
+     * the ready date is still empty. It falls back to today in the controller,
+     * which is the honest answer to a question asked with no date in it.
+     *
+     * ⚠️ `pricingService` itself requires the date. The default lives at the
+     * transport edge so no domain caller can quietly inherit it.
+     */
+    onDate: IsoDateSchema.optional(),
   })
   .meta({ id: 'QuoteQuery' });
+
+/** `:id` on the invoice-template routes. */
+export const InvoiceTemplateIdParamsSchema = z
+  .object({ id: z.string().trim().min(1).max(60) })
+  .meta({ id: 'InvoiceTemplateIdParams' });

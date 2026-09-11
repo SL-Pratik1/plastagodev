@@ -111,15 +111,48 @@ export function useListQuery({
     [setParams, key],
   );
 
+  /** The last value this hook itself pushed into the URL. */
+  const committed = useRef<string | null>(null);
+
+  /**
+   * Release the draft only when the URL is genuinely more current than it.
+   *
+   * ⚠️ This used to be `setDraftSearch(null)` inside the debounce callback,
+   * beside the `update`, "so the input never shows a value the URL disagrees
+   * with". The two do not land together — `update` goes through the router and
+   * arrives a tick or more later — so in that gap the draft was already gone
+   * while `urlSearch` still held the OLD value, and the input silently reset to
+   * it, eating what had been typed.
+   *
+   * The trigger is an ordinary pause: type a few letters, hesitate for longer
+   * than the debounce, and the commit lands while you are still typing. The
+   * letters typed during its flight were discarded, so "Clarendon" reached the
+   * server as "Clendon" and the search found nothing for a builder that is
+   * really there. Every list in the console shares this hook.
+   *
+   * So the draft steps aside in exactly two cases, and neither is a timer:
+   * the URL now equals it (our commit landed, nothing typed since), or the URL
+   * changed to something this hook did not write — the back button, or
+   * `clearFilters` — which is authoritative over anything half-typed. When our
+   * own commit lands but more has been typed since, the draft is the newer
+   * truth and stays; a fresh commit is already scheduled behind it.
+   */
+  useEffect(() => {
+    setDraftSearch((draft) => {
+      if (draft === null) return null;
+      if (urlSearch === draft) return null;
+      if (urlSearch !== committed.current) return null;
+      return draft;
+    });
+  }, [urlSearch]);
+
   const setSearchInput = useCallback(
     (value: string) => {
       setDraftSearch(value);
 
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
       debounceTimer.current = setTimeout(() => {
-        // Release the draft in the same tick as the commit, so the input never
-        // shows a value the URL disagrees with.
-        setDraftSearch(null);
+        committed.current = value;
         update(
           (next) => {
             if (value) next.set(key('q'), value);

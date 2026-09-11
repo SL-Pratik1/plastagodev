@@ -4,12 +4,20 @@ import type { Role, Settings } from '@plastago/shared';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
 
 /**
- * Settings rules (M2.4 · W7).
+ * Settings rules (M2.4).
  *
  * These test the things a repository cannot: who may change a platform-wide
  * setting, and what is refused outright. Both are decisions, and both are the
  * kind that get quietly reimplemented in a controller if they are not pinned
  * here.
+ *
+ * ⚠️ Notification rules, credential types and integration checks were removed —
+ * each wrote a value nothing downstream read — so the write-permission cases
+ * below run through invoicing rather than spreading across four sections.
+ *
+ * Pricing is the other writable section, and its rules are the sharpest in the
+ * codebase: a rate that can be edited in place reprices work that has already
+ * been invoiced. See "issuing a rate schedule" below.
  */
 
 let repo: ReturnType<typeof createFakeSettingsRepository>;
@@ -61,37 +69,82 @@ describe('who may change them', () => {
   });
 
   it('allows operations', async () => {
-    const saved = await settingsService.saveNotifications(
-      { ...repo.current().notifications, reminderLeadDays: 3 },
+    const saved = await settingsService.saveInvoicing(
+      { ...repo.current().invoicing, defaultPaymentTermsDays: 30 },
       OPS,
     );
-    expect(saved.reminderLeadDays).toBe(3);
+    expect(saved.defaultPaymentTermsDays).toBe(30);
   });
 
   it('refuses office staff, who may read but not write', async () => {
     // The blast radius of a wrong setting is every job afterwards.
     await expect(
-      settingsService.saveNotifications(repo.current().notifications, OFFICE),
+      settingsService.saveInvoicing(repo.current().invoicing, OFFICE),
     ).rejects.toMatchObject({ status: 403 });
-    expect(repo.calls.savedNotifications).toBeNull();
+    expect(repo.calls.savedInvoicing).toBeNull();
   });
 
   it('refuses a customer', async () => {
     await expect(
-      settingsService.saveNotifications(repo.current().notifications, CUSTOMER),
+      settingsService.saveInvoicing(repo.current().invoicing, CUSTOMER),
     ).rejects.toMatchObject({ status: 403 });
+    expect(repo.calls.savedInvoicing).toBeNull();
   });
 
-  it('refuses office staff on every write, not just the first', async () => {
+  it('refuses on the permission check, before any validation runs', async () => {
+    /*
+     * A caller who may not write must be told so whatever they send. Validating
+     * first would leak which fields exist to somebody with no business knowing,
+     * and would turn a 403 into a 422 for the same forbidden request.
+     */
     await expect(
-      settingsService.saveNotifications(repo.current().notifications, OFFICE),
+      settingsService.saveInvoicing({ ...repo.current().invoicing, bankBsb: 'nonsense' }, OFFICE),
     ).rejects.toMatchObject({ status: 403 });
-    await expect(
-      settingsService.saveInvoicing(repo.current().invoicing, OFFICE),
-    ).rejects.toMatchObject({ status: 403 });
-    await expect(
-      settingsService.saveCredentialTypes(repo.current().credentialTypes, OFFICE),
-    ).rejects.toMatchObject({ status: 403 });
+    expect(repo.calls.savedInvoicing).toBeNull();
+  });
+});
+
+/*
+ * ── Three write surfaces were removed, and must not come back by accident ──
+ *
+ * Each wrote a value nothing downstream ever read: the per-event SMS/email
+ * matrix (`outboundService` picks a channel from the recipient's own M8.4
+ * preferences), the integration check (which recorded an outcome rather than
+ * performing one), and the credential-type register (whose lead times reached
+ * no reminder).
+ *
+ * These pin the absence rather than the removal. Re-adding one of these
+ * methods "just to store the value" is exactly how a control that silently
+ * does nothing gets shipped a second time.
+ */
+describe('the removed sections stay removed', () => {
+  it('exposes no writer for notification rules, credential types or integrations', () => {
+    expect(settingsService).not.toHaveProperty('saveNotifications');
+    expect(settingsService).not.toHaveProperty('saveCredentialTypes');
+    expect(settingsService).not.toHaveProperty('recordIntegrationCheck');
+  });
+
+  it('names none of them anywhere in what it returns', async () => {
+    const settings = await settingsService.get(ADMIN);
+
+    expect(settings).not.toHaveProperty('notifications');
+    expect(settings).not.toHaveProperty('integrations');
+    expect(settings).not.toHaveProperty('credentialTypes');
+  });
+
+  it('leaves the settings payload as pricing and invoicing alone', async () => {
+    const settings = await settingsService.get(ADMIN);
+    expect(Object.keys(settings).sort()).toEqual(['invoicing', 'pricing']);
+  });
+
+  it('still carries the assumed cost, which the financial report reads', async () => {
+    /*
+     * M6.8 — the margin CARD went; the value did not. Every margin figure on
+     * the financial summary report is computed from this, so dropping it from
+     * the contract would silently zero a report rather than fail a screen.
+     */
+    const settings = await settingsService.get(ADMIN);
+    expect(settings.pricing.assumedCostPerJob).toBe('100.00');
   });
 });
 
@@ -181,82 +234,3 @@ describe('invoicing', () => {
   });
 });
 
-describe('credential types', () => {
-  it('refuses the same type twice', async () => {
-    // The last one written would silently win, making "which rule applies to an
-    // HR licence" ambiguous.
-    const duplicated = [...repo.current().credentialTypes, ...repo.current().credentialTypes];
-
-    await expect(settingsService.saveCredentialTypes(duplicated, ADMIN)).rejects.toMatchObject({
-      status: 422,
-    });
-    expect(repo.calls.savedCredentialTypes).toBeNull();
-  });
-
-  it('saves a list with no duplicates', async () => {
-    const saved = await settingsService.saveCredentialTypes(
-      [
-        {
-          type: 'drivers-licence',
-          label: 'Driver’s licence',
-          reminderLeadDays: 45,
-          requiredForDrivers: true,
-        },
-        {
-          type: 'white-card',
-          label: 'White card',
-          reminderLeadDays: 30,
-          requiredForDrivers: true,
-        },
-      ],
-      ADMIN,
-    );
-
-    expect(saved).toHaveLength(2);
-  });
-});
-
-describe('integration checks (W7)', () => {
-  it('records a success and stamps when it last worked', async () => {
-    const updated = await settingsService.recordIntegrationCheck('xero', { ok: true }, ADMIN);
-
-    expect(updated.state).toBe('connected');
-    expect(updated.lastSuccessAt).not.toBeNull();
-  });
-
-  it('records a failure without stamping a success', async () => {
-    // A failed check must not make a broken integration look like it worked a
-    // moment ago.
-    const updated = await settingsService.recordIntegrationCheck(
-      'xero',
-      { ok: false, detail: 'Token expired' },
-      ADMIN,
-    );
-
-    expect(updated.state).toBe('error');
-    expect(updated.lastSuccessAt).toBeNull();
-    expect(updated.detail).toBe('Token expired');
-  });
-
-  it('clears a stale detail when a check passes with no message', async () => {
-    await settingsService.recordIntegrationCheck('xero', { ok: false, detail: 'Boom' }, ADMIN);
-    const updated = await settingsService.recordIntegrationCheck('xero', { ok: true }, ADMIN);
-
-    // A red-dot explanation left behind on a working integration is worse than
-    // none at all.
-    expect(updated.detail).toBeNull();
-  });
-
-  it('404s on an integration that is not configured', async () => {
-    await expect(
-      settingsService.recordIntegrationCheck('twilio', { ok: true }, ADMIN),
-    ).rejects.toMatchObject({ status: 404 });
-  });
-
-  it('refuses a non-administrator', async () => {
-    await expect(
-      settingsService.recordIntegrationCheck('xero', { ok: true }, OFFICE),
-    ).rejects.toMatchObject({ status: 403 });
-    expect(repo.calls.integrationChecks).toEqual([]);
-  });
-});

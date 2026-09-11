@@ -127,8 +127,21 @@ export const XERO_SYNC_LABELS: Record<XeroSyncState, string> = {
 
 export const InvoiceSchema = InvoiceListItemSchema.extend({
   lines: z.array(InvoiceLineSchema),
-  /** Which of the six shipped templates produced it (M7.4, M7.5). */
+  /**
+   * Which template produced it, as the name read at the time (M7.4, M7.5).
+   *
+   * ⚠️ A frozen copy, not a reference. Renaming or deleting a template must
+   * not change what an invoice already sent says it was printed on.
+   */
   templateName: NonEmptyStringSchema,
+  /**
+   * Storage key for the rendered PDF (M7.6). Null until one exists.
+   *
+   * The stored bytes ARE the invoice — a reprint serves this object rather
+   * than re-rendering, so a document reprinted a year later is identical to
+   * the one in the builder's filing system.
+   */
+  pdfKey: z.string().nullable(),
   sentAt: IsoDateTimeSchema.nullable(),
   xeroState: XeroSyncStateSchema,
   xeroLastSyncAt: IsoDateTimeSchema.nullable(),

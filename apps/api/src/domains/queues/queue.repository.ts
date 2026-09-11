@@ -15,9 +15,10 @@ import { fromDecimal128 } from '../../lib/money.js';
 import { AccountModel, ContactModel } from '../accounts/account.model.js';
 import { InvoiceLineModel, InvoiceModel } from '../invoices/invoice.model.js';
 import { JobChargeModel, JobModel, JobPhotoModel } from '../jobs/job.model.js';
+import { CallUpModel } from './call-up.model.js';
 import { FutileReviewModel } from './futile-review.model.js';
 import { LeadModel } from './lead.model.js';
-import { PoExtractionModel } from './purchase-order.model.js';
+import { PoExtractionModel, PurchaseOrderModel } from './purchase-order.model.js';
 
 /**
  * Repository layer — the ONLY file in this domain that touches Mongoose
@@ -89,21 +90,64 @@ export const queueRepository = {
   /**
    * M9.4 — one call for every nav badge.
    *
-   * Five counts in parallel. The shell polls this, so it is deliberately the
-   * cheapest thing in the API: counts only, no documents, every one of them
-   * answered by an index.
+   * Seven counts in parallel. The shell polls this, so it is deliberately the
+   * cheapest thing in the API: counts only and no documents.
+   *
+   * ⚠️ Six are answered by an index. The seventh — orders with no job — is an
+   * aggregate, because "has this been booked?" is a fact about another
+   * collection. See the note on it.
    */
   async counts(): Promise<QueueCounts> {
-    const [futileReview, serviceApprovals, awaitingPo, poReview, leads] = await Promise.all([
+    const [
+      futileReview,
+      serviceApprovals,
+      awaitingPo,
+      poReview,
+      awaitingCallUp,
+      callUpReview,
+      leads,
+    ] = await Promise.all([
       FutileReviewModel.countDocuments({ outcome: 'pending' }),
       JobChargeModel.countDocuments({ approvalState: 'pending' }),
       InvoiceModel.countDocuments({ status: 'awaiting-po' }),
       PoExtractionModel.countDocuments({ state: 'needs-review' }),
+      /*
+       * M2.12b — orders with no live job against them.
+       *
+       * ⚠️ The one count here that is not a plain `countDocuments`, because
+       * "has this been booked?" is a fact about the JOBS collection. A flag on
+       * the order would make this cheap and would go stale the first time a
+       * job was cancelled — and a cancelled job leaves the order callable
+       * again, which is exactly the case a stale flag would hide.
+       */
+      PurchaseOrderModel.aggregate<{ total: number }>([
+        {
+          $lookup: {
+            from: 'jobs',
+            localField: '_id',
+            foreignField: 'purchaseOrderId',
+            as: 'jobs',
+            pipeline: [{ $match: { status: { $ne: 'cancelled' } } }, { $project: { _id: 1 } }],
+          },
+        },
+        { $match: { jobs: { $size: 0 } } },
+        { $count: 'total' },
+      ]).then((rows) => rows[0]?.total ?? 0),
+      // M2.12b — a date a builder has given us that nobody has acted on.
+      CallUpModel.countDocuments({ state: 'needs-review' }),
       // A converted lead is history, and a lost one is not work either.
       LeadModel.countDocuments({ convertedAccountId: null, status: { $ne: 'lost' } }),
     ]);
 
-    return { futileReview, serviceApprovals, awaitingPo, poReview, leads };
+    return {
+      futileReview,
+      serviceApprovals,
+      awaitingPo,
+      poReview,
+      awaitingCallUp,
+      callUpReview,
+      leads,
+    };
   },
 
   /* ── M2.6 · Futile review ──────────────────────────────────────────────── */
@@ -184,9 +228,7 @@ export const queueRepository = {
     const row = rows[0];
     if (!row) return null;
 
-    const photos = await JobPhotoModel.find({ jobId: row.job._id })
-      .sort({ takenAt: 1 })
-      .lean();
+    const photos = await JobPhotoModel.find({ jobId: row.job._id }).sort({ takenAt: 1 }).lean();
 
     const counts = new Map([[row.job._id.toHexString(), photos.length]]);
 
@@ -441,9 +483,7 @@ export const queueRepository = {
    * row — a chaser who has to open another screen to find the email address is
    * a chaser who makes fewer calls.
    */
-  async awaitingPoList(
-    query: QueueListQuery,
-  ): Promise<{ data: AwaitingPoItem[]; meta: PageMeta }> {
+  async awaitingPoList(query: QueueListQuery): Promise<{ data: AwaitingPoItem[]; meta: PageMeta }> {
     const filter: Record<string, unknown> = { status: 'awaiting-po' };
 
     if (query.account && mongoose.isValidObjectId(query.account)) {
@@ -652,10 +692,7 @@ function toFutileItem(
   };
 }
 
-function toApprovalItem(
-  row: RawApprovalRow,
-  photoCounts: Map<string, number>,
-): ChargeApprovalItem {
+function toApprovalItem(row: RawApprovalRow, photoCounts: Map<string, number>): ChargeApprovalItem {
   return {
     id: row._id.toHexString(),
     jobId: row.job._id.toHexString(),

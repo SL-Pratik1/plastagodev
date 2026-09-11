@@ -16,6 +16,8 @@ import { notificationService } from '../notifications/notification.service.js';
 import { outboundService } from '../notifications/outbound.service.js';
 import { billableCharges, jobRepository, setInvoiceStatus } from '../jobs/job.repository.js';
 import { settingsRepository } from '../settings/settings.repository.js';
+import { invoiceRenderService } from './invoice-render.service.js';
+import { xeroService } from '../xero/xero.service.js';
 import {
   invoiceRepository,
   type InvoiceScope,
@@ -238,6 +240,24 @@ export const invoiceService = {
       created.push(invoice);
     }
 
+    /*
+     * Nothing raised is not success.
+     *
+     * Every entry in the plan was skipped — the job already carries an invoice
+     * of each kind its charges would produce — and this used to answer `201`
+     * with an empty array, which reads to any caller as "done". Pressing it
+     * twice therefore looked like it worked twice and silently did nothing the
+     * second time. Say which invoices are already there instead.
+     */
+    if (created.length === 0) {
+      const raised = await invoiceRepository.kindsForJob(jobId);
+      throw AppError.conflict(
+        `Job ${String(job.jobNumber)} has already been invoiced — nothing further to raise${
+          raised.length > 0 ? ` (${raised.join(' and ')})` : ''
+        }`,
+      );
+    }
+
     if (created.length > 0) {
       /*
        * The job's rollup badge follows, so the jobs grid agrees with the invoice
@@ -318,6 +338,19 @@ export const invoiceService = {
      */
     await Promise.all(ids.map((id) => emailInvoice(id, now, caller)));
 
+    /*
+     * I1 · M7.8 — and into Xero.
+     *
+     * Same contract as the email above and for the same reason: after the
+     * durable transition, per invoice, and never able to fail the batch. A
+     * rejected invoice records "Xero push failed" on its own row with the
+     * reason, which is where the office looks and what the Retry button acts
+     * on. Rolling back forty sends because Xero disliked one account code
+     * would be the wrong trade in both directions — the invoices really were
+     * sent, and the customer already has the email.
+     */
+    await pushInvoicesToXero(ids, caller);
+
     log.info({ count: changed, by: caller.name }, 'invoices sent');
     return changed;
   },
@@ -379,11 +412,11 @@ export const invoiceService = {
   },
 
   /**
-   * M7.6 — queue a PDF render.
+   * M7.6 — render the invoice PDFs.
    *
-   * ⚠️ Queued, not rendered inline. Rendering is server-side from HTML+CSS
-   * (§6A.6) and a bulk request can be fifty documents; doing it in the request
-   * would hold a connection open for a minute and time out behind a proxy.
+   * Returns how many were PRODUCED, not how many were asked for: a template
+   * missing for one brand fails that invoice alone, and the screen needs to
+   * say so rather than report a success it did not have.
    */
   async requestPdf(ids: readonly string[], caller: Caller): Promise<{ queued: number }> {
     if (ids.length === 0) throw AppError.validation('Select at least one invoice');
@@ -393,19 +426,58 @@ export const invoiceService = {
     const existing = await invoiceRepository.existingIds(ids, scopeFor(caller));
     if (existing.length === 0) throw AppError.notFound('None of those invoices could be found');
 
-    log.info({ count: existing.length, by: caller.name }, 'invoice PDFs queued');
-    return { queued: existing.length };
+    /*
+     * ⚠️ Rendered here rather than handed to a queue, and the doc comment above
+     * no longer claims otherwise.
+     *
+     * `pdf-lib` draws in-process with no browser, so one invoice is a few
+     * milliseconds — the connection-holding problem that justified a queue was
+     * a property of spawning Chromium, and it went away with Chromium. A bulk
+     * request is still bounded below so a fifty-invoice render cannot become a
+     * request that never returns.
+     */
+    const context = await invoiceRenderService.context();
+    let rendered = 0;
+
+    for (const id of existing) {
+      const invoice = await invoiceRepository.findById(id, scopeFor(caller));
+      if (!invoice) continue;
+
+      try {
+        await invoiceRenderService.render(invoice, context);
+        rendered += 1;
+      } catch (error) {
+        /*
+         * Per invoice, never fatal to the batch. One invoice whose template is
+         * missing must not deny the other forty-nine their PDFs, and the
+         * office can see which one failed.
+         */
+        log.error({ err: error, invoiceId: id }, 'invoice pdf render failed');
+      }
+    }
+
+    log.info({ count: rendered, of: existing.length, by: caller.name }, 'invoice PDFs rendered');
+    return { queued: rendered };
   },
 
   /**
-   * I1 — re-push to Xero after a failure.
+   * I1 · M7.8 — re-push one invoice to Xero after a failure.
    *
-   * The push itself is a queued job; this records the intent and clears the
-   * error so the row stops showing as failed while it is being retried.
+   * ── Why this pushes inline rather than queueing ───────────────────────
+   * It is a single invoice, triggered by somebody looking at the row and
+   * waiting for an answer. Queueing it would mean the button reports success
+   * whatever happens next and the user reloads until the badge changes —
+   * which is exactly the "did that work?" experience this screen exists to
+   * replace. The bulk path is different and does not come through here.
+   *
+   * Safe to press repeatedly: the push upserts on the stored `xeroInvoiceId`,
+   * so a retry updates the invoice in Xero rather than raising a second one.
    */
-  async retryXero(id: string, caller: Caller): Promise<void> {
+  async retryXero(id: string, caller: Caller): Promise<{ pushed: boolean; message: string | null }> {
     assertFinance(caller);
 
+    // Through the caller's own scope, so a retry cannot be aimed at an
+    // invoice this person is not allowed to see.
     const invoice = await invoiceRepository.findById(id, scopeFor(caller));
     if (!invoice) throw AppError.notFound('No such invoice');
 
@@ -415,17 +487,47 @@ export const invoiceService = {
       );
     }
 
-    await invoiceRepository.recordXeroResult({
-      id,
-      // `unknown` while the retry is in flight, which is honest: we have asked
-      // and do not yet know. Their current list genuinely shows this state.
-      state: 'unknown',
-      message: null,
-    });
+    const result = await xeroService.pushInvoice(id);
 
-    log.info({ invoiceId: id, by: caller.name }, 'xero push re-queued');
+    log.info(
+      { invoiceId: id, by: caller.name, pushed: result.pushed },
+      'xero push retried',
+    );
+
+    return result;
   },
 };
+
+/* ── Xero (I1 · M7.8) ────────────────────────────────────────────────────── */
+
+/**
+ * Pushes a batch of just-sent invoices, one at a time.
+ *
+ * ── Why sequential and not `Promise.all` ──────────────────────────────────
+ * The emails above fan out because SMTP does not care. Xero does: it enforces
+ * a per-minute call ceiling per organisation, and each invoice here costs at
+ * least two calls — a contact lookup and the upsert. Forty invoices fired at
+ * once would trip the limiter, and the invoices that lost the race would each
+ * record a rate-limit failure that looks to the office like a rejection.
+ *
+ * Sequential is also what makes the token refresh cheap: the first push
+ * refreshes if it must and the remaining thirty-nine reuse the result.
+ */
+async function pushInvoicesToXero(ids: readonly string[], caller: Caller): Promise<void> {
+  for (const id of ids) {
+    try {
+      await xeroService.pushInvoice(id);
+    } catch (error) {
+      /*
+       * `pushInvoice` records its own outcomes and is not expected to throw.
+       * This catch is for the case it does anyway — a bug, or Mongo going away
+       * mid-batch — and it must not stop the remaining invoices, which have
+       * already been sent to the customer either way.
+       */
+      log.error({ err: error, invoiceId: id, by: caller.name }, 'xero push threw');
+    }
+  }
+}
 
 /* ── The covering email (M7.7 · M8.4) ───────────────────────────────────── */
 
@@ -473,6 +575,40 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
     poNumber: invoice.poNumber,
   };
 
+  /*
+   * M7.6 — the PDF the customer actually files.
+   *
+   * ⚠️ Fetched ONCE and attached to every recipient's copy. Two people at the
+   * same builder get the identical document, and rendering per contact would
+   * produce two objects in storage for one invoice.
+   *
+   * `null` where it could not be produced. That is not a reason to withhold
+   * the email: the invoice has been sent, the customer needs to know, and a
+   * covering note with no attachment is recoverable in a way silence is not.
+   */
+  const renderContext = await invoiceRenderService.context();
+  const pdf = await invoiceRenderService.bytesForSending(invoice, renderContext);
+
+  const attachments =
+    pdf === null
+      ? undefined
+      : [
+          {
+            // Named for a filing system, not for a URL: this is what the
+            // recipient sees in their inbox and searches for a year later.
+            filename: `Invoice ${renderContext.invoiceNumberPrefix}${String(invoice.invoiceNumber)}.pdf`,
+            contentType: 'application/pdf',
+            content: pdf,
+          },
+        ];
+
+  if (pdf === null) {
+    log.warn(
+      { invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber },
+      'invoice emailed without its PDF — render unavailable',
+    );
+  }
+
   for (const contact of recipients) {
     await outboundService.send({
       event: 'invoice-sent',
@@ -484,7 +620,7 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
         mobile: null,
         notifyByEmail: contact.notifyByEmail,
       },
-      email: (to) => buildInvoiceEmail(to, context),
+      email: (to) => ({ ...buildInvoiceEmail(to, context), ...(attachments ? { attachments } : {}) }),
       accountId: invoice.accountId,
       invoiceId: invoice.id,
       jobId: invoice.jobId,

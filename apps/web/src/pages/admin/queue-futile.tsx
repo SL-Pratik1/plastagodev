@@ -474,7 +474,7 @@ function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogPr
 
               <fieldset className="space-y-2">
                 <legend className="text-sm font-medium">What happens to this job?</legend>
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <OutcomeChoice
                     checked={outcome === 'rescheduled'}
                     onChange={() => {

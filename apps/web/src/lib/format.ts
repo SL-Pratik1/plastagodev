@@ -162,6 +162,18 @@ export function formatInvoiceNumber(invoiceNumber: number, prefix = ''): string 
   return clean === '' ? `#${String(invoiceNumber)}` : `${clean}-${String(invoiceNumber)}`;
 }
 
+/**
+ * `148 KB`. Rounded hard — nobody needs the exact byte count of a proposal.
+ *
+ * Lives here because both lead screens show it: the detail screen for what is
+ * already attached, the create screen for what is about to be.
+ */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${String(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${String(Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function formatWeight(kilograms: number | null | undefined, fallback = '—'): string {
   if (kilograms === null || kilograms === undefined) return fallback;
   if (kilograms >= 1000) return `${(kilograms / 1000).toLocaleString('en-AU')} t`;

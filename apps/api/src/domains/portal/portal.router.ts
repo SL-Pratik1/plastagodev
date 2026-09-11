@@ -1,5 +1,6 @@
 import {
   AccountOnboardingSchema,
+  CallUpRequestSchema,
   PortalAccountUpdateSchema,
   PortalBookingDraftSchema,
   PortalChangeRequestSchema,
@@ -18,11 +19,13 @@ import {
 } from './portal-account.controller.js';
 import { portalController } from './portal.controller.js';
 import {
+  PortalAwaitingQuerySchema,
   PortalInvoiceIdsSchema,
   PortalCertificateIdParamsSchema,
   PortalInvoicesQuerySchema,
   PortalJobIdParamsSchema,
   PortalJobsQuerySchema,
+  PortalPurchaseOrderIdParamsSchema,
   PortalSupervisorIdParamsSchema,
   PortalSupervisorsQuerySchema,
   SetSupervisorStateSchema,
@@ -52,6 +55,27 @@ portalRouter.get('/scope', asyncHandler(portalController.scope));
 /* ── M5.7 · the screen that replaces phoning the office ──────────────────── */
 
 portalRouter.get('/dashboard', asyncHandler(portalController.dashboard));
+
+/* ── M2.12b · purchase orders waiting for a date ─────────────────────────── */
+
+/**
+ * Matt, 30:40: *"he can log into his portal and that PO that we got will be
+ * sitting there on his account and he can go call this up for the 21st."*
+ *
+ * The fallback for when the builder's own call-up email never arrives — which is
+ * often enough that the work would otherwise stall on a phone call.
+ */
+portalRouter.get(
+  '/purchase-orders/awaiting',
+  validate({ query: PortalAwaitingQuerySchema }),
+  asyncHandler(portalController.awaitingCallUp),
+);
+
+portalRouter.post(
+  '/purchase-orders/:purchaseOrderId/call-up',
+  validate({ params: PortalPurchaseOrderIdParamsSchema, body: CallUpRequestSchema }),
+  asyncHandler(portalController.callUp),
+);
 
 /* ── M5.7, M5.8, M5.9 · jobs ─────────────────────────────────────────────── */
 

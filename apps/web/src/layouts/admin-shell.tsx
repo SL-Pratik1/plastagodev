@@ -19,7 +19,6 @@ import {
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   RepeatIcon,
-  UserIcon,
 } from 'lucide-react';
 import { useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
@@ -39,7 +38,6 @@ import { visibleNav, type NavGroup } from '@/config/navigation';
 import { driverAppHref } from '@/config/driver-origin';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
 import { landingPathFor } from '@/features/auth/permissions';
-import { useQueueCounts } from '@/features/queues/queries';
 
 /**
  * The admin & office console shell (M2).
@@ -325,10 +323,13 @@ export function AdminShell() {
                     ))}
                 </>
               )}
-              <MenuSeparator />
-              <MenuItem icon={UserIcon} disabled>
-                My profile (not built yet)
-              </MenuItem>
+              {/*
+                There is no "My profile" item here. There was, disabled, reading
+                "(not built yet)" — an admission of an unbuilt screen sitting in
+                the menu every office user opens to sign out. Nothing links to a
+                profile route and nothing depends on one, so the item is out
+                until the screen exists rather than advertising its absence.
+              */}
               <MenuSeparator />
               <MenuItem
                 icon={LogOutIcon}
@@ -398,17 +399,18 @@ export function AdminShell() {
 }
 
 /**
- * The rail, with live counts on the queue links.
+ * The rail. Links only — no counts.
  *
- * The counts come from one small polled call shared by every item — not one per
- * link — and a missing or still-loading count renders nothing rather than a
- * placeholder zero. "0" and "not loaded yet" mean opposite things here: the
- * first says the queue is clear, and showing it before it is true is exactly the
- * false reassurance these queues exist to prevent.
+ * ── Why the badges are gone ───────────────────────────────────────────────
+ * They were removed on request, and the Leads badge is the reason why: each
+ * badge carried its own private definition of "outstanding", and the Leads one
+ * counted anything not lost — so a lead marked won but never converted sat in
+ * the rail as work forever, and the rail said 4 while the page it linked to
+ * said 3 open. Two numbers for one queue, disagreeing in the same viewport, are
+ * worse than no number: the page you land on is the one that can show its
+ * working, and now it is the only one that speaks.
  */
 function NavGroups({ groups, collapsed }: { groups: readonly NavGroup[]; collapsed: boolean }) {
-  const { data: counts } = useQueueCounts();
-
   return (
     <div className="space-y-6">
       {groups.map((group) => (
@@ -423,9 +425,6 @@ function NavGroups({ groups, collapsed }: { groups: readonly NavGroup[]; collaps
 
           <ul className="space-y-0.5">
             {group.items.map((item) => {
-              const count = item.countKey && counts ? counts[item.countKey] : undefined;
-              const showCount = count !== undefined && count > 0;
-
               return (
                 <li key={item.to}>
                   <NavLink
@@ -433,13 +432,7 @@ function NavGroups({ groups, collapsed }: { groups: readonly NavGroup[]; collaps
                     end={item.end ?? false}
                     // The tooltip is the only label when collapsed, so it is not
                     // optional polish — it is the accessible name's backup.
-                    title={
-                      collapsed
-                        ? showCount
-                          ? `${item.label} — ${String(count)} waiting`
-                          : item.label
-                        : undefined
-                    }
+                    title={collapsed ? item.label : undefined}
                     className={({ isActive }) =>
                       cn(
                         'focus-ring relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
@@ -452,29 +445,9 @@ function NavGroups({ groups, collapsed }: { groups: readonly NavGroup[]; collaps
                   >
                     <item.icon aria-hidden className="size-4 shrink-0" />
                     {collapsed ? (
-                      <>
-                        <span className="sr-only">
-                          {item.label}
-                          {showCount ? `, ${String(count)} waiting` : ''}
-                        </span>
-                        {/* A dot, not a number: 190px of rail is gone. */}
-                        {showCount && (
-                          <span
-                            aria-hidden
-                            className="absolute top-1.5 right-3 size-1.5 rounded-full bg-warning"
-                          />
-                        )}
-                      </>
+                      <span className="sr-only">{item.label}</span>
                     ) : (
-                      <>
-                        <span className="flex-1 truncate">{item.label}</span>
-                        {showCount && (
-                          <span className="shrink-0 rounded-full bg-sidebar-foreground/15 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
-                            {count}
-                            <span className="sr-only"> waiting</span>
-                          </span>
-                        )}
-                      </>
+                      <span className="flex-1 truncate">{item.label}</span>
                     )}
                   </NavLink>
                 </li>

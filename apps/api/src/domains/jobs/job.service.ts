@@ -10,6 +10,7 @@ import type {
   Role,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
+import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
 import { logger } from '../../lib/logger.js';
 import { withTransaction } from '../../lib/transaction.js';
 import { jobNotices } from '../notifications/job-notices.service.js';
@@ -83,12 +84,44 @@ const MATCHES_NOTHING = '000000000000000000000000';
  */
 const CANCELLABLE_FROM = ['booked', 'assigned', 'in-transit', 'arrived'] as const;
 
+/**
+ * Roles allowed to see what a job is worth.
+ *
+ * ⚠️ The ALLOCATOR is absent, and M1.5 is the reason: *"the allocator sees the
+ * job, the site, the driver and the dates — never what it is worth."* Every one
+ * of their eleven workflows is logistics; not one is commercial.
+ *
+ * The console already honours this — it drops the total column from the grid
+ * and removes the Charges and Invoice tabs entirely — but it said so itself:
+ * *"This is a UI courtesy, not a security boundary. The server must scope what
+ * it returns."* It did not, so the numbers arrived anyway and were one devtools
+ * panel away. This is the server doing its half.
+ */
+const PRICING_ROLES = new Set<Role>(['super-admin', 'operations', 'office-staff']);
+
+const seesPricing = (caller: Caller): boolean =>
+  caller.roles.some((role) => PRICING_ROLES.has(role));
+
+/**
+ * Blank the money on a job for a caller who may not see it.
+ *
+ * Nulled rather than omitted: the fields stay on the contract, so the console
+ * renders them as "—" through `formatMoney` wherever a screen does reach for
+ * one, instead of failing to parse a response with a field missing.
+ */
+function redactListItem<T extends JobListItem>(job: T): T {
+  return { ...job, totalExGst: null };
+}
+
 export const jobService = {
   async list(
     query: ListJobsQuery,
     caller: Caller,
   ): Promise<{ data: JobListItem[]; meta: PageMeta }> {
-    return jobRepository.list(query, scopeFor(caller));
+    const page = await jobRepository.list(query, scopeFor(caller));
+    if (seesPricing(caller)) return page;
+
+    return { ...page, data: page.data.map(redactListItem) };
   },
 
   async get(id: string, caller: Caller): Promise<Job> {
@@ -98,7 +131,11 @@ export const jobService = {
     // caller probing for another account's work wants to know.
     if (!job) throw AppError.notFound('No such job');
 
-    return job;
+    if (seesPricing(caller)) return job;
+
+    // `charges` goes too: a line reading "Contamination — $90" is the price,
+    // whatever the totals say.
+    return { ...redactListItem(job), gst: null, totalIncGst: null, charges: [] };
   },
 
   /**
@@ -154,7 +191,100 @@ export const jobService = {
       zone: place.zone,
       expectedAreaM2: quantities.expectedAreaM2,
       bagCount: quantities.bagCount,
+      // M6.2 — the SAME date `create` below prices on, so the estimate the
+      // office reads out cannot differ from the job that gets saved.
+      onDate: draft.readyDate,
     });
+  },
+
+  /**
+   * M2.6 — the new pickup a futile review's "Rescheduled" outcome promises.
+   *
+   * ── Why a NEW job rather than moving the old one back ─────────────────────
+   * The futile job is finished work: the truck went, the driver attended, and
+   * the $120 fee is already on it. Invoicing accepts `completed`, `admin-complete`
+   * and `futile` — not `cancelled` and not `booked` — so putting the job back to
+   * `booked` would take the fee off the invoice run until the re-attempt
+   * completes, which is exactly what "the fee applies either way" rules out.
+   * A second job also matches what the screen says: *"Rescheduling books a new
+   * pickup."*
+   *
+   * ⚠️ The purchase order LINK is deliberately not carried. `purchaseOrderId`
+   * is unique across jobs (`purchase_order_unique`), and the futile job still
+   * holds it. The PO NUMBER comes across, because that is the string the
+   * builder's accounts system matches on.
+   *
+   * Priced fresh on the new ready date, like any booking — the quote is taken
+   * on the day the work will happen.
+   */
+  async rebookFromFutile(
+    originalJobId: string,
+    newReadyDate: string,
+    caller: Caller,
+  ): Promise<JobListItem> {
+    const original = await jobRepository.findById(originalJobId, scopeFor(caller));
+    if (!original) throw AppError.notFound('No such job');
+
+    const place = await placeService.findForJob(original.suburb, original.postcode);
+    if (!place) {
+      // Refusing beats booking a pickup into somewhere we no longer go.
+      throw AppError.validation(
+        `${original.suburb} is not a suburb we service any more, so this pickup cannot be rebooked`,
+        [{ path: 'newReadyDate', message: 'Book this one by hand against a serviced suburb' }],
+      );
+    }
+
+    const rebooked = await this.create(
+      {
+        accountId: original.accountId,
+        siteName: original.siteName,
+        lotNumber: original.lotNumber ?? '',
+        addressLine: original.addressLine,
+        placeId: place.id,
+        builderName: original.builderName,
+        accessNotes: original.accessNotes,
+        gateHours: original.gateHours ?? '',
+        inductionRequired: original.inductionRequired,
+        craneAvailable: original.craneAvailable,
+        siteContactName: original.siteContactName ?? '',
+        siteContactMobile: original.siteContactMobile ?? '',
+        siteContactEmail: original.siteContactEmail ?? '',
+        poNumber: original.poNumber ?? '',
+        purchaseOrderId: null,
+        readyDate: newReadyDate,
+        serviceLevel: original.serviceLevel,
+        freightItem: original.freightItem,
+        expectedAreaM2: original.expectedAreaM2 ?? 0,
+        bagCount: original.bagCount,
+        notes: original.notes,
+      },
+      caller,
+    );
+
+    // Both timelines have to say where the other went, or the pair is
+    // unreadable six months later.
+    await jobRepository.appendEvent({
+      jobId: originalJobId,
+      label: 'Rebooked after a futile attempt',
+      actor: caller.name,
+      status: null,
+      detail: `New pickup #${String(rebooked.jobNumber)}, ready ${newReadyDate}`,
+    });
+
+    await jobRepository.appendEvent({
+      jobId: rebooked.id,
+      label: 'Rebooked from a futile pickup',
+      actor: caller.name,
+      status: null,
+      detail: `Replaces job #${String(original.jobNumber)}`,
+    });
+
+    log.info(
+      { originalJobId, originalJobNumber: original.jobNumber, jobId: rebooked.id, jobNumber: rebooked.jobNumber, newReadyDate },
+      'futile pickup rebooked',
+    );
+
+    return rebooked;
   },
 
   /**
@@ -167,6 +297,9 @@ export const jobService = {
    * curiosity, a collision is a reconciliation nobody can unpick.
    */
   async create(draft: JobDraft, caller: Caller): Promise<JobListItem> {
+    // Before anything is priced off it — the quote below is taken ON this date.
+    assertPlausibleReadyDate(draft.readyDate);
+
     const { account, place, purchaseOrder } = await resolveDraft(draft, caller);
 
     if (account.status !== 'active') {
@@ -178,11 +311,20 @@ export const jobService = {
     const slaBusinessDays = await settingsRepository.slaBusinessDays();
     const quantities = quantitiesFor(draft, purchaseOrder);
 
-    const quote = await pricingService.quote({
+    const { preview: quote, appliedRate } = await pricingService.quoteWithAppliedRate({
       rateCardId: account.rateCardId,
       zone: place.zone,
       expectedAreaM2: quantities.expectedAreaM2,
       bagCount: quantities.bagCount,
+      /*
+       * ⚠️ M6.2 — priced on the READY DATE, not on today.
+       *
+       * A pickup booked in September for an October ready date is priced on
+       * October's schedule, because that is when the work happens and that is
+       * what the office quoted. `appliedRate` freezes the result onto the job,
+       * so a schedule issued later cannot move this figure.
+       */
+      onDate: draft.readyDate,
     });
 
     const jobNumber = await settingsRepository.takeNextNumber('nextJobNumber');
@@ -229,11 +371,27 @@ export const jobService = {
           // from it by a character (Matt, 9:56).
           poNumber: purchaseOrder ? purchaseOrder.poNumber : draft.poNumber.trim() || null,
           purchaseOrderId: purchaseOrder?.id ?? null,
+          // Who actually keyed it in. Stays the office user even where the
+          // scoping id below belongs to somebody else — the two answer different
+          // questions, and the model says so.
           bookedByName: caller.name,
-          // Only a portal booking carries a scoping user. A job keyed in by the
-          // office has none, and a null is invisible to every site supervisor —
-          // which is the safe direction. See `bookedByUserId` on the model.
-          bookedByUserId: isCustomer(caller) ? caller.userId : null,
+          /*
+           * Who may SEE this job (an authorisation field — see the model).
+           *
+           * A portal booking scopes to whoever made it. An office booking has
+           * no such person, and a null is invisible to every supervisor — the
+           * safe direction, and still the answer for a phone booking.
+           *
+           * ⚠️ The exception is an order that named a supervisor. Matt, 33:57:
+           * *"that job should get assigned to that site supervisor… they get an
+           * email and able to log in in the system and see all these job
+           * details."* Without this the office confirms the order, the job is
+           * created, and the one person who needs to see it cannot — which is
+           * indistinguishable from the feature not existing.
+           */
+          bookedByUserId: isCustomer(caller)
+            ? caller.userId
+            : (purchaseOrder?.siteSupervisorUserId ?? null),
           bookedBySource: isCustomer(caller) ? 'portal' : 'office',
           readyDate: draft.readyDate,
           // M2.4a — the SLA is in BUSINESS days, from the customer's ready date.
@@ -251,6 +409,17 @@ export const jobService = {
           totalExGst: quote.subtotalExGst,
           gst: quote.gst,
           totalIncGst: quote.totalIncGst,
+          /*
+           * ⚠️ M6.2 — the rates that produced those totals, frozen on the job
+           * for exactly the same reason as the zone and the area above.
+           *
+           * This is what lets a rate be changed at all. A credit note or a
+           * reprint reads these figures instead of asking the rate tables
+           * again, so a schedule issued next March cannot move a line on an
+           * invoice the customer has already paid — and a retired rate card
+           * does not take its history with it.
+           */
+          appliedRate,
           /*
            * M4.8b — the account's rule, resolved NOW and frozen on the job.
            *
@@ -394,6 +563,8 @@ export const jobService = {
         'That job is finished, so there is nothing left to reschedule',
       );
     }
+
+    assertPlausibleReadyDate(readyDate);
 
     const targetDate = addBusinessDays(readyDate, await settingsRepository.slaBusinessDays());
 

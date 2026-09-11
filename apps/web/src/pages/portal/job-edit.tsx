@@ -207,7 +207,7 @@ function EditForm({ job }: { job: PortalJob }) {
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field
                 id="edit-ready-date"
                 label="When will it be ready?"
@@ -268,7 +268,7 @@ function EditForm({ job }: { job: PortalJob }) {
             <CardTitle className="text-base">References and notes</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               {/*
                 One field, not two.
                 Matt, 9:08: *"customer reference and purchase order number… they

@@ -1,4 +1,5 @@
 import {
+  CallUpRequestSchema,
   FutileDecisionSchema,
   LeadConversionSchema,
   LeadCreateSchema,
@@ -16,6 +17,14 @@ import {
   LeadIdParamsSchema,
   ListLeadsQuerySchema,
 } from './lead.schemas.js';
+import { callUpController } from './call-up.controller.js';
+import {
+  CallUpIdParamsSchema,
+  ListAwaitingQuerySchema,
+  ListCallUpsQuerySchema,
+  PurchaseOrderIdParamsSchema,
+  RejectCallUpSchema,
+} from './call-up.schemas.js';
 import { poReviewController } from './po-review.controller.js';
 import {
   ExtractionIdParamsSchema,
@@ -121,6 +130,67 @@ queueRouter.post(
  * An extraction is a PROPOSAL — see the service. Nothing here writes a purchase
  * order except `confirm`, and `confirm` is a human pressing a button.
  */
+/* ── Call-ups (M2.12b) ─────────────────────────────────────────────────── */
+
+/**
+ * Orders that have been confirmed and not yet booked — Matt's *"sitting there
+ * waiting"* (21:30).
+ *
+ * ⚠️ Declared before `/call-ups/:id` so the literal path is not captured as an
+ * id. Express matches in declaration order, and "awaiting" is a valid
+ * `ObjectId`-shaped string to nobody but the validator, which would 400 instead
+ * of serving the list.
+ */
+queueRouter.get(
+  '/call-ups/awaiting',
+  validate({ query: ListAwaitingQuerySchema }),
+  asyncHandler(callUpController.listAwaiting),
+);
+
+queueRouter.get(
+  '/call-ups',
+  validate({ query: ListCallUpsQuerySchema }),
+  asyncHandler(callUpController.list),
+);
+
+queueRouter.get(
+  '/call-ups/:id',
+  validate({ params: CallUpIdParamsSchema }),
+  asyncHandler(callUpController.get),
+);
+
+/**
+ * Calling an order up by hand (Matt, 30:40).
+ *
+ * Keyed by the ORDER, not by a call-up id: the caller is naming a date against
+ * an order, and the call-up record is what that produces rather than what it
+ * addresses.
+ */
+queueRouter.post(
+  '/call-ups/orders/:purchaseOrderId',
+  validate({ params: PurchaseOrderIdParamsSchema, body: CallUpRequestSchema }),
+  asyncHandler(callUpController.callUp),
+);
+
+/**
+ * Working the queue: try it again, or set it aside.
+ *
+ * Every reason a call-up queues is a fixable data problem outside the message —
+ * an unconfirmed order, a suburb nobody had added. Retry re-decides against the
+ * world as it now is, so the email never has to be re-keyed by hand.
+ */
+queueRouter.post(
+  '/call-ups/:id/retry',
+  validate({ params: CallUpIdParamsSchema }),
+  asyncHandler(callUpController.retry),
+);
+
+queueRouter.post(
+  '/call-ups/:id/reject',
+  validate({ params: CallUpIdParamsSchema, body: RejectCallUpSchema }),
+  asyncHandler(callUpController.reject),
+);
+
 queueRouter.get(
   '/po-review',
   validate({ query: ListExtractionsQuerySchema }),
@@ -167,6 +237,14 @@ queueRouter.get(
   validate({ query: ListLeadsQuerySchema }),
   asyncHandler(leadController.list),
 );
+
+/**
+ * The Won / Conversion cards above the grid.
+ *
+ * ⚠️ ABOVE `/leads/:id` on purpose. Express matches in order, so registered
+ * after it this path would be read as a lead whose id is the word "stats".
+ */
+queueRouter.get('/leads/stats', asyncHandler(leadController.stats));
 
 queueRouter.get(
   '/leads/:id',

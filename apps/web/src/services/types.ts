@@ -4,8 +4,17 @@ import type {
   AccountDraft,
   AccountListItem,
   AccountOnboarding,
+  AccountType,
+  AdditionalServiceCreate,
+  AdditionalServiceSetting,
+  AdditionalServiceUpdate,
   AllocationBoard,
+  AwaitingCallUp,
   AwaitingPoItem,
+  CallUp,
+  CallUpOutcome,
+  CallUpRequest,
+  CallUpState,
   Certificate,
   ChargeApprovalDetail,
   ChargeApprovalItem,
@@ -19,6 +28,7 @@ import type {
   LeadConversion,
   LeadCreate,
   LeadListItem,
+  LeadPipelineStats,
   LeadUpdate,
   PoConfirmation,
   PoExtraction,
@@ -29,7 +39,6 @@ import type {
   DriverListItem,
   DriverProfile,
   FinancialReport,
-  Integration,
   Invoice,
   MonthlyVolumeReport,
   Notification,
@@ -69,6 +78,10 @@ import type {
   PortalSupervisorInvite,
   Place,
   PricePreview,
+  RateCardCreate,
+  RateCardSummary,
+  RateCardUpdate,
+  RateScheduleCreate,
   OnboardingInvite,
   ReadinessCertification,
   Run,
@@ -76,6 +89,8 @@ import type {
   Session,
   User,
   InvitationResult,
+  InvoiceTemplate,
+  InvoiceTemplateWrite,
   InvitedUser,
   UserDraft,
   UserListItem,
@@ -151,6 +166,15 @@ export interface LookupService {
   builders: () => Promise<LookupOption[]>;
   drivers: () => Promise<LookupOption[]>;
   /**
+   * M6.1 — the rate cards, for the pickers that assign one to an account.
+   *
+   * ⚠️ Read from here, never from a constant. Rate cards used to be a
+   * compile-time enum with a matching label map; they are records an
+   * administrator creates now, so a screen holding its own list would be
+   * missing every card added since the last deploy.
+   */
+  rateCards: () => Promise<LookupOption[]>;
+  /**
    * Address lookup (Matt, 7:25) — matches on suburb name or postcode.
    *
    * Returns at most a handful: this feeds a type-ahead, and a list longer than
@@ -209,6 +233,16 @@ export interface CustomerService {
    * tick.
    */
   setRiskAssessmentRequired: (accountId: string, required: boolean) => Promise<Account>;
+  /**
+   * Builder or contractor — the account's journey (Matt, 21:55).
+   *
+   * Returns the updated account for the same reason as the switch above: this
+   * decides whether the customer has site supervisors and which booking form
+   * they see, so the screen must render what was stored, not what was asked for.
+   * The server refuses builder → contractor while supervisors can still sign in,
+   * and that refusal arrives as a 409 the caller has to show.
+   */
+  setAccountType: (accountId: string, accountType: AccountType) => Promise<Account>;
   /*
    * The per-site exception is gone with the sites (Matt, 0:29).
    *
@@ -314,6 +348,14 @@ export interface DashboardService {
 export interface InvoiceService {
   list: (query: ListQuery) => Promise<ListResult<InvoiceListItem>>;
   get: (id: string) => Promise<Invoice>;
+  /**
+   * M7.1 — turn a finished job's charges into an invoice.
+   *
+   * Returns the invoices raised: one, or two where the account needs a separate
+   * purchase order for the driver's extras. The server refuses a job that is
+   * not finished, one with nothing billable, and one already invoiced.
+   */
+  raiseForJob: (jobId: string) => Promise<InvoiceListItem[]>;
   /** Draft → sent. Returns how many actually changed. */
   send: (ids: readonly string[]) => Promise<number>;
   /** Releases an awaiting-PO invoice once its PO has been recorded (M7.3). */
@@ -323,7 +365,8 @@ export interface InvoiceService {
   /** Queues a PDF. Rendering is server-side (Playwright, §6A.6). */
   requestPdf: (ids: readonly string[]) => Promise<void>;
   /** I1 — re-push to Xero after a failure. */
-  retryXero: (id: string) => Promise<void>;
+  /** Resolves with what Xero actually did — `pushed: false` is a rejection, not an error. */
+  retryXero: (id: string) => Promise<{ pushed: boolean; message: string | null }>;
 }
 
 /**
@@ -403,18 +446,46 @@ export interface NotificationService {
 }
 
 /**
- * W3, M1.1, M6, M7.5, W7.
+ * W3, M1.1, M6, M7.5.
  *
- * Saves are per section rather than one giant PUT, so a failure in the pricing
- * form cannot discard what someone typed in notifications.
+ * Invoicing is the only writable section. Pricing is read-only because rates
+ * are effective-dated, and the notification-rules, integrations and
+ * credential-type blocks were removed — nothing downstream ever read them.
  */
 export interface SettingsService {
   get: () => Promise<Settings>;
-  saveNotifications: (input: Settings['notifications']) => Promise<Settings['notifications']>;
   saveInvoicing: (input: Settings['invoicing']) => Promise<Settings['invoicing']>;
-  saveCredentialTypes: (input: Settings['credentialTypes']) => Promise<Settings['credentialTypes']>;
-  /** W7 — a connectivity check. No credentials are handled in the browser. */
-  testIntegration: (id: Integration['id']) => Promise<Integration>;
+
+  /* ── Rate cards (M6.1, M6.2) ─────────────────────────────────────────── */
+
+  createRateCard: (input: RateCardCreate) => Promise<RateCardSummary>;
+  renameRateCard: (id: string, input: RateCardUpdate) => Promise<RateCardSummary>;
+  /**
+   * ⚠️ Issue a NEW schedule — there is deliberately no "update these rates".
+   *
+   * A job is priced by the rates in force on its own date, so overwriting a
+   * rate would reprice work that has already been invoiced. The only safe
+   * operation is adding a dated version, and it is the only one offered.
+   */
+  issueSchedule: (id: string, input: RateScheduleCreate) => Promise<RateCardSummary>;
+  deleteRateCard: (id: string) => Promise<void>;
+
+  /* ── Additional services (M6.5) ──────────────────────────────────────── */
+
+  createAdditionalService: (input: AdditionalServiceCreate) => Promise<AdditionalServiceSetting>;
+  updateAdditionalService: (
+    code: string,
+    input: AdditionalServiceUpdate,
+  ) => Promise<AdditionalServiceSetting>;
+  /** Refused by the server for the codes the application looks up by name. */
+  deleteAdditionalService: (code: string) => Promise<void>;
+
+  /* ── Invoice templates (M7.5) ────────────────────────────────────────── */
+
+  createInvoiceTemplate: (input: InvoiceTemplateWrite) => Promise<InvoiceTemplate>;
+  updateInvoiceTemplate: (id: string, input: InvoiceTemplateWrite) => Promise<InvoiceTemplate>;
+  /** Refused while any account still invoices on it. */
+  deleteInvoiceTemplate: (id: string) => Promise<void>;
 }
 
 /**
@@ -459,6 +530,19 @@ export interface CustomerPortalService {
    * Server-resolved like every other price (Risk 1).
    */
   quote: (draft: PortalBookingDraft) => Promise<PricePreview>;
+
+  /* ── M2.12b · orders waiting for a date ─────────────────────────────── */
+
+  /**
+   * This account's confirmed orders with no job against them.
+   *
+   * Matt, 30:40: *"he can log into his portal and that PO that we got will be
+   * sitting there on his account and he can go call this up for the 21st."*
+   * Scoped from the session — no account id crosses the wire.
+   */
+  awaitingCallUp: (query: ListQuery) => Promise<ListResult<AwaitingCallUp>>;
+  /** Name a date against one of them. Two taps, because the order has the rest. */
+  callUp: (purchaseOrderId: string, request: CallUpRequest) => Promise<CallUpOutcome>;
 
   /** M5.4 — a direct edit, allowed only while `editable` is true. */
   editJob: (id: string, input: PortalJobEdit) => Promise<PortalJobListItem>;
@@ -546,6 +630,29 @@ export interface QueueService {
   awaitingPoChase: (ids: readonly string[]) => Promise<number>;
 
   // M2.12 — AI purchase-order review.
+  /* ── M2.12b · call-ups ─────────────────────────────────────────────── */
+
+  /**
+   * Orders confirmed and not yet booked — Matt's *"sitting there waiting"*
+   * (21:30). The office's answer to "what have we been told about that nobody
+   * has given us a date for?", which before this had no screen at all.
+   */
+  awaitingCallUpList: (query: ListQuery) => Promise<ListResult<AwaitingCallUp>>;
+  /** Call one up by hand, for when the builder's email never arrived (30:40). */
+  callUpOrder: (purchaseOrderId: string, request: CallUpRequest) => Promise<CallUpOutcome>;
+  /** Call-ups that could not be applied on their own, and the applied history. */
+  callUpList: (query: ListQuery & { state?: CallUpState }) => Promise<ListResult<CallUp>>;
+  callUpGet: (id: string) => Promise<CallUp>;
+  /**
+   * Try a queued call-up again, once whatever blocked it has been fixed.
+   *
+   * Returns the outcome rather than void: a retry can land back in the queue for
+   * a different reason, and the screen has to be able to say so.
+   */
+  callUpRetry: (id: string) => Promise<CallUpOutcome>;
+  /** Set one aside as not actionable. The note is required. */
+  callUpReject: (id: string, note: string) => Promise<void>;
+
   poReviewList: (query: ListQuery) => Promise<ListResult<PoExtractionItem>>;
   poReviewGet: (id: string) => Promise<PoExtraction>;
   poReviewConfirm: (id: string, input: PoConfirmation) => Promise<void>;
@@ -553,6 +660,14 @@ export interface QueueService {
 
   // M5 · Journey A — leads and onboarding.
   leadList: (query: ListQuery) => Promise<ListResult<LeadListItem>>;
+  /**
+   * The Won / Conversion cards above the grid.
+   *
+   * ⚠️ Separate from `leadList` on purpose. Counting the rows the grid happens
+   * to be showing is what made those cards wrong: the grid hides converted
+   * leads, so "won" could only ever count leads nobody had converted.
+   */
+  leadStats: () => Promise<LeadPipelineStats>;
   leadGet: (id: string) => Promise<Lead>;
   /**
    * A.1 — take a lead by hand (phone, referral, walk-up).
@@ -611,6 +726,45 @@ export interface ExtractorSession {
   expiresAt: string;
 }
 
+/**
+ * I1 · M7.8 — the Xero connection.
+ *
+ * Three methods and no invoice traffic: pushing invoices happens on the server
+ * when one is sent, and the sync badge already rides on the invoice itself.
+ * This service exists only so an administrator can see the connection, start
+ * one, and end one.
+ */
+export interface XeroService {
+  status(): Promise<XeroConnectionStatus>;
+  /**
+   * Starts the handshake and returns where to send the WHOLE window.
+   *
+   * A mutation: it creates a single-use state row on the server, which is the
+   * thing that later proves the callback answers a request we started.
+   */
+  beginConnect(): Promise<{ authorizeUrl: string }>;
+  disconnect(): Promise<void>;
+}
+
+export interface XeroConnectionStatus {
+  /** False when the deployment has no Xero credentials — the page explains. */
+  configured: boolean;
+  connected: boolean;
+  organisationName: string | null;
+  connectedByName: string | null;
+  connectedAt: string | null;
+  lastRefreshAt: string | null;
+  /**
+   * `expiring` is not a failure — it is the warning that exists because the
+   * alternative is discovering a lapsed connection at month-end.
+   */
+  state: 'connected' | 'needs-reconnect' | 'expiring' | 'disconnected';
+  message: string | null;
+  refreshExpiresAt: string | null;
+  /** What a pushed invoice becomes in Xero, so the page can state it plainly. */
+  invoiceStatus: 'DRAFT' | 'AUTHORISED';
+}
+
 export interface Services {
   readonly auth: AuthService;
   readonly lookups: LookupService;
@@ -626,6 +780,7 @@ export interface Services {
   readonly notifications: NotificationService;
   readonly settings: SettingsService;
   readonly extractor: ExtractorService;
+  readonly xero: XeroService;
   readonly queues: QueueService;
   readonly portal: CustomerPortalService;
   /**

@@ -228,12 +228,76 @@ const jobSchema = new Schema(
      */
     recoveredWeightBasis: { type: String, enum: WEIGHT_BASES, default: null },
     bagCount: { type: Number, required: true, min: 0, default: 0 },
+    /**
+     * M4.3, Matt 07:37 — how many bags the driver actually found on site.
+     *
+     * ⚠️ Separate from `bagCount`, which is the allowance the purchase order
+     * authorised and which the base invoice is priced on. The driver's figure
+     * used to be written over the top of it, which destroyed the only record of
+     * what was ordered — and with it any way to tell that a job with two bags
+     * on its PO came back with four. Matt, 08:28: *"anything over that original
+     * PO needs to get sent off for approval."*
+     *
+     * Null until the weights screen is saved. Null is not zero: zero is a
+     * bagged job the driver found nothing on.
+     */
+    collectedBagCount: { type: Number, default: null, min: 0 },
+    /**
+     * M4.3, Matt 06:34 — the crane reading for each bag, in lift order.
+     *
+     * `recoveredWeightKg` above stays the authoritative TOTAL, because that is
+     * what gets priced, invoiced and printed on a diversion certificate. This is
+     * the breakdown behind it, kept so a disputed docket can be answered bag by
+     * bag instead of with one aggregate figure.
+     *
+     * ⚠️ Empty on a hand load (nothing was lifted) and empty on any job weighed
+     * before per-bag capture shipped. An empty array therefore does NOT mean
+     * "zero kilograms" — read `recoveredWeightKg` for the weight.
+     */
+    bagWeights: { type: [Number], default: [] },
     freightItem: { type: String, required: true, enum: FREIGHT_ITEMS },
 
     /* ── Money. `Decimal128`, never a float (§6A.10 #1). ─────────────── */
     totalExGst: { type: Schema.Types.Decimal128, required: true },
     gst: { type: Schema.Types.Decimal128, required: true },
     totalIncGst: { type: Schema.Types.Decimal128, required: true },
+
+    /**
+     * ⚠️ M6.2 — the rates AS APPLIED, frozen at the moment this job was priced.
+     *
+     * ── Why the totals above are not enough ───────────────────────────────
+     * They say what the job came to; they do not say how. "Why is this $416?"
+     * needs the call-out fee and the per-m² rate that produced it, and once
+     * rates are effective-dated the only honest source for those is a copy
+     * taken when the job was priced. Recomputing from the rate tables would
+     * hand back today's schedule for a job raised last March, and re-deriving
+     * a credit note that way is how a customer gets refunded at the wrong rate.
+     *
+     * So this is deliberately DENORMALISED and deliberately never updated. It
+     * survives the schedule that produced it being superseded, and it survives
+     * the whole rate card being deleted — which is what lets an administrator
+     * retire a card without rewriting history.
+     *
+     * `null` on jobs created before snapshots existed. Readers must treat that
+     * as "unknown", never fall back to a live lookup: a silent live lookup is
+     * exactly the reprice this field exists to prevent.
+     */
+    appliedRate: {
+      type: new Schema(
+        {
+          rateCardId: { type: String, required: true },
+          /** The card's name as it read then, so a reprint is not a slug. */
+          rateCardLabel: { type: String, required: true },
+          zone: { type: String, required: true, enum: ZONES },
+          /** Which dated schedule priced it. Traces a figure to a decision. */
+          scheduleFrom: { type: String, required: true },
+          serviceCharge: { type: Schema.Types.Decimal128, required: true },
+          ratePerM2: { type: Schema.Types.Decimal128, required: true },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
 
     /* ── Invoicing (M7) ──────────────────────────────────────────────── */
     invoiceStatus: {
@@ -302,6 +366,18 @@ jobSchema.index({ runId: 1, readyDate: 1, status: 1 }, { name: 'unallocated_read
 
 /** Invoicing sweeps by state (M7.2), including the awaiting-PO backlog. */
 jobSchema.index({ invoiceStatus: 1, completedAt: -1 }, { name: 'invoice_state' });
+
+/**
+ * M6.2 — "has this rate card already priced something that was invoiced?"
+ *
+ * Asked before a schedule is back-dated, and before a card is deleted. Sparse
+ * because jobs raised before rate snapshots existed carry no `appliedRate`, and
+ * indexing thousands of nulls buys nothing.
+ */
+jobSchema.index(
+  { 'appliedRate.rateCardId': 1, readyDate: 1 },
+  { name: 'applied_card_ready', sparse: true },
+);
 
 /**
  * ⚠️ One job per purchase order.

@@ -125,8 +125,15 @@ export function AdminInvoiceDetailPage() {
 
   const retry = async () => {
     try {
-      await retryXero.mutateAsync(invoice.id);
-      toast.success('Re-sent to Xero');
+      const result = await retryXero.mutateAsync(invoice.id);
+
+      // Xero answering "no" is a completed request, not a thrown error, so the
+      // success branch has to be able to report a failure.
+      if (result.pushed) {
+        toast.success('Sent to Xero');
+      } else {
+        toast.error('Xero would not accept this invoice', result.message ?? undefined);
+      }
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);
@@ -199,7 +206,7 @@ export function AdminInvoiceDetailPage() {
         </Alert>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         {/* ── Lines ──────────────────────────────────────────────────────── */}
         <Card className="lg:col-span-2">
           <CardHeader>

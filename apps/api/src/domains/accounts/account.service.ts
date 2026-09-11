@@ -2,11 +2,20 @@ import type {
   Account,
   AccountDraft,
   AccountListItem,
+  AccountType,
   PageMeta,
   Role,
   TermsAcceptance,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
+/*
+ * Supervisors live in the portal domain because that is where the customer
+ * manages them. Read from here, not re-queried, so "who can still sign in" has
+ * one definition — the same one the portal screen shows.
+ */
+import { supervisorRepository } from '../portal/supervisor.repository.js';
+// Read-only: "does this rate card exist?" is the settings domain's question.
+import { settingsRepository } from '../settings/settings.repository.js';
 import {
   accountRepository,
   type AccountScope,
@@ -90,6 +99,17 @@ export const accountService = {
       });
     }
 
+    /*
+     * WARNING: the rate card must EXIST.
+     *
+     * It used to be an enum, so Mongo refused an unknown value and the check
+     * was implicit. Cards are runtime data now — an administrator adds them —
+     * so an id that names nothing would be accepted and the account would fail
+     * to price its first booking, on a booking form, in front of a customer.
+     * Failing here names the field instead.
+     */
+    await assertRateCardExists(draft.rateCardId);
+
     const contactName = draft.accountsContactName.trim();
     const contactEmail = draft.accountsContactEmail.trim();
 
@@ -153,6 +173,55 @@ export const accountService = {
     return this.get(id, caller);
   },
 
+  /**
+   * Move an account between the two journeys — builder or contractor.
+   *
+   * ── Why this endpoint exists ──────────────────────────────────────────────
+   * The type decides whether the customer gets site supervisors and whether
+   * their booking form asks for the area and bag count (Matt, 21:55). It was
+   * settable only at creation, so a wrong choice — or a customer whose business
+   * changed — was permanent, and the workaround was a second account with the
+   * same ABN, which splits their invoices and their history.
+   *
+   * ⚠️ Builder → contractor is refused while supervisors can still sign in.
+   * The contractor journey has no supervisor screen, so their logins would keep
+   * working with nobody able to see, suspend or replace them — an account whose
+   * own administrator cannot answer "who can book on my account". Suspending
+   * them first is a deliberate act by the customer's administrator, which is
+   * whose decision it is.
+   */
+  async setAccountType(id: string, accountType: AccountType, caller: Caller): Promise<Account> {
+    // Office decision, not a customer's. Checked before the write, not after.
+    if (isCustomer(caller)) {
+      throw AppError.forbidden('Only the office can change a customer’s type');
+    }
+
+    // Read through `get` so the same scoping and not-found rules apply, and so
+    // the current type is the stored one rather than something the caller sent.
+    const account = await this.get(id, caller);
+
+    // Idempotent: a retried request must not fail on the supervisor check for a
+    // change it is not making.
+    if (account.accountType === accountType) return account;
+
+    if (accountType === 'contractor') {
+      const supervisors = await supervisorRepository.countLive(id);
+
+      if (supervisors > 0) {
+        throw AppError.conflict(
+          `${account.name} has ${String(supervisors)} site ${
+            supervisors === 1 ? 'supervisor' : 'supervisors'
+          } who can still sign in. A contractor account has no supervisor screen, so suspend them in the portal first.`,
+        );
+      }
+    }
+
+    const updated = await accountRepository.setAccountType(id, accountType);
+    if (!updated) throw AppError.notFound('That account could not be found');
+
+    return this.get(id, caller);
+  },
+
   /** Journey A.4 — what has been signed, if anything. */
   async getTermsAcceptance(id: string, caller: Caller): Promise<TermsAcceptance | null> {
     // Read through `get` so the same scoping and not-found rules apply.
@@ -175,4 +244,28 @@ function isCustomer(caller: Caller): boolean {
 function scopeFor(caller: Caller): AccountScope {
   if (!isCustomer(caller)) return { accountId: null };
   return { accountId: caller.accountId ?? '000000000000000000000000' };
+}
+
+/**
+ * Refuse a rate card that does not exist.
+ *
+ * ── Why this lives here rather than in the schema ─────────────────────────
+ * `RateCardIdSchema` validates the SHAPE of an id, which is all a schema can
+ * do: whether `metricon-homes` names a real card is a question about stored
+ * data, and the set of cards changes while the process is running.
+ *
+ * ⚠️ Not defaulted to `default` on a miss, tempting as that is. An account
+ * quietly repointed at the fallback card would invoice at the wrong rates and
+ * look entirely healthy doing it — a pricing incident nobody notices until the
+ * customer does (M6.1).
+ */
+async function assertRateCardExists(rateCardId: string): Promise<void> {
+  if (await settingsRepository.findRateCard(rateCardId)) return;
+
+  throw AppError.validation('That rate card does not exist', [
+    {
+      path: 'rateCardId',
+      message: 'Pick a card from the list — it may have been renamed or retired',
+    },
+  ]);
 }

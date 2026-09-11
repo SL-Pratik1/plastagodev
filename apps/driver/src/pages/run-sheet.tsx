@@ -261,7 +261,12 @@ function StopCard({
           <span aria-hidden>·</span>
           <span>{stop.expectedAreaM2.toLocaleString('en-AU')} m²</span>
           <span aria-hidden>·</span>
-          <span>{stop.loadType === 'bagged' ? `${String(stop.bagCount)} bags` : 'hand load'}</span>
+          {/* Once weighed this is what was collected; before that, what to expect. */}
+          <span>
+            {stop.loadType === 'bagged'
+              ? `${String(stop.collectedBagCount ?? stop.bagCount)} bags`
+              : 'hand load'}
+          </span>
           {/* M4.8b — some builders will not let the driver start without it. */}
           {stop.riskAssessmentRequired && stop.riskAssessmentDoneAt === null && (
             <Badge variant="warning">

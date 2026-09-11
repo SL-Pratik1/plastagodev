@@ -32,6 +32,8 @@ let approveMatches = true;
 let existingTerms: Record<string, unknown> | null = null;
 let termsRecorded = true;
 let ownedIds: string[] = ['inv1'];
+/** Builder or contractor — the supervisor endpoints are builders-only (M5.14). */
+let accountType: 'builder' | 'contractor' | null = 'builder';
 
 const ACCOUNT_ID = 'acc0000000000000000000a1';
 
@@ -76,6 +78,7 @@ vi.mock('../src/domains/portal/supervisor.repository.js', () => ({
     },
   },
   portalAccountRepository: {
+    accountTypeOf: () => Promise.resolve(accountType),
     find: () =>
       Promise.resolve({
         accountId: ACCOUNT_ID,
@@ -182,6 +185,7 @@ beforeEach(() => {
   existingTerms = null;
   termsRecorded = true;
   ownedIds = ['inv1'];
+  accountType = 'builder';
 });
 
 describe('a supervisor sees none of this (M1.5)', () => {
@@ -224,6 +228,72 @@ describe('a supervisor sees none of this (M1.5)', () => {
   it('refuses a session with no account at all', async () => {
     await expect(
       portalAccountService.account({ ...ADMIN, accountId: null }),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe('a contractor has no supervisors (Matt, 21:55)', () => {
+  /*
+   * ── Why these four tests exist ────────────────────────────────────────────
+   * The portal hides the "Site supervisors" item for a contractor. Hiding a
+   * menu is a courtesy to the user, not a boundary: the route was reachable by
+   * typing it, and every endpoint behind it worked, so a contractor could mint
+   * supervisor logins on a journey that has no supervisors in it.
+   *
+   * The refusal is 403 on all four, and the WRITES must not happen — a check
+   * that only hides the list would still let an invite through.
+   */
+  beforeEach(() => {
+    accountType = 'contractor';
+  });
+
+  it('refuses the supervisor list', async () => {
+    await expect(
+      portalAccountService.supervisors({ page: 1, pageSize: 20 }, ADMIN),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('refuses inviting a supervisor, and creates nobody', async () => {
+    await expect(portalAccountService.inviteSupervisor(invite(), ADMIN)).rejects.toMatchObject({
+      status: 403,
+    });
+
+    expect(invited).toHaveLength(0);
+  });
+
+  it('refuses suspending a supervisor', async () => {
+    await expect(
+      portalAccountService.setSupervisorState('sup1', 'suspended', ADMIN),
+    ).rejects.toMatchObject({ status: 403 });
+
+    expect(stateChanges).toHaveLength(0);
+  });
+
+  it('refuses approving a supervisor', async () => {
+    await expect(portalAccountService.approveSupervisor('sup1', ADMIN)).rejects.toMatchObject({
+      status: 403,
+    });
+
+    expect(approvals).toHaveLength(0);
+  });
+
+  // The commercial screens are the contractor administrator's as much as the
+  // builder's — this gate is about supervisors, and must not widen.
+  it('still allows the invoices they are entitled to', async () => {
+    await expect(
+      portalAccountService.invoices({ page: 1, pageSize: 20 }, ADMIN),
+    ).resolves.toMatchObject({ data: [] });
+  });
+});
+
+describe('an account that has vanished', () => {
+  // Unknown type is a refusal, not a pass. Failing open here would mean a
+  // broken session got MORE than a working one.
+  it('refuses the supervisor list rather than assuming a builder', async () => {
+    accountType = null;
+
+    await expect(
+      portalAccountService.supervisors({ page: 1, pageSize: 20 }, ADMIN),
     ).rejects.toMatchObject({ status: 403 });
   });
 });

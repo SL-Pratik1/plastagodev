@@ -257,7 +257,7 @@ export function AdminReportsPage() {
             <ReportSkeleton />
           ) : monthly.data ? (
             <div className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <StatCard label="Jobs" value={monthly.data.totalJobs} />
                 <StatCard label="Square metres" value={formatArea(monthly.data.totalAreaM2)} />
                 <StatCard
@@ -336,7 +336,7 @@ export function AdminReportsPage() {
             <ReportSkeleton />
           ) : zones.data ? (
             <div className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <StatCard label="Jobs" value={zones.data.totalJobs} />
                 <StatCard
                   label="Revenue ex GST"
@@ -408,7 +408,7 @@ export function AdminReportsPage() {
                 per kilometre is for.
               </Alert>
 
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <StatCard
                   label="Revenue ex GST"
                   value={formatMoney(financial.data.totalRevenueExGst)}
@@ -731,7 +731,7 @@ function SimpleTable<TRow>({
 function ReportSkeleton() {
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         {[0, 1, 2].map((index) => (
           <Card key={index} className="p-4">
             <Skeleton className="h-3 w-20" />

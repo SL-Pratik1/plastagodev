@@ -342,7 +342,7 @@ export function PortalBookPage() {
               )}
             </Field>
 
-            <div className="grid gap-4 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <Field
                 id="book-lot"
                 label="Lot number"
@@ -395,7 +395,7 @@ export function PortalBookPage() {
               )}
             />
 
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field
                 id="book-ready-date"
                 label="When will it be ready?"
@@ -454,7 +454,7 @@ export function PortalBookPage() {
               <Field
                 id="book-service-level"
                 label="Urgency"
-                hint="Urgent pickups are flagged to the office immediately (M5.5)."
+                hint="Urgent pickups are flagged to the office immediately."
               >
                 {(control) => (
                   <Select {...control} {...register('serviceLevel')}>

@@ -2,7 +2,7 @@ import { ClientSecretCredential } from '@azure/identity';
 import { env } from '../config/env.js';
 import { AppError } from '../lib/app-error.js';
 import { logger } from '../lib/logger.js';
-import type { Mailer, OutboundEmail } from './messaging.js';
+import { MAX_ATTACHMENT_BYTES, type Mailer, type OutboundEmail } from './messaging.js';
 
 const log = logger.child({ module: 'graph-mailer' });
 
@@ -44,10 +44,32 @@ export function createGraphMailer(): Mailer {
   return {
     name: 'graph',
 
-    async send({ to, subject, text, html }: OutboundEmail): Promise<void> {
+    async send({ to, subject, text, html, attachments }: OutboundEmail): Promise<void> {
       const token = await credential.getToken(GRAPH_SCOPE);
       if (!token) {
         throw AppError.dependencyUnavailable('Could not obtain a Microsoft Graph token');
+      }
+
+      /*
+       * ⚠️ Checked BEFORE the request, not after Graph rejects it.
+       *
+       * Graph refuses an oversized message with a 413 that names no file, so
+       * the office would see "could not send the email" with nothing to act
+       * on. Failing here says which message was too big and by how much.
+       */
+      const totalBytes = (attachments ?? []).reduce(
+        (sum, attachment) => sum + attachment.content.byteLength,
+        0,
+      );
+
+      if (totalBytes > MAX_ATTACHMENT_BYTES) {
+        log.error({ to, subject, totalBytes }, 'attachments exceed the message limit');
+        throw AppError.validation('That email is too large to send', [
+          {
+            path: 'attachments',
+            message: `Attachments total ${String(Math.round(totalBytes / 1024 / 1024))}MB; the limit is ${String(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB`,
+          },
+        ]);
       }
 
       const response = await fetch(
@@ -63,12 +85,30 @@ export function createGraphMailer(): Mailer {
               subject,
               body: { contentType: 'HTML', content: html },
               toRecipients: [{ emailAddress: { address: to } }],
+              /*
+               * Graph's inline attachment form. Omitted entirely rather than
+               * sent empty: an empty `attachments` array makes some clients
+               * render a paperclip on a message carrying nothing.
+               */
+              ...(attachments && attachments.length > 0
+                ? {
+                    attachments: attachments.map((attachment) => ({
+                      '@odata.type': '#microsoft.graph.fileAttachment',
+                      name: attachment.filename,
+                      contentType: attachment.contentType,
+                      contentBytes: attachment.content.toString('base64'),
+                    })),
+                  }
+                : {}),
             },
             // A sign-in code is not correspondence. Keeping it out of Sent Items
             // avoids filling the mailbox with thousands of one-time codes.
             saveToSentItems: false,
           }),
-          signal: AbortSignal.timeout(10_000),
+          // Longer than the 10s a bare message gets: an invoice PDF has to
+          // cross the wire, and a timeout here loses a send that would have
+          // succeeded.
+          signal: AbortSignal.timeout(attachments && attachments.length > 0 ? 30_000 : 10_000),
         },
       );
 

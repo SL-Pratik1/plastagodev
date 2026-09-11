@@ -39,6 +39,13 @@ export interface BookablePurchaseOrder {
   bagAllowance: number | null;
   siteSupervisorName: string | null;
   siteSupervisorMobile: string | null;
+  /**
+   * The supervisor's portal login, where one was provisioned.
+   *
+   * Carried through to the booking so a job raised against this order can be
+   * scoped to them (Matt, 33:57) without matching on a name.
+   */
+  siteSupervisorUserId: string | null;
   amountExGst: string | null;
 }
 
@@ -56,6 +63,7 @@ interface RawOrder {
   bagAllowance: number | null;
   siteSupervisorName: string | null;
   siteSupervisorMobile: string | null;
+  siteSupervisorUserId: mongoose.Types.ObjectId | null;
   amountExGst: mongoose.Types.Decimal128 | null;
 }
 
@@ -75,6 +83,9 @@ function toBookable(row: RawOrder): BookablePurchaseOrder {
     bagAllowance: row.bagAllowance ?? null,
     siteSupervisorName: row.siteSupervisorName ?? null,
     siteSupervisorMobile: row.siteSupervisorMobile ?? null,
+    siteSupervisorUserId: row.siteSupervisorUserId
+      ? row.siteSupervisorUserId.toHexString()
+      : null,
     amountExGst: row.amountExGst ? fromDecimal128(row.amountExGst) : null,
   };
 }
@@ -83,6 +94,24 @@ function toBookable(row: RawOrder): BookablePurchaseOrder {
 const PICKER_LIMIT = 50;
 
 export const purchaseOrderRepository = {
+  /**
+   * Records which login the order's named supervisor turned out to be.
+   *
+   * Written after the order exists rather than as part of it: provisioning a
+   * person is a separate act that is allowed to fail, and a purchase order must
+   * be confirmable whether or not it succeeded (Matt, 34:52).
+   */
+  async setSupervisorUser(id: string, userId: string): Promise<boolean> {
+    if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(userId)) return false;
+
+    const result = await PurchaseOrderModel.updateOne(
+      { _id: new mongoose.Types.ObjectId(id) },
+      { $set: { siteSupervisorUserId: new mongoose.Types.ObjectId(userId) } },
+    );
+
+    return result.matchedCount === 1;
+  },
+
   /**
    * One order, scoped to the account it belongs to.
    *

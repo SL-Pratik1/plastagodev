@@ -67,6 +67,8 @@ export interface DriverCaller {
 /** M4.7 — the contamination charge, per Matt's current price list. */
 const CONTAMINATION_CODE = 'contamination';
 const FUTILE_CODE = 'futile-pickup';
+/** M6.5, Matt 07:37 — bags collected beyond what the order allowed for. */
+const EXTRA_BAG_CODE = 'extra-bags';
 
 export const driverService = {
   /**
@@ -150,6 +152,9 @@ export const driverService = {
       // Only an actual crane figure. An estimated one is the output of a tip-off
       // reconciliation, and showing it here would look like a measurement.
       craneScaleKg: stop.recoveredWeightBasis === 'actual' ? stop.recoveredWeightKg : null,
+      // Same gate as the total: an estimated figure has no per-bag breakdown,
+      // and echoing a stale one next to it would read as a measurement.
+      bagWeights: stop.recoveredWeightBasis === 'actual' ? (stop.bagWeights ?? []) : [],
       weightsRecordedAt: stop.recoveredWeightBasis !== null && stop.completedAt !== null
         ? stop.completedAt.toISOString()
         : null,
@@ -341,10 +346,13 @@ export const driverService = {
   async captureWeights(jobId: string, input: WeightCapture, caller: DriverCaller): Promise<void> {
     const stop = await requireStop(jobId, caller);
 
-    if (input.loadType === 'hand-load' && input.craneScaleKg !== null) {
+    const perBag = input.bagWeights;
+    const sentAnyWeight = input.craneScaleKg !== null || (perBag !== undefined && perBag.length > 0);
+
+    if (input.loadType === 'hand-load' && sentAnyWeight) {
       throw AppError.validation('A hand-loaded job has no crane weight', [
         {
-          path: 'craneScaleKg',
+          path: perBag !== undefined && perBag.length > 0 ? 'bagWeights' : 'craneScaleKg',
           message: 'Leave this empty on a hand load — the weight comes from the weighbridge',
         },
       ]);
@@ -354,18 +362,24 @@ export const driverService = {
      * An m²-only account never records kilograms (M2.3). Accepting one would put
      * a weight on a certificate for a customer who does not buy that service.
      */
-    if (!stop.capturesWeight && input.craneScaleKg !== null) {
+    if (!stop.capturesWeight && sentAnyWeight) {
       throw AppError.validation('This account records square metres only', [
-        { path: 'craneScaleKg', message: 'No weight is recorded for this customer' },
+        {
+          path: perBag !== undefined && perBag.length > 0 ? 'bagWeights' : 'craneScaleKg',
+          message: 'No weight is recorded for this customer',
+        },
       ]);
     }
+
+    const { craneScaleKg, bagWeights } = resolveWeights(input, stop.capturesWeight);
 
     await driverRepository.recordWeights({
       jobId,
       driverId: caller.userId,
       bagCount: input.bagCount,
       loadType: input.loadType,
-      craneScaleKg: input.craneScaleKg,
+      bagWeights,
+      craneScaleKg,
     });
 
     await driverRepository.appendEvent({
@@ -374,12 +388,25 @@ export const driverService = {
       label: 'Weights captured',
       actor: caller.name,
       status: null,
-      detail:
-        input.craneScaleKg === null
-          ? `${String(input.bagCount)} bags, hand loaded`
-          : `${String(input.bagCount)} bags, ${String(input.craneScaleKg)} kg on the crane scale`,
+      detail: describeWeights(input.bagCount, bagWeights, craneScaleKg),
       latitude: input.position?.latitude ?? null,
       longitude: input.position?.longitude ?? null,
+    });
+
+    /*
+     * Last, and deliberately not inside a transaction with the weights above.
+     * The weights are what the driver came to record; the overage charge is
+     * derived from them. If pricing is misconfigured the collection must still
+     * be saved — see principle 2 at the top of this file.
+     */
+    await syncExtraBagCharge({
+      jobId,
+      jobNumber: stop.jobNumber,
+      allowedBags: stop.bagCount,
+      collectedBags: input.bagCount,
+      caller,
+      occurredAt: new Date(input.occurredAt),
+      position: input.position,
     });
   },
 
@@ -940,6 +967,7 @@ function toRunStop(row: DriverStopRow): RunStop {
     // read the job directly — not to a driver looking at a stop card.
     expectedAreaM2: row.expectedAreaM2 ?? 0,
     bagCount: row.bagCount,
+    collectedBagCount: row.collectedBagCount,
     loadType: row.loadType,
     capturesWeight: row.capturesWeight,
     poNumber: row.poNumber,
@@ -953,6 +981,238 @@ function toRunStop(row: DriverStopRow): RunStop {
     hasQueuedActions: false,
     runId: row.runId ? row.runId.toHexString() : '',
   };
+}
+
+/* ── Weights (M4.3) ──────────────────────────────────────────────────────── */
+
+/**
+ * The heaviest total the crane scale can credibly report for one stop.
+ *
+ * Mirrors the per-reading cap in `WeightCaptureSchema`. The schema can bound
+ * each bag but not their sum, so 200 bags of 20 tonnes would otherwise validate
+ * and land on an invoice.
+ */
+const MAX_STOP_KG = 20000;
+
+/**
+ * Turns what the phone sent into the pair the job stores.
+ *
+ * ── The total is DERIVED, never trusted ───────────────────────────────────
+ * Matt, 06:34, wants a reading per bag. Once those exist, a separately typed
+ * total is a second source of truth for one quantity — and it is the copy that
+ * reaches the invoice and the diversion certificate. So the server adds the
+ * bags up and ignores any total the client sent alongside them.
+ *
+ * ── Why `undefined` and `[]` are not the same ─────────────────────────────
+ * `undefined` is a phone that queued this pickup offline before per-bag capture
+ * shipped: it has a total and no breakdown, and rejecting it would discard a
+ * collection that physically happened. `[]` is a current client saying nothing
+ * was lifted — a hand load, or an m²-only account (M2.3).
+ */
+function resolveWeights(
+  input: WeightCapture,
+  capturesWeight: boolean,
+): { craneScaleKg: number | null; bagWeights: number[] } {
+  if (input.bagWeights === undefined) {
+    return { craneScaleKg: input.craneScaleKg, bagWeights: [] };
+  }
+
+  const bagWeights = input.bagWeights;
+  const weighable = capturesWeight && input.loadType === 'bagged';
+
+  /*
+   * One reading per bag, or the breakdown does not describe the load that was
+   * collected. Refusing here rather than at month end matters: the driver is
+   * still on site and can put the missing bag back on the scale.
+   */
+  if (weighable && bagWeights.length !== input.bagCount) {
+    const bagsWere = input.bagCount === 1 ? 'bag was' : 'bags were';
+    const weightsWere = bagWeights.length === 1 ? 'weight was' : 'weights were';
+
+    throw AppError.validation('Every bag needs its own weight', [
+      {
+        path: 'bagWeights',
+        message: `${String(input.bagCount)} ${bagsWere} collected but ${String(bagWeights.length)} ${weightsWere} entered — one reading per bag.`,
+      },
+    ]);
+  }
+
+  if (bagWeights.length === 0) return { craneScaleKg: null, bagWeights };
+
+  /*
+   * Rounded to the kilogram, like every other figure that reaches a certificate
+   * (see `reconcileTipOff`). Adding decimal readings otherwise yields
+   * 1239.9999999999998, and that is the number the builder reads.
+   */
+  const total = Math.round(bagWeights.reduce((sum, kg) => sum + kg, 0));
+
+  if (total > MAX_STOP_KG) {
+    throw AppError.validation('That is heavier than the truck can carry', [
+      {
+        path: 'bagWeights',
+        message: `Those bags add up to ${String(total)} kg. Check the scale readings.`,
+      },
+    ]);
+  }
+
+  return { craneScaleKg: total, bagWeights };
+}
+
+/**
+ * The line the office reads on the job timeline.
+ *
+ * The individual readings are spelled out rather than summarised: "4 bags,
+ * 1240 kg" cannot answer *which* bag was overloaded, and answering that is the
+ * reason they are captured at all.
+ */
+function describeWeights(
+  bagCount: number,
+  bagWeights: number[],
+  craneScaleKg: number | null,
+): string {
+  const bags = `${String(bagCount)} ${bagCount === 1 ? 'bag' : 'bags'}`;
+  if (craneScaleKg === null) return `${bags}, hand loaded`;
+
+  const total = `${bags}, ${String(craneScaleKg)} kg on the crane scale`;
+  return bagWeights.length > 0 ? `${total} (${bagWeights.map(String).join(', ')} kg)` : total;
+}
+
+/**
+ * Keeps the extra-bag charge in step with what the driver counted.
+ *
+ * ── The rule, in Matt's words ─────────────────────────────────────────────
+ * 07:37: *"if the purchase order's only got two bags on it and there's three
+ * bags on a site, for instance, that extra bag needs to be on a separate
+ * invoice like for an overage."* And 08:28: *"anything over that original PO
+ * needs to get sent off for approval."*
+ *
+ * So the excess is charged, but never on the base invoice — Matt, 09:55: *"the
+ * original invoice for the job… has to go out exactly matching what the build
+ * has given us."* Raising it with `source: 'driver'` is what does that: the
+ * invoicing split routes driver charges onto their own invoice with no PO
+ * number, where they wait for the builder to issue a second order (M7.3).
+ *
+ * ── Why the driver is not asked about any of this ─────────────────────────
+ * Matt, 09:02: *"the driver doesn't really know, he's just going to tell us
+ * what's on site. The system has to sort of understand that this job's got an
+ * extra bag on it than what it should have."* Nothing here surfaces on the
+ * phone. The driver records four bags; the office finds a charge to approve.
+ *
+ * ── Why a sync rather than raise-once ─────────────────────────────────────
+ * An overage is a quantity, not an event. A driver who saves four bags and
+ * corrects it to six must end up with one charge for four extras — not a stale
+ * charge for two, and not two charges.
+ */
+async function syncExtraBagCharge(input: {
+  jobId: string;
+  jobNumber: number;
+  /** The allowance frozen off the purchase order at booking. */
+  allowedBags: number;
+  collectedBags: number;
+  caller: DriverCaller;
+  occurredAt: Date;
+  position: GeoFix | null;
+}): Promise<void> {
+  const excess = input.collectedBags - input.allowedBags;
+
+  const note = async (detail: string): Promise<void> => {
+    await driverRepository.appendEvent({
+      jobId: input.jobId,
+      at: input.occurredAt,
+      label: 'Extra bags',
+      actor: 'System',
+      status: null,
+      detail,
+      latitude: input.position?.latitude ?? null,
+      longitude: input.position?.longitude ?? null,
+    });
+  };
+
+  /*
+   * At or under the allowance. This is the correction path: a driver who saved
+   * six bags and has just fixed it to two must not leave a charge for four
+   * behind. Nothing to do where no charge was ever raised.
+   */
+  if (excess <= 0) {
+    if (await driverRepository.removePendingCharge(input.jobId, EXTRA_BAG_CODE)) {
+      await note(
+        `Corrected to ${String(input.collectedBags)} bags, within the ${String(input.allowedBags)} the order allows. Extra-bag charge withdrawn.`,
+      );
+    }
+    return;
+  }
+
+  /*
+   * ⚠️ Never let this stop the weights being saved. A missing `extra-bags` rate
+   * is a settings problem in the office, and a driver at a kerb can do nothing
+   * about it — so it is logged loudly and left for the office to pick up rather
+   * than thrown back at the phone.
+   */
+  let perBagExGst: string;
+  try {
+    perBagExGst = (await pricingService.priceAdditionalService(EXTRA_BAG_CODE)).amountExGst;
+  } catch (error) {
+    log.error(
+      { jobId: input.jobId, jobNumber: input.jobNumber, excess, err: error },
+      'no extra-bags rate is configured — overage NOT charged, weights saved',
+    );
+    await note(
+      `${String(excess)} bag${excess === 1 ? '' : 's'} over the ${String(input.allowedBags)} on the order, but no extra-bag rate is configured. Raise this charge by hand.`,
+    );
+    return;
+  }
+
+  const amountExGst = centsToMoney(moneyToCents(perBagExGst) * excess);
+
+  const outcome = await driverRepository.syncPendingCharge({
+    jobId: input.jobId,
+    code: EXTRA_BAG_CODE,
+    description: `${String(excess)} bag${excess === 1 ? '' : 's'} beyond the ${String(input.allowedBags)} on the purchase order`,
+    quantity: excess,
+    unitRate: perBagExGst,
+    amount: amountExGst,
+    // The driver counted the bags; the system worked out that they exceed the
+    // order. Attributing it to them alone would misread the timeline.
+    raisedBy: `System · counted by ${input.caller.name}`,
+    raisedAt: input.occurredAt,
+    note: `Order allows ${String(input.allowedBags)}; ${String(input.collectedBags)} collected. Needs its own purchase order.`,
+  });
+
+  if (outcome === 'unchanged') return;
+
+  if (outcome === 'locked') {
+    /*
+     * The office has already approved or rejected an overage on this job, and
+     * the driver has since changed the count. Rewriting a decided amount under
+     * somebody would be worse than flagging it.
+     */
+    log.warn(
+      { jobId: input.jobId, jobNumber: input.jobNumber, excess },
+      'extra-bag charge already decided by the office — count changed, left alone',
+    );
+    await note(
+      `Bag count changed to ${String(input.collectedBags)} (${String(excess)} over the order), but the extra-bag charge has already been decided. Check it by hand.`,
+    );
+    return;
+  }
+
+  log.info(
+    {
+      jobId: input.jobId,
+      jobNumber: input.jobNumber,
+      allowedBags: input.allowedBags,
+      collectedBags: input.collectedBags,
+      excess,
+      outcome,
+    },
+    'extra bags over the purchase order — charge queued for approval',
+  );
+
+  await note(
+    outcome === 'created'
+      ? `${String(input.collectedBags)} bags collected against an order for ${String(input.allowedBags)}. ${String(excess)} extra queued for approval — needs its own purchase order.`
+      : `Bag count revised to ${String(input.collectedBags)}. Extra-bag charge updated to ${String(excess)}.`,
+  );
 }
 
 /* ── Status machinery ────────────────────────────────────────────────────── */

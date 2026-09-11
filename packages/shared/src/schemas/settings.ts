@@ -1,10 +1,9 @@
 import * as z from 'zod';
-import { MoneySchema, NonEmptyStringSchema } from './primitives.js';
-import { BrandIdSchema, RateCardIdSchema, ZoneSchema } from './party.js';
-import { CredentialTypeSchema } from './fleet.js';
+import { IsoDateSchema, MoneySchema, NonEmptyStringSchema } from './primitives.js';
+import { BrandIdSchema, RateCardIdSchema, ZONES, ZoneSchema } from './party.js';
 
 /**
- * Settings (W3), plus brands (M1.1), rate cards (M6) and integrations (W7).
+ * Settings (W3), plus brands (M1.1), rate cards (M6) and invoice branding (M7.5).
  *
  * ── Editable versus displayed ─────────────────────────────────────────────
  * Some of what belongs on a settings screen is NOT a setting, and pretending
@@ -36,6 +35,51 @@ export const ZoneRateSchema = z
   })
   .meta({ id: 'ZoneRate' });
 
+/**
+ * One effective-dated version of a card's rates (M6.2).
+ *
+ * ── Why the SCHEDULE is the versioned thing, not the card ─────────────────
+ * A rate card is a commercial relationship — "Clarendon & Domaine" — and it
+ * does not end when its prices change. What changes is the schedule of rates
+ * under it. So a card has many schedules, exactly one of which is in force on
+ * any given date, and a job is priced by the schedule covering ITS date.
+ *
+ * `effectiveTo` empty means open-ended, which is the normal case: a schedule
+ * applies until a later one supersedes it. Issuing a new schedule closes the
+ * previous one the day before the new one starts, so the windows tile the
+ * calendar with no gap and no overlap.
+ */
+export const RateScheduleSchema = z
+  .object({
+    effectiveFrom: IsoDateSchema,
+    /** Empty means open-ended — in force until something supersedes it. */
+    effectiveTo: z.string(),
+    zones: z.array(ZoneRateSchema),
+  })
+  .meta({ id: 'RateSchedule' });
+
+/**
+ * The rates as applied to one job, frozen at the moment it was priced (M6.2).
+ *
+ * ⚠️ This is what makes effective dating safe rather than merely stored. A
+ * reprint, a credit note or a reissue reads THIS, and never asks the rate
+ * tables again — so a schedule issued next March cannot move a figure on an
+ * invoice the customer has already paid, even if the schedule that priced it
+ * were later corrected or deleted.
+ */
+export const AppliedRateSchema = z
+  .object({
+    rateCardId: RateCardIdSchema,
+    /** The card's name as it read when the job was priced. */
+    rateCardLabel: NonEmptyStringSchema,
+    zone: ZoneSchema,
+    /** Which schedule priced it, so a dispute can be traced to a decision. */
+    scheduleFrom: IsoDateSchema,
+    serviceCharge: MoneySchema,
+    ratePerM2: MoneySchema,
+  })
+  .meta({ id: 'AppliedRate' });
+
 /*
  * There is no `GeneralSettingsSchema`, and the settings payload has no
  * `general` block.
@@ -58,58 +102,31 @@ export const ZoneRateSchema = z
  * or a migration, which is the trade the client accepted.
  */
 
-/* ── Notifications (M8.3, M8.4 · W5, W14) ─────────────────────────────────── */
-
-export const NOTIFICATION_EVENTS = [
-  'job-booked',
-  'job-allocated',
-  'driver-on-the-way',
-  'job-completed',
-  'job-futile',
-  'job-rescheduled',
-  'upcoming-reminder',
-] as const;
-export const NotificationEventSchema = z
-  .enum(NOTIFICATION_EVENTS)
-  .meta({ id: 'NotificationEvent' });
-export type NotificationEvent = z.infer<typeof NotificationEventSchema>;
-
-export const NOTIFICATION_EVENT_LABELS: Record<NotificationEvent, string> = {
-  'job-booked': 'Job booked',
-  'job-allocated': 'Job allocated',
-  'driver-on-the-way': 'Driver on the way',
-  'job-completed': 'Job completed',
-  'job-futile': 'Futile pickup',
-  'job-rescheduled': 'Job rescheduled',
-  'upcoming-reminder': 'Upcoming job reminder',
-};
-
-export const NotificationRuleSchema = z
-  .object({
-    event: NotificationEventSchema,
-    sms: z.boolean(),
-    email: z.boolean(),
-    /** M8.2 — the completion email carries the job photos. */
-    includePhotos: z.boolean(),
-  })
-  .meta({ id: 'NotificationRule' });
-
-export const NotificationSettingsSchema = z
-  .object({
-    rules: z.array(NotificationRuleSchema),
-    /** M8.3 — how far ahead the readiness reminder goes out. */
-    reminderLeadDays: z.number().int().min(1).max(7),
-    /**
-     * M8.3 — the committed implementation is a tap-through link to the reschedule
-     * screen, NOT inbound SMS parsing (F65's stretch). Cheaper, unambiguous and
-     * fully audited.
-     */
-    reminderIncludeRescheduleLink: z.boolean(),
-    /** M8.7 — the internal daily digest for the queues. */
-    queueDigestEnabled: z.boolean(),
-    queueDigestHour: z.number().int().min(0).max(23),
-  })
-  .meta({ id: 'NotificationSettings' });
+/*
+ * ── There is no notification-rules block, and no integrations block ────────
+ *
+ * Both were settings SURFACES over things that were configured elsewhere, and
+ * neither was ever read:
+ *
+ *  • The per-event SMS/email matrix was never consulted by the sender.
+ *    `outboundService` chooses a channel from the RECIPIENT's own
+ *    `notifyByEmail` / `notifyBySms` (M8.4), which is the preference that
+ *    actually belongs to a person rather than to the platform. A second,
+ *    platform-wide switch that silently did nothing was worse than no switch.
+ *  • The integrations board reported connection state for six services whose
+ *    credentials live in the environment. It could not configure any of them,
+ *    and its "test connection" button recorded an outcome rather than
+ *    performing a check.
+ *
+ * ⚠️ The notification CENTRE (the bell, `notifications` + `outboundmessages`)
+ * and all outbound email and SMS are untouched and still live — they are a
+ * different domain entirely. Only the dead settings block is gone.
+ *
+ * Driver credential types went the same way. Driver licences, tickets and their
+ * expiry tracking are still on the driver profile (`DriverCredentialSchema` in
+ * `fleet.ts`); what was removed is the per-type reminder-lead-time register,
+ * which nothing read.
+ */
 
 /* ── Pricing (M6) ─────────────────────────────────────────────────────────── */
 
@@ -121,11 +138,100 @@ export const RateCardSummarySchema = z
     /** M6.2 — rates are versioned; a job is priced by the date it ran. */
     effectiveFrom: z.string(),
     effectiveTo: z.string(),
+    /**
+     * The schedule in force TODAY, flattened for the screens that only want
+     * current prices — the quote header, the customer detail page.
+     *
+     * Empty where a card has no schedule covering today, which is a real state
+     * worth showing rather than hiding: a card whose only schedule starts next
+     * month prices nothing until then, and falls back to `default`.
+     */
     zones: z.array(ZoneRateSchema),
+    /** Every schedule, newest first — the history the office audits against. */
+    schedules: z.array(RateScheduleSchema),
+    /**
+     * Whether this card may be deleted. False for `default`, which is the
+     * fallback every other card relies on, and for any card an account names.
+     *
+     * Computed by the server rather than inferred by the browser: the account
+     * count is only part of it, and a UI that guessed would offer a delete that
+     * comes back 409.
+     */
+    deletable: z.boolean(),
   })
   .meta({ id: 'RateCardSummary' });
 
-/** M6.5 — all nine, fixed and percentage. */
+/* ── Writing rates (M6.1, M6.2) ───────────────────────────────────────────── */
+
+/**
+ * One zone's prices, as typed into the schedule form.
+ *
+ * ⚠️ `ratePerM2` carries FOUR decimal places, not two. It is a rate, not an
+ * amount: rounding $0.1625 to $0.16 before multiplying by 823.41 m² loses real
+ * money on every large job, and a month of them adds up to a reconciliation
+ * nobody can explain.
+ */
+export const ZoneRateInputSchema = z
+  .object({
+    zone: ZoneSchema,
+    serviceCharge: MoneySchema,
+    ratePerM2: MoneySchema,
+  })
+  .meta({ id: 'ZoneRateInput' });
+
+/**
+ * Every zone must be priced, in one go.
+ *
+ * A schedule missing a zone is not a half-finished schedule — it is a card that
+ * silently falls back to `default` for that zone, which is how a builder ends
+ * up invoiced at somebody else's rate. So the array is checked for
+ * completeness here rather than trusted from the form.
+ */
+const CompleteZoneRatesSchema = z
+  .array(ZoneRateInputSchema)
+  .length(ZONES.length, `Price all ${String(ZONES.length)} zones`)
+  .refine((rates) => new Set(rates.map((rate) => rate.zone)).size === rates.length, {
+    message: 'Each zone may appear only once',
+  })
+  .refine((rates) => ZONES.every((zone) => rates.some((rate) => rate.zone === zone)), {
+    message: 'Every zone needs a rate',
+  });
+
+/** A brand-new card, with its opening schedule. */
+export const RateCardCreateSchema = z
+  .object({
+    /**
+     * Optional: derived from the label when absent, which is what the form
+     * does. Supplied explicitly only when migrating a card that must keep the
+     * id an external system already knows.
+     */
+    id: RateCardIdSchema.optional(),
+    label: NonEmptyStringSchema.max(80),
+    effectiveFrom: IsoDateSchema,
+    zones: CompleteZoneRatesSchema,
+  })
+  .meta({ id: 'RateCardCreate' });
+
+/**
+ * A new schedule on an existing card — the ONLY way rates change (M6.2).
+ *
+ * There is deliberately no "update this schedule's prices" route. Editing a
+ * rate in place would reprice every job already priced by it, and invoice
+ * correctness is the highest-rated risk in the project.
+ */
+export const RateScheduleCreateSchema = z
+  .object({
+    effectiveFrom: IsoDateSchema,
+    zones: CompleteZoneRatesSchema,
+  })
+  .meta({ id: 'RateScheduleCreate' });
+
+/** Renaming a card. Its rates are not reachable from here, by design. */
+export const RateCardUpdateSchema = z
+  .object({ label: NonEmptyStringSchema.max(80) })
+  .meta({ id: 'RateCardUpdate' });
+
+/** M6.5 — the chargeable extras, fixed and percentage. */
 export const AdditionalServiceSettingSchema = z
   .object({
     code: NonEmptyStringSchema,
@@ -137,19 +243,132 @@ export const AdditionalServiceSettingSchema = z
     driverRaisable: z.boolean(),
     /** Extra Load Time is `system` — hence *Created By: System* in the queue. */
     systemGenerated: z.boolean(),
+    /**
+     * Whether this charge may be deleted (M6.5).
+     *
+     * False for the codes the application looks up BY NAME — see
+     * `PROTECTED_SERVICE_CODES`. Their price and label are editable; their
+     * existence is not, because deleting one breaks a workflow rather than
+     * removing a line from a list.
+     */
+    deletable: z.boolean(),
   })
   .meta({ id: 'AdditionalServiceSetting' });
+
+/**
+ * The charges the code reaches for by literal code, and so may never be
+ * deleted.
+ *
+ * ⚠️ Each of these is looked up by name somewhere that would throw without it:
+ *
+ *  • `recycling-bags`  — priced into every quote (`pricingService.quote`)
+ *  • `futile-pickup`   — raised when the office confirms a futile (M2.6)
+ *  • `contamination`   — raised by a driver at the fence (M4.6)
+ *  • `extra-bags`      — derived from bag count over the order's allowance
+ *  • `extra-load-time` — derived from on-site duration
+ *
+ * Repricing them is exactly what the settings screen is for. Removing them is
+ * a code change, so the API refuses it rather than letting an administrator
+ * discover it through a 500 on a driver's phone.
+ */
+export const PROTECTED_SERVICE_CODES = [
+  'recycling-bags',
+  'futile-pickup',
+  'contamination',
+  'extra-bags',
+  'extra-load-time',
+] as const;
+
+/**
+ * A `code` an administrator may type.
+ *
+ * Slug-shaped for the same reason a rate card id is: it is an identifier the
+ * driver app and the invoice both carry, not a display string.
+ */
+export const ServiceCodeSchema = z
+  .string()
+  .trim()
+  .min(1, 'A charge needs a code')
+  .max(40, 'Keep the code short')
+  .regex(/^[a-z0-9][a-z0-9-]*$/, 'Lowercase letters, digits and hyphens only')
+  .meta({ id: 'ServiceCode' });
+
+/**
+ * The editable half of a charge.
+ *
+ * `kind` is absent on purpose: switching a $90 fixed charge into a 90%
+ * percentage would silently reprice every future job by a factor of thousands.
+ * Changing kind means retiring the charge and adding a new one, which is a
+ * decision somebody has to make deliberately.
+ */
+export const AdditionalServiceUpdateSchema = z
+  .object({
+    label: NonEmptyStringSchema.max(80),
+    value: MoneySchema,
+    requiresApproval: z.boolean(),
+    driverRaisable: z.boolean(),
+  })
+  .meta({ id: 'AdditionalServiceUpdate' });
+
+export const AdditionalServiceCreateSchema = AdditionalServiceUpdateSchema.extend({
+  code: ServiceCodeSchema,
+  kind: z.enum(['fixed', 'percentage']),
+})
+  /*
+   * `systemGenerated` is NOT settable. It means "derived by the application
+   * from data the driver captured", which is a property of code that exists,
+   * not a flag: ticking it on a hand-made charge would put *Created By: System*
+   * on the approvals queue next to something a person invented.
+   */
+  .meta({ id: 'AdditionalServiceCreate' });
 
 export const PricingSettingsSchema = z
   .object({
     rateCards: z.array(RateCardSummarySchema),
     additionalServices: z.array(AdditionalServiceSettingSchema),
-    /** M6.8 — the flat per-job cost the margin figure assumes today. */
+    /**
+     * M6.8 — the flat per-job cost the margin figure assumes today.
+     *
+     * ⚠️ No longer shown on the settings screen, but very much still live: the
+     * financial summary report (M9.6) computes every margin figure from it. It
+     * is a seed-time value now, like the SLA.
+     */
     assumedCostPerJob: MoneySchema,
   })
   .meta({ id: 'PricingSettings' });
 
 /* ── Invoicing (M7) ───────────────────────────────────────────────────────── */
+
+/**
+ * Which of the shipped layouts a template draws with (M7.5).
+ *
+ * ── Why the LAYOUT is a fixed union and the template is a record ──────────
+ * An administrator controls what a template says — its name, its brand, its
+ * accent colour, which quantity columns print. They do not control where the
+ * logo sits or how the table is ruled, because a layout is code: it is drawn
+ * by the renderer, and a drag-and-drop designer is a product in its own right
+ * and the single biggest scope trap in this project.
+ *
+ * So a template POINTS AT a layout. Adding a sixth layout is a deploy; adding
+ * a sixth template is a click.
+ */
+export const INVOICE_LAYOUTS = ['standard', 'detailed', 'compact', 'rcti'] as const;
+export const InvoiceLayoutSchema = z.enum(INVOICE_LAYOUTS).meta({ id: 'InvoiceLayout' });
+export type InvoiceLayout = z.infer<typeof InvoiceLayoutSchema>;
+
+export const INVOICE_LAYOUT_LABELS: Record<InvoiceLayout, string> = {
+  standard: 'Standard',
+  detailed: 'Detailed — job and site breakdown',
+  compact: 'Compact — one page, totals led',
+  rcti: 'RCTI — recipient created tax invoice',
+};
+
+export const INVOICE_LAYOUT_DESCRIPTIONS: Record<InvoiceLayout, string> = {
+  standard: 'The everyday invoice: line items, totals, payment details.',
+  detailed: 'Adds the job number, site address and collection date against each line.',
+  compact: 'Totals and payment details first, lines condensed. For high-volume accounts.',
+  rcti: 'The customer raises this one. Carries the RCTI wording the ATO requires.',
+};
 
 export const InvoiceTemplateSchema = z
   .object({
@@ -158,9 +377,38 @@ export const InvoiceTemplateSchema = z
     brandId: BrandIdSchema,
     /** Which quantity columns it prints — m² only, or m² and kg. */
     showsWeight: z.boolean(),
+    /** Which shipped layout draws it. */
+    layout: InvoiceLayoutSchema,
+    /**
+     * The heading rule and table accent, as `#rrggbb`.
+     *
+     * Per template rather than per brand: EasyLift and PlastaGo differ, but so
+     * can two PlastaGo templates — a builder on an RCTI arrangement gets a
+     * visibly different document on purpose, so nobody files it as an invoice.
+     */
+    accentColour: z.string(),
     assignedAccountCount: z.number().int().nonnegative(),
+    /** False while any account still names it — deleting would strand them. */
+    deletable: z.boolean(),
   })
   .meta({ id: 'InvoiceTemplate' });
+
+/** A hex colour an administrator may type. `#` required, six digits. */
+export const HexColourSchema = z
+  .string()
+  .trim()
+  .regex(/^#[0-9a-fA-F]{6}$/, 'Use a six-digit hex colour, e.g. #1a4d3a')
+  .meta({ id: 'HexColour' });
+
+export const InvoiceTemplateWriteSchema = z
+  .object({
+    name: NonEmptyStringSchema.max(80),
+    brandId: BrandIdSchema,
+    showsWeight: z.boolean(),
+    layout: InvoiceLayoutSchema,
+    accentColour: HexColourSchema,
+  })
+  .meta({ id: 'InvoiceTemplateWrite' });
 
 export const InvoicingSettingsSchema = z
   .object({
@@ -188,74 +436,70 @@ export const InvoicingSettingsSchema = z
     /** M7.2 — base invoice now, additional charges on their own PO later. */
     splitAdditionalCharges: z.boolean(),
     defaultPaymentTermsDays: z.number().int().min(0).max(90),
-    /** Branding, which is what Scope Call 1 puts in scope. */
+
+    /*
+     * ── Branding, which is what Scope Call 1 puts in scope ────────────────
+     *
+     * Everything the invoice PDF prints that is not the invoice itself. All of
+     * it is optional and every field degrades to "leave it off the page"
+     * rather than to a placeholder: a document that says "Company Name Here"
+     * has gone to a customer, and that is worse than one with a gap.
+     */
+
+    /**
+     * Storage key for the logo — NOT a URL.
+     *
+     * The renderer reads the bytes through `StorageProvider.get`, so nothing
+     * about invoice generation depends on a public bucket or a signed URL that
+     * might have expired. Empty means print the company name as text instead.
+     */
+    logoKey: z.string(),
+
+    /** The legal entity, as it must appear on a tax invoice. */
+    companyName: z.string(),
+    /**
+     * ⚠️ Required on a valid Australian tax invoice over $82.50.
+     *
+     * Stored as typed — formatting is the renderer's job — but its ABSENCE is
+     * what matters: an invoice without one is not a tax invoice, and the
+     * customer's accounts department is entitled to reject it.
+     */
+    companyAbn: z.string(),
+    companyAddress: z.string(),
+    companyPhone: z.string(),
+    companyEmail: z.string(),
+
+    /** Payment terms wording, printed under the totals. */
+    termsText: z.string(),
     footerText: z.string(),
     bankBsb: z.string(),
     bankAccount: z.string(),
+    /** The account NAME the payment goes to. A BSB and number alone are not enough. */
+    bankAccountName: z.string(),
     showGbcaBadge: z.boolean(),
   })
   .meta({ id: 'InvoicingSettings' });
 
-/* ── Integrations (W7) ────────────────────────────────────────────────────── */
-
-export const INTEGRATION_IDS = [
-  'xero',
-  'twilio',
-  'google-maps',
-  'm365-smtp',
-  'm365-outlook',
-  'mistral-ocr',
-] as const;
-export const IntegrationIdSchema = z.enum(INTEGRATION_IDS).meta({ id: 'IntegrationId' });
-export type IntegrationId = z.infer<typeof IntegrationIdSchema>;
-
-export const INTEGRATION_STATES = ['connected', 'not-configured', 'error'] as const;
-export const IntegrationStateSchema = z.enum(INTEGRATION_STATES).meta({ id: 'IntegrationState' });
-export type IntegrationState = z.infer<typeof IntegrationStateSchema>;
-
-export const IntegrationSchema = z
-  .object({
-    id: IntegrationIdSchema,
-    name: NonEmptyStringSchema,
-    purpose: NonEmptyStringSchema,
-    state: IntegrationStateSchema,
-    lastSuccessAt: z.string().nullable(),
-    detail: z.string().nullable(),
-    /** Stated caveats that belong on screen, not in a doc nobody reopens. */
-    caveat: z.string().nullable(),
-  })
-  .meta({ id: 'Integration' });
-
-/* ── Credential types (F53) ───────────────────────────────────────────────── */
-
-export const CredentialTypeSettingSchema = z
-  .object({
-    type: CredentialTypeSchema,
-    label: NonEmptyStringSchema,
-    /** Matt's preference: define the type once, set the lead time per type. */
-    reminderLeadDays: z.number().int().min(1).max(180),
-    requiredForDrivers: z.boolean(),
-  })
-  .meta({ id: 'CredentialTypeSetting' });
-
 export const SettingsSchema = z
   .object({
-    notifications: NotificationSettingsSchema,
     pricing: PricingSettingsSchema,
     invoicing: InvoicingSettingsSchema,
-    integrations: z.array(IntegrationSchema),
-    credentialTypes: z.array(CredentialTypeSettingSchema),
   })
   .meta({ id: 'Settings' });
 
 export type ZoneRate = z.infer<typeof ZoneRateSchema>;
-export type NotificationRule = z.infer<typeof NotificationRuleSchema>;
-export type NotificationSettings = z.infer<typeof NotificationSettingsSchema>;
+export type RateSchedule = z.infer<typeof RateScheduleSchema>;
+export type AppliedRate = z.infer<typeof AppliedRateSchema>;
 export type RateCardSummary = z.infer<typeof RateCardSummarySchema>;
+export type ZoneRateInput = z.infer<typeof ZoneRateInputSchema>;
+export type RateCardCreate = z.infer<typeof RateCardCreateSchema>;
+export type RateScheduleCreate = z.infer<typeof RateScheduleCreateSchema>;
+export type RateCardUpdate = z.infer<typeof RateCardUpdateSchema>;
 export type AdditionalServiceSetting = z.infer<typeof AdditionalServiceSettingSchema>;
+export type AdditionalServiceCreate = z.infer<typeof AdditionalServiceCreateSchema>;
+export type AdditionalServiceUpdate = z.infer<typeof AdditionalServiceUpdateSchema>;
 export type PricingSettings = z.infer<typeof PricingSettingsSchema>;
 export type InvoiceTemplate = z.infer<typeof InvoiceTemplateSchema>;
+export type InvoiceTemplateWrite = z.infer<typeof InvoiceTemplateWriteSchema>;
 export type InvoicingSettings = z.infer<typeof InvoicingSettingsSchema>;
-export type Integration = z.infer<typeof IntegrationSchema>;
-export type CredentialTypeSetting = z.infer<typeof CredentialTypeSettingSchema>;
 export type Settings = z.infer<typeof SettingsSchema>;

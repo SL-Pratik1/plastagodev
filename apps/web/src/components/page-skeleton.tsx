@@ -20,7 +20,7 @@ export function PageSkeleton() {
         <Skeleton className="h-4 w-80" />
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[0, 1, 2, 3].map((index) => (
           <Card key={index} className="p-4">
             <Skeleton className="h-3 w-20" />

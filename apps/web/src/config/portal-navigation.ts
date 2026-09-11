@@ -1,5 +1,6 @@
 import {
   AwardIcon,
+  CalendarClockIcon,
   ChartColumnIcon,
   ClipboardListIcon,
   HomeIcon,
@@ -80,6 +81,21 @@ export const PORTAL_NAV: readonly PortalNavItem[] = [
     capability: 'portal:access',
     primary: true,
     scope: 'M5.7, M5.8, M5.9 — live status, history, completion record + photos',
+  },
+  {
+    to: '/portal/purchase-orders',
+    label: 'Waiting on a date',
+    shortLabel: 'Dates',
+    icon: CalendarClockIcon,
+    /*
+     * `portal:access`, not `portal:book` — a site supervisor has to be able to
+     * do this. Matt, 30:40, is describing the supervisor doing it himself when
+     * the builder's call-up email fails, and gating it behind the booking
+     * capability would lock out the person the screen exists for.
+     */
+    capability: 'portal:access',
+    primary: true,
+    scope: 'M2.12b — orders we have, with no date yet; the fallback when the call-up email fails',
   },
   {
     to: '/portal/invoices',

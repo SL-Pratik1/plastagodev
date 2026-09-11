@@ -11,7 +11,11 @@ import { logger } from '../../lib/logger.js';
 import { extractorClient, TERMINAL_FAILURES } from '../../integrations/extractor.js';
 import { getStorage } from '../../integrations/storage.js';
 import { accountRepository } from '../accounts/account.repository.js';
+import { supervisorProvisioning } from '../portal/supervisor-provisioning.service.js';
+import { adaptCallUp } from './call-up-ingest.adapter.js';
+import { callUpService } from './call-up.service.js';
 import { adaptExtraction } from './po-ingest.adapter.js';
+import { purchaseOrderRepository } from './purchase-order.repository.js';
 import {
   poExtractionRepository,
   type IngestExtractionInput,
@@ -57,7 +61,7 @@ export const poReviewService = {
     return poExtractionRepository.list(query);
   },
 
-  async get(id: string, caller: Caller): Promise<PoExtraction & { documentUrl: string | null }> {
+  async get(id: string, caller: Caller): Promise<PoExtraction> {
     assertReviewer(caller);
 
     const extraction = await poExtractionRepository.findById(id);
@@ -86,7 +90,25 @@ export const poReviewService = {
    * confidence, and the reason it needs review is recorded as a first-class
    * field so the human knows what to check.
    */
-  async ingest(input: IngestExtractionInput): Promise<{ id: string }> {
+  async ingest(input: IngestExtractionInput, caller: Caller): Promise<{ id: string }> {
+    /*
+     * ⚠️ Who may put something into this queue, which is not the same question
+     * as who is signed in.
+     *
+     * The route's own note says an unauthenticated ingest "is a way for anybody
+     * to put a plausible-looking purchase order in front of the office", and
+     * that a service extractor "does not get an exemption" — but nothing here
+     * read the caller, so every signed-in account had the exemption in practice.
+     * A driver or, worse, a CUSTOMER could post a purchase order naming any
+     * number and amount into the queue whose whole purpose is to stop a machine
+     * billing somebody. Confirming one writes a real order against an account.
+     *
+     * The webhook path is unaffected: it authenticates with its own shared
+     * secret and goes through `ingestFromExtractor`, which writes to the
+     * repository directly.
+     */
+    assertReviewer(caller);
+
     /*
      * The review reason is decided HERE, not by the extractor. A vendor that
      * reported its own confidence as "high" would otherwise be deciding whether
@@ -161,6 +183,34 @@ export const poReviewService = {
         );
       }
       return null;
+    }
+
+    /*
+     * ── The second document type in the same mailbox (M2.12b) ─────────────
+     *
+     * Matt, 23:37: *"all purchase orders and call-ups will go to the same email
+     * address."* One inbox, two kinds of document, one webhook — so the template
+     * the extractor matched is the only thing that separates "here is a job" from
+     * "that job is ready on the 21st".
+     *
+     * ⚠️ Checked BEFORE the purchase-order filter below. Without this branch a
+     * call-up would either be ignored (where the PO template id is set) or read
+     * against the PO template and arrive in the review queue as an order with no
+     * area, no allowance and no supervisor — a phantom purchase order.
+     */
+    if (
+      env.EXTRACTOR_CALL_UP_DOCUMENT_ID &&
+      extraction.documentId === env.EXTRACTOR_CALL_UP_DOCUMENT_ID
+    ) {
+      const adapted = adaptCallUp(extraction, {
+        receivedAt: extraction.createdAt ? new Date(extraction.createdAt) : new Date(),
+      });
+
+      // No PO number at all: nothing to match now or by hand later.
+      if (!adapted) return null;
+
+      const outcome = await callUpService.record(adapted.input);
+      return { id: outcome.id };
     }
 
     /*
@@ -279,12 +329,46 @@ export const poReviewService = {
       throw AppError.conflict('That extraction was reviewed by somebody else — reload the queue');
     }
 
+    /*
+     * ⚠️ After the order is written, and never in front of it.
+     *
+     * Matt, 33:25, wants the supervisor on the order to get a login without
+     * anybody keying one in. But confirming the purchase order is the act that
+     * matters commercially, and it must not fail because Twilio is down or
+     * because that mobile turns out to belong to somebody else. So this runs
+     * last, reports its outcome as a status rather than throwing, and a purchase
+     * order with no supervisor attached stays perfectly usable — 34:52: *"it
+     * just sits there with no site supervisor assigned and we can handle that
+     * manually."*
+     */
+    const provisioned = await supervisorProvisioning.ensureForAccount({
+      accountId: input.accountId,
+      accountType: account.accountType,
+      name: input.siteSupervisorName,
+      mobile: input.siteSupervisorMobile,
+      provisionedBy: caller.name,
+      sourceLabel: `PO ${input.poNumber}`,
+    });
+
+    /*
+     * Linked only where the login is genuinely this account's. A login that
+     * belongs elsewhere is deliberately NOT attached: scoping a job to it would
+     * show one builder's work to another builder's contact.
+     */
+    if (provisioned.status === 'created' || provisioned.status === 'reused') {
+      await purchaseOrderRepository.setSupervisorUser(
+        result.purchaseOrderId,
+        provisioned.userId,
+      );
+    }
+
     log.info(
       {
         extractionId: id,
         purchaseOrderId: result.purchaseOrderId,
         poNumber: input.poNumber,
         accountId: input.accountId,
+        supervisor: provisioned.status,
         // The accuracy metric. Which fields the model got wrong, per document.
         correctedFields: corrected,
         correctionCount: corrected.length,

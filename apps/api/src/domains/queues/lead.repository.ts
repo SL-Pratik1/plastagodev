@@ -167,27 +167,23 @@ export const leadRepository = {
     return {
       ...toListItem(row),
       heardAbout: row.heardAbout,
-      notes: notes.map(
-        (note): LeadNote => ({
-          id: note._id.toHexString(),
-          at: note.at.toISOString(),
-          author: note.author,
-          body: note.body,
-        }),
-      ),
-      attachments: attachments.map(
-        (file): LeadAttachment => ({
-          id: file._id.toHexString(),
-          fileName: file.fileName,
-          sizeBytes: file.sizeBytes,
-          contentType: file.contentType,
-          uploadedAt: file.uploadedAt.toISOString(),
-          uploadedBy: file.uploadedBy,
-          // Resolved to a short-lived URL by the service; the key never leaves
-          // the server.
-          url: null,
-        }),
-      ),
+      notes: notes.map((note): LeadNote => ({
+        id: note._id.toHexString(),
+        at: note.at.toISOString(),
+        author: note.author,
+        body: note.body,
+      })),
+      attachments: attachments.map((file): LeadAttachment => ({
+        id: file._id.toHexString(),
+        fileName: file.fileName,
+        sizeBytes: file.sizeBytes,
+        contentType: file.contentType,
+        uploadedAt: file.uploadedAt.toISOString(),
+        uploadedBy: file.uploadedBy,
+        // Resolved to a short-lived URL by the service; the key never leaves
+        // the server.
+        url: null,
+      })),
     };
   },
 
@@ -290,6 +286,23 @@ export const leadRepository = {
     return { id: created._id.toHexString() };
   },
 
+  /**
+   * Every attachment's storage key for one lead, by attachment id.
+   *
+   * One query, because the service needs all of them at once to mint download
+   * URLs — asking per attachment was a query per row on every read of the
+   * detail screen, for data the same screen had already loaded.
+   */
+  async attachmentKeys(leadId: string): Promise<Map<string, string>> {
+    if (!mongoose.isValidObjectId(leadId)) return new Map();
+
+    const rows = await LeadAttachmentModel.find({
+      leadId: new mongoose.Types.ObjectId(leadId),
+    }).lean<{ _id: mongoose.Types.ObjectId; storageKey: string }[]>();
+
+    return new Map(rows.map((row) => [row._id.toHexString(), row.storageKey]));
+  },
+
   async findAttachment(
     attachmentId: string,
     leadId: string,
@@ -344,5 +357,29 @@ export const leadRepository = {
   /** The nav badge: open leads only. */
   async countOpen(): Promise<number> {
     return LeadModel.countDocuments({ convertedAccountId: null, status: { $ne: 'lost' } });
+  },
+
+  /**
+   * The Won / Conversion cards above the grid.
+   *
+   * ⚠️ Deliberately NOT derived from `list()`. The grid hides converted leads,
+   * so counting its rows made "Won" structurally unable to see a single real
+   * win — it could only ever count leads somebody had typed as won without
+   * converting. These three counts span every lead, whatever the grid is
+   * filtered to.
+   *
+   * `won` keys off `convertedAccountId` rather than `status`, because the
+   * account reference is the fact and the status is only a label. Rows carrying
+   * the label with no account behind it are still open work, and are counted
+   * there — which is also what makes them visible enough to get fixed.
+   */
+  async pipelineStats(): Promise<{ open: number; won: number; lost: number }> {
+    const [open, won, lost] = await Promise.all([
+      LeadModel.countDocuments({ convertedAccountId: null, status: { $ne: 'lost' } }),
+      LeadModel.countDocuments({ convertedAccountId: { $ne: null } }),
+      LeadModel.countDocuments({ convertedAccountId: null, status: 'lost' }),
+    ]);
+
+    return { open, won, lost };
   },
 };

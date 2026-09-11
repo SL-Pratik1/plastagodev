@@ -61,6 +61,8 @@ const DOMAINE_ORDER: BookablePurchaseOrder = {
   bagAllowance: 2,
   siteSupervisorName: 'Mathew French',
   siteSupervisorMobile: '0427 821 430',
+  // The login provisioned for him when the order was confirmed (M5.14).
+  siteSupervisorUserId: 'usr00000000000000000mf1',
   amountExGst: '474.68',
 };
 
@@ -141,22 +143,52 @@ vi.mock('../src/domains/places/place.service.js', () => ({
   },
 }));
 
-vi.mock('../src/domains/settings/pricing.service.js', () => ({
-  pricingService: {
-    quote: (input: { expectedAreaM2: number | null; bagCount: number }) => {
-      quotedFor.push({ expectedAreaM2: input.expectedAreaM2, bagCount: input.bagCount });
-      return Promise.resolve({
-        zone: 'sydney',
-        rateCardLabel: 'Clarendon / Domaine',
-        lines: [],
-        subtotalExGst: '474.68',
-        gst: '47.47',
-        totalIncGst: '522.15',
-        caveat: '',
-      });
+vi.mock('../src/domains/settings/pricing.service.js', () => {
+  const preview = {
+    zone: 'sydney' as const,
+    rateCardLabel: 'Clarendon / Domaine',
+    lines: [],
+    subtotalExGst: '474.68',
+    gst: '47.47',
+    totalIncGst: '522.15',
+    caveat: '',
+  };
+
+  /**
+   * M6.2 — the rates as applied, which `create` freezes onto the job.
+   *
+   * Stubbed rather than omitted: the job repository now requires it, so a fake
+   * that returned only the preview would fail every booking here for a reason
+   * that has nothing to do with purchase orders.
+   */
+  const appliedRate = {
+    rateCardId: 'clarendon-domaine',
+    rateCardLabel: 'Clarendon / Domaine',
+    zone: 'sydney' as const,
+    scheduleFrom: '2026-04-01',
+    serviceCharge: '220.00',
+    ratePerM2: '0.16',
+  };
+
+  const record = (input: { expectedAreaM2: number | null; bagCount: number }) => {
+    quotedFor.push({ expectedAreaM2: input.expectedAreaM2, bagCount: input.bagCount });
+  };
+
+  return {
+    pricingService: {
+      quote: (input: { expectedAreaM2: number | null; bagCount: number }) => {
+        record(input);
+        return Promise.resolve(preview);
+      },
+
+      /* What `create` calls. Both record, so preview-versus-booked still compares. */
+      quoteWithAppliedRate: (input: { expectedAreaM2: number | null; bagCount: number }) => {
+        record(input);
+        return Promise.resolve({ preview, appliedRate });
+      },
     },
-  },
-}));
+  };
+});
 
 /*
  * M8.1 / M8.2 — booking a job, moving it and completing it now message the site
@@ -175,6 +207,14 @@ const OFFICE = {
   name: 'Renee Boyle',
   roles: ['operations'] as Role[],
   accountId: null,
+};
+
+/** The builder's own supervisor, booking through the portal. */
+const SUPERVISOR = {
+  userId: 'usr00000000000000000sv1',
+  name: 'Dane Whitfield',
+  roles: ['customer-site-supervisor'] as Role[],
+  accountId: account.id,
 };
 
 function draft(overrides: Partial<JobDraft> = {}): JobDraft {
@@ -372,6 +412,61 @@ describe('an order belonging to another account', () => {
 });
 
 /* ── Bookings with no order ───────────────────────────────────────────────── */
+
+/*
+ * Matt, 33:57: *"that job should get assigned to that site supervisor… they get
+ * an email and able to log in in the system and see all these job details."*
+ *
+ * `bookedByUserId` is an AUTHORISATION field (see the job model): a supervisor
+ * sees the jobs it points at. An office booking leaves it null, which is
+ * invisible to everybody — so without this the office confirms the order, the
+ * job appears, and the one person who needs it cannot see it.
+ */
+describe('the order’s supervisor can see the job booked against it', () => {
+  it('scopes an office booking to the supervisor the order named', async () => {
+    await jobService.create(draft({ purchaseOrderId: DOMAINE_ORDER.id }), OFFICE);
+
+    expect(repo.calls.lastCreate?.bookedByUserId).toBe('usr00000000000000000mf1');
+  });
+
+  /*
+   * ⚠️ The office user stays the one who booked it. The two fields answer
+   * different questions — who keyed it in, and who may see it — and collapsing
+   * them would put a supervisor's name on work they never raised.
+   */
+  it('still records the office user as the one who booked it', async () => {
+    await jobService.create(draft({ purchaseOrderId: DOMAINE_ORDER.id }), OFFICE);
+
+    expect(repo.calls.lastCreate?.bookedByName).toBe(OFFICE.name);
+    expect(repo.calls.lastCreate?.bookedBySource).toBe('office');
+  });
+
+  /*
+   * An order with a blank supervisor is normal — Matt, 34:52: *"sometimes
+   * they're blank… then it just sits there with no site supervisor assigned."*
+   * Null is invisible to every supervisor, which is the safe direction.
+   */
+  it('leaves the job unscoped when the order named nobody', async () => {
+    orders[DOMAINE_ORDER.id] = {
+      ...DOMAINE_ORDER,
+      siteSupervisorName: null,
+      siteSupervisorMobile: null,
+      siteSupervisorUserId: null,
+    };
+
+    await jobService.create(draft({ purchaseOrderId: DOMAINE_ORDER.id }), OFFICE);
+
+    expect(repo.calls.lastCreate?.bookedByUserId).toBeNull();
+  });
+
+  /* A portal booking still scopes to whoever actually made it. */
+  it('does not let an order override a supervisor who booked it themselves', async () => {
+    await jobService.create(draft({ purchaseOrderId: DOMAINE_ORDER.id }), SUPERVISOR);
+
+    expect(repo.calls.lastCreate?.bookedByUserId).toBe(SUPERVISOR.userId);
+    expect(repo.calls.lastCreate?.bookedBySource).toBe('portal');
+  });
+});
 
 describe('a booking with no purchase order', () => {
   it('still uses the form’s own figures', async () => {

@@ -59,6 +59,9 @@ export interface StoredStop {
   riskAssessmentDoneAt: Date | null;
   recoveredWeightKg: number | null;
   recoveredWeightBasis: WeightBasis | null;
+  bagWeights: number[];
+  /** What the driver counted. Null until weights are captured (M4.3). */
+  collectedBagCount: number | null;
   arrivedAt: Date | null;
   completedAt: Date | null;
   siteName: string;
@@ -71,6 +74,12 @@ export interface StoredCharge {
   amount: string;
   photoCount: number;
   note: string | null;
+  /** Present on charges raised through `syncPendingCharge` (M6.5 overages). */
+  description?: string;
+  quantity?: number;
+  unitRate?: string;
+  raisedBy?: string;
+  approvalState?: 'pending' | 'approved' | 'rejected';
 }
 
 export interface StoredEvent {
@@ -127,6 +136,8 @@ export function createFakeDriverRepository(driverId: string) {
       riskAssessmentRequired: stop.riskAssessmentRequired,
       recoveredWeightKg: stop.recoveredWeightKg,
       recoveredWeightBasis: stop.recoveredWeightBasis,
+      bagWeights: stop.bagWeights,
+      collectedBagCount: stop.collectedBagCount,
       runId: stop.runId ? objectId(stop.runId) : null,
       runSequence: stop.runSequence,
       driverId: objectId(stop.driverId),
@@ -156,6 +167,8 @@ export function createFakeDriverRepository(driverId: string) {
         riskAssessmentDoneAt: null,
         recoveredWeightKg: null,
         recoveredWeightBasis: null,
+        bagWeights: [],
+        collectedBagCount: null,
         arrivedAt: null,
         completedAt: null,
         siteName: `Lot ${String(overrides.jobNumber)}`,
@@ -261,12 +274,17 @@ export function createFakeDriverRepository(driverId: string) {
         jobId: string;
         bagCount: number;
         loadType: LoadType;
+        bagWeights: number[];
         craneScaleKg: number | null;
       }) {
         const stop = stops.get(input.jobId);
         if (!stop) return Promise.resolve(false);
-        stop.bagCount = input.bagCount;
+        // ⚠️ Mirrors the real repository: `collectedBagCount`, not `bagCount`.
+        // A fake that clobbered the allowance would hide the very bug the
+        // overage tests exist to catch.
+        stop.collectedBagCount = input.bagCount;
         stop.loadType = input.loadType;
+        stop.bagWeights = input.bagWeights;
         stop.recoveredWeightKg = input.craneScaleKg;
         stop.recoveredWeightBasis = input.craneScaleKg === null ? null : 'actual';
         return Promise.resolve(true);
@@ -357,7 +375,7 @@ export function createFakeDriverRepository(driverId: string) {
         photoCount: number;
         note: string | null;
       }) {
-        charges.push(input);
+        charges.push({ ...input, approvalState: 'pending' });
         return Promise.resolve(nextId());
       },
 
@@ -365,6 +383,68 @@ export function createFakeDriverRepository(driverId: string) {
         return Promise.resolve(
           charges.some((charge) => charge.jobId === jobId && charge.code === code),
         );
+      },
+
+      /*
+       * Models the real method's two guards faithfully: a decided charge is
+       * never rewritten, and a pending one is updated in place rather than
+       * duplicated. Getting either wrong here would let a broken overage pass.
+       */
+      syncPendingCharge(input: {
+        jobId: string;
+        code: string;
+        description: string;
+        quantity: number;
+        unitRate: string;
+        amount: string;
+        raisedBy: string;
+        raisedAt: Date;
+        note: string | null;
+      }) {
+        const mine = charges.filter(
+          (charge) => charge.jobId === input.jobId && charge.code === input.code,
+        );
+
+        if (mine.some((charge) => charge.approvalState !== 'pending')) {
+          return Promise.resolve('locked' as const);
+        }
+
+        const existing = mine[0];
+        if (!existing) {
+          charges.push({
+            jobId: input.jobId,
+            code: input.code,
+            description: input.description,
+            quantity: input.quantity,
+            unitRate: input.unitRate,
+            amount: input.amount,
+            raisedBy: input.raisedBy,
+            photoCount: 0,
+            note: input.note,
+            approvalState: 'pending',
+          });
+          return Promise.resolve('created' as const);
+        }
+
+        if (existing.quantity === input.quantity) return Promise.resolve('unchanged' as const);
+
+        existing.description = input.description;
+        existing.quantity = input.quantity;
+        existing.unitRate = input.unitRate;
+        existing.amount = input.amount;
+        existing.raisedBy = input.raisedBy;
+        existing.note = input.note;
+        return Promise.resolve('updated' as const);
+      },
+
+      removePendingCharge(jobId: string, code: string) {
+        const index = charges.findIndex(
+          (charge) =>
+            charge.jobId === jobId && charge.code === code && charge.approvalState === 'pending',
+        );
+        if (index === -1) return Promise.resolve(false);
+        charges.splice(index, 1);
+        return Promise.resolve(true);
       },
 
       appendEvent(input: StoredEvent) {

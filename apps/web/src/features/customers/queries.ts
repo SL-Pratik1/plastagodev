@@ -1,4 +1,4 @@
-import type { AccountDraft } from '@plastago/shared';
+import type { AccountDraft, AccountType } from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
 import { useServices } from '@/services/services-context';
@@ -39,6 +39,29 @@ export function useCreateCustomer() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
       // The account picker on job creation is one of these.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.lookups.all });
+    },
+  });
+}
+
+/**
+ * Move an account between the two journeys — builder or contractor.
+ *
+ * ── Why the lookups go stale too ──────────────────────────────────────────
+ * The type decides which booking form the customer sees and whether they have
+ * site supervisors, so it is not only this page that is now wrong: the account
+ * pickers cache the same rows. Invalidating both is cheaper than a stale
+ * contractor sitting in a dropdown with a builder's form behind it.
+ */
+export function useSetAccountType(accountId: string | undefined) {
+  const { customers } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (accountType: AccountType) =>
+      customers.setAccountType(accountId ?? '', accountType),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.lookups.all });
     },
   });

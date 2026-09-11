@@ -27,6 +27,8 @@ let existingExternalId: string | null = null;
 let vendorExtraction: Record<string, unknown> = {};
 let fetchedIds: string[] = [];
 let enabled = true;
+/** Call-ups the webhook routed away from the purchase-order path (M2.12b). */
+let recordedCallUps: Record<string, unknown>[] = [];
 
 vi.mock('../src/domains/queues/po-extraction.repository.js', () => ({
   poExtractionRepository: {
@@ -116,11 +118,41 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
  */
 vi.mock('../src/config/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/config/env.js')>();
-  return { ...actual, env: { ...actual.env, EXTRACTOR_DOCUMENT_ID: 'tpl1' } };
+  return {
+    ...actual,
+    env: {
+      ...actual.env,
+      EXTRACTOR_DOCUMENT_ID: 'tpl1',
+      // M2.12b — the second template in the same mailbox (Matt, 23:37).
+      EXTRACTOR_CALL_UP_DOCUMENT_ID: 'tpl-call-up',
+    },
+  };
 });
 
 vi.mock('../src/integrations/storage.js', () => ({
   getStorage: () => ({ presignDownload: () => Promise.resolve('https://x') }),
+}));
+
+/**
+ * M2.12b — the call-up path.
+ *
+ * Mocked because what is under test here is which way the webhook SENDS a
+ * document, not what the call-up service then does with it — that has its own
+ * 39 tests. This file only has to prove the fork is taken correctly.
+ */
+vi.mock('../src/domains/queues/call-up.service.js', () => ({
+  callUpService: {
+    record: (input: Record<string, unknown>) => {
+      recordedCallUps.push(input);
+      return Promise.resolve({
+        id: 'aa0000000000000000000001',
+        state: 'applied',
+        reason: null,
+        jobId: null,
+        jobNumber: 61501,
+      });
+    },
+  },
 }));
 
 const { poReviewService } = await import('../src/domains/queues/po-review.service.js');
@@ -192,6 +224,101 @@ describe('a repeated callback', () => {
     await poReviewService.ingestFromExtractor('6aa1296322fa384a1165608d');
 
     expect(fetchedIds).toEqual([]);
+  });
+});
+
+/*
+ * Matt, 23:37: *"all purchase orders and call-ups will go to the same email
+ * address."* One mailbox, two kinds of document, one webhook — so the template
+ * the extractor matched is the only thing separating "here is a job" from "that
+ * job is ready on the 21st".
+ */
+describe('telling a call-up from a purchase order (M2.12b)', () => {
+  beforeEach(() => {
+    recordedCallUps = [];
+  });
+
+  it('sends a call-up document to the call-up path, not the PO queue', async () => {
+    vendorExtraction = {
+      id: 'ext-call-up',
+      fileName: 'Call up 4500123456.pdf',
+      status: 'completed',
+      documentId: 'tpl-call-up',
+      createdAt: '2026-09-14T02:00:00.000Z',
+      extractedData: {
+        po_number: '4500123456',
+        ready_date: '21/09/2026',
+        notification_type: 'new',
+      },
+    };
+
+    await poReviewService.ingestFromExtractor('ext-call-up');
+
+    expect(recordedCallUps).toHaveLength(1);
+    expect(recordedCallUps[0]?.poNumber).toBe('4500123456');
+    // Day-first, the way Australian builders write it.
+    expect(recordedCallUps[0]?.readyDate).toBe('2026-09-21');
+    expect(recordedCallUps[0]?.source).toBe('email');
+    // ⚠️ And emphatically NOT a purchase order.
+    expect(queued).toHaveLength(0);
+  });
+
+  it('still sends a purchase-order document to the PO queue', async () => {
+    vendorExtraction = {
+      ...vendorExtraction,
+      id: 'ext-po',
+      documentId: 'tpl1',
+      extractedData: { po_number: '4500123456', area_m2: 823.41 },
+    };
+
+    await poReviewService.ingestFromExtractor('ext-po');
+
+    expect(recordedCallUps).toHaveLength(0);
+    expect(queued).toHaveLength(1);
+  });
+
+  /*
+   * ⚠️ The regression this fork exists to prevent. Without the branch a call-up
+   * read against the PO template arrives in the review queue as an order with no
+   * area, no allowance and no supervisor — a phantom purchase order somebody
+   * then has to work out how to reject.
+   */
+  it('never lets a call-up fall through into the purchase-order queue', async () => {
+    vendorExtraction = {
+      id: 'ext-cu2',
+      fileName: 'RESCHEDULED Lot 214.pdf',
+      status: 'completed',
+      documentId: 'tpl-call-up',
+      createdAt: '2026-09-14T02:00:00.000Z',
+      extractedData: { po_number: 'PO-88213', notification_type: 'green' },
+    };
+
+    await poReviewService.ingestFromExtractor('ext-cu2');
+
+    expect(queued).toHaveLength(0);
+    expect(recordedCallUps[0]?.kind).toBe('reschedule');
+  });
+
+  /*
+   * A call-up with no PO number cannot be matched to an order now or by a human
+   * later, so there is nothing worth queueing — and it must not become a
+   * purchase order either.
+   */
+  it('ignores a call-up carrying no PO number at all', async () => {
+    vendorExtraction = {
+      id: 'ext-cu3',
+      fileName: 'Automatic reply.pdf',
+      status: 'completed',
+      documentId: 'tpl-call-up',
+      createdAt: '2026-09-14T02:00:00.000Z',
+      extractedData: { notification_type: 'new' },
+    };
+
+    const result = await poReviewService.ingestFromExtractor('ext-cu3');
+
+    expect(result).toBeNull();
+    expect(recordedCallUps).toHaveLength(0);
+    expect(queued).toHaveLength(0);
   });
 });
 

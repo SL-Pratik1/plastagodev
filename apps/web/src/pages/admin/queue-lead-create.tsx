@@ -1,7 +1,10 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import {
+  LEAD_ATTACHABLE_TYPES,
+  LEAD_ATTACHMENT_ACCEPT,
   LEAD_SOURCES,
   LEAD_SOURCE_LABELS,
+  MAX_UPLOAD_BYTES,
   ZONES,
   ZONE_LABELS,
   type LeadCreate,
@@ -21,12 +24,15 @@ import {
   buttonVariants,
   useToast,
 } from '@plastago/ui';
+import { FileTextIcon, PaperclipIcon, XIcon } from 'lucide-react';
+import { useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router';
 import * as z from 'zod';
 import { PageHeader } from '@/components/page-header';
-import { useLeadCreate } from '@/features/queues/queries';
+import { useLeadAttach, useLeadCreate } from '@/features/queues/queries';
 import { describeError } from '@/lib/error-message';
+import { formatFileSize } from '@/lib/format';
 import { isServiceError } from '@/services/service-error';
 
 /**
@@ -114,6 +120,75 @@ export function AdminQueueLeadCreatePage() {
   const navigate = useNavigate();
   const toast = useToast();
   const createLead = useLeadCreate();
+  const attach = useLeadAttach();
+
+  /**
+   * Files chosen before the lead exists.
+   *
+   * ── Why they are held here and not uploaded as they are picked ────────────
+   * An attachment is stored under a key built from the lead's id, and there is
+   * no id until the lead is saved. The alternatives were a staging area on the
+   * server with something to sweep up whatever is never claimed, or refusing to
+   * offer the field at all — and the office has the proposal open while they are
+   * still on the call, which is the moment it is worth capturing.
+   *
+   * ⚠️ So the save is two steps, and the second one can fail on its own. The
+   * lead is never rolled back if an upload fails: the lead is the valuable part,
+   * the file can be attached again from the detail screen.
+   */
+  const [staged, setStaged] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * Checked here as well as on the server.
+   *
+   * Not defence — the server is the authority. It is about *when* somebody is
+   * told: refusing a 30 MB file the moment it is picked costs nothing, whereas
+   * discovering it after the lead is saved means an error toast attached to a
+   * screen that has already navigated away.
+   */
+  const stageFiles = (picked: File[]) => {
+    const accepted: File[] = [];
+
+    for (const file of picked) {
+      if (staged.some((held) => held.name === file.name && held.size === file.size)) continue;
+
+      if (file.size === 0) {
+        toast.error(`${file.name} is empty`, 'The file has no contents.');
+        continue;
+      }
+
+      if (file.size > MAX_UPLOAD_BYTES) {
+        toast.error(
+          `${file.name} is too large`,
+          `Attachments must be under ${String(Math.round(MAX_UPLOAD_BYTES / 1024 / 1024))} MB.`,
+        );
+        continue;
+      }
+
+      /*
+       * An empty `file.type` is allowed through. Windows reports nothing for a
+       * .docx with no handler registered, and the service layer recovers the
+       * type from the extension — rejecting it here would block a real file the
+       * upload would have accepted.
+       */
+      if (file.type !== '' && !(LEAD_ATTACHABLE_TYPES as readonly string[]).includes(file.type)) {
+        toast.error(
+          `${file.name} cannot be attached`,
+          'Attach a PDF, a Word document or an image.',
+        );
+        continue;
+      }
+
+      accepted.push(file);
+    }
+
+    if (accepted.length > 0) setStaged((held) => [...held, ...accepted]);
+  };
+
+  const unstage = (file: File) => {
+    setStaged((held) => held.filter((each) => each !== file));
+  };
 
   const {
     register,
@@ -146,10 +221,36 @@ export function AdminQueueLeadCreatePage() {
   const onSubmit = async (values: FormValues) => {
     try {
       const lead = await createLead.mutateAsync(toLead(values));
-      toast.success(
-        `${lead.companyName} added to the queue`,
-        'Logged as a new lead. Progress it, or convert it to an account once the terms are agreed.',
-      );
+
+      /*
+       * The lead exists from here on, so nothing below is allowed to throw out
+       * of this block — a failed upload must not be reported as a failed save,
+       * and must not stop the navigation. Sequential rather than parallel: each
+       * upload is a presign, a PUT and a re-read, and firing five at once on a
+       * site office's connection is how the slowest of them times out.
+       */
+      const failed: string[] = [];
+      for (const file of staged) {
+        try {
+          await attach.mutateAsync({ id: lead.id, file });
+        } catch {
+          failed.push(file.name);
+        }
+      }
+
+      if (failed.length === 0) {
+        toast.success(
+          `${lead.companyName} added to the queue`,
+          'Logged as a new lead. Progress it, or convert it to an account once the terms are agreed.',
+        );
+      } else {
+        // Named, not counted. "2 files failed" leaves somebody comparing lists.
+        toast.error(
+          `${lead.companyName} was saved, but not everything attached`,
+          `${failed.join(', ')} did not upload. Attach ${failed.length === 1 ? 'it' : 'them'} again from the lead.`,
+        );
+      }
+
       // Straight to the detail screen rather than back to the grid: the call is
       // usually not over, and the next thing wanted is the note thread.
       await navigate(`/admin/queues/leads/${lead.id}`);
@@ -174,7 +275,7 @@ export function AdminQueueLeadCreatePage() {
       />
 
       <form onSubmit={(event) => void handleSubmit(onSubmit)(event)} noValidate>
-        <div className="grid gap-4 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="space-y-4 lg:col-span-2">
             <Card>
               <CardHeader>
@@ -183,7 +284,7 @@ export function AdminQueueLeadCreatePage() {
                   Enough to ring them back. This is the only part that is required.
                 </p>
               </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2">
+              <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field
                   id="lead-company"
                   label="Company"
@@ -249,7 +350,7 @@ export function AdminQueueLeadCreatePage() {
                   the call is worth more than a blank field.
                 </p>
               </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2">
+              <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field
                   id="lead-zone"
                   label="Zone"
@@ -337,6 +438,98 @@ export function AdminQueueLeadCreatePage() {
                     />
                   )}
                 </Field>
+              </CardContent>
+            </Card>
+
+            {/*
+              Attachments, staged (Matt, 5:53).
+
+              The same card as the detail screen, with one honest difference:
+              nothing is uploaded until the lead is saved, because the file is
+              stored under the lead's id and there is not one yet. The card says
+              so rather than showing a spinner over a lead that does not exist.
+            */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Attachments</CardTitle>
+                <p className="text-xs text-muted-foreground">
+                  A proposal already drafted, or anything emailed to them. Uploaded when the lead is
+                  saved, and it stays with the lead whether or not it converts.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {staged.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    Nothing chosen. Optional — files can be attached later from the lead.
+                  </p>
+                ) : (
+                  <ul className="divide-y divide-border">
+                    {staged.map((file) => (
+                      <li
+                        key={`${file.name}:${String(file.size)}`}
+                        className="flex items-center justify-between gap-3 py-2 first:pt-0"
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <FileTextIcon
+                            aria-hidden
+                            className="size-4 shrink-0 text-muted-foreground"
+                          />
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-medium">{file.name}</span>
+                            <span className="block text-xs text-muted-foreground">
+                              {formatFileSize(file.size)} · uploads when you save
+                            </span>
+                          </span>
+                        </span>
+
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={isSubmitting}
+                          onClick={() => {
+                            unstage(file);
+                          }}
+                        >
+                          <XIcon aria-hidden />
+                          Remove
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {/* Hidden real input, same reasoning as the detail screen: the
+                    native control cannot be styled, and its "No file chosen"
+                    label contradicts the list above it. */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept={LEAD_ATTACHMENT_ACCEPT}
+                  className="sr-only"
+                  onChange={(event) => {
+                    stageFiles([...(event.target.files ?? [])]);
+                    // Cleared so re-picking the same file fires change again.
+                    event.target.value = '';
+                  }}
+                />
+                {/*
+                  ⚠️ `type="button"`. Inside a form, a button with no type
+                  submits it — this one would create the lead instead of opening
+                  the file picker.
+                */}
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isSubmitting}
+                  onClick={() => {
+                    fileInputRef.current?.click();
+                  }}
+                >
+                  <PaperclipIcon aria-hidden />
+                  Choose files
+                </Button>
               </CardContent>
             </Card>
           </div>

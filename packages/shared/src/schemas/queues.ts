@@ -1,5 +1,6 @@
 import * as z from 'zod';
 import {
+  AbnSchema,
   IsoDateSchema,
   IsoDateTimeSchema,
   MoneySchema,
@@ -7,6 +8,7 @@ import {
   ObjectIdSchema,
 } from './primitives.js';
 import {
+  AccountTypeSchema,
   BrandIdSchema,
   CaptureModeSchema,
   PoPolicySchema,
@@ -265,7 +267,6 @@ export const MatchCandidateSchema = z
   })
   .meta({ id: 'MatchCandidate' });
 
-
 /* ── The purchase order itself (M2.12 · I6) ──────────────────────────────── */
 
 /**
@@ -322,6 +323,14 @@ export const PurchaseOrderSchema = z
     /* ── Who is on site ───────────────────────────────────────────────── */
     siteSupervisorName: z.string().nullable(),
     siteSupervisorMobile: z.string().nullable(),
+    /**
+     * The portal login provisioned for that person, once there is one.
+     *
+     * Null where the order named nobody, where the account is a contractor, or
+     * where that mobile already belongs to somebody else's login — see the
+     * field on the model.
+     */
+    siteSupervisorUserId: ObjectIdSchema.nullable(),
 
     amountExGst: MoneySchema.nullable(),
     /** The stored original. The office reads figures off it during review. */
@@ -356,24 +365,185 @@ export const CALL_UP_SOURCE_LABELS: Record<CallUpSource, string> = {
   phone: 'Phoned in',
 };
 
+/**
+ * What a call-up is telling us to do — Matt's own colour coding (24:07).
+ *
+ * He reads these off the builder's portal without opening them: *"this one here
+ * is, it's in green, it's been rescheduled from this date to this date… Green
+ * means it's been rescheduled from another day, whereas blue is a brand new
+ * notification. There are red ones which are like job cancellations, but I've
+ * probably had 10 of them in the last four years, so they're very rare."*
+ *
+ * ⚠️ `cancel` is rare and must still be handled. Ten in four years is ten
+ * trucks that drove to a site with nothing on it — the cost of ignoring it is
+ * not proportional to how often it happens.
+ */
+export const CALL_UP_KINDS = ['new', 'reschedule', 'cancel'] as const;
+export const CallUpKindSchema = z.enum(CALL_UP_KINDS).meta({ id: 'CallUpKind' });
+export type CallUpKind = z.infer<typeof CallUpKindSchema>;
+
+export const CALL_UP_KIND_LABELS: Record<CallUpKind, string> = {
+  new: 'New booking',
+  reschedule: 'Rescheduled',
+  cancel: 'Cancelled',
+};
+
+/**
+ * Whether the call-up actually moved the work, or is waiting for a human.
+ *
+ * Same rule as the purchase-order queue: never silently guess. A call-up naming
+ * a PO nobody has on file is not a booking, and inventing a job for it would put
+ * a truck on a road for work that was never ordered.
+ */
+export const CALL_UP_STATES = ['applied', 'needs-review', 'rejected'] as const;
+export const CallUpStateSchema = z.enum(CALL_UP_STATES).meta({ id: 'CallUpState' });
+export type CallUpState = z.infer<typeof CallUpStateSchema>;
+
+export const CALL_UP_STATE_LABELS: Record<CallUpState, string> = {
+  applied: 'Scheduled',
+  'needs-review': 'Needs review',
+  rejected: 'Rejected',
+};
+
+/** Why a call-up could not be applied on its own. */
+export const CALL_UP_REVIEW_REASONS = [
+  /** No confirmed purchase order carries that number. */
+  'no-matching-po',
+  /** More than one order matches, so which job to move is a guess. */
+  'ambiguous-po',
+  /** A reschedule or cancellation for an order that has no job yet. */
+  'no-job-to-change',
+  /** The job is already collected or invoiced — too late to move it. */
+  'job-finished',
+  /** The order's suburb is not one we service, so the job cannot be priced. */
+  'unknown-suburb',
+  /** A new booking for an order that already produced a job. */
+  'already-booked',
+] as const;
+export const CallUpReviewReasonSchema = z
+  .enum(CALL_UP_REVIEW_REASONS)
+  .meta({ id: 'CallUpReviewReason' });
+export type CallUpReviewReason = z.infer<typeof CallUpReviewReasonSchema>;
+
+export const CALL_UP_REVIEW_REASON_LABELS: Record<CallUpReviewReason, string> = {
+  'no-matching-po': 'No purchase order on file with that number',
+  'ambiguous-po': 'More than one order has that number',
+  'no-job-to-change': 'No job booked against that order yet',
+  'job-finished': 'That job is already finished',
+  'unknown-suburb': 'The order’s suburb is not one we service',
+  'already-booked': 'That order already has a job',
+};
+
 export const CallUpSchema = z
   .object({
     id: ObjectIdSchema,
-    /** The order this call-up releases. A call-up without one is a lead. */
-    purchaseOrderId: ObjectIdSchema,
+    /**
+     * The order this call-up releases.
+     *
+     * ⚠️ Nullable, unlike the original sketch of this record. A call-up naming a
+     * PO number nobody has on file still has to be STORED — it is a real email
+     * about real work, and dropping it means the job never happens and there is
+     * no trace of why. It lands unmatched, with `needs-review`.
+     */
+    purchaseOrderId: ObjectIdSchema.nullable(),
+    /** The number as it arrived. The only handle on an unmatched call-up. */
     poNumber: NonEmptyStringSchema,
+    accountId: ObjectIdSchema.nullable(),
+    accountName: z.string().nullable(),
     receivedAt: IsoDateTimeSchema,
     source: CallUpSourceSchema,
-    /** The date the board plans against — the whole point of the call-up. */
-    readyDate: IsoDateSchema,
-    /** Set once the call-up has produced a job. Null while it is being read. */
+    kind: CallUpKindSchema,
+    /**
+     * The date the board plans against — the whole point of the call-up.
+     *
+     * ⚠️ Null on a cancellation, which names no date. Null is not "today".
+     */
+    readyDate: IsoDateSchema.nullable(),
+    /** The date it moved FROM, on a reschedule. Context for the office. */
+    previousReadyDate: IsoDateSchema.nullable(),
+    state: CallUpStateSchema,
+    /** Why it is waiting for a human. Null once applied. */
+    reason: CallUpReviewReasonSchema.nullable(),
+    /** Set once the call-up has produced or changed a job. */
     jobId: ObjectIdSchema.nullable(),
     jobNumber: z.number().int().positive().nullable(),
     note: z.string(),
+    resolvedAt: IsoDateTimeSchema.nullable(),
+    resolvedBy: z.string().nullable(),
   })
   .meta({ id: 'CallUp' });
 
 export type CallUp = z.infer<typeof CallUpSchema>;
+
+/**
+ * Calling a purchase order up by hand (Matt, 29:03 and 30:40).
+ *
+ * *"Sometimes the builder's systems that aren't work, we don't get this email.
+ * So there's still the manual ability… he can log into his portal and that job,
+ * that PO that we got will be sitting there on his account and he can go call
+ * this up for the 21st."*
+ *
+ * Deliberately only a date and a note: everything else about the job is already
+ * on the order, which is the whole reason the supervisor can do this in two taps
+ * rather than filling in a form they cannot answer.
+ */
+export const CallUpRequestSchema = z
+  .object({
+    readyDate: IsoDateSchema,
+    note: z.string().trim().max(500).default(''),
+  })
+  .meta({ id: 'CallUpRequest' });
+
+export type CallUpRequest = z.infer<typeof CallUpRequestSchema>;
+
+/**
+ * What calling up an order actually did.
+ *
+ * ── Why the caller is told, rather than just given a 201 ──────────────────
+ * Because "recorded" and "scheduled" are different outcomes and look identical
+ * from outside. A supervisor who picks a date and gets a bare success would
+ * reasonably believe a truck is coming; if the order's suburb is not one we
+ * service, it went to the office queue instead. The screen has to be able to say
+ * which, so the shape says which.
+ */
+export const CallUpOutcomeSchema = z
+  .object({
+    id: ObjectIdSchema,
+    state: CallUpStateSchema,
+    /** Why it is waiting for the office. Null once applied. */
+    reason: CallUpReviewReasonSchema.nullable(),
+    jobId: ObjectIdSchema.nullable(),
+    jobNumber: z.number().int().positive().nullable(),
+  })
+  .meta({ id: 'CallUpOutcome' });
+
+export type CallUpOutcome = z.infer<typeof CallUpOutcomeSchema>;
+
+/**
+ * A confirmed order with no job yet — Matt's *"sitting there waiting"* (21:30).
+ *
+ * The office list this feeds is the answer to "what have we been told about that
+ * has not been booked in?", which before this had no screen at all.
+ */
+export const AwaitingCallUpSchema = z
+  .object({
+    purchaseOrderId: ObjectIdSchema,
+    poNumber: NonEmptyStringSchema,
+    accountId: ObjectIdSchema,
+    accountName: NonEmptyStringSchema,
+    receivedAt: IsoDateTimeSchema,
+    lotNumber: z.string().nullable(),
+    addressLine: z.string().nullable(),
+    suburb: z.string().nullable(),
+    expectedAreaM2: z.number().nullable(),
+    bagAllowance: z.number().int().nullable(),
+    siteSupervisorName: z.string().nullable(),
+    /** Whether the order's suburb resolves to a place we service. */
+    serviceable: z.boolean(),
+  })
+  .meta({ id: 'AwaitingCallUp' });
+
+export type AwaitingCallUp = z.infer<typeof AwaitingCallUpSchema>;
 
 export const PoExtractionItemSchema = z
   .object({
@@ -414,6 +584,22 @@ export const PoExtractionItemSchema = z
   .meta({ id: 'PoExtractionItem' });
 
 export const PoExtractionSchema = PoExtractionItemSchema.extend({
+  /**
+   * A short-lived link to the stored original, shown beside the fields.
+   *
+   * Matt, 28:30, on reviewing an extraction: *"do they see a copy of that PDF
+   * on the review screen? …I'd be looking at a copy of the PDF too."* Checking
+   * eight extracted values against nothing is not a review, so the page it came
+   * off has to be on screen next to them.
+   *
+   * ⚠️ Null where the copy could not be taken — `storeOriginal` swallows a
+   * failed download rather than dropping a real purchase order, so an
+   * extraction with no stored original is a normal state, not an error. The
+   * screen falls back to the OCR text in that case.
+   *
+   * Presigned and short-lived, so it is minted per request and never stored.
+   */
+  documentUrl: z.string().nullable(),
   /** Plain-text rendering of the source document, shown beside the fields. */
   documentText: z.string(),
   fields: z.array(ExtractedFieldSchema),
@@ -469,6 +655,27 @@ export const LEAD_STATUSES = ['new', 'contacted', 'quoted', 'won', 'lost'] as co
 export const LeadStatusSchema = z.enum(LEAD_STATUSES).meta({ id: 'LeadStatus' });
 export type LeadStatus = z.infer<typeof LeadStatusSchema>;
 
+/**
+ * The statuses a human may set by hand.
+ *
+ * ⚠️ `won` is absent on purpose, and that absence is the whole point.
+ *
+ * A lead is won when it becomes an ACCOUNT — which is A.4, where the customer
+ * code, the rate card and the terms are decided. Letting the status dropdown
+ * write `won` produced a lead that claimed to be a customer with no account,
+ * no rate card and nothing to invoice against, and it did so silently: the
+ * console warned and then saved it anyway. Those rows then poisoned the
+ * conversion figures, because they were the only "wins" the grid could see.
+ *
+ * `lost` stays — closing an enquiry that went nowhere is a genuine by-hand
+ * decision with nothing downstream of it.
+ */
+export const LEAD_WORKABLE_STATUSES = ['new', 'contacted', 'quoted', 'lost'] as const;
+export const LeadWorkableStatusSchema = z
+  .enum(LEAD_WORKABLE_STATUSES)
+  .meta({ id: 'LeadWorkableStatus' });
+export type LeadWorkableStatus = z.infer<typeof LeadWorkableStatusSchema>;
+
 export const LEAD_STATUS_LABELS: Record<LeadStatus, string> = {
   new: 'New',
   contacted: 'Contacted',
@@ -515,6 +722,41 @@ export const LeadNoteSchema = z
  * Attachments are therefore append-and-remove, never edit-in-place: a proposal
  * that can be silently swapped is not evidence of anything.
  */
+/**
+ * What may be filed against a lead (Matt, 5:53).
+ *
+ * ── Why this is shared rather than a set in the service ───────────────────
+ * The API enforces it and the console's file pickers advertise it, and those
+ * two lists disagreeing is the whole problem: a picker offering `image/*` lets
+ * somebody choose a GIF, wait for the dialog, and then be told no. The picker
+ * should not offer what the server will refuse.
+ *
+ * ⚠️ Every type here needs an extension in the API's storage `EXTENSIONS` map,
+ * or its key is built as `.bin` and the file reads back with no type at all.
+ */
+export const LEAD_ATTACHABLE_TYPES = [
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+] as const;
+
+/**
+ * The `accept` attribute for a lead file picker.
+ *
+ * Extensions as well as media types on purpose: Windows reports no type at all
+ * for some files, and a picker that filters on media type alone then hides the
+ * .docx the user is looking straight at.
+ */
+export const LEAD_ATTACHMENT_ACCEPT = [
+  ...LEAD_ATTACHABLE_TYPES,
+  '.pdf',
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.docx',
+].join(',');
+
 export const LeadAttachmentSchema = z
   .object({
     id: ObjectIdSchema,
@@ -562,7 +804,9 @@ export const LeadSchema = LeadListItemSchema.extend({
 
 export const LeadUpdateSchema = z
   .object({
-    status: LeadStatusSchema,
+    // Not `LeadStatusSchema` — see the warning on LEAD_WORKABLE_STATUSES.
+    // Converting is the only route to `won`.
+    status: LeadWorkableStatusSchema,
     ownerName: z.string().trim().max(80),
     note: z.string().trim().max(1000),
   })
@@ -641,10 +885,19 @@ export const LeadConversionSchema = z
       .trim()
       .regex(/^[A-Z]{3}[0-9]{3}$/, 'Three letters then three digits, e.g. NEW001'),
     legalName: z.string().trim().min(1, 'Enter the registered company name').max(120),
-    abn: z
-      .string()
-      .trim()
-      .regex(/^\d{11}$/, 'An ABN is 11 digits'),
+    abn: AbnSchema,
+    /**
+     * Builder or contractor — the two journeys (Matt, 21:55).
+     *
+     * ── Why this is asked and not assumed ─────────────────────────────────
+     * It decides whether the customer gets site supervisors and whether their
+     * booking form asks for the area and bag count, and it is set once: there
+     * is no screen that changes an account's journey afterwards. Conversion
+     * defaulted it to `builder` for every lead, so a contractor arriving
+     * through this queue got supervisors they do not use and a short form
+     * missing the only figures they can supply.
+     */
+    accountType: AccountTypeSchema,
     brandId: BrandIdSchema,
     rateCardId: RateCardIdSchema,
     poPolicy: PoPolicySchema,
@@ -664,6 +917,33 @@ export const LeadConversionSchema = z
   })
   .meta({ id: 'LeadConversion' });
 
+/* ── Pipeline stats, for the cards above the leads grid ──────────────── */
+
+/**
+ * The Won / Conversion figures above the leads grid.
+ *
+ * ⚠️ Counted on the SERVER, across every lead, never on the page the grid
+ * happens to be showing. These cards used to be derived from the visible rows,
+ * which made them the most quotable wrong number on the screen: the grid hides
+ * converted leads by default, so "Won" could only ever count leads somebody had
+ * typed as won WITHOUT converting — precisely the ones that are not wins.
+ */
+export const LeadPipelineStatsSchema = z
+  .object({
+    /** Still being chased: not converted, not lost. */
+    open: z.number().int().nonnegative(),
+    /**
+     * Leads that became an account.
+     *
+     * Counted on `convertedAccountId`, not on `status: 'won'`. Conversion is the
+     * only thing that creates an account, so the account reference is the fact;
+     * the status is a label that older rows may carry without one.
+     */
+    won: z.number().int().nonnegative(),
+    lost: z.number().int().nonnegative(),
+  })
+  .meta({ id: 'LeadPipelineStats' });
+
 /* ── Counts, for the nav badges ───────────────────────────────────────────── */
 
 /**
@@ -679,6 +959,24 @@ export const QueueCountsSchema = z
     serviceApprovals: z.number().int().nonnegative(),
     awaitingPo: z.number().int().nonnegative(),
     poReview: z.number().int().nonnegative(),
+    /**
+     * M2.12b — confirmed orders nobody has given us a date for.
+     *
+     * ⚠️ Counts the WAITING ORDERS, not the call-ups needing review. Matt's
+     * question is *"what have we been told about that has not been booked in?"*
+     * (21:30), and a badge showing failed emails would answer a different and
+     * much rarer one — most of these are simply orders whose call-up has not
+     * arrived yet, which is normal until it is not.
+     */
+    awaitingCallUp: z.number().int().nonnegative(),
+    /**
+     * M2.12b — call-ups that arrived and could not be applied.
+     *
+     * ⚠️ A separate count from `awaitingCallUp`, and the more urgent of the two.
+     * A waiting order is normal until it is not; a call-up sitting in the queue
+     * means a builder has already told us a date and we have not acted on it.
+     */
+    callUpReview: z.number().int().nonnegative(),
     leads: z.number().int().nonnegative(),
   })
   .meta({ id: 'QueueCounts' });
@@ -701,4 +999,5 @@ export type Lead = z.infer<typeof LeadSchema>;
 export type LeadUpdate = z.infer<typeof LeadUpdateSchema>;
 export type LeadCreate = z.infer<typeof LeadCreateSchema>;
 export type LeadConversion = z.infer<typeof LeadConversionSchema>;
+export type LeadPipelineStats = z.infer<typeof LeadPipelineStatsSchema>;
 export type QueueCounts = z.infer<typeof QueueCountsSchema>;

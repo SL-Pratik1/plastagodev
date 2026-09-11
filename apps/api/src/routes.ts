@@ -6,6 +6,7 @@ import { dashboardRouter } from './domains/dashboard/dashboard.router.js';
 import { dispatchRouter } from './domains/dispatch/dispatch.router.js';
 import { driverRouter } from './domains/driver/driver.router.js';
 import { extractorRouter } from './domains/extractor/extractor.router.js';
+import { xeroRouter } from './domains/xero/xero.router.js';
 import { vehicleRouter } from './domains/fleet/vehicle.router.js';
 import { healthRouter } from './domains/health/health.router.js';
 import { invoiceRouter } from './domains/invoices/invoice.router.js';
@@ -92,6 +93,16 @@ export function mountRoutes(app: Express): void {
    * without the credential that mints it ever reaching one.
    */
   v1.use('/extractor', extractorRouter);
+
+  /*
+   * I1 · M7.8 — the Xero connection.
+   *
+   * ⚠️ Mounted BEFORE nothing in particular, but note that its own router
+   * exposes `GET /xero/callback` without the auth gate: that path is a
+   * top-level redirect back from login.xero.com, not a call from the app. The
+   * single-use `state` row is what authorises it. See the router.
+   */
+  v1.use('/xero', xeroRouter);
 
   // M5 — the customer portal. Scoped entirely from the session; no route here
   // takes an account id, so no URL can widen what a customer sees.

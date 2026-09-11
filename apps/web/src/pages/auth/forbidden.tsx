@@ -23,7 +23,19 @@ import { landingPathFor } from '@/features/auth/permissions';
 export function ForbiddenPage() {
   const { user } = useAuth();
   const location = useLocation();
-  const capability = (location.state as { capability?: string } | null)?.capability;
+  const state = location.state as { capability?: string; reason?: string } | null;
+  const capability = state?.capability;
+
+  /*
+   * Not every refusal is about a role.
+   *
+   * Site supervisors are a BUILDER concept (Matt, 21:55): a contractor account
+   * has one login and no supervisors, so the screen is missing because of who
+   * the account is, not what the person's role is. Telling them to "ask a super
+   * admin to update your role" would send them chasing a change that would not
+   * help and that nobody would make.
+   */
+  const builderOnly = state?.reason === 'builder-accounts-only';
 
   return (
     <div className="mx-auto max-w-md py-12">
@@ -32,17 +44,25 @@ export function ForbiddenPage() {
           <div className="mb-1 grid size-10 place-items-center rounded-full bg-muted text-muted-foreground">
             <LockIcon aria-hidden className="size-5" />
           </div>
-          <CardTitle className="text-lg">You don’t have access to that page</CardTitle>
+          <CardTitle className="text-lg">
+            {builderOnly
+              ? 'That page isn’t part of your account'
+              : 'You don’t have access to that page'}
+          </CardTitle>
           <CardDescription>
-            {user
-              ? `You’re signed in as ${user.name} (${ROLE_LABELS[user.role]}). That role doesn’t include this screen.`
-              : 'Sign in to continue.'}
+            {builderOnly
+              ? 'Site supervisors are set up for builder accounts. On your account, whoever is signed in books pickups directly.'
+              : user
+                ? `You’re signed in as ${user.name} (${ROLE_LABELS[user.role]}). That role doesn’t include this screen.`
+                : 'Sign in to continue.'}
           </CardDescription>
         </CardHeader>
 
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            If you need it, ask a super admin to update your role.
+            {builderOnly
+              ? 'If this looks wrong, call PlastaGo on 1300 395 438 — the account type is set by the office.'
+              : 'If you need it, ask a super admin to update your role.'}
           </p>
 
           {/*

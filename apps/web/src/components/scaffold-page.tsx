@@ -51,7 +51,7 @@ export function ScaffoldPage({
         screen’s content is the next phase of work.
       </Alert>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle>Planned content</CardTitle>

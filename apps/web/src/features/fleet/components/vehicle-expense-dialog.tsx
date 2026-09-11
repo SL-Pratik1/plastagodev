@@ -168,7 +168,7 @@ export function VehicleExpenseDialog({
         className="space-y-4 py-2"
         noValidate
       >
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field id="expense-date" label="Date" required error={errors.incurredOn?.message}>
             {(aria) => <DatePicker {...aria} {...register('incurredOn')} />}
           </Field>

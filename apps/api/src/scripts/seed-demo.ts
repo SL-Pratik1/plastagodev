@@ -36,6 +36,7 @@ import { PlaceModel } from '../domains/places/place.model.js';
 import { ChangeRequestModel, ReadinessCertificationModel } from '../domains/portal/portal.model.js';
 import { FutileReviewModel } from '../domains/queues/futile-review.model.js';
 import { LeadModel, LeadNoteModel } from '../domains/queues/lead.model.js';
+import { CallUpModel } from '../domains/queues/call-up.model.js';
 import { PoExtractionModel, PurchaseOrderModel } from '../domains/queues/purchase-order.model.js';
 import { CertificateModel } from '../domains/reports/certificate.model.js';
 import {
@@ -2584,9 +2585,213 @@ async function seedPurchaseOrders(
     });
   }
 
-  await PurchaseOrderModel.insertMany(poDocs);
+  /*
+   * M2.12b — orders with NO job against them.
+   *
+   * Every order above was built from a job and attached to it, which is right
+   * for history but leaves the "waiting for a date" screens permanently empty:
+   * an order is only waiting if nothing points at it. Matt's whole two-message
+   * flow (21:30) lives in exactly that state, so the demo has to contain some.
+   */
+  const waitingDocs = buildWaitingOrders(jobs, accounts);
+
+  await PurchaseOrderModel.insertMany([...poDocs, ...waitingDocs]);
   await PoExtractionModel.insertMany(buildExtractions(accounts));
-  log.info({ purchaseOrders: poDocs.length }, 'orders seeded');
+  await CallUpModel.insertMany(buildCallUps(waitingDocs));
+
+  log.info({ purchaseOrders: poDocs.length, awaitingCallUp: waitingDocs.length }, 'orders seeded');
+}
+
+/**
+ * Confirmed orders nobody has given us a date for yet (M2.12b).
+ *
+ * ── Why the spread of ages matters ────────────────────────────────────────
+ * The screen sorts oldest first and badges the age, because those two facts are
+ * the whole judgement: an order that arrived on Tuesday is normal, and one from
+ * three months ago is a conversation with the builder. A demo where they all
+ * arrived last week exercises neither.
+ *
+ * ── Why one is deliberately unserviceable ─────────────────────────────────
+ * A call-up cannot price a job whose suburb is not in the places table, so the
+ * screen refuses to offer the button and says why instead. That branch is
+ * invisible unless the data contains a row that trips it.
+ *
+ * ⚠️ Suburbs are borrowed from the seeded JOBS rather than invented, so every
+ * serviceable row resolves to a real place and a real zone. A made-up suburb
+ * would make all five look unserviceable and hide the normal case.
+ */
+function buildWaitingOrders(
+  jobs: readonly JobDraft[],
+  accounts: readonly SeededAccount[],
+): Record<string, unknown>[] {
+  const builders = accounts.filter(
+    (account) => account.status === 'active' && account.poPolicy === 'required-before-invoice',
+  );
+  if (builders.length === 0) return [];
+
+  const serviced = jobs
+    .map((job) => ({
+      suburb: job.doc.suburb as string,
+      postcode: job.doc.postcode as string,
+    }))
+    .filter((entry) => typeof entry.suburb === 'string' && entry.suburb !== '');
+  if (serviced.length === 0) return [];
+
+  const CASES = [
+    { agedDays: 4, offZone: false, supervisor: true },
+    { agedDays: 11, offZone: false, supervisor: true },
+    { agedDays: 26, offZone: false, supervisor: false },
+    // Matt, 34:52: *"sometimes they're blank… there's nothing I can do."*
+    { agedDays: 63, offZone: false, supervisor: false },
+    // Outside the three zones, so no call-up can price it.
+    { agedDays: 97, offZone: true, supervisor: true },
+  ] as const;
+
+  // Annotated so the `null` skip narrows cleanly in the filter below.
+  return CASES.map((entry, index): Record<string, unknown> | null => {
+    const account = builders[index % builders.length];
+    const where = serviced[index % serviced.length];
+    if (!account || !where) return null;
+
+    const lotNumber = String(int(101, 486));
+
+    return {
+      _id: oid(),
+      poNumber: `PO-${String(int(60_000, 79_999))}`,
+      accountId: account.id,
+      accountName: account.name,
+      receivedAt: at(toWeekday(day(-entry.agedDays)), int(8, 16), int(0, 59)),
+      lotNumber,
+      addressLine: `${String(int(2, 148))} ${pick(STREETS)}`,
+      suburb: entry.offZone ? 'Bendigo' : where.suburb,
+      postcode: entry.offZone ? '3550' : where.postcode,
+      // Wisdom state a line item and no square metres at all (Matt, 31:04).
+      expectedAreaM2: account.rateCardId === 'wisdom' ? null : area(300, 900),
+      bagAllowance: chance(0.6) ? int(1, 4) : null,
+      siteSupervisorName: entry.supervisor
+        ? pick(['Dave Miller', 'Nick Farrugia', 'Karen Whitby', 'Sam Farrar'])
+        : null,
+      siteSupervisorMobile: entry.supervisor
+        ? `04${String(int(10, 99))}${String(int(100_000, 999_999))}`
+        : null,
+      siteSupervisorUserId: null,
+      amountExGst: decimal(int(30_000, 90_000)),
+      storageKey: null,
+      extractionId: null,
+      createdByName: 'PO extractor',
+    };
+  }).filter((doc): doc is Record<string, unknown> => doc !== null);
+}
+
+/**
+ * Call-ups the system could not act on (M2.12b).
+ *
+ * ── Why the queue is seeded at all ────────────────────────────────────────
+ * Because it is the screen that proves the pipeline refuses to guess, and an
+ * empty one demonstrates nothing. Each row is a different reason, since each
+ * needs a different fix — and the fix is the work.
+ */
+function buildCallUps(waiting: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const docs: Record<string, unknown>[] = [
+    /*
+     * A date for an order nobody has on file — the commonest failure and the one
+     * that matters most: a builder has told us a date for work we cannot find,
+     * and without this queue nobody would ever know.
+     */
+    {
+      _id: oid(),
+      purchaseOrderId: null,
+      poNumber: 'PO-41277',
+      accountId: null,
+      accountName: null,
+      receivedAt: at(toWeekday(day(-3)), 9, 14),
+      source: 'email',
+      kind: 'new',
+      readyDate: toWeekday(day(3)),
+      previousReadyDate: null,
+      state: 'needs-review',
+      reason: 'no-matching-po',
+      jobId: null,
+      jobNumber: null,
+      note: 'Email: Call up - Lot 88 Box Hill · Site: 88 Fairwater Blvd, Box Hill',
+      externalId: 'demo-call-up-1',
+      raisedBy: null,
+    },
+    /*
+     * A reschedule for work we were never told about. Matt, 24:07 — the
+     * builder's blue notice sometimes goes missing, so the green one is the
+     * first thing we see.
+     */
+    {
+      _id: oid(),
+      purchaseOrderId: null,
+      poNumber: 'PO-52901',
+      accountId: null,
+      accountName: null,
+      receivedAt: at(toWeekday(day(-6)), 14, 2),
+      source: 'email',
+      kind: 'reschedule',
+      readyDate: toWeekday(day(5)),
+      previousReadyDate: null,
+      state: 'needs-review',
+      reason: 'no-job-to-change',
+      jobId: null,
+      jobNumber: null,
+      note: 'Email: RESCHEDULED - Lot 214 · Notice: green',
+      externalId: 'demo-call-up-2',
+      raisedBy: null,
+    },
+    /* One already set aside, so the history filter is not empty either. */
+    {
+      _id: oid(),
+      purchaseOrderId: null,
+      poNumber: 'PO-68410',
+      accountId: null,
+      accountName: null,
+      receivedAt: at(toWeekday(day(-9)), 8, 5),
+      source: 'email',
+      kind: 'cancel',
+      readyDate: null,
+      previousReadyDate: null,
+      state: 'rejected',
+      reason: 'no-job-to-change',
+      jobId: null,
+      jobNumber: null,
+      note: 'Email: CANCELLED - Lot 12 · Builder cancelled a job we never had',
+      externalId: 'demo-call-up-4',
+      raisedBy: null,
+    },
+  ];
+
+  /*
+   * The unserviceable one, matched to the order it names. Retrying this is the
+   * demo of the whole loop: add Bendigo to the places table, press Try again,
+   * and it books.
+   */
+  const offZone = waiting[waiting.length - 1];
+  if (offZone) {
+    docs.push({
+      _id: oid(),
+      purchaseOrderId: offZone._id,
+      poNumber: offZone.poNumber,
+      accountId: offZone.accountId,
+      accountName: offZone.accountName,
+      receivedAt: at(toWeekday(day(-2)), 11, 30),
+      source: 'email',
+      kind: 'new',
+      readyDate: toWeekday(day(4)),
+      previousReadyDate: null,
+      state: 'needs-review',
+      reason: 'unknown-suburb',
+      jobId: null,
+      jobNumber: null,
+      note: 'Email: Ready for pickup · Site: Bendigo VIC',
+      externalId: 'demo-call-up-3',
+      raisedBy: null,
+    });
+  }
+
+  return docs;
 }
 
 /**

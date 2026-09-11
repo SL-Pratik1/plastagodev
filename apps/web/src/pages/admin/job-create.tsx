@@ -11,8 +11,10 @@ import {
   Button,
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
+  Checkbox,
   DatePicker,
   Field,
   Input,
@@ -58,20 +60,20 @@ import { isServiceError } from '@/services/service-error';
 const FormSchema = z.object({
   accountId: z.string().min(1, 'Choose the account being invoiced'),
   /* ── The address, typed on the job (Matt, 0:29) ───────────────────── */
-  siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120),
-  lotNumber: z.string().trim().max(30),
-  addressLine: z.string().trim().min(1, 'Enter the street address').max(160),
+  siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120, 'Keep the site name under 120 characters'),
+  lotNumber: z.string().trim().max(30, 'A lot number is at most 30 characters'),
+  addressLine: z.string().trim().min(1, 'Enter the street address').max(160, 'Keep the address under 160 characters'),
   /** Picked, not typed — carries the zone that prices the job and the map pin. */
   placeId: z.string().min(1, 'Choose the suburb from the list'),
-  builderName: z.string().trim().max(120),
-  accessNotes: z.string().trim().max(1000),
-  gateHours: z.string().trim().max(120),
+  builderName: z.string().trim().max(120, 'Keep the builder name under 120 characters'),
+  accessNotes: z.string().trim().max(1000, 'Keep access notes under 1000 characters'),
+  gateHours: z.string().trim().max(120, 'Keep gate hours under 120 characters'),
   inductionRequired: z.boolean(),
   craneAvailable: z.boolean(),
-  siteContactName: z.string().trim().max(80),
-  siteContactMobile: z.string().trim().max(20),
-  siteContactEmail: z.string().trim().max(160),
-  poNumber: z.string().trim().max(60),
+  siteContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
+  siteContactMobile: z.string().trim().max(20, 'A mobile number is at most 20 characters'),
+  siteContactEmail: z.string().trim().max(160, 'Keep the email under 160 characters'),
+  poNumber: z.string().trim().max(60, 'A PO or job reference is at most 60 characters'),
   /**
    * M2.12 — the confirmed purchase order this pickup fulfils.
    *
@@ -92,7 +94,7 @@ const FormSchema = z.object({
     .int('Whole bags only')
     .min(0, 'Bags cannot be negative')
     .max(200, 'That looks too many — check the figure'),
-  notes: z.string().trim().max(2000),
+  notes: z.string().trim().max(2000, 'Keep notes under 2000 characters'),
 });
 
 type FormValues = z.input<typeof FormSchema>;
@@ -273,13 +275,13 @@ export function AdminJobCreatePage() {
       />
 
       <form onSubmit={(event) => void handleSubmit(onSubmit)(event)} noValidate>
-        <div className="grid gap-4 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="space-y-4 lg:col-span-2">
             <Card>
               <CardHeader>
                 <CardTitle>Who and where</CardTitle>
               </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2">
+              <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field
                   id="job-account"
                   label="Account"
@@ -464,7 +466,7 @@ export function AdminJobCreatePage() {
               <CardHeader>
                 <CardTitle>When and what</CardTitle>
               </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2">
+              <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field
                   id="job-ready-date"
                   label="Ready date"
@@ -571,6 +573,123 @@ export function AdminJobCreatePage() {
                     />
                   )}
                 </Field>
+              </CardContent>
+            </Card>
+
+            {/*
+              ── Site access and contact ────────────────────────────────────
+              ⚠️ These seven fields were declared on this form's schema, given
+              defaults, carried through `JobDraft`, stored on the job — and had
+              no inputs. Nothing in the product could set them.
+
+              The driver app is built around them: a "Call site" button on the
+              mobile, an Access panel read before getting out of the truck,
+              Induction and Crane badges, gate hours, and a "No site contact on
+              this job — ring the office" fallback for when they are empty. So
+              every job booked here reached the driver with that fallback and a
+              phone call back to the office, which is the thing the fields exist
+              to prevent.
+
+              Optional on purpose: a phone booking often has none of it, and the
+              form must not block on what the caller did not say.
+            */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Site access and contact</CardTitle>
+                <CardDescription>
+                  What the driver needs on arrival. All optional — anything left
+                  blank simply does not show on their screen.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field
+                  id="job-contact-name"
+                  label="Site contact"
+                  error={errors.siteContactName?.message}
+                >
+                  {(aria) => (
+                    <Input {...aria} placeholder="Dave Nguyen" {...register('siteContactName')} />
+                  )}
+                </Field>
+
+                <Field
+                  id="job-contact-mobile"
+                  label="Site contact mobile"
+                  hint="The number the driver taps to call from site."
+                  error={errors.siteContactMobile?.message}
+                >
+                  {(aria) => (
+                    <Input
+                      {...aria}
+                      type="tel"
+                      inputMode="tel"
+                      placeholder="0412 345 678"
+                      {...register('siteContactMobile')}
+                    />
+                  )}
+                </Field>
+
+                <Field
+                  id="job-contact-email"
+                  label="Site contact email"
+                  error={errors.siteContactEmail?.message}
+                >
+                  {(aria) => (
+                    <Input
+                      {...aria}
+                      type="email"
+                      placeholder="dave@example.com.au"
+                      {...register('siteContactEmail')}
+                    />
+                  )}
+                </Field>
+
+                <Field
+                  id="job-gate-hours"
+                  label="Gate hours"
+                  hint="When the site can actually be entered."
+                  error={errors.gateHours?.message}
+                >
+                  {(aria) => (
+                    <Input {...aria} placeholder="6:30am – 3:30pm" {...register('gateHours')} />
+                  )}
+                </Field>
+
+                <Field
+                  id="job-access-notes"
+                  label="Access notes"
+                  error={errors.accessNotes?.message}
+                  className="sm:col-span-2"
+                >
+                  {(aria) => (
+                    <Textarea
+                      {...aria}
+                      {...register('accessNotes')}
+                      rows={2}
+                      placeholder="Gate code, where to park, which lot to enter from."
+                    />
+                  )}
+                </Field>
+
+                <label className="flex items-start gap-2.5 text-sm">
+                  <Checkbox className="mt-0.5" {...register('inductionRequired')} />
+                  <span>
+                    <span className="block font-medium">Induction required</span>
+                    <span className="block text-xs text-muted-foreground">
+                      The driver cannot start without one.
+                    </span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2.5 text-sm">
+                  <Checkbox className="mt-0.5" {...register('craneAvailable')} />
+                  <span>
+                    <span className="block font-medium">Crane on site</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Changes how the load comes out.
+                    </span>
+                  </span>
+                </label>
               </CardContent>
             </Card>
           </div>

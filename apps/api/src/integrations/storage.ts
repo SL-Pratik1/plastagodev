@@ -84,6 +84,14 @@ export const UPLOADABLE_TYPES = new Set([
   'application/pdf',
 ]);
 
+/*
+ * ⚠️ Wider than `UPLOADABLE_TYPES` on purpose. That set is what a driver's
+ * PHONE may send; this map is every type any key in the system can encode. A
+ * lead proposal arrives from the office as a Word document (see the lead
+ * service's own allow-list), and a type missing from here gets a `.bin` key —
+ * which reads back as no type at all, so the file downloads nameless instead of
+ * opening.
+ */
 const EXTENSIONS: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -91,15 +99,42 @@ const EXTENSIONS: Record<string, string> = {
   'image/heif': 'heif',
   'image/webp': 'webp',
   'application/pdf': 'pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
 };
 
-/** 20 MB. A modern phone photo is 3–5 MB; a burst of HEIC frames is not. */
-export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+/**
+ * The type an object at this key holds, read back off its extension.
+ *
+ * ── Why the extension and not a stored value ──────────────────────────────
+ * S3 keeps the `Content-Type` it was given at upload and returns it, so nothing
+ * needs to remember it. The stub writes bare files to disk and has nowhere to
+ * put it — but `buildKey` already encoded it in the extension, so the stub can
+ * recover exactly what was declared rather than guessing.
+ *
+ * ⚠️ Returns null rather than a default. The stub's read route sends
+ * `X-Content-Type-Options: nosniff`, and answering `application/octet-stream`
+ * for an unknown extension is what makes a browser download a file instead of
+ * displaying it. Null lets the caller stay silent, which is the honest answer.
+ */
+export function contentTypeForKey(key: string): string | null {
+  const extension = key.split('.').pop()?.toLowerCase() ?? '';
+  const match = Object.entries(EXTENSIONS).find(([, ext]) => ext === extension);
+  return match ? match[0] : null;
+}
+
+/**
+ * 20 MB. A modern phone photo is 3–5 MB; a burst of HEIC frames is not.
+ *
+ * Re-exported from `@plastago/shared` rather than declared here: the console's
+ * file pickers check the same ceiling, and two copies of the number drift the
+ * first time one of them is raised.
+ */
+export { MAX_UPLOAD_BYTES } from '@plastago/shared';
 
 /**
  * Builds the key an object lives at.
  *
- * ── Why the shape is `jobs/<id>/photos/<uuid>.<ext>` ──────────────────────
+ * ── Why the shape is `plastago/jobs/<id>/photos/<uuid>.<ext>` ─────────────
  * Prefixed by owner so a lifecycle rule, a bulk delete or an access policy can
  * be written against a path rather than a database query. Ending in a UUID
  * rather than the driver's filename: two phones both produce `IMG_0001.jpg`, and
@@ -118,7 +153,18 @@ export function buildKey(input: {
   if (!/^[a-f0-9]{24}$/i.test(input.ownerId)) {
     throw new Error(`Refusing to build a storage key for a non-id owner: ${input.ownerId}`);
   }
-  return `${input.scope}/${input.ownerId}/${input.kind}/${randomUUID()}.${extension}`;
+  /*
+   * The prefix is applied HERE and nowhere else.
+   *
+   * Every key in the system is born in this function, so this is the one place
+   * that can add it without a second place being able to disagree. In
+   * particular the provider methods below take a key VERBATIM: a key read back
+   * off a photo record already carries whatever prefix it was created under, so
+   * prefixing inside `put`/`get`/`remove` would double it on write and lose the
+   * old objects on read.
+   */
+  const path = `${input.scope}/${input.ownerId}/${input.kind}/${randomUUID()}.${extension}`;
+  return env.S3_KEY_PREFIX ? `${env.S3_KEY_PREFIX}/${path}` : path;
 }
 
 /* ── The stub ────────────────────────────────────────────────────────────── */
@@ -179,6 +225,12 @@ function createStubStorage(): StorageProvider {
       );
     },
 
+    /*
+     * `contentType` is deliberately unused. S3 stores it on the object; the
+     * stub has no metadata to put it in, and inventing a sidecar file would be
+     * one more thing to keep in step. It is recovered from the key's extension
+     * on read instead — see `contentTypeForKey`.
+     */
     put: async (key, body) => {
       const path = pathFor(key);
       await mkdir(dirname(path), { recursive: true });
@@ -315,7 +367,28 @@ function createS3Storage(): StorageProvider {
       return {
         key,
         uploadUrl,
-        headers: { 'Content-Type': contentType, 'Content-Length': String(contentLength) },
+        /*
+         * ⚠️ Every header the presigner SIGNED must be listed here, or the PUT
+         * is rejected with `SignatureDoesNotMatch` — S3 recomputes the
+         * signature from the headers it actually receives.
+         *
+         * `ServerSideEncryption` above is the one that catches people out: the
+         * SDK signs it as `x-amz-server-side-encryption` rather than hoisting
+         * it into the query string, so a client that does not send the header
+         * presents a signature over a request it did not make. It cannot be
+         * inferred by the client either — encryption is our decision, made
+         * here, so it has to be handed over with the URL.
+         *
+         * `Content-Length` a browser sets itself from the body and will not let
+         * `fetch` override; it is declared anyway because the signature covers
+         * it, and a non-browser caller (a script, the driver app's retry queue)
+         * has to know to send the same number it asked to be signed.
+         */
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': String(contentLength),
+          'x-amz-server-side-encryption': 'AES256',
+        },
         expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
       };
     },
@@ -376,14 +449,25 @@ export function setStorageForTesting(next: StorageProvider | undefined): void {
   provider = next;
 }
 
-export function describeStorage(): { provider: string; bucket: string | null } {
+export function describeStorage(): {
+  provider: string;
+  bucket: string | null;
+  prefix: string | null;
+} {
   return {
     provider: env.STORAGE_PROVIDER,
     bucket: env.STORAGE_PROVIDER === 's3' ? (env.S3_BUCKET ?? null) : null,
+    // Reported alongside the bucket because "the file is not in S3" and "the
+    // file is in S3 under a prefix you were not looking at" are the same
+    // symptom, and this is the cheapest place to tell them apart.
+    prefix: env.S3_KEY_PREFIX || null,
   };
 }
 
-log.debug({ provider: env.STORAGE_PROVIDER }, 'storage configured');
+log.debug(
+  { provider: env.STORAGE_PROVIDER, prefix: env.S3_KEY_PREFIX },
+  'storage configured',
+);
 
 /** Exposed for the stub's read/write route, which must resolve keys the same way. */
 export const stubStorageRoot = (): string => resolve(process.cwd(), env.STORAGE_STUB_DIR);

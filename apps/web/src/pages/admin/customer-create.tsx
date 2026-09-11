@@ -9,8 +9,6 @@ import {
   CAPTURE_MODE_LABELS,
   PO_POLICIES,
   PO_POLICY_LABELS,
-  RATE_CARDS,
-  RATE_CARD_LABELS,
   ZONES,
   ZONE_LABELS,
   type AccountDraft,
@@ -36,6 +34,7 @@ import { useForm, useWatch } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router';
 import { PageHeader } from '@/components/page-header';
 import { useCreateCustomer } from '@/features/customers/queries';
+import { useRateCardOptions } from '@/features/lookups/queries';
 import { describeError } from '@/lib/error-message';
 import { isServiceError } from '@/services/service-error';
 
@@ -65,6 +64,16 @@ export function AdminCustomerCreatePage() {
   const toast = useToast();
   const navigate = useNavigate();
   const create = useCreateCustomer();
+
+  /*
+   * The rate cards, loaded (M6.1).
+   *
+   * Falling back to an empty list rather than gating the page on a spinner: the
+   * rest of this form is usable while seven rows arrive, and the server refuses
+   * a card that does not exist anyway — so an empty dropdown fails safe instead
+   * of silently assigning the default.
+   */
+  const rateCards = useRateCardOptions().data ?? [];
 
   const {
     register,
@@ -143,7 +152,7 @@ export function AdminCustomerCreatePage() {
               The business
             </CardTitle>
           </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
+          <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field
               id="cc-code"
               label="Customer code"
@@ -242,7 +251,7 @@ export function AdminCustomerCreatePage() {
           <CardHeader>
             <CardTitle>Commercial terms</CardTitle>
           </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
+          <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {/*
               A wrong rate card is a pricing incident, not a typo — every invoice
               on the account is computed from it. Nothing here is defaulted
@@ -257,9 +266,16 @@ export function AdminCustomerCreatePage() {
             >
               {(aria) => (
                 <Select {...aria} {...register('rateCardId')}>
-                  {RATE_CARDS.map((card) => (
-                    <option key={card} value={card}>
-                      {RATE_CARD_LABELS[card]}
+                  {/*
+                    Loaded, not hardcoded. Rate cards are records an
+                    administrator creates on the Pricing tab, so a card added
+                    this morning has to be selectable this afternoon — a
+                    compile-time list could only ever offer the ones that
+                    shipped.
+                  */}
+                  {rateCards.map((card) => (
+                    <option key={card.value} value={card.value}>
+                      {card.label}
                     </option>
                   ))}
                 </Select>
@@ -320,7 +336,7 @@ export function AdminCustomerCreatePage() {
           <CardHeader>
             <CardTitle>Accounts contact</CardTitle>
           </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
+          <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field
               id="cc-contact-name"
               label="Who handles their invoices"

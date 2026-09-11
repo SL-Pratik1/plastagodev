@@ -3,10 +3,12 @@ import {
   MAX_UPLOAD_BYTES,
   UPLOADABLE_TYPES,
   buildKey,
+  contentTypeForKey,
   signStubToken,
   stubPathFor,
   verifyStubToken,
 } from '../src/integrations/storage.js';
+import { env } from '../src/config/env.js';
 
 /**
  * Object storage (§6A.10 #9).
@@ -18,6 +20,8 @@ import {
  */
 
 const JOB_ID = 'a'.repeat(24);
+/** Read from config rather than hard-coded: it is deployment-specific (§8). */
+const PREFIX = env.S3_KEY_PREFIX ? `${env.S3_KEY_PREFIX}/` : '';
 
 describe('storage keys', () => {
   it('scopes a key by owner so policies can be written against a path', () => {
@@ -28,7 +32,39 @@ describe('storage keys', () => {
       contentType: 'image/jpeg',
     });
 
-    expect(key).toMatch(new RegExp(`^jobs/${JOB_ID}/photos/[0-9a-f-]{36}\\.jpg$`));
+    expect(key).toMatch(new RegExp(`^${PREFIX}jobs/${JOB_ID}/photos/[0-9a-f-]{36}\\.jpg$`));
+  });
+
+  /*
+   * The bucket is shared infrastructure, so "everything of ours is under one
+   * prefix" is the property that lets a lifecycle rule or an IAM policy be
+   * written without reaching a neighbour's objects. Asserted across every
+   * scope, because a single upload path that forgot the prefix would scatter
+   * objects at the bucket root where no policy covers them.
+   */
+  it('puts every scope under the one configured folder', () => {
+    const scopes = ['jobs', 'runs', 'vehicles', 'invoices', 'leads', 'purchase-orders'] as const;
+
+    for (const scope of scopes) {
+      const key = buildKey({ scope, ownerId: JOB_ID, kind: 'photos', contentType: 'image/jpeg' });
+      expect(key.startsWith(`${env.S3_KEY_PREFIX}/`)).toBe(true);
+      expect(key).toContain(`/${scope}/`);
+    }
+  });
+
+  // A prefix given as `/plastago/` must not produce `//jobs` or a leading
+  // slash: in S3 those are different, valid keys, and the mistake is invisible
+  // until somebody goes looking in the console for objects that are not there.
+  it('joins the prefix without doubling or leading slashes', () => {
+    const key = buildKey({
+      scope: 'jobs',
+      ownerId: JOB_ID,
+      kind: 'photos',
+      contentType: 'image/jpeg',
+    });
+
+    expect(key.startsWith('/')).toBe(false);
+    expect(key).not.toContain('//');
   });
 
   it('never reuses a key, even for identical input', () => {
@@ -60,6 +96,47 @@ describe('storage keys', () => {
       contentType: 'application/x-made-up',
     });
     expect(key.endsWith('.bin')).toBe(true);
+  });
+});
+
+/**
+ * M2.12, Matt 28:30 — the review screen embeds the stored original.
+ *
+ * S3 returns the `Content-Type` it was given at upload. The stub writes bare
+ * files and has no metadata, so it recovers the type from the extension
+ * `buildKey` already encoded. Without it the read route sends no type at all,
+ * and with `nosniff` the browser downloads the purchase order instead of
+ * displaying it beside the extracted fields.
+ */
+describe('serving a stored document back', () => {
+  it('recovers the declared type from the key', () => {
+    expect(contentTypeForKey('purchase-orders/aaaaaaaaaaaaaaaaaaaaaaaa/originals/x.pdf')).toBe(
+      'application/pdf',
+    );
+    expect(contentTypeForKey('jobs/aaaaaaaaaaaaaaaaaaaaaaaa/photos/x.jpg')).toBe('image/jpeg');
+    expect(contentTypeForKey('jobs/aaaaaaaaaaaaaaaaaaaaaaaa/photos/x.heic')).toBe('image/heic');
+  });
+
+  it('round-trips whatever buildKey encoded', () => {
+    const key = buildKey({
+      scope: 'purchase-orders',
+      ownerId: 'a'.repeat(24),
+      kind: 'originals',
+      contentType: 'application/pdf',
+    });
+
+    expect(contentTypeForKey(key)).toBe('application/pdf');
+  });
+
+  /*
+   * ⚠️ Null, not `application/octet-stream`. These are user-supplied bytes: an
+   * unknown extension is served with no type rather than a guess, and a guess
+   * is what turns an unrecognised upload into something a browser will render.
+   */
+  it('claims nothing about a type it does not recognise', () => {
+    expect(contentTypeForKey('jobs/aaaaaaaaaaaaaaaaaaaaaaaa/photos/x.bin')).toBeNull();
+    expect(contentTypeForKey('no-extension-at-all')).toBeNull();
+    expect(contentTypeForKey('jobs/x/photos/x.svg')).toBeNull();
   });
 });
 

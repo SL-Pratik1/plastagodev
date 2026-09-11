@@ -44,10 +44,14 @@ import {
   QueueLeadDetailPage,
   QueueLeadsPage,
   QueuePoReviewDetailPage,
+  PortalPurchaseOrdersPage,
+  QueueCallUpReviewPage,
+  QueueCallUpsPage,
   QueuePoReviewPage,
   ReportsPage,
   ExtractorPage,
   SettingsPage,
+  XeroPage,
   UserDetailPage,
   UsersPage,
   VehicleDetailPage,
@@ -56,6 +60,7 @@ import {
 import { PageSkeleton } from '@/components/page-skeleton';
 import { RequireAuth } from '@/features/auth/require-auth';
 import { RequireCapability } from '@/features/auth/require-capability';
+import { RequireBuilderAccount } from '@/features/portal/require-builder-account';
 import { AdminShell } from '@/layouts/admin-shell';
 import { AuthLayout } from '@/layouts/auth-layout';
 import { DriverShell } from '@/layouts/driver-shell';
@@ -175,6 +180,11 @@ export const router = createBrowserRouter([
                       { path: 'queues/approvals', element: load(<QueueApprovalsPage />) },
                       { path: 'queues/awaiting-po', element: load(<QueueAwaitingPoPage />) },
                       { path: 'queues/po-review', element: load(<QueuePoReviewPage />) },
+                      { path: 'queues/call-ups', element: load(<QueueCallUpsPage />) },
+                      {
+                        path: 'queues/call-up-review',
+                        element: load(<QueueCallUpReviewPage />),
+                      },
                       {
                         path: 'queues/po-review/:extractionId',
                         element: load(<QueuePoReviewDetailPage />),
@@ -255,6 +265,17 @@ export const router = createBrowserRouter([
                     children: [{ path: 'extractor', element: load(<ExtractorPage />) }],
                   },
                   {
+                    /*
+                     * I1 · M7.8 — gated on `integrations:manage`, which is the
+                     * Administrator's alone. Deliberately NOT `settings:manage`:
+                     * connecting Xero binds the company's invoicing to a set of
+                     * accounting books, which is a different decision from
+                     * changing a platform setting.
+                     */
+                    element: <RequireCapability capability="integrations:manage" />,
+                    children: [{ path: 'xero', element: load(<XeroPage />) }],
+                  },
+                  {
                     element: <RequireCapability capability="settings:manage" />,
                     children: [{ path: 'settings', element: load(<SettingsPage />) }],
                   },
@@ -296,6 +317,16 @@ export const router = createBrowserRouter([
                   */
                   { path: 'welcome', element: load(<PortalWelcomePage />) },
                   { path: 'jobs', element: load(<PortalJobsPage />) },
+                  /*
+                   * M2.12b — deliberately NOT behind `portal:book`. A site
+                   * supervisor must be able to give us a date for an order we
+                   * already hold (Matt, 30:40); the booking capability is about
+                   * raising work that has no order behind it.
+                   */
+                  {
+                    path: 'purchase-orders',
+                    element: load(<PortalPurchaseOrdersPage />),
+                  },
                   { path: 'jobs/:jobId', element: load(<PortalJobDetailPage />) },
                   { path: 'jobs/:jobId/edit', element: load(<PortalJobEditPage />) },
 
@@ -318,8 +349,23 @@ export const router = createBrowserRouter([
                     children: [{ path: 'certificates', element: load(<PortalCertificatesPage />) }],
                   },
                   {
+                    /*
+                     * Two gates, because two different things can refuse this
+                     * screen: the ROLE (a site supervisor does not manage other
+                     * supervisors) and the ACCOUNT TYPE (a contractor has none —
+                     * Matt, 21:55). The nav hides the item for a contractor;
+                     * hiding is not preventing, so the type is checked here too,
+                     * and again on the server, which is the actual boundary.
+                     */
                     element: <RequireCapability capability="portal:supervisors" />,
-                    children: [{ path: 'supervisors', element: load(<PortalSupervisorsPage />) }],
+                    children: [
+                      {
+                        element: <RequireBuilderAccount />,
+                        children: [
+                          { path: 'supervisors', element: load(<PortalSupervisorsPage />) },
+                        ],
+                      },
+                    ],
                   },
                   {
                     element: <RequireCapability capability="portal:account" />,

@@ -7,7 +7,7 @@ import {
   ONBOARDING_STATES,
   PageQuerySchema,
   PO_POLICIES,
-  RATE_CARDS,
+  RateCardIdSchema,
 } from '@plastago/shared';
 import * as z from 'zod';
 
@@ -36,7 +36,9 @@ export const ListAccountsQuerySchema = PageQuerySchema.extend({
   status: z.enum(ACCOUNT_STATUSES).optional(),
   accountType: z.enum(ACCOUNT_TYPES).optional(),
   brandId: z.enum(BRAND_IDS).optional(),
-  rateCardId: z.enum(RATE_CARDS).optional(),
+  // A filter facet, so the shape is validated but membership is not: the set of
+  // cards is runtime data now, and an unknown id simply matches nothing.
+  rateCardId: RateCardIdSchema.optional(),
   poPolicy: z.enum(PO_POLICIES).optional(),
   captureMode: z.enum(CAPTURE_MODES).optional(),
   onboarding: z.enum(ONBOARDING_STATES).optional(),
@@ -51,3 +53,14 @@ export const ListAccountsQuerySchema = PageQuerySchema.extend({
 export const RiskAssessmentBodySchema = z
   .object({ required: z.boolean() })
   .meta({ id: 'RiskAssessmentBody' });
+
+/**
+ * The account's journey — builder or contractor.
+ *
+ * The target type, not a "switch it" instruction, for the same reason as the
+ * toggle above: a retried request has to land where it asked, and there are
+ * exactly two values, so the destination is always sayable.
+ */
+export const AccountTypeBodySchema = z
+  .object({ accountType: z.enum(ACCOUNT_TYPES) })
+  .meta({ id: 'AccountTypeBody' });

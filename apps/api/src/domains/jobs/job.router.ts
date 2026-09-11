@@ -1,7 +1,7 @@
 import { JobCommentDraftSchema, JobDraftSchema } from '@plastago/shared';
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
-import { requireAuth } from '../../middleware/require-auth.js';
+import { requireAuth, requireRole } from '../../middleware/require-auth.js';
 import { validate } from '../../middleware/validate.js';
 import { jobController } from './job.controller.js';
 import {
@@ -27,6 +27,31 @@ export const jobRouter = Router();
 // Every route below is authenticated. Mounted once rather than per-route so a
 // new endpoint cannot be added unprotected by omission.
 jobRouter.use(requireAuth);
+
+/**
+ * The coarse gate the note above describes. It was documented but never
+ * applied — `requireRole` was not so much as imported here.
+ *
+ * This is the OFFICE's view of a job. The other two surfaces have their own,
+ * and both are narrower on purpose:
+ *
+ * ⚠️ The DRIVER never belonged here. Nothing narrows a driver in the
+ * repository, so `GET /jobs` handed them every job on the system and
+ * `GET /jobs/:id` handed them any one in full — the customer's charge lines and
+ * totals, the site contact's mobile, and the INTERNAL comment thread the office
+ * keeps about the job. Their own work comes from `/driver/*`, which returns
+ * their run and nothing else.
+ *
+ * ⚠️ CUSTOMER roles do not belong here either, and this is the fix for a real
+ * leak rather than tidying. M1.5 is explicit that a site supervisor "cannot see
+ * pricing"; `/portal/*` honours that exactly — it nulls `totalIncGst` for a
+ * supervisor and returns it for an administrator — while this router handed a
+ * supervisor `totalExGst`, `gst` and the charge lines in full. The portal is
+ * their whole surface: `portal.http.ts` calls nothing but `/portal/*`, and
+ * booking reaches `jobService.create` through the portal service, so no
+ * customer flow loses anything.
+ */
+jobRouter.use(requireRole('super-admin', 'operations', 'office-staff', 'allocator'));
 
 jobRouter.get('/', validate({ query: ListJobsQuerySchema }), asyncHandler(jobController.list));
 

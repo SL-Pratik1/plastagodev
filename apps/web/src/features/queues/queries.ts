@@ -1,4 +1,6 @@
 import type {
+  CallUpRequest,
+  CallUpState,
   ChargeDecision,
   FutileDecision,
   LeadConversion,
@@ -166,6 +168,71 @@ export function usePoReviewReject() {
   );
 }
 
+/* ── M2.12b · call-ups ───────────────────────────────────────────────────── */
+
+/**
+ * Orders confirmed and not booked — Matt's *"sitting there waiting"* (21:30).
+ */
+export function useAwaitingCallUps(query: ListQuery) {
+  const { queues } = useServices();
+  return useQuery({
+    queryKey: queryKeys.queues.awaitingCallUpList(query),
+    queryFn: () => queues.awaitingCallUpList(query),
+  });
+}
+
+export function useCallUps(query: ListQuery & { state?: CallUpState }) {
+  const { queues } = useServices();
+  return useQuery({
+    queryKey: queryKeys.queues.callUpList(query),
+    queryFn: () => queues.callUpList(query),
+  });
+}
+
+export function useCallUp(id: string | undefined) {
+  const { queues } = useServices();
+  return useQuery({
+    queryKey: queryKeys.queues.callUpDetail(id ?? 'none'),
+    queryFn: () => queues.callUpGet(id ?? ''),
+    enabled: Boolean(id),
+  });
+}
+
+/**
+ * Calling an order up by hand (Matt, 30:40).
+ *
+ * ⚠️ Goes through `useQueueMutation` like every other queue act, so the nav
+ * badges and both lists refetch. A call-up that books a job empties a row from
+ * the waiting list and adds one to the board, and a screen still showing the
+ * order as unbooked invites somebody to call it up twice.
+ */
+export function useCallUpOrder() {
+  const { queues } = useServices();
+  return useQueueMutation(
+    ({ purchaseOrderId, request }: { purchaseOrderId: string; request: CallUpRequest }) =>
+      queues.callUpOrder(purchaseOrderId, request),
+  );
+}
+
+/**
+ * Retrying a queued call-up.
+ *
+ * ⚠️ A queue mutation, because a successful retry changes three lists at once:
+ * this queue empties a row, the waiting-orders list loses one, and a job appears
+ * on the board. Invalidating only this screen would leave the other two lying.
+ */
+export function useCallUpRetry() {
+  const { queues } = useServices();
+  return useQueueMutation((id: string) => queues.callUpRetry(id));
+}
+
+export function useCallUpReject() {
+  const { queues } = useServices();
+  return useQueueMutation(({ id, note }: { id: string; note: string }) =>
+    queues.callUpReject(id, note),
+  );
+}
+
 /* ── M5 · Journey A — leads ───────────────────────────────────────────────── */
 
 export function useLeadList(query: ListQuery) {
@@ -174,6 +241,20 @@ export function useLeadList(query: ListQuery) {
     queryKey: queryKeys.queues.leadList(query),
     queryFn: () => queues.leadList(query),
     placeholderData: (previous) => previous,
+  });
+}
+
+/**
+ * The three cards above the grid.
+ *
+ * Invalidated by `useQueueMutation` along with everything else under
+ * `queues.all`, so converting a lead moves the Won figure without a reload.
+ */
+export function useLeadStats() {
+  const { queues } = useServices();
+  return useQuery({
+    queryKey: queryKeys.queues.leadStats(),
+    queryFn: () => queues.leadStats(),
   });
 }
 

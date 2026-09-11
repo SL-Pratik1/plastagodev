@@ -23,6 +23,7 @@
     "seed:driver-demo": "tsx src/scripts/seed-driver-demo.ts",
     "setup:extractor": "tsx src/scripts/setup-extractor.ts",
     "seed:reset": "tsx src/scripts/seed-reset.ts",
+    "migrate:rate-schedules": "tsx src/scripts/migrate-rate-schedules.ts",
     "seed:demo": "tsx src/scripts/seed-demo.ts",
     "seed:all": "npm run seed:reset && npm run seed:auth && npm run seed:settings && npm run seed:places && npm run seed:demo"
   },
@@ -41,6 +42,7 @@
     "ioredis": "^6.0.0",
     "mongodb": "~7.5.0",
     "mongoose": "^9.9.3",
+    "pdf-lib": "^1.17.1",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
     "twilio": "^6.1.0",

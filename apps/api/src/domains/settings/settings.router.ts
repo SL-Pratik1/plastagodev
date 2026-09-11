@@ -1,18 +1,22 @@
 import {
-  CredentialTypeSettingSchema,
+  AdditionalServiceCreateSchema,
+  AdditionalServiceUpdateSchema,
+  InvoiceTemplateWriteSchema,
   InvoicingSettingsSchema,
-  NotificationSettingsSchema,
+  RateCardCreateSchema,
+  RateCardUpdateSchema,
+  RateScheduleCreateSchema,
 } from '@plastago/shared';
 import { Router } from 'express';
-import * as z from 'zod';
 import { asyncHandler } from '../../lib/async-handler.js';
 import { requireAuth, requireRole } from '../../middleware/require-auth.js';
 import { validate } from '../../middleware/validate.js';
 import { settingsController } from './settings.controller.js';
 import {
-  IntegrationCheckBodySchema,
-  IntegrationIdParamsSchema,
+  InvoiceTemplateIdParamsSchema,
   QuoteQuerySchema,
+  RateCardIdParamsSchema,
+  ServiceCodeParamsSchema,
 } from './settings.schemas.js';
 
 /**
@@ -60,12 +64,14 @@ const ADMIN = requireRole('super-admin', 'operations');
  * schema. It is a seed-time value now.
  */
 
-settingsRouter.put(
-  '/notifications',
-  ADMIN,
-  validate({ body: NotificationSettingsSchema }),
-  asyncHandler(settingsController.saveNotifications),
-);
+/*
+ * There is no `PUT /notifications`, no `PUT /credential-types` and no
+ * `POST /integrations/:id/check` either. All three wrote settings nothing
+ * downstream read — see the note in `@plastago/shared`'s settings schema.
+ *
+ * ⚠️ Unrelated: `/notifications` on the API root is the notification CENTRE and
+ * is very much alive. Only the settings-level rules block is gone.
+ */
 
 settingsRouter.put(
   '/invoicing',
@@ -74,20 +80,88 @@ settingsRouter.put(
   asyncHandler(settingsController.saveInvoicing),
 );
 
-settingsRouter.put(
-  '/credential-types',
+/* ── Invoice templates (M7.5) ────────────────────────────────────────────── */
+
+settingsRouter.post(
+  '/invoice-templates',
   ADMIN,
-  validate({ body: z.array(CredentialTypeSettingSchema) }),
-  asyncHandler(settingsController.saveCredentialTypes),
+  validate({ body: InvoiceTemplateWriteSchema }),
+  asyncHandler(settingsController.createInvoiceTemplate),
+);
+
+settingsRouter.put(
+  '/invoice-templates/:id',
+  ADMIN,
+  validate({ params: InvoiceTemplateIdParamsSchema, body: InvoiceTemplateWriteSchema }),
+  asyncHandler(settingsController.updateInvoiceTemplate),
+);
+
+settingsRouter.delete(
+  '/invoice-templates/:id',
+  ADMIN,
+  validate({ params: InvoiceTemplateIdParamsSchema }),
+  asyncHandler(settingsController.deleteInvoiceTemplate),
+);
+
+/* ── Rate cards (M6.1, M6.2) ─────────────────────────────────────────────── */
+
+settingsRouter.post(
+  '/rate-cards',
+  ADMIN,
+  validate({ body: RateCardCreateSchema }),
+  asyncHandler(settingsController.createRateCard),
+);
+
+settingsRouter.patch(
+  '/rate-cards/:id',
+  ADMIN,
+  validate({ params: RateCardIdParamsSchema, body: RateCardUpdateSchema }),
+  asyncHandler(settingsController.renameRateCard),
 );
 
 /**
- * POST, not PUT — this records that a check HAPPENED, which is an event rather
- * than a state the caller sets.
+ * ⚠️ Issuing a schedule is a POST to a sub-collection, and there is
+ * deliberately NO `PUT /rate-cards/:id/zones`.
+ *
+ * A PUT would say "these are the card's rates", which is the mental model that
+ * reprices history: a job is priced by the rates in force on ITS date, so
+ * changing a rate has to ADD a dated version rather than overwrite a location.
+ * Making the safe operation the only representable one is stronger than
+ * validating against the unsafe one.
  */
 settingsRouter.post(
-  '/integrations/:id/check',
+  '/rate-cards/:id/schedules',
   ADMIN,
-  validate({ params: IntegrationIdParamsSchema, body: IntegrationCheckBodySchema }),
-  asyncHandler(settingsController.recordIntegrationCheck),
+  validate({ params: RateCardIdParamsSchema, body: RateScheduleCreateSchema }),
+  asyncHandler(settingsController.issueSchedule),
+);
+
+settingsRouter.delete(
+  '/rate-cards/:id',
+  ADMIN,
+  validate({ params: RateCardIdParamsSchema }),
+  asyncHandler(settingsController.deleteRateCard),
+);
+
+/* ── Additional services (M6.5) ──────────────────────────────────────────── */
+
+settingsRouter.post(
+  '/additional-services',
+  ADMIN,
+  validate({ body: AdditionalServiceCreateSchema }),
+  asyncHandler(settingsController.createAdditionalService),
+);
+
+settingsRouter.patch(
+  '/additional-services/:code',
+  ADMIN,
+  validate({ params: ServiceCodeParamsSchema, body: AdditionalServiceUpdateSchema }),
+  asyncHandler(settingsController.updateAdditionalService),
+);
+
+settingsRouter.delete(
+  '/additional-services/:code',
+  ADMIN,
+  validate({ params: ServiceCodeParamsSchema }),
+  asyncHandler(settingsController.deleteAdditionalService),
 );

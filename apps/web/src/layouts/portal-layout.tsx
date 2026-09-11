@@ -68,9 +68,10 @@ export function PortalLayout() {
    * must not be presented with a page implying they can — they see the portal as
    * normal and their administrator gets the prompt.
    */
-  const onboarding = useOnboardingInvite();
+  const isAdministrator = user.role === 'customer-administrator';
+  const onboarding = useOnboardingInvite({ enabled: isAdministrator });
   const needsTerms =
-    user.role === 'customer-administrator' &&
+    isAdministrator &&
     onboarding.data?.state === 'awaiting-terms' &&
     !location.pathname.startsWith('/portal/welcome');
   const tabs = items.filter((item) => item.primary);

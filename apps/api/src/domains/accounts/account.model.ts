@@ -5,7 +5,6 @@ import {
   CAPTURE_MODES,
   CONTACT_ROLES,
   PO_POLICIES,
-  RATE_CARDS,
   ZONES,
 } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
@@ -56,8 +55,26 @@ const accountSchema = new Schema(
      *
      * Not a preference — a wrong rate card is a pricing incident that nobody
      * notices until the customer does. Required, never defaulted.
+     *
+     * REFERENCE → `ratecards._id`, with no `enum`: an administrator adds cards
+     * at runtime, and a compile-time list here would have Mongo reject a card
+     * that genuinely exists. The service checks the card exists before writing.
      */
-    rateCardId: { type: String, required: true, enum: RATE_CARDS },
+    rateCardId: { type: String, required: true, ref: 'RateCard' },
+
+    /**
+     * M7.5 — which invoice template this account's invoices print on.
+     *
+     * REFERENCE → `invoicetemplates._id`. Null means "whatever the brand's
+     * default is", resolved at render time rather than stamped here: a new
+     * account should follow its brand without somebody having to pick, and
+     * changing the brand default should carry those accounts with it.
+     *
+     * ⚠️ Resolved at RENDER time, but the resolved name is then frozen onto
+     * the invoice — see `invoices.templateName`. Reassigning an account must
+     * not change how an invoice already sent to a customer would reprint.
+     */
+    invoiceTemplateId: { type: String, default: null, ref: 'InvoiceTemplate' },
 
     poPolicy: { type: String, required: true, enum: PO_POLICIES },
     captureMode: { type: String, required: true, enum: CAPTURE_MODES },

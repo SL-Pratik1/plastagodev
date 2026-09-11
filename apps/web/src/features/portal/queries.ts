@@ -1,5 +1,6 @@
 import type {
   AccountOnboarding,
+  CallUpRequest,
   PortalAccountUpdate,
   PortalBookingDraft,
   PortalChangeRequest,
@@ -106,6 +107,33 @@ export function usePortalQuote(draft: PortalBookingDraft | null, enabled: boolea
 export function usePortalBook() {
   const { portal } = useServices();
   return usePortalJobMutation((draft: PortalBookingDraft) => portal.book(draft));
+}
+
+/* ── M2.12b · orders waiting for a date ─────────────────────────────────── */
+
+export function usePortalAwaitingCallUp(query: ListQuery) {
+  const { portal } = useServices();
+  return useQuery({
+    queryKey: queryKeys.portal.awaitingCallUp(query),
+    queryFn: () => portal.awaitingCallUp(query),
+    placeholderData: (previous) => previous,
+  });
+}
+
+/**
+ * Giving us a date for an order (Matt, 30:40).
+ *
+ * ⚠️ Goes through `usePortalJobMutation` because it does two things at once: it
+ * empties a row from this list AND puts a pickup on the customer's jobs screen.
+ * Invalidating only the waiting list would leave the new pickup invisible until
+ * a reload, which reads as the booking having failed.
+ */
+export function usePortalCallUp() {
+  const { portal } = useServices();
+  return usePortalJobMutation(
+    ({ purchaseOrderId, request }: { purchaseOrderId: string; request: CallUpRequest }) =>
+      portal.callUp(purchaseOrderId, request),
+  );
 }
 
 export function usePortalEditJob() {
@@ -226,12 +254,21 @@ export function usePortalApproveSupervisor() {
  * customer is sent to the welcome screen. Cheap and rarely changing, hence the
  * long stale time: it changes exactly once in an account's life.
  */
-export function useOnboardingInvite() {
+export function useOnboardingInvite({ enabled = true }: { enabled?: boolean } = {}) {
   const { portal } = useServices();
   return useQuery({
     queryKey: queryKeys.portal.onboarding(),
     queryFn: () => portal.onboardingInvite(),
     staleTime: 5 * 60 * 1000,
+    /*
+     * Administrator-only on the API: a site supervisor cannot bind their
+     * employer to the terms, so `assertAdministrator` answers them 403. The
+     * layout reads this on EVERY portal page, so leaving it on for a supervisor
+     * is a guaranteed authorisation failure per page opened — noise in the API
+     * log and in error monitoring, of exactly the shape that hides a real one.
+     * The caller that knows the role turns it off.
+     */
+    enabled,
   });
 }
 

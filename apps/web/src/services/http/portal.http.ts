@@ -1,7 +1,10 @@
 import type { ApiClient } from '@plastago/api-client';
 import {
   API_PREFIX,
+  AwaitingCallUpSchema,
+  CallUpOutcomeSchema,
   CertificateSchema,
+  type CallUpRequest,
   MonthlyVolumeReportSchema,
   OnboardingInviteSchema,
   PortalAccountSchema,
@@ -83,6 +86,26 @@ export function createHttpPortalService(api: ApiClient): CustomerPortalService {
           method: 'POST',
           body: draft,
           schema: PricePreviewSchema,
+        }),
+      ),
+
+    /* ── M2.12b · orders waiting for a date ───────────────────────────────── */
+
+    awaitingCallUp: (query: ListQuery) =>
+      viaService(() =>
+        api.request(`${base}/purchase-orders/awaiting`, {
+          searchParams: listParams(query),
+          schema: pageOf(AwaitingCallUpSchema),
+        }),
+      ),
+
+    callUp: (purchaseOrderId: string, request: CallUpRequest) =>
+      viaService(() =>
+        api.request(`${base}/purchase-orders/${purchaseOrderId}/call-up`, {
+          method: 'POST',
+          body: request,
+          // Says what it DID — booked, or queued for the office. See the schema.
+          schema: CallUpOutcomeSchema,
         }),
       ),
 

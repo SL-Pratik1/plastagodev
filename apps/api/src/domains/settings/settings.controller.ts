@@ -1,18 +1,23 @@
 import type {
-  CredentialTypeSettingSchema,
+  AdditionalServiceCreateSchema,
+  InvoiceTemplateWriteSchema,
+  AdditionalServiceUpdateSchema,
   InvoicingSettingsSchema,
-  NotificationSettingsSchema,
+  RateCardCreateSchema,
+  RateCardUpdateSchema,
+  RateScheduleCreateSchema,
 } from '@plastago/shared';
 import type { Response } from 'express';
-import type * as z from 'zod';
 import { AppError } from '../../lib/app-error.js';
 import type { Request } from 'express';
+import { todayInSydney } from '../../lib/business-day.js';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { pricingService } from './pricing.service.js';
 import type {
-  IntegrationCheckBodySchema,
-  IntegrationIdParamsSchema,
+  InvoiceTemplateIdParamsSchema,
   QuoteQuerySchema,
+  RateCardIdParamsSchema,
+  ServiceCodeParamsSchema,
 } from './settings.schemas.js';
 import { settingsService, type Caller } from './settings.service.js';
 
@@ -28,43 +33,12 @@ export const settingsController = {
     res.json(settings);
   },
 
-  saveNotifications: async (
-    req: ValidatedRequest<{ body: typeof NotificationSettingsSchema }>,
-    res: Response,
-  ): Promise<void> => {
-    const saved = await settingsService.saveNotifications(req.validated.body, callerOf(req));
-    res.json(saved);
-  },
-
   saveInvoicing: async (
     req: ValidatedRequest<{ body: typeof InvoicingSettingsSchema }>,
     res: Response,
   ): Promise<void> => {
     const saved = await settingsService.saveInvoicing(req.validated.body, callerOf(req));
     res.json(saved);
-  },
-
-  saveCredentialTypes: async (
-    req: ValidatedRequest<{ body: z.ZodArray<typeof CredentialTypeSettingSchema> }>,
-    res: Response,
-  ): Promise<void> => {
-    const saved = await settingsService.saveCredentialTypes(req.validated.body, callerOf(req));
-    res.json(saved);
-  },
-
-  recordIntegrationCheck: async (
-    req: ValidatedRequest<{
-      params: typeof IntegrationIdParamsSchema;
-      body: typeof IntegrationCheckBodySchema;
-    }>,
-    res: Response,
-  ): Promise<void> => {
-    const updated = await settingsService.recordIntegrationCheck(
-      req.validated.params.id,
-      req.validated.body,
-      callerOf(req),
-    );
-    res.json(updated);
   },
 
   /**
@@ -78,16 +52,152 @@ export const settingsController = {
     req: ValidatedRequest<{ query: typeof QuoteQuerySchema }>,
     res: Response,
   ): Promise<void> => {
-    const { rateCardId, zone, expectedAreaM2, bagCount } = req.validated.query;
+    const { rateCardId, zone, expectedAreaM2, bagCount, onDate } = req.validated.query;
 
     const preview = await pricingService.quote({
       rateCardId,
       zone,
       expectedAreaM2: expectedAreaM2 ?? null,
       bagCount: bagCount ?? 0,
+      /*
+       * ⚠️ Today's date in SYDNEY, not `new Date()` sliced to ten characters.
+       * A preview asked for at 9am on the 1st would otherwise price on the
+       * 30th, which is the wrong schedule on exactly the days a rate changes.
+       *
+       * The default lives here rather than in `pricingService` on purpose:
+       * this endpoint answers a question asked with no job attached, and every
+       * domain caller must state the date it means.
+       */
+      onDate: onDate ?? todayInSydney(),
     });
 
     res.json(preview);
+  },
+
+  /* ── Invoice templates (M7.5) ──────────────────────────────────────────── */
+
+  createInvoiceTemplate: async (
+    req: ValidatedRequest<{ body: typeof InvoiceTemplateWriteSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const created = await settingsService.createInvoiceTemplate(req.validated.body, callerOf(req));
+    // 201 with the stored template: the id is derived from the name, so the
+    // caller cannot know it without being told.
+    res.status(201).json(created);
+  },
+
+  updateInvoiceTemplate: async (
+    req: ValidatedRequest<{
+      params: typeof InvoiceTemplateIdParamsSchema;
+      body: typeof InvoiceTemplateWriteSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const updated = await settingsService.updateInvoiceTemplate(
+      req.validated.params.id,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.json(updated);
+  },
+
+  deleteInvoiceTemplate: async (
+    req: ValidatedRequest<{ params: typeof InvoiceTemplateIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    await settingsService.deleteInvoiceTemplate(req.validated.params.id, callerOf(req));
+    res.status(204).end();
+  },
+
+  /* ── Rate cards (M6.1, M6.2) ───────────────────────────────────────────── */
+
+  createRateCard: async (
+    req: ValidatedRequest<{ body: typeof RateCardCreateSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const created = await settingsService.createRateCard(req.validated.body, callerOf(req));
+    // 201 with the stored card: the id may have been derived from the label, so
+    // the caller cannot know it without being told.
+    res.status(201).json(created);
+  },
+
+  renameRateCard: async (
+    req: ValidatedRequest<{
+      params: typeof RateCardIdParamsSchema;
+      body: typeof RateCardUpdateSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const updated = await settingsService.renameRateCard(
+      req.validated.params.id,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.json(updated);
+  },
+
+  /**
+   * POST, not PUT — issuing a schedule ADDS a dated version rather than
+   * replacing the rates at a location. There is deliberately no route that
+   * edits a schedule's figures in place (M6.2).
+   */
+  issueSchedule: async (
+    req: ValidatedRequest<{
+      params: typeof RateCardIdParamsSchema;
+      body: typeof RateScheduleCreateSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const updated = await settingsService.issueSchedule(
+      req.validated.params.id,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.status(201).json(updated);
+  },
+
+  deleteRateCard: async (
+    req: ValidatedRequest<{ params: typeof RateCardIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    await settingsService.deleteRateCard(req.validated.params.id, callerOf(req));
+    res.status(204).end();
+  },
+
+  /* ── Additional services (M6.5) ────────────────────────────────────────── */
+
+  createAdditionalService: async (
+    req: ValidatedRequest<{ body: typeof AdditionalServiceCreateSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const created = await settingsService.createAdditionalService(
+      req.validated.body,
+      callerOf(req),
+    );
+    res.status(201).json(created);
+  },
+
+  updateAdditionalService: async (
+    req: ValidatedRequest<{
+      params: typeof ServiceCodeParamsSchema;
+      body: typeof AdditionalServiceUpdateSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const updated = await settingsService.updateAdditionalService(
+      req.validated.params.code,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.json(updated);
+  },
+
+  deleteAdditionalService: async (
+    req: ValidatedRequest<{ params: typeof ServiceCodeParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    await settingsService.deleteAdditionalService(req.validated.params.code, callerOf(req));
+    res.status(204).end();
   },
 };
 

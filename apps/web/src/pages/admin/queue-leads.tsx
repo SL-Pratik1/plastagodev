@@ -10,6 +10,7 @@ import {
 } from '@plastago/shared';
 import { Alert, Badge, Card, Pagination, buttonVariants, type BadgeProps } from '@plastago/ui';
 import { PlusIcon, SproutIcon } from 'lucide-react';
+import { useMemo } from 'react';
 import { Link } from 'react-router';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
@@ -18,7 +19,7 @@ import { useListQuery } from '@/components/data-table/use-list-query';
 import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
 import { StatCard } from '@/components/stat-card';
-import { useLeadList } from '@/features/queues/queries';
+import { useLeadList, useLeadStats } from '@/features/queues/queries';
 import { formatArea, formatDate, formatMobile } from '@/lib/format';
 
 /**
@@ -118,7 +119,19 @@ const COLUMNS: readonly DataTableColumn<LeadListItem>[] = [
       <span className="block">
         <Badge variant={STATUS_VARIANT[row.status]}>{LEAD_STATUS_LABELS[row.status]}</Badge>
         {row.convertedAccountId !== null && (
-          <span className="mt-1 block text-xs text-success">Account created</span>
+          // A dead "Account created" label was the end of the trail: the lead is
+          // hidden from the default grid and the account it became was never
+          // named, so "what happened to that enquiry" had no answer on screen.
+          <Link
+            to={`/admin/customers/${row.convertedAccountId}`}
+            className="focus-ring mt-1 block truncate rounded text-xs text-success underline-offset-4 hover:underline"
+            onClick={(event) => {
+              // The row itself navigates to the lead; this link means the account.
+              event.stopPropagation();
+            }}
+          >
+            View the account
+          </Link>
         )}
       </span>
     ),
@@ -196,15 +209,40 @@ const COLUMNS: readonly DataTableColumn<LeadListItem>[] = [
 
 export function AdminQueueLeadsPage() {
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
-  const { data, error, isPending, isFetching, refetch } = useLeadList(controller.query);
 
-  // Computed from the visible page only, and labelled as such — a "conversion
-  // rate" that silently covered a different set of rows than the grid below it
-  // would be the most quotable wrong number on the screen.
+  /*
+   * ⚠️ Asking for "Won" has to un-hide the converted leads.
+   *
+   * The grid hides anything with an account behind it, which is right for the
+   * working pipeline and exactly wrong for this one filter: converting is the
+   * only route to `won`, so every genuine win is hidden. Picking Won therefore
+   * used to return an empty grid, with nothing on screen to say why.
+   */
+  const query = useMemo(() => {
+    if (controller.query.filters?.status !== 'won') return controller.query;
+
+    return {
+      ...controller.query,
+      filters: { ...controller.query.filters, includeConverted: 'true' },
+    };
+  }, [controller.query]);
+
+  const { data, error, isPending, isFetching, refetch } = useLeadList(query);
+
+  /*
+   * ── Why these three numbers do not come from `rows` ──────────────────────
+   * They used to, and it made them the most quotable wrong number on the
+   * screen. The grid is paged and hides converted leads, so "Won" counted only
+   * leads somebody had typed as won WITHOUT converting — the precise set that
+   * are not wins — and a conversion rate that moved when you typed in the
+   * search box is a rate nobody can repeat. Counted on the server now, across
+   * every lead, whatever the grid is filtered to.
+   */
+  const stats = useLeadStats().data;
   const rows = data?.data ?? [];
-  const open = rows.filter((row) => !['won', 'lost'].includes(row.status)).length;
-  const won = rows.filter((row) => row.status === 'won').length;
-  const closed = rows.filter((row) => ['won', 'lost'].includes(row.status)).length;
+  const open = stats?.open ?? 0;
+  const won = stats?.won ?? 0;
+  const closed = (stats?.won ?? 0) + (stats?.lost ?? 0);
   const conversion = closed === 0 ? null : Math.round((won / closed) * 100);
 
   return (
@@ -223,17 +261,13 @@ export function AdminQueueLeadsPage() {
         }
       />
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <StatCard label="Open on this page" value={String(open)} hint="New, contacted or quoted" />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard label="Open" value={String(open)} hint="New, contacted or quoted" />
         <StatCard label="Won" value={String(won)} hint="Converted to an account" />
         <StatCard
           label="Conversion"
           value={conversion === null ? '—' : `${String(conversion)}%`}
-          hint={
-            closed === 0
-              ? 'Nothing closed yet on this page'
-              : `${String(won)} of ${String(closed)} closed`
-          }
+          hint={closed === 0 ? 'Nothing closed yet' : `${String(won)} of ${String(closed)} closed`}
         />
       </div>
 

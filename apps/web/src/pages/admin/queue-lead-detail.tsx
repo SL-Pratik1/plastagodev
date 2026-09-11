@@ -1,22 +1,24 @@
 import {
+  ACCOUNT_TYPES,
+  ACCOUNT_TYPE_DESCRIPTIONS,
+  ACCOUNT_TYPE_LABELS,
   BRAND_LABELS,
   CAPTURE_MODES,
   CAPTURE_MODE_LABELS,
+  LEAD_ATTACHMENT_ACCEPT,
   LEAD_SOURCE_LABELS,
-  LEAD_STATUSES,
   LEAD_STATUS_LABELS,
+  LEAD_WORKABLE_STATUSES,
   PO_POLICIES,
   PO_POLICY_LABELS,
-  RATE_CARDS,
-  RATE_CARD_LABELS,
   ZONES,
   ZONE_LABELS,
+  type AccountType,
   type BrandId,
   type CaptureMode,
   type Lead,
-  type LeadStatus,
+  type LeadWorkableStatus,
   type PoPolicy,
-  type RateCardId,
   type Zone,
 } from '@plastago/shared';
 import {
@@ -55,6 +57,7 @@ import { DetailList } from '@/components/detail-list';
 import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
 import { CONFIGURED_BRAND_IDS, IS_MULTI_BRAND } from '@/config/brands';
+import { useRateCardOptions } from '@/features/lookups/queries';
 import {
   useLead,
   useLeadAttach,
@@ -63,7 +66,8 @@ import {
   useLeadUpdate,
 } from '@/features/queues/queries';
 import { describeError } from '@/lib/error-message';
-import { formatArea, formatDateTime, formatMobile } from '@/lib/format';
+import { isServiceError } from '@/services/service-error';
+import { formatArea, formatDateTime, formatFileSize, formatMobile } from '@/lib/format';
 
 /**
  * One lead, and the conversion (M5 · Journey A · A.3 + A.4).
@@ -85,7 +89,7 @@ export function AdminQueueLeadDetailPage() {
     return (
       <div className="space-y-6">
         <Skeleton className="h-8 w-72" />
-        <div className="grid gap-6 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <Skeleton className="h-72 lg:col-span-2" />
           <Skeleton className="h-72" />
         </div>
@@ -113,7 +117,11 @@ function LeadDetail({ lead }: { lead: Lead }) {
   const toast = useToast();
   const update = useLeadUpdate();
 
-  const [status, setStatus] = useState<LeadStatus>(lead.status);
+  const [status, setStatus] = useState<LeadWorkableStatus>(
+    // A converted lead is read-only below, so the cast only ever meets a
+    // workable value in practice.
+    lead.status === 'won' ? 'quoted' : lead.status,
+  );
   const [owner, setOwner] = useState(lead.ownerName ?? '');
   const [note, setNote] = useState('');
   const [converting, setConverting] = useState(false);
@@ -168,9 +176,15 @@ function LeadDetail({ lead }: { lead: Lead }) {
         }
         actions={
           converted ? (
-            <Link to="/admin/customers" className={buttonVariants({ variant: 'outline' })}>
+            // The account this lead BECAME, not the list of all of them. Landing
+            // on the grid left the reader to find it by name, which is the same
+            // dead end the row's old "Account created" label was.
+            <Link
+              to={`/admin/customers/${lead.convertedAccountId ?? ''}`}
+              className={buttonVariants({ variant: 'outline' })}
+            >
               <BuildingIcon aria-hidden />
-              View accounts
+              View the account
             </Link>
           ) : (
             <Button
@@ -187,8 +201,8 @@ function LeadDetail({ lead }: { lead: Lead }) {
 
       {converted && (
         <Alert variant="success" title="Already converted">
-          This lead became an account. Pricing and terms were set during conversion — change them
-          on the account, not here.
+          This lead became an account. Pricing and terms were set during conversion — change them on
+          the account, not here.
         </Alert>
       )}
 
@@ -199,7 +213,7 @@ function LeadDetail({ lead }: { lead: Lead }) {
         </Alert>
       )}
 
-      <div className="grid items-start gap-6 lg:grid-cols-3">
+      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
           <Card>
             <CardHeader>
@@ -302,10 +316,24 @@ function LeadDetail({ lead }: { lead: Lead }) {
                   value={status}
                   disabled={converted}
                   onChange={(event) => {
-                    setStatus(event.target.value as LeadStatus);
+                    setStatus(event.target.value as LeadWorkableStatus);
                   }}
                 >
-                  {LEAD_STATUSES.map((option) => (
+                  {/*
+                    ⚠️ The WORKABLE statuses, not all of them. `won` is absent
+                    from this list for the reason the shared schema gives: a lead
+                    is won when it becomes an ACCOUNT, which happens on Convert
+                    below, where the customer code, the rate card and the terms
+                    are decided.
+
+                    This dropdown used to offer every status, so picking "Won"
+                    sent a value `LeadUpdateSchema` refuses and the office got a
+                    bare "Request validation failed" with no way to tell what it
+                    objected to. A TypeScript error should have caught it and did
+                    not, because the built `@plastago/shared` on disk predated
+                    `won` being removed from the writable set.
+                  */}
+                  {LEAD_WORKABLE_STATUSES.map((option) => (
                     <option key={option} value={option}>
                       {LEAD_STATUS_LABELS[option]}
                     </option>
@@ -361,11 +389,14 @@ function LeadDetail({ lead }: { lead: Lead }) {
               Save changes
             </Button>
 
-            {!converted && status === 'won' && lead.status !== 'won' && (
-              <Alert variant="info" title="Marking a lead won does not create the account">
-                Use Convert to account — that is where the rate card and terms are set.
-              </Alert>
-            )}
+            {/*
+              There was an alert here saying "Marking a lead won does not create
+              the account", shown once somebody had already chosen Won. It was
+              explaining a choice the form should not have offered — and the save
+              behind it failed anyway. The dropdown no longer lists Won, so there
+              is nothing left to explain after the fact; "Convert to account" in
+              the header is the only way a lead is won.
+            */}
           </CardContent>
         </Card>
       </div>
@@ -387,8 +418,19 @@ interface ConvertForm {
   customerCode: string;
   legalName: string;
   abn: string;
+  /** Empty until chosen — see `ConvertLeadDialog`. Never defaulted. */
+  accountType: AccountType | '';
   brandId: BrandId;
-  rateCardId: RateCardId | '';
+  /*
+   * A plain `string`, not `RateCardId | ''`.
+   *
+   * `RateCardId` used to be an enum, so the `| ''` carried real meaning — "not
+   * one of the seven yet". It is a validated slug now, which `''` satisfies at
+   * the type level, so the union said nothing. The requirement is unchanged
+   * and still enforced: `submit` refuses an empty selection before it builds a
+   * conversion, and the API refuses a card that does not exist.
+   */
+  rateCardId: string;
   poPolicy: PoPolicy;
   captureMode: CaptureMode;
   paymentTermsDays: string;
@@ -423,6 +465,14 @@ function ConvertLeadDialog({
   const toast = useToast();
   const navigate = useNavigate();
   const convert = useLeadConvert();
+  /*
+   * M6.1 — the rate cards to choose from.
+   *
+   * The empty-string default on `rateCardId` below already forces a choice, so
+   * an empty list while this loads means the form refuses to submit rather than
+   * silently converting onto the wrong card.
+   */
+  const rateCards = useRateCardOptions().data ?? [];
 
   const [form, setForm] = useState<ConvertForm>(() => ({
     // Three letters of the company name plus 001 is the pattern their existing
@@ -433,6 +483,7 @@ function ConvertLeadDialog({
       .toUpperCase()}001`,
     legalName: lead.companyName,
     abn: '',
+    accountType: '',
     brandId: 'plastago',
     rateCardId: '',
     poPolicy: 'not-required',
@@ -442,9 +493,18 @@ function ConvertLeadDialog({
     sendInvitation: true,
   }));
   const [errors, setErrors] = useState<Record<string, string>>({});
+  /**
+   * The last failure, shown in the dialog itself.
+   *
+   * A toast cannot do this job here — see the catch in `submit`.
+   */
+  const [formError, setFormError] = useState<string | null>(null);
 
   const set = <TKey extends keyof ConvertForm>(key: TKey, value: ConvertForm[TKey]) => {
     setForm((current) => ({ ...current, [key]: value }));
+    // Editing anything makes the last rejection stale — leaving it on screen
+    // next to a changed form is how people re-read an error they have fixed.
+    setFormError(null);
     setErrors((current) => {
       const { [key]: _dropped, ...rest } = current;
       return rest;
@@ -467,12 +527,17 @@ function ConvertLeadDialog({
     if (!form.rateCardId) {
       next.rateCardId = 'Choose the rate card. Every invoice for this customer is priced from it.';
     }
+    if (!form.accountType) {
+      next.accountType =
+        'Choose builder or contractor. It decides whether they get site supervisors and which booking form they see.';
+    }
     const terms = Number(form.paymentTermsDays);
     if (!Number.isInteger(terms) || terms < 0 || terms > 90) {
       next.paymentTermsDays = 'Whole days, 0 to 90. Their standard is 7.';
     }
 
     setErrors(next);
+    setFormError(null);
     if (Object.keys(next).length > 0) return;
 
     try {
@@ -482,8 +547,9 @@ function ConvertLeadDialog({
           customerCode: form.customerCode,
           legalName: form.legalName.trim(),
           abn: abnDigits,
+          accountType: form.accountType as AccountType,
           brandId: form.brandId,
-          rateCardId: form.rateCardId as RateCardId,
+          rateCardId: form.rateCardId,
           poPolicy: form.poPolicy,
           captureMode: form.captureMode,
           paymentTermsDays: terms,
@@ -499,10 +565,34 @@ function ConvertLeadDialog({
           : 'No invitation was sent — you can send one from the account.',
       );
       onClose();
-      await navigate('/admin/queues/leads');
+      /*
+       * ⚠️ The ACCOUNT, not back to the leads list.
+       *
+       * Converting stamps the lead with its new account and the grid hides
+       * anything so stamped — so returning to the list dropped you on the one
+       * screen guaranteed not to show what you had just made. It read as the
+       * lead having been deleted.
+       */
+      await navigate(`/admin/customers/${result.accountId}`);
     } catch (caught) {
+      /*
+       * ⚠️ Errors from here must be shown INSIDE the dialog.
+       *
+       * Two things hid them. The server's field `issues` were dropped on the
+       * floor, so "Customer code TES001 is already in use" never reached the
+       * box it was about; and this dialog is a native <dialog> opened with
+       * `showModal()`, which puts it in the browser's top layer — above every
+       * z-index there is, including the toast viewport. So the one signal left
+       * was painted behind the thing it was reporting on, and pressing Create
+       * account looked like it did nothing at all.
+       */
       const described = describeError(caught);
-      toast.error(described.title, described.detail);
+
+      if (isServiceError(caught) && Object.keys(caught.fieldErrors).length > 0) {
+        setErrors(caught.fieldErrors);
+      }
+
+      setFormError(described.detail ? `${described.title} — ${described.detail}` : described.title);
     }
   };
 
@@ -527,9 +617,15 @@ function ConvertLeadDialog({
       }
     >
       <div className="space-y-5">
+        {formError && (
+          <Alert variant="destructive" title="The account was not created">
+            {formError}
+          </Alert>
+        )}
+
         <section className="space-y-4">
           <h3 className="text-sm font-semibold">Identity</h3>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field
               id="convert-code"
               label="Customer code"
@@ -585,9 +681,47 @@ function ConvertLeadDialog({
             )}
           </Field>
 
+          {/*
+            Opens empty, exactly like the rate card and for the same reason.
+
+            Builder or contractor decides whether the customer gets site
+            supervisors and whether their booking form asks for the area and bag
+            count (Matt, 21:55). Conversion used to write `builder` for every
+            lead without asking, so a contractor got supervisors they never use
+            and a short form missing the only figures they can give us.
+          */}
+          <Field
+            id="convert-account-type"
+            label="Customer type"
+            required
+            error={errors.accountType}
+            hint={
+              form.accountType
+                ? ACCOUNT_TYPE_DESCRIPTIONS[form.accountType]
+                : 'Decides site supervisors and which booking form they get.'
+            }
+          >
+            {(control) => (
+              <Select
+                {...control}
+                value={form.accountType}
+                onChange={(event) => {
+                  set('accountType', event.target.value as AccountType);
+                }}
+              >
+                <option value="">Choose builder or contractor…</option>
+                {ACCOUNT_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {ACCOUNT_TYPE_LABELS[type]}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+
           {/* One configured brand is not a choice, so the form submits its default. */}
           {IS_MULTI_BRAND && (
-            <Field id="convert-brand" label="Brand" hint="Which brand services them (M1.1).">
+            <Field id="convert-brand" label="Brand" hint="Which brand services them.">
               {(control) => (
                 <Select
                   {...control}
@@ -620,27 +754,32 @@ function ConvertLeadDialog({
             label="Rate card"
             required
             error={errors.rateCardId}
-            hint="Resolution order is named card → tier → default (M6.1)."
+            hint="Resolution order is named card → tier → default."
           >
             {(control) => (
               <Select
                 {...control}
                 value={form.rateCardId}
                 onChange={(event) => {
-                  set('rateCardId', event.target.value as RateCardId);
+                  set('rateCardId', event.target.value);
                 }}
               >
                 <option value="">Choose a rate card…</option>
-                {RATE_CARDS.map((id) => (
-                  <option key={id} value={id}>
-                    {RATE_CARD_LABELS[id]}
+                {/*
+                  Loaded (M6.1). Conversion is where a lead's rates are agreed,
+                  so it has to offer the card that was negotiated — including
+                  one an administrator created for this builder an hour ago.
+                */}
+                {rateCards.map((card) => (
+                  <option key={card.value} value={card.value}>
+                    {card.label}
                   </option>
                 ))}
               </Select>
             )}
           </Field>
 
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field
               id="convert-po-policy"
               label="Purchase order policy"
@@ -709,7 +848,7 @@ function ConvertLeadDialog({
             <Field
               id="convert-zone"
               label="Primary zone"
-              hint="Service charge and per-m² rate both vary by zone (M6.3)."
+              hint="Service charge and per-m² rate both vary by zone."
             >
               {(control) => (
                 <Select
@@ -729,7 +868,6 @@ function ConvertLeadDialog({
             </Field>
           </div>
         </section>
-
 
         <div className="flex items-start gap-3 rounded-lg border border-border p-3">
           <Checkbox
@@ -861,7 +999,7 @@ function LeadAttachments({ lead }: { lead: Lead }) {
         <input
           ref={inputRef}
           type="file"
-          accept="application/pdf,image/*"
+          accept={LEAD_ATTACHMENT_ACCEPT}
           className="sr-only"
           onChange={(event) => {
             const file = event.target.files?.[0];
@@ -883,11 +1021,4 @@ function LeadAttachments({ lead }: { lead: Lead }) {
       </CardContent>
     </Card>
   );
-}
-
-/** `148 KB`. Rounded hard — nobody needs the exact byte count of a proposal. */
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${String(bytes)} B`;
-  if (bytes < 1024 * 1024) return `${String(Math.round(bytes / 1024))} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

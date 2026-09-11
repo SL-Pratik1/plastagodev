@@ -119,6 +119,18 @@ export const CHARGE_CODES = [
   'service-fee',
   'area-charge',
   'recycling-bags',
+  /**
+   * Bags collected beyond what the purchase order allowed for (Matt, 07:37).
+   *
+   * ⚠️ A separate code from `recycling-bags` on purpose, and not an adjustment
+   * to it. The base invoice has to leave the site matching the builder's order
+   * exactly — Matt, 09:55: *"the original invoice for the job… has to go out
+   * exactly matching what the build has given us"* — so the excess cannot be
+   * folded into the ordered line. It is raised with `source: 'driver'`, which
+   * is what routes it onto the additional-charges invoice with no PO number and
+   * into the awaiting-PO queue until the builder issues a second order.
+   */
+  'extra-bags',
   'contamination',
   'extra-load-time',
   'futile-pickup',
@@ -135,6 +147,7 @@ export const CHARGE_CODE_LABELS: Record<ChargeCode, string> = {
   'service-fee': 'Service fee',
   'area-charge': 'Weight charge (per m²)',
   'recycling-bags': 'Recycling bags',
+  'extra-bags': 'Extra bags (not on the original PO)',
   contamination: 'Contamination charge',
   'extra-load-time': 'Extra load time',
   'futile-pickup': 'Futile pickup',
@@ -273,7 +286,7 @@ export const JobCommentSchema = z
 /** What the comment box submits. */
 export const JobCommentDraftSchema = z
   .object({
-    body: z.string().trim().min(1, 'Write something before posting').max(2000),
+    body: z.string().trim().min(1, 'Write something before posting').max(2000, 'Keep a comment under 2000 characters'),
     visibility: CommentVisibilitySchema,
   })
   .meta({ id: 'JobCommentDraft' });
@@ -563,8 +576,28 @@ export const JobListItemSchema = z
     recoveredWeightKg: z.number().nonnegative().nullable(),
     /** How that weight was arrived at. Null where there is no weight at all. */
     recoveredWeightBasis: WeightBasisSchema.nullable(),
+    /**
+     * The allowance the purchase order authorised, frozen at booking.
+     *
+     * ⚠️ This is the quantity the base invoice is priced on, so it must keep
+     * matching the builder's order (Matt, 09:55). What the driver actually
+     * found is `collectedBagCount`; the two are only equal by coincidence.
+     */
     bagCount: z.number().int().nonnegative(),
-    totalExGst: MoneySchema,
+    /**
+     * What the driver counted on site. Null until the weights are captured.
+     *
+     * Anything over `bagCount` is charged separately and needs its own purchase
+     * order (Matt, 08:28) — see the `extra-bags` charge code.
+     */
+    collectedBagCount: z.number().int().nonnegative().nullable(),
+    /**
+     * Null for a caller who may not see money — today the allocator (M1.5:
+     * "the allocator sees the job, the site, the driver and the dates — never
+     * what it is worth"). The server nulls it rather than the console hiding a
+     * value it was sent; see `redactPricing` in `job.service.ts`.
+     */
+    totalExGst: MoneySchema.nullable(),
     invoiceStatus: z.enum(['not-invoiced', 'awaiting-po', 'invoiced', 'paid']),
     hasPendingCharges: z.boolean(),
     completedAt: IsoDateTimeSchema.nullable(),
@@ -587,8 +620,9 @@ export const JobSchema = JobListItemSchema.extend({
   comments: z.array(JobCommentSchema),
   invoiceNumber: z.number().int().positive().nullable(),
   invoicedAt: IsoDateTimeSchema.nullable(),
-  gst: MoneySchema,
-  totalIncGst: MoneySchema,
+  /** Null for a caller who may not see money — see `totalExGst` above. */
+  gst: MoneySchema.nullable(),
+  totalIncGst: MoneySchema.nullable(),
   /** M4.8 — the safety record, readable by the office. */
   compliance: JobComplianceSchema,
 }).meta({ id: 'Job' });
@@ -611,21 +645,21 @@ export const JobDraftSchema = z
     accountId: ObjectIdSchema,
 
     /* ── The address ──────────────────────────────────────────────────── */
-    siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120),
-    lotNumber: z.string().trim().max(30),
-    addressLine: z.string().trim().min(1, 'Enter the street address').max(160),
+    siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120, 'Keep the site name under 120 characters'),
+    lotNumber: z.string().trim().max(30, 'A lot number is at most 30 characters'),
+    addressLine: z.string().trim().min(1, 'Enter the street address').max(160, 'Keep the address under 160 characters'),
     /** From the suburb picker. Supplies suburb, postcode, zone and the pin. */
     placeId: z.string().trim().min(1, 'Choose the suburb from the list'),
-    builderName: z.string().trim().max(120),
+    builderName: z.string().trim().max(120, 'Keep the builder name under 120 characters'),
 
     /* ── Getting a truck in ───────────────────────────────────────────── */
-    accessNotes: z.string().trim().max(1000),
-    gateHours: z.string().trim().max(120),
+    accessNotes: z.string().trim().max(1000, 'Keep access notes under 1000 characters'),
+    gateHours: z.string().trim().max(120, 'Keep gate hours under 120 characters'),
     inductionRequired: z.boolean(),
     craneAvailable: z.boolean(),
-    siteContactName: z.string().trim().max(80),
-    siteContactMobile: z.string().trim().max(20),
-    siteContactEmail: z.string().trim().max(160),
+    siteContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
+    siteContactMobile: z.string().trim().max(20, 'A mobile number is at most 20 characters'),
+    siteContactEmail: z.string().trim().max(160, 'Keep the email under 160 characters'),
     /**
      * PO number or job reference — one field. See `Job.poNumber`.
      *
@@ -633,7 +667,7 @@ export const JobDraftSchema = z
      * wins, because that is the number the builder's accounts system matches on
      * and a typed one can disagree with it by a character.
      */
-    poNumber: z.string().trim().max(60),
+    poNumber: z.string().trim().max(60, 'A PO or job reference is at most 60 characters'),
     /**
      * M2.12 — the confirmed purchase order this pickup is being booked against.
      *
@@ -656,10 +690,10 @@ export const JobDraftSchema = z
      * Zero means "nobody has told us yet", which is the fixed-price builder's
      * normal case, not an area of nothing (`Job.expectedAreaM2`).
      */
-    expectedAreaM2: z.number().nonnegative().max(100000),
+    expectedAreaM2: z.number().nonnegative().max(100000, 'That looks too large — check the figure'),
     /** ⚠️ IGNORED when `purchaseOrderId` is set — the order states the allowance. */
-    bagCount: z.number().int().nonnegative().max(200),
-    notes: z.string().trim().max(2000),
+    bagCount: z.number().int().nonnegative().max(200, 'That looks too many — check the figure'),
+    notes: z.string().trim().max(2000, 'Keep notes under 2000 characters'),
   })
   .meta({ id: 'JobDraft' });
 
@@ -692,6 +726,11 @@ export const BookablePurchaseOrderSchema = z
     bagAllowance: z.number().int().nullable(),
     siteSupervisorName: z.string().nullable(),
     siteSupervisorMobile: z.string().nullable(),
+    /**
+     * The supervisor's portal login, so a job booked against this order can be
+     * scoped to them (Matt, 33:57). Null where nobody was provisioned.
+     */
+    siteSupervisorUserId: ObjectIdSchema.nullable(),
     amountExGst: MoneySchema.nullable(),
     /**
      * The job already booked against this order, if there is one.

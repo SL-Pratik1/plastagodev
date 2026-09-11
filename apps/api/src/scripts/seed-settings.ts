@@ -1,33 +1,57 @@
 import {
-  CREDENTIAL_TYPE_LABELS,
-  CREDENTIAL_TYPES,
-  RATE_CARD_LABELS,
-  RATE_CARDS,
+  SEEDED_RATE_CARD_LABELS,
+  SEEDED_RATE_CARDS,
   ZONES,
   type AdditionalServiceSetting,
-  type CredentialTypeSetting,
-  type Integration,
   type InvoiceTemplate,
-  type NotificationRule,
   type RateCardId,
   type Zone,
 } from '@plastago/shared';
+
 import mongoose from 'mongoose';
 import { connectMongo, disconnectMongo, isMongoConnected } from '../db/mongo.js';
 import { SEQUENCE_STARTS } from '../domains/settings/settings.model.js';
 import { settingsRepository } from '../domains/settings/settings.repository.js';
+import { startOfSydneyDay } from '../lib/business-day.js';
 import { logger } from '../lib/logger.js';
 
 const log = logger.child({ module: 'seed-settings' });
 
 /**
- * Seeds platform settings, rate cards and zone rates (M2.4, M6, W7).
+ * A charge as the seed states it.
+ *
+ * `deletable` is absent because the READ computes it from the protected-code
+ * list — the seed states what a charge is, not what may be done to it.
+ */
+type SeededService = Omit<AdditionalServiceSetting, 'deletable'>;
+
+/**
+ * A template as the seed states it.
+ *
+ * `assignedAccountCount` and `deletable` are absent because both are COUNTED
+ * on read — the seed states what a template is, not how many accounts happen
+ * to name it today.
+ */
+type SeededTemplate = Omit<InvoiceTemplate, 'assignedAccountCount' | 'deletable'>;
+
+/**
+ * When the seeded schedule opens (M6.2).
+ *
+ * ⚠️ A `YYYY-MM-DD` string, resolved to the start of the Sydney day by the
+ * repository. Their current schedule runs from 1 April 2026, and every seeded
+ * card opens on that date so a job dated before it prices nothing rather than
+ * silently picking up figures that were not yet agreed.
+ */
+const SEED_EFFECTIVE_FROM = '2026-04-01';
+
+/**
+ * Seeds platform settings, rate cards and zone rates (M2.4, M6).
  *
  * ── Why the figures below are copied from the web fixtures ────────────────
- * They are the same rates, services and integrations the console's demo data
- * already shows. That means a screen looks identical whether it is running on
- * mocks or on the real API, so the cutover is not also a change of demo data —
- * and any difference between the two is a real bug rather than different seeds.
+ * They are the same rates and services the console's demo data already shows.
+ * That means a screen looks identical whether it is running on mocks or on the
+ * real API, so the cutover is not also a change of demo data — and any
+ * difference between the two is a real bug rather than different seeds.
  *
  * ⚠️ Idempotent by design. Sequences and anything the office may have since
  * edited are `$setOnInsert`, so re-running never rewinds `nextJobNumber` or
@@ -49,7 +73,7 @@ const ZONE_RATES: Record<Zone, { serviceCharge: string; ratePerM2: string }> = {
 };
 
 /** M6.5–M6.7 — the chargeable extras, and who may raise each. */
-const ADDITIONAL_SERVICES: AdditionalServiceSetting[] = [
+const ADDITIONAL_SERVICES: SeededService[] = [
   {
     code: 'contamination',
     label: 'Contamination charge',
@@ -88,6 +112,26 @@ const ADDITIONAL_SERVICES: AdditionalServiceSetting[] = [
     requiresApproval: false,
     driverRaisable: false,
     systemGenerated: false,
+  },
+  {
+    code: 'extra-bags',
+    label: 'Extra bags (not on the original PO)',
+    kind: 'fixed',
+    /*
+     * The same money as an ordered bag — it is the same bag, collected and
+     * tipped identically. What differs is which invoice it may appear on.
+     */
+    value: '30.00',
+    /*
+     * Matt, 08:28: *"anything over that original PO needs to get sent off for
+     * approval."* The office has to see it before it can be billed, because
+     * billing it needs a purchase order that does not exist yet.
+     */
+    requiresApproval: true,
+    // Nobody raises this by hand. It is derived from the driver's bag count
+    // against the order's allowance — hence *Created By: System*.
+    driverRaisable: false,
+    systemGenerated: true,
   },
   {
     code: 'fuel-levy',
@@ -136,138 +180,69 @@ const ADDITIONAL_SERVICES: AdditionalServiceSetting[] = [
   },
 ];
 
-/** M8 — defaults only. `$setOnInsert`, so a rule the office has tuned survives. */
-const NOTIFICATION_RULES: NotificationRule[] = [
-  { event: 'job-booked', sms: true, email: true, includePhotos: false },
-  { event: 'job-allocated', sms: true, email: false, includePhotos: false },
-  { event: 'driver-on-the-way', sms: true, email: false, includePhotos: false },
-  // Completion carries the photos — that is the proof of collection.
-  { event: 'job-completed', sms: true, email: true, includePhotos: true },
-  { event: 'job-futile', sms: true, email: true, includePhotos: true },
-  { event: 'job-rescheduled', sms: true, email: true, includePhotos: false },
-  { event: 'upcoming-reminder', sms: true, email: true, includePhotos: false },
-];
-
 /**
- * W7 — what each external service is for.
+ * M7.5 — the five shipped templates.
  *
- * ⚠️ No credentials, ever. `state` seeds as `not-configured` and only a real
- * connectivity check moves it, so a fresh environment never claims a connection
- * it does not have.
+ * ── Why five and not the six that were here before ───────────────────────
+ * `pg-m2-only` was byte-for-byte identical to `pg-m2`: same brand, same
+ * columns, a different name. Two templates that produce the same document are
+ * a choice the office has to make with no way to make it correctly, so the
+ * duplicate is gone.
+ *
+ * What varies across the five is real: the BRAND on the letterhead, whether
+ * kilograms print beside square metres, and — for the RCTI — the document type
+ * itself. Anything that does not change the document does not earn a row.
  */
-const INTEGRATIONS: Integration[] = [
-  {
-    id: 'xero',
-    name: 'Xero',
-    purpose: 'Push invoices and contacts; pull payment status.',
-    state: 'not-configured',
-    lastSuccessAt: null,
-    detail: null,
-    caveat: 'Credit notes, part-payments and bank reconciliation are v1.1.',
-  },
-  {
-    id: 'twilio',
-    name: 'Twilio',
-    purpose: 'Customer SMS and SMS one-time codes.',
-    state: 'not-configured',
-    lastSuccessAt: null,
-    detail: null,
-    caveat: null,
-  },
-  {
-    id: 'google-maps',
-    name: 'Google Maps Platform',
-    purpose: 'Address autocomplete, geocoding, map pins, driver navigation hand-off.',
-    state: 'not-configured',
-    lastSuccessAt: null,
-    detail: null,
-    caveat: 'Route optimisation is out of scope — this is visual clustering only.',
-  },
-  {
-    id: 'm365-smtp',
-    name: 'Microsoft 365 — outbound email',
-    purpose: 'Completion emails with photos, invoices, reminders.',
-    state: 'not-configured',
-    lastSuccessAt: null,
-    detail: null,
-    // A conscious trade the client chose; it belongs on screen, not in a doc.
-    caveat:
-      'Throttled to roughly 30 messages a minute and ~10k recipients a day, with weaker bounce handling than a dedicated provider. Fine at ~140 jobs a month.',
-  },
-  {
-    id: 'm365-outlook',
-    name: 'Microsoft 365 — monitored mailbox',
-    purpose: 'Inbound purchase orders for the extraction pipeline.',
-    state: 'not-configured',
-    lastSuccessAt: null,
-    detail: null,
-    caveat: null,
-  },
-  {
-    id: 'mistral-ocr',
-    name: 'Mistral Document AI',
-    purpose: 'Extract PO number, account, site and reference from an emailed document.',
-    state: 'not-configured',
-    lastSuccessAt: null,
-    detail: null,
-    caveat:
-      'Never auto-attach below threshold. Extraction accuracy must be a measured number — log confidence and correction rate from day one.',
-  },
-];
-
-/** M7.5 — the six shipped layouts. */
-const INVOICE_TEMPLATES: InvoiceTemplate[] = [
+const INVOICE_TEMPLATES: SeededTemplate[] = [
   {
     id: 'pg-m2',
     name: 'PlastaGo Recycling Invoice (m²)',
     brandId: 'plastago',
     showsWeight: false,
-    assignedAccountCount: 0,
+    layout: 'standard',
+    accentColour: '#1a4d3a',
   },
   {
     id: 'pg-kg-m2',
     name: 'PlastaGo Recycling Invoice (kg & m²)',
     brandId: 'plastago',
     showsWeight: true,
-    assignedAccountCount: 0,
-  },
-  {
-    id: 'pg-m2-only',
-    name: 'PlastaGo Recycling Invoice (m² only)',
-    brandId: 'plastago',
-    showsWeight: false,
-    assignedAccountCount: 0,
+    // The detailed drawing, because an account billed by weight is one whose
+    // accounts department reconciles against a docket — so the site and the
+    // collection date have to be on the page.
+    layout: 'detailed',
+    accentColour: '#1a4d3a',
   },
   {
     id: 'el-m2',
     name: 'EasyLift Recycling Invoice (m²)',
     brandId: 'easylift',
     showsWeight: false,
-    assignedAccountCount: 0,
+    layout: 'standard',
+    accentColour: '#0f5c7a',
   },
   {
     id: 'el-kg',
     name: 'EasyLift Recycling Invoice (kg)',
     brandId: 'easylift',
     showsWeight: true,
-    assignedAccountCount: 0,
+    layout: 'detailed',
+    accentColour: '#0f5c7a',
   },
   {
     id: 'rcti',
-    name: 'RCTI layout',
+    name: 'RCTI — recipient created tax invoice',
     brandId: 'plastago',
     showsWeight: false,
-    assignedAccountCount: 0,
+    layout: 'rcti',
+    /*
+     * Visibly different on purpose. An RCTI is raised by the CUSTOMER, and one
+     * that looks like an ordinary PlastaGo invoice is one somebody files as an
+     * ordinary invoice — and then pays twice, or not at all.
+     */
+    accentColour: '#7a4a0f',
   },
 ];
-
-/** F53 / M9.8 — Matt asked for a reminder a month out, per type. */
-const CREDENTIAL_TYPE_SETTINGS: CredentialTypeSetting[] = CREDENTIAL_TYPES.map((type) => ({
-  type,
-  label: CREDENTIAL_TYPE_LABELS[type],
-  reminderLeadDays: 30,
-  requiredForDrivers: type !== 'crane-ticket-class-4',
-}));
 
 async function main(): Promise<void> {
   if (process.env.NODE_ENV === 'production') {
@@ -284,27 +259,27 @@ async function main(): Promise<void> {
    * back to `default` at quote time, which is a safety net rather than a plan —
    * the office should never be quoting from a card it did not choose.
    */
-  const zoneRates = RATE_CARDS.flatMap((rateCardId: RateCardId) =>
+  const zoneRates = SEEDED_RATE_CARDS.flatMap((rateCardId: RateCardId) =>
     ZONES.map((zone) => ({
       rateCardId,
       zone,
       serviceCharge: ZONE_RATES[zone].serviceCharge,
       ratePerM2: ZONE_RATES[zone].ratePerM2,
+      effectiveFrom: SEED_EFFECTIVE_FROM,
     })),
   );
 
   await settingsRepository.seed({
-    rateCards: RATE_CARDS.map((id) => ({
+    rateCards: SEEDED_RATE_CARDS.map((id) => ({
       id,
-      label: RATE_CARD_LABELS[id],
-      // Their current schedule runs from 1 Apr 2026.
-      effectiveFrom: new Date('2026-04-01T00:00:00.000Z'),
+      label: SEEDED_RATE_CARD_LABELS[id],
+      // Start of the Sydney day, not UTC midnight — the same instant the
+      // schedule rows below are written at, so a card and its opening
+      // schedule cannot disagree by eleven hours.
+      effectiveFrom: startOfSydneyDay(SEED_EFFECTIVE_FROM),
     })),
     zoneRates,
     additionalServices: ADDITIONAL_SERVICES,
-    notificationRules: NOTIFICATION_RULES,
-    integrations: INTEGRATIONS,
-    credentialTypes: CREDENTIAL_TYPE_SETTINGS,
     invoiceTemplates: INVOICE_TEMPLATES,
     // M6.8 — a placeholder until real cost data exists, which is exactly why it
     // is a setting rather than a constant.
@@ -320,12 +295,9 @@ async function main(): Promise<void> {
 Seeded settings into "${mongoose.connection.name}".
 
   Rate cards          ${String(settings.pricing.rateCards.length)}
-  Zone rates          ${String(zoneRates.length)}  (${String(RATE_CARDS.length)} cards × ${String(ZONES.length)} zones)
+  Zone rates          ${String(zoneRates.length)}  (${String(SEEDED_RATE_CARDS.length)} cards × ${String(ZONES.length)} zones)
   Additional services ${String(settings.pricing.additionalServices.length)}
-  Notification rules  ${String(settings.notifications.rules.length)}
-  Integrations        ${String(settings.integrations.length)}
   Invoice templates   ${String(settings.invoicing.templates.length)}
-  Credential types    ${String(settings.credentialTypes.length)}
 
   Next job number     ${String(SEQUENCE_STARTS.nextJobNumber)}  (start; advances as jobs are raised)
   Next invoice number ${String(SEQUENCE_STARTS.nextInvoiceNumber)}  (start; advances as invoices are raised)

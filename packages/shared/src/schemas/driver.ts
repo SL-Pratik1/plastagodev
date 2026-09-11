@@ -108,7 +108,24 @@ export const RunStopSchema = z
     latitude: z.number(),
     longitude: z.number(),
     expectedAreaM2: z.number().nonnegative(),
+    /**
+     * What the ORDER allowed for — copied off the purchase order when the job
+     * was booked and frozen there, like the area and the rate.
+     *
+     * ⚠️ Not what the driver found. The two are separate quantities because the
+     * base invoice is priced on this one and has to match the builder's order
+     * exactly (Matt, 09:55), while the overage is charged separately. Writing
+     * the driver's count over the top of this is what made the excess
+     * unknowable, and therefore unbillable.
+     */
     bagCount: z.number().int().nonnegative(),
+    /**
+     * What the driver actually put on the crane, once they have (M4.3).
+     *
+     * Null until the weights screen is saved — which is different from zero, an
+     * honest "there was nothing to collect".
+     */
+    collectedBagCount: z.number().int().nonnegative().nullable(),
     loadType: LoadTypeSchema,
     /** M2.3 — only ask for weight where the account records it. */
     capturesWeight: z.boolean(),
@@ -202,6 +219,15 @@ export const DriverJobSchema = RunStopSchema.extend({
   /** M4.3 — what has been captured so far. */
   capturedAreaM2: z.number().nonnegative().nullable(),
   craneScaleKg: z.number().nonnegative().nullable(),
+  /**
+   * The per-bag readings behind `craneScaleKg`, so re-opening the screen shows
+   * the driver what they typed rather than only the total.
+   *
+   * Empty on a hand load, and empty on any job weighed before per-bag capture
+   * shipped — in that case `craneScaleKg` is still the real measured total and
+   * the screen falls back to showing it as a single figure.
+   */
+  bagWeights: z.array(z.number().nonnegative()),
   /** Set the moment the weights screen is saved, even on a hand load. */
   weightsRecordedAt: IsoDateTimeSchema.nullable(),
   /**
@@ -313,6 +339,27 @@ export const StatusUpdateSchema = DriverActionEnvelopeSchema.extend({
 export const WeightCaptureSchema = DriverActionEnvelopeSchema.extend({
   bagCount: z.number().int().min(0).max(200),
   loadType: LoadTypeSchema,
+  /**
+   * One crane reading per bag, in the order they were lifted.
+   *
+   * Matt, 06:34: *"bag one, my way 320, bag 2, my way 290, bag 3, you know what
+   * I mean? The each bag[']s weight needs to be recorded."* A four-bag job
+   * carrying a single 1240 kg total cannot answer "which bag was overloaded?",
+   * and that is the question a builder asks when they dispute a docket.
+   *
+   * ⚠️ Optional, not defaulted to an empty array. A phone that queued this
+   * pickup offline before per-bag capture shipped sends no `bagWeights` at all,
+   * and `undefined` is the only way the server can tell that apart from a
+   * genuinely empty list (a hand load). Defaulting here would make an old
+   * queued payload look like a driver who weighed nothing, and the length check
+   * in `captureWeights` would then reject a pickup that already happened.
+   *
+   * `craneScaleKg` stays the total, but the SERVER derives it from this array
+   * rather than trusting a separately typed figure — see `captureWeights`.
+   * Diversion certificates (M9.5 · F52) and the tip-off split (M4.4) read that
+   * total, so neither is affected by this field existing.
+   */
+  bagWeights: z.array(z.number().positive().max(20000)).max(200).optional(),
   craneScaleKg: z.number().positive().max(20000).nullable(),
 }).meta({ id: 'WeightCapture' });
 

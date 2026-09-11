@@ -5,16 +5,57 @@ import { createTwilioSmsSender } from './twilio-sms.js';
 
 const log = logger.child({ module: 'messaging' });
 
+/**
+ * A file travelling with an email.
+ *
+ * ⚠️ Held as BYTES, not as a storage key or a URL. A mailer that resolved a
+ * key would need storage credentials and could fail at send time with the
+ * message half-built; and a link is not an attachment — a builder's accounts
+ * department files the PDF, it does not click through to fetch one.
+ */
+export interface OutboundAttachment {
+  /** What it is called in the recipient's inbox — `Invoice PGA-104312.pdf`. */
+  filename: string;
+  contentType: string;
+  content: Buffer;
+}
+
 export interface OutboundEmail {
   to: string;
   subject: string;
   /** Plain text alternative. Always sent — some clients prefer it, all accept it. */
   text: string;
   html: string;
+  /**
+   * Files to attach. Omitted on almost every message.
+   *
+   * ⚠️ M365 caps a message at roughly 25MB after base64 expansion, which
+   * inflates bytes by about a third. An invoice PDF is a few tens of
+   * kilobytes, so the cap is nowhere near — but a caller attaching job photos
+   * would reach it, and the mailer refuses rather than letting Graph reject
+   * the whole send.
+   */
+  attachments?: readonly OutboundAttachment[];
 }
 
+/**
+ * The most a single message may carry, before base64.
+ *
+ * 18MB rather than 25: base64 adds ~33%, so this lands just under the real
+ * limit with room for the body and headers.
+ */
+export const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024;
+
 export interface OutboundSms {
-  /** E.164. Normalisation happens before this layer, never inside a provider. */
+  /**
+   * The recipient in PlastaGo's own storage form — Australian local,
+   * `0412345678` (see `normaliseMobile`).
+   *
+   * ⚠️ NOT E.164. Each provider formats for its own vendor: Twilio converts to
+   * `+61…` because it rejects anything else with error 21211, and the stub
+   * prints what it was given so the console matches what is on screen
+   * everywhere else in the app.
+   */
   to: string;
   body: string;
 }
@@ -114,11 +155,27 @@ function extractCode(text: string): string | null {
 function createStubMailer(): Mailer {
   return {
     name: 'stub',
-    send({ to, subject, text }) {
-      log.info({ to, subject, provider: 'stub' }, 'email not sent (MAIL_PROVIDER=stub)');
+    send({ to, subject, text, attachments }) {
+      log.info(
+        { to, subject, provider: 'stub', attachments: attachments?.length ?? 0 },
+        'email not sent (MAIL_PROVIDER=stub)',
+      );
       printBox('EMAIL — not sent (MAIL_PROVIDER=stub)', [
         `to      : ${to}`,
         `subject : ${subject}`,
+        /*
+         * Attachments are NAMED in the stub output, not silently dropped.
+         *
+         * "Did the invoice actually carry its PDF?" is the thing being
+         * developed, and a stub that printed the body alone would answer it
+         * the same way whether the attachment was built or not.
+         */
+        ...(attachments && attachments.length > 0
+          ? attachments.map(
+              (attachment) =>
+                `attach  : ${attachment.filename} (${String(Math.round(attachment.content.byteLength / 1024))} KB, ${attachment.contentType})`,
+            )
+          : []),
         '',
         ...text.split('\n'),
       ]);

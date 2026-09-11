@@ -12,6 +12,8 @@ import type {
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
+import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
+import { jobService } from '../jobs/job.service.js';
 import { pricingService } from '../settings/pricing.service.js';
 import { queueRepository, type QueueListQuery } from './queue.repository.js';
 
@@ -36,6 +38,8 @@ export interface Caller {
   userId: string;
   name: string;
   roles: readonly Role[];
+  /** Null for office staff. Only carried so `jobService` can scope by it. */
+  accountId: string | null;
 }
 
 /** Roles that work these queues. Customers and drivers see none of them. */
@@ -93,6 +97,15 @@ export const queueService = {
       ]);
     }
 
+    /*
+     * The same window booking and rescheduling use. This path sets a ready date
+     * too, and it did not check one — a futile review could be closed onto
+     * `2020-01-01`, which parks the job at the top of every at-risk list.
+     */
+    if (decision.outcome === 'rescheduled' && decision.newReadyDate) {
+      assertPlausibleReadyDate(decision.newReadyDate, 'newReadyDate');
+    }
+
     if (decision.outcome === 'cancelled' && !decision.cancelReason) {
       // M2.4 forbids a bare cancel: a reason people pick from a list can be
       // counted, and a reason people type cannot.
@@ -119,8 +132,37 @@ export const queueService = {
       );
     }
 
+    /*
+     * ⚠️ The half that was missing. `decideFutile` records the decision and
+     * returns the job "so the caller can act on it" — and for a long while the
+     * caller did not. The review was stamped `rescheduled`, `newReadyDate` was
+     * written and never read by anything, and the screen said "Rescheduling
+     * books a new pickup" over a toast reading "Job #61379 rescheduled". No
+     * pickup was ever booked. The queue cleared, the office believed the job
+     * was back on, and the customer was simply never collected.
+     *
+     * `cancelled` needs nothing here and gets nothing: the job is already
+     * terminal at `futile`, which is the status invoicing accepts, so the $120
+     * still reaches the invoice. Only the promise of a new pickup was unkept.
+     */
+    let rebookedJobNumber: number | null = null;
+    if (decision.outcome === 'rescheduled' && decision.newReadyDate) {
+      const rebooked = await jobService.rebookFromFutile(
+        result.jobId,
+        decision.newReadyDate,
+        caller,
+      );
+      rebookedJobNumber = rebooked.jobNumber;
+    }
+
     log.info(
-      { reviewId: id, jobId: result.jobId, outcome: decision.outcome, by: caller.name },
+      {
+        reviewId: id,
+        jobId: result.jobId,
+        outcome: decision.outcome,
+        rebookedJobNumber,
+        by: caller.name,
+      },
       'futile review decided',
     );
   },

@@ -104,7 +104,7 @@ export function AdminDashboardPage() {
           Today
         </h2>
 
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatCard
             label="Open jobs"
             value={data?.openJobs ?? 0}
@@ -157,7 +157,7 @@ export function AdminDashboardPage() {
             </p>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {isPending
               ? Array.from({ length: 4 }, (_, index) => (
                   <Card key={index} className="p-4">
@@ -187,7 +187,7 @@ export function AdminDashboardPage() {
           This month
         </h2>
 
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatCard
             label="Futile pickups"
             value={data?.futileThisMonth ?? 0}
@@ -246,7 +246,7 @@ export function AdminDashboardPage() {
         </h2>
 
         {isPending ? (
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Card className="p-5">
               <Skeleton className="h-4 w-32" />
               <Skeleton className="mt-4 h-52 w-full" />
@@ -258,11 +258,11 @@ export function AdminDashboardPage() {
           </div>
         ) : (
           <>
-            <div className="grid gap-4 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <DailyVolumeChart data={data?.dailyVolume ?? []} />
               <ExceptionRateChart data={data?.exceptionRates ?? []} />
             </div>
-            <div className="grid gap-4 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <JobsByStatusChart data={data?.statusCounts ?? []} />
               <ActivityAndHealth
                 driverHealth={data?.driverHealth ?? []}

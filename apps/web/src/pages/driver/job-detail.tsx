@@ -293,7 +293,9 @@ function JobScreen({ job }: { job: DriverJob }) {
             <div>
               <dt className="text-xs text-muted-foreground">Load</dt>
               <dd className="font-medium">
-                {job.loadType === 'bagged' ? `${String(job.bagCount)} bags` : 'Hand load'}
+                {job.loadType === 'bagged'
+                  ? `${String(job.collectedBagCount ?? job.bagCount)} bags`
+                  : 'Hand load'}
               </dd>
             </div>
             <div>
@@ -429,8 +431,8 @@ function JobScreen({ job }: { job: DriverJob }) {
                       ? 'Bags, and the crane scale if it is bagged'
                       : 'Bags — this customer does not record weight'
                     : job.craneScaleKg !== null
-                      ? `${String(job.bagCount)} bags · ${String(job.craneScaleKg)} kg weighed`
-                      : `${String(job.bagCount)} bags · hand load, weight worked out at tip-off`
+                      ? `${String(job.collectedBagCount ?? job.bagCount)} bags · ${String(job.craneScaleKg)} kg weighed`
+                      : `${String(job.collectedBagCount ?? job.bagCount)} bags · hand load, weight worked out at tip-off`
                 }
                 icon={ScaleIcon}
                 tone={needsWeights ? 'warning' : 'neutral'}
@@ -567,6 +569,20 @@ function JobScreen({ job }: { job: DriverJob }) {
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">Crane scale</dt>
                 <dd className="font-medium">{job.craneScaleKg} kg</dd>
+              </div>
+            )}
+            {/*
+             * The per-bag breakdown behind that total (Matt, 06:34). Absent on
+             * a hand load and on anything weighed before per-bag capture
+             * shipped, which is why it is conditional rather than always shown
+             * as an empty row.
+             */}
+            {job.bagWeights.length > 0 && (
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">Each bag</dt>
+                <dd className="text-right font-medium tabular-nums">
+                  {job.bagWeights.map((kg) => `${String(kg)} kg`).join(' · ')}
+                </dd>
               </div>
             )}
             <div className="flex justify-between">

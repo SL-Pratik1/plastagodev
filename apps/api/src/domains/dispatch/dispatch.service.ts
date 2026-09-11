@@ -243,6 +243,26 @@ export const dispatchService = {
       throw AppError.conflict('Add at least one stop before assigning this run');
     }
 
+    /*
+     * A driver who is not working cannot be given the run.
+     *
+     * `driverRepository` already computes this — it maps anyone whose account is
+     * not active to `off` precisely "so a suspended driver cannot be put on a run
+     * by accident" — but nothing was reading it here, so the board accepted the
+     * assignment and the run went green.
+     *
+     * The failure that causes is silent and late. A suspended account cannot sign
+     * in at all (`requireAuth` re-reads the user and refuses), so the run reaches
+     * no phone: the stops simply never happen, and the first anyone hears of it is
+     * the builder ringing to ask where the truck was. Refusing here costs the
+     * allocator one re-pick.
+     */
+    if (driver.status === 'off') {
+      throw AppError.conflict(
+        `${driver.name} is not working — their account is not active, so the run would never reach their phone. Pick another driver, or have the office reactivate them first.`,
+      );
+    }
+
     const sequenceForDay = (await runRepository.countDriverRuns(driverId, run.date)) + 1;
 
     const assigned = await runRepository.assign(runId, driverId, driver.name, sequenceForDay);

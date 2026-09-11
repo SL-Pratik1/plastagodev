@@ -2057,6 +2057,15 @@
           "loadType": {
             "$ref": "#/components/schemas/LoadType"
           },
+          "bagWeights": {
+            "maxItems": 200,
+            "type": "array",
+            "items": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 20000
+            }
+          },
           "craneScaleKg": {
             "anyOf": [
               {
@@ -3056,6 +3065,18 @@
             "minimum": 0,
             "maximum": 9007199254740991
           },
+          "collectedBagCount": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "loadType": {
             "$ref": "#/components/schemas/LoadType"
           },
@@ -3113,6 +3134,7 @@
           "longitude",
           "expectedAreaM2",
           "bagCount",
+          "collectedBagCount",
           "loadType",
           "capturesWeight",
           "poNumber",
@@ -3210,6 +3232,18 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "collectedBagCount": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "loadType": {
             "$ref": "#/components/schemas/LoadType"
@@ -3337,6 +3371,13 @@
               }
             ]
           },
+          "bagWeights": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
           "weightsRecordedAt": {
             "anyOf": [
               {
@@ -3437,6 +3478,7 @@
           "longitude",
           "expectedAreaM2",
           "bagCount",
+          "collectedBagCount",
           "loadType",
           "capturesWeight",
           "poNumber",
@@ -3460,6 +3502,7 @@
           "requiredPhotos",
           "capturedAreaM2",
           "craneScaleKg",
+          "bagWeights",
           "weightsRecordedAt",
           "riskAssessment",
           "messages"

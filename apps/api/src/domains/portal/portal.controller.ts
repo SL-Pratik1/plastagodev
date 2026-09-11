@@ -1,4 +1,5 @@
 import type {
+  CallUpRequestSchema,
   PortalBookingDraftSchema,
   PortalChangeRequestSchema,
   PortalJobEditSchema,
@@ -9,8 +10,10 @@ import { AppError } from '../../lib/app-error.js';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { portalService, type Caller } from './portal.service.js';
 import type {
+  PortalAwaitingQuerySchema,
   PortalJobIdParamsSchema,
   PortalJobsQuerySchema,
+  PortalPurchaseOrderIdParamsSchema,
   SetUrgencySchema,
 } from './portal.schemas.js';
 
@@ -63,6 +66,37 @@ export const portalController = {
     res: Response,
   ): Promise<void> => {
     res.json(await portalService.quote(req.validated.body, callerFrom(req)));
+  },
+
+  /** M2.12b — orders on this account that nobody has booked a date for yet. */
+  awaitingCallUp: async (
+    req: ValidatedRequest<{ query: typeof PortalAwaitingQuerySchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await portalService.awaitingCallUp(req.validated.query, callerFrom(req)));
+  },
+
+  /**
+   * Calling one of them up (Matt, 30:40).
+   *
+   * 201: this creates a call-up, and where the order resolves cleanly it creates
+   * the job too. The body says which, because a call-up that landed in the
+   * office queue instead is otherwise indistinguishable from a booked one.
+   */
+  callUp: async (
+    req: ValidatedRequest<{
+      params: typeof PortalPurchaseOrderIdParamsSchema;
+      body: typeof CallUpRequestSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const outcome = await portalService.callUp(
+      req.validated.params.purchaseOrderId,
+      req.validated.body,
+      callerFrom(req),
+    );
+
+    res.status(201).json(outcome);
   },
 
   editJob: async (

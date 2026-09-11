@@ -43,13 +43,16 @@ export const poReviewController = {
     res: Response,
   ): Promise<void> => {
     const body = req.validated.body;
-    const result = await poReviewService.ingest({
-      ...body,
-      receivedAt: new Date(body.receivedAt),
-      // Decided server-side. The extractor does not get to declare its own
-      // output trustworthy — see the service.
-      reason: 'below-threshold',
-    });
+    const result = await poReviewService.ingest(
+      {
+        ...body,
+        receivedAt: new Date(body.receivedAt),
+        // Decided server-side. The extractor does not get to declare its own
+        // output trustworthy — see the service.
+        reason: 'below-threshold',
+      },
+      callerFrom(req),
+    );
     res.status(202).json(result);
   },
 
