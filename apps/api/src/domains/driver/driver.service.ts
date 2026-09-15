@@ -709,7 +709,7 @@ export const driverService = {
         severity: 'urgent',
         title: `Site unsafe — #${String(stop.jobNumber)} stopped`,
         body: `${caller.name} judged ${stop.siteName} unsafe and did not collect. ${input.note.trim() || 'No note given.'}`,
-        href: `/jobs/${input.jobId}`,
+        href: `/admin/jobs/${input.jobId}`,
         subjectKey: `site-unsafe:${input.jobId}`,
         jobId: input.jobId,
         jobNumber: stop.jobNumber,
@@ -865,7 +865,7 @@ export const driverService = {
         severity: 'urgent',
         title: `${input.vehicleRego} reported UNROADWORTHY`,
         body: `${caller.name}: ${input.summary}. Do not allocate this vehicle until it is cleared.`,
-        href: '/fleet',
+        href: '/admin/vehicles',
         subjectKey: `unroadworthy:${defectId}`,
       });
     }
@@ -966,6 +966,12 @@ function toRunStop(row: DriverStopRow): RunStop {
     // "zero area" matters to PRICING and to the tip-off split, both of which
     // read the job directly — not to a driver looking at a stop card.
     expectedAreaM2: row.expectedAreaM2 ?? 0,
+    /*
+     * `?? 'suburb'` for the same reason the model defaults to it: a job booked
+     * before the geocoder existed has no such field, and claiming `geocoded`
+     * for one would send a driver confidently to a suburb centre.
+     */
+    locationSource: row.locationSource ?? 'suburb',
     bagCount: row.bagCount,
     /*
      * `?? null` because a job booked before per-bag capture shipped has no such

@@ -51,6 +51,7 @@ interface RawJobForDriver {
   zone: RunStop['zone'];
   latitude: number;
   longitude: number;
+  locationSource: RunStop['locationSource'];
   accessNotes: string;
   gateHours: string | null;
   inductionRequired: boolean;

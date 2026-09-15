@@ -3056,6 +3056,9 @@
           "longitude": {
             "type": "number"
           },
+          "locationSource": {
+            "$ref": "#/components/schemas/LocationSource"
+          },
           "expectedAreaM2": {
             "type": "number",
             "minimum": 0
@@ -3132,6 +3135,7 @@
           "zone",
           "latitude",
           "longitude",
+          "locationSource",
           "expectedAreaM2",
           "bagCount",
           "collectedBagCount",
@@ -3166,6 +3170,13 @@
           "sydney",
           "wollongong",
           "newcastle"
+        ]
+      },
+      "LocationSource": {
+        "type": "string",
+        "enum": [
+          "suburb",
+          "geocoded"
         ]
       },
       "DriverJob": {
@@ -3223,6 +3234,9 @@
           },
           "longitude": {
             "type": "number"
+          },
+          "locationSource": {
+            "$ref": "#/components/schemas/LocationSource"
           },
           "expectedAreaM2": {
             "type": "number",
@@ -3476,6 +3490,7 @@
           "zone",
           "latitude",
           "longitude",
+          "locationSource",
           "expectedAreaM2",
           "bagCount",
           "collectedBagCount",

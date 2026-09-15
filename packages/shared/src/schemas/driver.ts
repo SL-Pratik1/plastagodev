@@ -9,6 +9,7 @@ import { ZoneSchema } from './party.js';
 import {
   ExceptionReasonSchema,
   JobStatusSchema,
+  LocationSourceSchema,
   SraDocumentSchema,
   SraUploadStateSchema,
 } from './jobs.js';
@@ -107,6 +108,25 @@ export const RunStopSchema = z
     zone: ZoneSchema,
     latitude: z.number(),
     longitude: z.number(),
+    /**
+     * Whether the pin above is the SITE or merely its suburb.
+     *
+     * ── Why a driver's phone is told this ──────────────────────────────────
+     * `geocoded` means the address itself resolved and the pin is worth
+     * navigating to. `suburb` means it did not — the geocoder failed, was no
+     * more precise than the suburb, or landed implausibly far from the one the
+     * office picked — and the pin is the suburb's own centre.
+     *
+     * Without this field the two are indistinguishable, so a client has to
+     * assume the worst and navigate by the address string forever, even once
+     * every job is properly geocoded. With it, "navigate to the pin when it is
+     * real, to the address when it is not" is a decision the app can make.
+     *
+     * ⚠️ Every job booked before the geocoder existed carries `suburb`, and
+     * they are not back-filled: a job's address is frozen at booking. So expect
+     * this value for a long time yet, not as an error but as the truth.
+     */
+    locationSource: LocationSourceSchema,
     expectedAreaM2: z.number().nonnegative(),
     /**
      * What the ORDER allowed for — copied off the purchase order when the job
@@ -581,12 +601,28 @@ export const PreStartSubmissionSchema = DriverActionEnvelopeSchema.extend({
     .positive('Enter the odometer reading')
     .max(2000000),
   items: z.array(
-    z.object({
-      key: NonEmptyStringSchema,
-      state: PreStartItemStateSchema,
-      /** Required when the state is `fail` — it becomes the defect report. */
-      note: z.string().trim().max(300),
-    }),
+    z
+      .object({
+        key: NonEmptyStringSchema,
+        state: PreStartItemStateSchema,
+        /** Required when the state is `fail` — it becomes the defect report. */
+        note: z.string().trim().max(300),
+      })
+      /*
+       * ⚠️ The rule above was documented and not enforced, so a driver could
+       * fail an item and send nothing with it. That does not stay a blank
+       * field: a failed item BECOMES a vehicle defect, and the office was
+       * getting rows reading `summary: "Brakes", detail: ""` — a brake fault
+       * with no description, sitting beside real ones like "Pedal travel longer
+       * than usual. Still stopping, but not right."
+       *
+       * A defect nobody can act on is worse than no defect, because it occupies
+       * the queue and tells the mechanic nothing.
+       */
+      .refine((item) => item.state !== 'fail' || item.note.trim().length > 0, {
+        path: ['note'],
+        error: 'Say what is wrong — this becomes the defect the workshop reads',
+      }),
   ),
   /**
    * The driver's own declaration. A checklist with no attestation is a form; with
