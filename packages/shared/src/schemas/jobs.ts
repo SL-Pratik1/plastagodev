@@ -44,6 +44,18 @@ export const JOB_STATUSES = [
 export const JobStatusSchema = z.enum(JOB_STATUSES).meta({ id: 'JobStatus' });
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 
+/**
+ * Where a job pin came from (I3).
+ *
+ * A latitude is a latitude — nothing about the number says whether it is the
+ * house or the middle of the suburb, and the two can be kilometres apart. The
+ * run optimiser must not order stops that are all suburb centres, and this is
+ * the only field that can tell it.
+ */
+export const LOCATION_SOURCES = ['suburb', 'geocoded'] as const;
+export const LocationSourceSchema = z.enum(LOCATION_SOURCES).meta({ id: 'LocationSource' });
+export type LocationSource = z.infer<typeof LocationSourceSchema>;
+
 export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
   booked: 'Booked',
   assigned: 'Assigned',
@@ -196,7 +208,19 @@ export const JobChargeSchema = z
     raisedAt: IsoDateTimeSchema,
     /** Driver-raised charges carry their evidence (M2.7). */
     photoCount: z.number().int().nonnegative(),
+    /** What the DRIVER said they saw. The office never writes over this. */
     note: z.string().nullable(),
+    /**
+     * Who made a charge billable, when, and why.
+     *
+     * Null while it is still pending. A driver-raised charge becoming money is
+     * a decision somebody made, and the job was the one place it could be read
+     * back — so it is carried here rather than left only in the queue that the
+     * charge drops out of the moment it is decided.
+     */
+    decidedBy: z.string().nullable(),
+    decidedAt: IsoDateTimeSchema.nullable(),
+    decisionNote: z.string().nullable(),
   })
   .meta({ id: 'JobCharge' });
 
