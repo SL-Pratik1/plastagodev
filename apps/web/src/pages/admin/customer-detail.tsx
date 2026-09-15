@@ -10,18 +10,23 @@ import {
   type Account,
   type AccountType,
   type InvoiceListItem,
+  type InvoiceTemplate,
   type JobListItem,
 } from '@plastago/shared';
 import {
   Alert,
   Badge,
+  Button,
   Card,
   CardContent,
   CardHeader,
   CardTitle,
+  Dialog,
   ErrorState,
+  Field,
   Pagination,
   Select,
+  Spinner,
   Skeleton,
   Switch,
   Tabs,
@@ -33,11 +38,13 @@ import {
 import {
   BriefcaseIcon,
   MailIcon,
+  PencilIcon,
   ReceiptIcon,
   RouteIcon,
   ShieldCheckIcon,
   SmartphoneIcon,
 } from 'lucide-react';
+import { useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
@@ -46,17 +53,25 @@ import { useListQuery } from '@/components/data-table/use-list-query';
 import { DetailList } from '@/components/detail-list';
 import { AccountTypeBadge, InvoiceStatusBadge, JobStatusBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
+import { CustomerEditDialog } from '@/features/customers/components/customer-edit-dialog';
 import {
   useCustomer,
   useCustomerInvoices,
   useCustomerJobs,
   useSetAccountType,
+  useSetInvoiceTemplate,
   useSetRiskAssessmentRequired,
 } from '@/features/customers/queries';
 import { useRateCardOptions } from '@/features/lookups/queries';
 import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
-import { formatDate, formatInvoiceNumber, formatMobile, formatMoney } from '@/lib/format';
+import {
+  formatDate,
+  formatDateTime,
+  formatInvoiceNumber,
+  formatMobile,
+  formatMoney,
+} from '@/lib/format';
 
 const TABS = ['overview', 'sites', 'contacts', 'jobs', 'invoices', 'preferences'] as const;
 type TabKey = (typeof TABS)[number];
@@ -74,6 +89,21 @@ type TabKey = (typeof TABS)[number];
  * URL-namespaced pagination — so the jobs tab does not load for someone who came
  * to check a phone number, and the tab survives a refresh or a shared link.
  */
+/**
+ * The registered address as one line, or null when there is nothing to show.
+ *
+ * Built from the parts that are present rather than a fixed template: an
+ * account whose suburb is known but whose street is not should read
+ * "Wollongong 2500", not ", Wollongong 2500".
+ */
+function formatAddress(account: Account): string | null {
+  const parts = [account.addressLine, [account.suburb, account.postcode].filter(Boolean).join(' ')]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
 export function AdminCustomerDetailPage() {
   const { customerId } = useParams();
   const [params, setParams] = useSearchParams();
@@ -98,9 +128,8 @@ export function AdminCustomerDetailPage() {
   const templateName =
     account?.invoiceTemplateId == null
       ? null
-      : (settings?.invoicing.templates.find(
-          (template) => template.id === account.invoiceTemplateId,
-        )?.name ?? null);
+      : (settings?.invoicing.templates.find((template) => template.id === account.invoiceTemplateId)
+          ?.name ?? null);
 
   const rawTab = params.get('tab');
   const tab: TabKey = (TABS as readonly string[]).includes(rawTab ?? '')
@@ -118,6 +147,9 @@ export function AdminCustomerDetailPage() {
       { replace: true },
     );
   };
+
+  const [editing, setEditing] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
 
   const jobQuery = useListQuery({
     paramPrefix: 'jobs',
@@ -174,6 +206,34 @@ export function AdminCustomerDetailPage() {
             {account.status === 'active' ? 'Active' : 'Inactive'}
           </Badge>
         }
+        actions={
+          <Button
+            variant="outline"
+            onClick={() => {
+              setEditing(true);
+            }}
+          >
+            <PencilIcon aria-hidden />
+            Edit details
+          </Button>
+        }
+      />
+
+      <CustomerEditDialog
+        account={account}
+        open={editing}
+        onClose={() => {
+          setEditing(false);
+        }}
+      />
+
+      <InvoiceTemplateDialog
+        account={account}
+        templates={settings?.invoicing.templates ?? []}
+        open={templateOpen}
+        onClose={() => {
+          setTemplateOpen(false);
+        }}
       />
 
       <Tabs value={tab} onValueChange={setTab}>
@@ -213,6 +273,26 @@ export function AdminCustomerDetailPage() {
                       wide: true,
                     },
                     { label: 'ABN', value: account.abn },
+                    {
+                      /*
+                       * ⚠️ Shown at last. The portal onboarding form has always
+                       * written the trading name and the registered address, and
+                       * no endpoint returned them — so a customer's own details
+                       * were stored where the office that invoices them could not
+                       * look, and could not be corrected by anybody.
+                       */
+                      label: 'Trading name',
+                      value: account.tradingName ?? (
+                        <span className="text-muted-foreground">Trades under its legal name</span>
+                      ),
+                    },
+                    {
+                      label: 'Registered address',
+                      value: formatAddress(account) ?? (
+                        <span className="text-muted-foreground">Not recorded</span>
+                      ),
+                      wide: true,
+                    },
                     { label: 'Payment terms', value: `${String(account.paymentTermsDays)} days` },
                     /*
                      * The card's NAME, from the loaded lookup, falling back to
@@ -233,12 +313,34 @@ export function AdminCustomerDetailPage() {
                        * alone would read as broken.
                        */
                       label: 'Invoice template',
-                      value:
-                        templateName ?? (
-                          <span className="text-muted-foreground">
-                            Follows the {BRAND_LABELS[account.brandId]} default
-                          </span>
-                        ),
+                      value: (
+                        <span className="flex flex-wrap items-center gap-2">
+                          {templateName ?? (
+                            <span className="text-muted-foreground">
+                              Follows the {BRAND_LABELS[account.brandId]} default
+                            </span>
+                          )}
+                          {/*
+                            ⚠️ The control this row was missing.
+
+                            `invoiceTemplateId` was read at render time and shown
+                            here, but no route and no control could SET it — so
+                            every account fell back to the first template for its
+                            brand, and a second template was unreachable. The
+                            Templates card could create configurations nothing
+                            could ever use.
+                          */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTemplateOpen(true);
+                            }}
+                            className="focus-ring rounded text-xs text-primary underline underline-offset-4"
+                          >
+                            Change
+                          </button>
+                        </span>
+                      ),
                     },
                     { label: 'Primary zone', value: ZONE_LABELS[account.primaryZone] },
                     { label: 'PO policy', value: PO_POLICY_LABELS[account.poPolicy] },
@@ -253,6 +355,22 @@ export function AdminCustomerDetailPage() {
                       value: account.certificateEmail ?? (
                         <span className="text-muted-foreground">
                           Not set — falls back to the accounts contact
+                        </span>
+                      ),
+                    },
+                    {
+                      /*
+                       * Whether the CUSTOMER has confirmed the details above, and
+                       * when. A date rather than a tick: "they filled this in" and
+                       * "what they filled in is still current" are the same
+                       * question a year later, and only a date answers both.
+                       */
+                      label: 'Details confirmed by the customer',
+                      value: account.detailsCompletedAt ? (
+                        formatDateTime(account.detailsCompletedAt)
+                      ) : (
+                        <span className="text-muted-foreground">
+                          Not yet — whatever is above was typed by the office
                         </span>
                       ),
                     },
@@ -463,7 +581,6 @@ export function AdminCustomerDetailPage() {
           </Card>
         </TabsPanel>
       </Tabs>
-
     </div>
   );
 }
@@ -686,66 +803,167 @@ const ACCOUNT_JOB_COLUMNS: readonly DataTableColumn<JobListItem>[] = [
 
 function invoiceColumns(prefix: string): readonly DataTableColumn<InvoiceListItem>[] {
   return [
-  {
-    id: 'invoiceNumber',
-    header: 'Invoice',
-    sortKey: 'invoiceNumber',
-    priority: 'primary',
-    cell: (row) => (
-      <span className="block">
-        <span className="font-mono font-medium">
-          {formatInvoiceNumber(row.invoiceNumber, prefix)}
+    {
+      id: 'invoiceNumber',
+      header: 'Invoice',
+      sortKey: 'invoiceNumber',
+      priority: 'primary',
+      cell: (row) => (
+        <span className="block">
+          <span className="font-mono font-medium">
+            {formatInvoiceNumber(row.invoiceNumber, prefix)}
+          </span>
+          <span className="block text-xs text-muted-foreground">
+            {row.kind === 'base' ? 'Base invoice' : 'Additional charges'}
+          </span>
         </span>
-        <span className="block text-xs text-muted-foreground">
-          {row.kind === 'base' ? 'Base invoice' : 'Additional charges'}
-        </span>
-      </span>
-    ),
-  },
-  {
-    id: 'status',
-    header: 'Status',
-    sortKey: 'status',
-    priority: 'secondary',
-    cell: (row) => <InvoiceStatusBadge status={row.status} />,
-  },
-  {
-    id: 'jobNumber',
-    header: 'Job',
-    priority: 'detail',
-    cell: (row) =>
-      row.jobId ? (
-        <Link
-          to={`/admin/jobs/${row.jobId}`}
-          className="focus-ring rounded font-mono text-primary underline-offset-4 hover:underline"
-        >
-          #{row.jobNumber}
-        </Link>
-      ) : (
-        <span className="text-muted-foreground">—</span>
       ),
-  },
-  {
-    id: 'poNumber',
-    header: 'PO',
-    priority: 'detail',
-    cell: (row) => (
-      <span className="font-mono text-xs text-muted-foreground">{row.poNumber ?? '—'}</span>
-    ),
-  },
-  {
-    id: 'issuedOn',
-    header: 'Issued',
-    sortKey: 'issuedOn',
-    priority: 'detail',
-    cell: (row) => formatDate(row.issuedOn),
-  },
-  {
-    id: 'totalIncGst',
-    header: 'Total inc GST',
-    numeric: true,
-    priority: 'detail',
-    cell: (row) => formatMoney(row.totalIncGst),
-  },
+    },
+    {
+      id: 'status',
+      header: 'Status',
+      sortKey: 'status',
+      priority: 'secondary',
+      cell: (row) => <InvoiceStatusBadge status={row.status} />,
+    },
+    {
+      id: 'jobNumber',
+      header: 'Job',
+      priority: 'detail',
+      cell: (row) =>
+        row.jobId ? (
+          <Link
+            to={`/admin/jobs/${row.jobId}`}
+            className="focus-ring rounded font-mono text-primary underline-offset-4 hover:underline"
+          >
+            #{row.jobNumber}
+          </Link>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
+    },
+    {
+      id: 'poNumber',
+      header: 'PO',
+      priority: 'detail',
+      cell: (row) => (
+        <span className="font-mono text-xs text-muted-foreground">{row.poNumber ?? '—'}</span>
+      ),
+    },
+    {
+      id: 'issuedOn',
+      header: 'Issued',
+      sortKey: 'issuedOn',
+      priority: 'detail',
+      cell: (row) => formatDate(row.issuedOn),
+    },
+    {
+      id: 'totalIncGst',
+      header: 'Total inc GST',
+      numeric: true,
+      priority: 'detail',
+      cell: (row) => formatMoney(row.totalIncGst),
+    },
   ];
+}
+
+/* ── M7.5 · which template this account's invoices print on ─────────────── */
+
+/**
+ * Choose the invoice template, or hand the account back to its brand.
+ *
+ * ── Why "follow the brand" is an option and not an empty selection ────────
+ * Null is a real, and usually correct, answer: a new account should look right
+ * without anybody choosing, and changing the brand's template should carry
+ * those accounts with it. Offering it as a named choice is what stops somebody
+ * reading a blank row as a configuration they forgot to finish.
+ *
+ * ⚠️ Changing this affects the NEXT invoice only. Every invoice already
+ * rendered stores the template's name and its own PDF, so nothing a customer
+ * has been sent moves.
+ */
+function InvoiceTemplateDialog({
+  account,
+  templates,
+  open,
+  onClose,
+}: {
+  account: Account;
+  templates: readonly InvoiceTemplate[];
+  open: boolean;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const assign = useSetInvoiceTemplate(account.id);
+
+  /* `''` is the sentinel for "follow the brand" — a select cannot hold null. */
+  const [choice, setChoice] = useState(account.invoiceTemplateId ?? '');
+
+  const submit = async () => {
+    try {
+      await assign.mutateAsync(choice === '' ? null : choice);
+      onClose();
+      toast.success(
+        'Invoice template updated',
+        'It applies to the next invoice raised for this account.',
+      );
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Invoice template"
+      description="What this customer's invoices look like. Invoices already sent keep the template they were drawn with."
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose} disabled={assign.isPending}>
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} disabled={assign.isPending}>
+            {assign.isPending && <Spinner className="text-current" />}
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <Field id="account-template" label="Template">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={choice}
+              onChange={(event) => {
+                setChoice(event.target.value);
+              }}
+            >
+              <option value="">Follow the {BRAND_LABELS[account.brandId]} default</option>
+              {/*
+                Only this account's own brand. A PlastaGo customer invoiced on
+                an EasyLift template would receive the wrong company's
+                letterhead, which is not a preference anybody should be able to
+                express by accident.
+              */}
+              {templates
+                .filter((template) => template.brandId === account.brandId)
+                .map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
+                  </option>
+                ))}
+            </Select>
+          )}
+        </Field>
+
+        <Alert variant="neutral" title="Preview it first">
+          Settings → Invoicing → Templates has a Preview on every template, so you can see what
+          this customer will receive before you choose it.
+        </Alert>
+      </div>
+    </Dialog>
+  );
 }

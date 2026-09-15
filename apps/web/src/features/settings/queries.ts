@@ -2,9 +2,9 @@ import type {
   AdditionalServiceCreate,
   AdditionalServiceUpdate,
   InvoiceTemplateWrite,
+  InvoicingSettings,
   RateCardCreate,
   RateScheduleCreate,
-  Settings,
 } from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
@@ -55,7 +55,35 @@ function useSettingsMutation<TInput, TResult>(mutationFn: (input: TInput) => Pro
 
 export function useSaveInvoicingSettings() {
   const { settings } = useServices();
-  return useSettingsMutation((input: Settings['invoicing']) => settings.saveInvoicing(input));
+  return useSettingsMutation((input: InvoicingSettings) => settings.saveInvoicing(input));
+}
+
+/**
+ * M7.5 — the invoice logo.
+ *
+ * Invalidates settings like every other write here: the screen shows the mark
+ * the invoices actually print, and that link is part of the settings payload.
+ */
+export function useUploadLogo() {
+  const { settings } = useServices();
+  return useSettingsMutation((file: File) => settings.uploadLogo(file));
+}
+
+export function useRemoveLogo() {
+  const { settings } = useServices();
+  return useSettingsMutation(() => settings.removeLogo());
+}
+
+/**
+ * A rendered sample of one template.
+ *
+ * ⚠️ Deliberately NOT invalidating anything. A preview changes no setting — it
+ * draws a throwaway document — and refetching the whole settings tree behind a
+ * preview would remount the form somebody is still editing.
+ */
+export function usePreviewTemplate() {
+  const { settings } = useServices();
+  return useMutation({ mutationFn: (id: string) => settings.previewTemplate(id) });
 }
 
 /* ── Pricing (M6.1, M6.2) ────────────────────────────────────────────────── */
@@ -103,6 +131,20 @@ export function useIssueSchedule() {
   const { settings } = useServices();
   return usePricingMutation((input: { id: string; schedule: RateScheduleCreate }) =>
     settings.issueSchedule(input.id, input.schedule),
+  );
+}
+
+/**
+ * Undo a schedule issued with the wrong start date.
+ *
+ * A pricing mutation, not a settings one: removing a schedule changes what a
+ * card charges, and the rate-card dropdowns cached for an hour elsewhere have
+ * to hear about it.
+ */
+export function useDeleteSchedule() {
+  const { settings } = useServices();
+  return usePricingMutation((input: { id: string; effectiveFrom: string }) =>
+    settings.deleteSchedule(input.id, input.effectiveFrom),
   );
 }
 

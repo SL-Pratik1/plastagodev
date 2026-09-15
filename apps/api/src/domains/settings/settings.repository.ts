@@ -1,5 +1,6 @@
 import { DEFAULT_RATE_CARD_ID, PROTECTED_SERVICE_CODES, ZONES } from '@plastago/shared';
 import type {
+  InvoicingSettings,
   AdditionalServiceCreate,
   AdditionalServiceSetting,
   AdditionalServiceUpdate,
@@ -15,6 +16,7 @@ import type {
 } from '@plastago/shared';
 import type { Types } from 'mongoose';
 import { startOfSydneyDay, todayInSydney } from '../../lib/business-day.js';
+import { getStorage } from '../../integrations/storage.js';
 import { fromDecimal128, toDecimal128 } from '../../lib/money.js';
 import { AccountModel } from '../accounts/account.model.js';
 /*
@@ -251,9 +253,24 @@ export const settingsRepository = {
             deletable: card._id !== DEFAULT_RATE_CARD_ID && accountCount === 0,
           };
         }),
-        additionalServices: additionalServices.map(
-          (service): AdditionalServiceSetting => toService(service),
-        ),
+        /*
+         * ⚠️ `extra-load-time` is filtered OUT, deliberately.
+         *
+         * The charge is seeded and protected from deletion, and its price was
+         * editable on this screen — but nothing in the application ever raises
+         * it. The driver's on-site minutes are captured and stored, and they
+         * feed one dashboard median; no code turns them into a charge. So the
+         * control was an invitation to set a price for work that is never
+         * billed, which is worse than the charge not appearing at all.
+         *
+         * Hidden rather than deleted, and hidden HERE rather than in the web
+         * app, so no surface can show it. The document stays exactly as it is:
+         * when the derivation is built, deleting these four lines is the whole
+         * of putting the control back.
+         */
+        additionalServices: additionalServices
+          .filter((service) => (service._id as string) !== UNBILLED_SERVICE_CODE)
+          .map((service): AdditionalServiceSetting => toService(service)),
         assumedCostPerJob: fromDecimal128(scalars.assumedCostPerJob),
       },
       invoicing: {
@@ -317,6 +334,13 @@ export const settingsRepository = {
         bankAccount: scalars.bankAccount ?? '',
         bankAccountName: scalars.bankAccountName ?? '',
         showGbcaBadge: scalars.showGbcaBadge ?? false,
+        /*
+         * A link to the stored mark, so the screen can show what the invoices
+         * actually print rather than the storage key, which tells a person
+         * nothing. Derived on read and never written back — see the note on
+         * `InvoicingSettingsReadSchema`.
+         */
+        logoUrl: await logoUrlFor(scalars.logoKey ?? ''),
       },
     };
   },
@@ -623,8 +647,16 @@ export const settingsRepository = {
       kind: input.kind,
       value: toDecimal128(input.value),
       requiresApproval: input.requiresApproval,
-      driverRaisable: input.driverRaisable,
-      // Never settable from a request — see the note on the create schema.
+      /*
+       * Neither of these is settable from a request.
+       *
+       * `systemGenerated` means "derived by code that exists" — see the note on
+       * the create schema. `driverRaisable` is false because the driver app
+       * decides what it offers from the screens it ships, never from this
+       * column; a new charge therefore reaches no phone, which is the truth
+       * rather than a default.
+       */
+      driverRaisable: false,
       systemGenerated: false,
     });
   },
@@ -637,7 +669,7 @@ export const settingsRepository = {
           label: input.label,
           value: toDecimal128(input.value),
           requiresApproval: input.requiresApproval,
-          driverRaisable: input.driverRaisable,
+          // `driverRaisable` is deliberately absent — see the create above.
         },
       },
     );
@@ -723,7 +755,32 @@ export const settingsRepository = {
     return scalars.slaBusinessDays;
   },
 
-  async saveInvoicing(input: Settings['invoicing']): Promise<void> {
+  /**
+   * Save the invoicing block.
+   *
+   * ⚠️ Seven fields used to be missing from this `$set` — the whole company
+   * block, the terms wording and the bank ACCOUNT NAME. They were read back on
+   * the next request from the stored document, so the screen showed the old
+   * value and the person who had just typed their ABN saw it silently revert.
+   * Worse, `saveInvoicing` in the service VALIDATES those same fields, so the
+   * API refused a malformed ABN and then discarded a valid one.
+   *
+   * The consequence was not cosmetic: `companyName` and `companyAbn` are what
+   * make the document a tax invoice, so no invoice this system rendered could
+   * carry either.
+   *
+   * ── Why the list is written out rather than spread ────────────────────────
+   * `$set: input` would also write `templates` and `logoUrl`, which are not
+   * scalars on this document — one is its own collection and the other is a
+   * derived link. Naming each field is what keeps a read-shaped object from
+   * being written back verbatim, which is how the two drifted apart in the
+   * first place.
+   *
+   * ⚠️ `logoKey` is deliberately NOT here. It is written by its own endpoints
+   * after the bytes land, and a client echoing back a stale key must not be
+   * able to repoint the logo.
+   */
+  async saveInvoicing(input: InvoicingSettings): Promise<void> {
     await SettingsModel.updateOne(
       { _id: SETTINGS_SINGLETON_ID },
       {
@@ -731,13 +788,92 @@ export const settingsRepository = {
           invoiceNumberPrefix: input.invoiceNumberPrefix,
           splitAdditionalCharges: input.splitAdditionalCharges,
           defaultPaymentTermsDays: input.defaultPaymentTermsDays,
+          companyName: input.companyName,
+          companyAbn: input.companyAbn,
+          companyAddress: input.companyAddress,
+          companyPhone: input.companyPhone,
+          companyEmail: input.companyEmail,
+          termsText: input.termsText,
           footerText: input.footerText,
           bankBsb: input.bankBsb,
           bankAccount: input.bankAccount,
+          bankAccountName: input.bankAccountName,
           showGbcaBadge: input.showGbcaBadge,
         },
       },
     );
+  },
+
+  /**
+   * M7.5 — point the invoices at a logo, or take it away.
+   *
+   * Separate from `saveInvoicing` because the bytes and the record are written
+   * at different moments: the browser PUTs the image to storage first, and only
+   * a successful upload should change what the invoices print.
+   */
+  async setLogoKey(key: string): Promise<void> {
+    await SettingsModel.updateOne({ _id: SETTINGS_SINGLETON_ID }, { $set: { logoKey: key } });
+  },
+
+  /** The stored logo key, or an empty string. */
+  async logoKey(): Promise<string> {
+    const row = await SettingsModel.findById(SETTINGS_SINGLETON_ID)
+      .select({ logoKey: 1 })
+      .lean<{ logoKey?: string }>();
+    return row?.logoKey ?? '';
+  },
+
+  /**
+   * Remove one rate schedule — the undo for a start date keyed wrong.
+   *
+   * ── Why the previous schedule has to be reopened ──────────────────────────
+   * Issuing this one CLOSED the schedule before it, at the day before this
+   * start. Deleting the row without undoing that close would leave the card
+   * with a gap: every job dated after the old schedule's new end would price
+   * against nothing, and `resolveRate` would refuse the booking with "no rate
+   * covers this date" — on a card that looks complete on screen.
+   *
+   * So the previous schedule is re-extended to whatever this one was bounded
+   * by, which is `null` when this was the last. That restores exactly the
+   * state that existed before it was issued.
+   */
+  async deleteSchedule(id: RateCardId, effectiveFrom: string): Promise<boolean> {
+    const from = startOfSydneyDay(effectiveFrom);
+
+    const doomed = await ZoneRateModel.find({ rateCardId: id, effectiveFrom: from })
+      .select({ effectiveTo: 1 })
+      .lean<Array<{ effectiveTo: Date | null }>>();
+
+    /*
+     * Read BEFORE the delete, because the window this schedule occupied is what
+     * the previous one has to be re-extended to. One row per zone, all sharing
+     * the same window, so the first answers for all three.
+     */
+    const vacatedEnd = doomed[0]?.effectiveTo;
+    if (vacatedEnd === undefined) return false;
+
+    await ZoneRateModel.deleteMany({ rateCardId: id, effectiveFrom: from });
+
+    /*
+     * The row that ran up to the day before this one. Reopened to this
+     * schedule's own end so the windows tile exactly as they did before.
+     */
+    const previous = await ZoneRateModel.findOne({
+      rateCardId: id,
+      effectiveFrom: { $lt: from },
+    })
+      .sort({ effectiveFrom: -1 })
+      .select({ effectiveFrom: 1 })
+      .lean<{ effectiveFrom: Date }>();
+
+    if (previous) {
+      await ZoneRateModel.updateMany(
+        { rateCardId: id, effectiveFrom: previous.effectiveFrom },
+        { $set: { effectiveTo: vacatedEnd } },
+      );
+    }
+
+    return true;
   },
 
   /** Seeds the platform. Idempotent, so it is safe to run on every deploy. */
@@ -966,4 +1102,30 @@ function toService(service: {
      */
     deletable: !(PROTECTED_SERVICE_CODES as readonly string[]).includes(code),
   };
+}
+
+/**
+ * The charge whose price is settable but which nothing ever raises.
+ *
+ * ⚠️ Not a general "hidden charges" mechanism, and deliberately a single
+ * constant rather than a list: a second entry here would mean somebody was
+ * hiding a control instead of fixing it. See the note where it is filtered.
+ */
+const UNBILLED_SERVICE_CODE = 'extra-load-time';
+
+/**
+ * A short-lived link to the stored logo, or null.
+ *
+ * Never throws. A logo that cannot be read is a gap on a settings screen, and
+ * failing the whole settings request over it would take down pricing, rate
+ * cards and invoicing with it — for a thumbnail.
+ */
+async function logoUrlFor(key: string): Promise<string | null> {
+  if (key.trim() === '') return null;
+
+  try {
+    return await getStorage().presignDownload(key);
+  } catch {
+    return null;
+  }
 }

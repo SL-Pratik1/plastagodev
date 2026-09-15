@@ -1,4 +1,8 @@
-import type { AccountDraftSchema } from '@plastago/shared';
+import type {
+  AccountInvoiceTemplateBodySchema,
+  AccountDraftSchema,
+  AccountUpdateSchema,
+} from '@plastago/shared';
 import type { Request, Response } from 'express';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { AppError } from '../../lib/app-error.js';
@@ -37,9 +41,32 @@ export const accountController = {
     req: ValidatedRequest<{ body: typeof AccountDraftSchema }>,
     res: Response,
   ): Promise<void> => {
-    const account = await accountService.create(req.validated.body);
-    // 201 with the created row: the grid and the redirect both need its id.
-    res.status(201).json(account);
+    const created = await accountService.create(req.validated.body);
+    /*
+     * 201 with the created row AND what reached them.
+     *
+     * The row because the grid and the redirect both need its id; the welcome
+     * outcome because the screen used to announce an invitation that was never
+     * sent. A send that failed or was skipped is not a failed create — the
+     * account stands either way — so it is reported, not thrown.
+     */
+    res.status(201).json(created);
+  },
+
+  /** M7.5 — assign an invoice template, or null to follow the brand. */
+  setInvoiceTemplate: async (
+    req: ValidatedRequest<{
+      params: typeof AccountIdParamsSchema;
+      body: typeof AccountInvoiceTemplateBodySchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const account = await accountService.setInvoiceTemplate(
+      req.validated.params.id,
+      req.validated.body.invoiceTemplateId,
+      callerOf(req),
+    );
+    res.json(account);
   },
 
   setRiskAssessmentRequired: async (
@@ -72,14 +99,19 @@ export const accountController = {
     res.json(account);
   },
 
-  getTerms: async (
-    req: ValidatedRequest<{ params: typeof AccountIdParamsSchema }>,
+  update: async (
+    req: ValidatedRequest<{
+      params: typeof AccountIdParamsSchema;
+      body: typeof AccountUpdateSchema;
+    }>,
     res: Response,
   ): Promise<void> => {
-    const terms = await accountService.getTermsAcceptance(req.validated.params.id, callerOf(req));
-    // 200 with `null` rather than 404: "not signed yet" is a normal state the
-    // screen renders, not a missing resource.
-    res.json(terms);
+    const account = await accountService.update(
+      req.validated.params.id,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.json(account);
   },
 };
 

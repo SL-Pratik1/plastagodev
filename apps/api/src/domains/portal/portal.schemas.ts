@@ -60,6 +60,12 @@ export const PortalInvoicesQuerySchema = z
      * stops the request being made in the first place.
      */
     status: z.enum(['awaiting-po', 'sent', 'paid', 'overdue']).optional(),
+    /**
+     * ⚠️ The screen has always had a search box; nothing behind it read the
+     * term. A customer typed an invoice number, the list did not move, and the
+     * only conclusion available to them was that they had no such invoice.
+     */
+    q: z.string().trim().max(120).optional(),
   })
   .meta({ id: 'PortalInvoicesQuery' });
 

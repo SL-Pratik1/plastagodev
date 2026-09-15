@@ -263,9 +263,23 @@ export const extractorClient = {
   /**
    * Adds a user to the tenant, session-authenticated.
    *
-   * 409 is reported as success: the guide says a user already in the tenant
-   * answers 409, and for the broker's purposes "already a member" and "now a
-   * member" are the same state.
+   * ── Why `admin` and not `member` ──────────────────────────────────────────
+   * The vendor gates its own Settings tab — the mailbox connection, webhooks and
+   * API keys — on being an owner or an admin over there, and it reads ONLY its
+   * own membership record: a PlastaGo super-admin is a stranger to it. Everyone
+   * provisioned here arrived through a route locked to `super-admin`
+   * (`extractor.router.ts`), so the mapping has already been made by the time
+   * this runs; sending `member` just meant the one person allowed through the
+   * door could not use what is behind it.
+   *
+   * Not `owner`: `EXTRACTOR_USER_EMAIL` holds that, and its session is what
+   * every authoritative read and the whole PO ingestion pipeline runs on. A
+   * second owner able to rotate the embed token underneath it buys nothing the
+   * Settings tab needs.
+   *
+   * ⚠️ This is a CREATE, so it cannot repair anyone who already exists. A user
+   * provisioned before this line said `admin` stays a member until the vendor
+   * changes their role — 409 below reports "already there", not "now correct".
    */
   async addMember(
     sessionId: string,
@@ -274,7 +288,7 @@ export const extractorClient = {
     const response = await fetch(`${env.EXTRACTOR_BASE_URL}/api/embed/users`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-session-id': sessionId },
-      body: JSON.stringify({ ...input, role: 'member' }),
+      body: JSON.stringify({ ...input, role: 'admin' }),
     });
 
     if (response.status === 409) return { ok: true, value: true };

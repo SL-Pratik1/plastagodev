@@ -17,7 +17,12 @@ import {
 import { CameraIcon, CheckCircle2Icon, ScaleIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { useRecordTipOff, useRunSheet, useTipOffPreview } from '@/features/run/queries';
+import {
+  useRecordTipOff,
+  useRunSheet,
+  useTipOffPreview,
+  useUploadDocketPhoto,
+} from '@/features/run/queries';
 import { todayInSydney } from '@/lib/geolocation';
 import { currentPosition } from '@/lib/geolocation';
 
@@ -63,6 +68,7 @@ export function TipOffPage() {
   const [totalKg, setTotalKg] = useState('');
   const [docket, setDocket] = useState('');
   const [docketPhotoId, setDocketPhotoId] = useState<string | null>(null);
+  const uploadDocket = useUploadDocketPhoto();
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [chosenRunId, setChosenRunId] = useState<string | null>(null);
 
@@ -130,21 +136,41 @@ export function TipOffPage() {
     }
   };
 
+  /*
+   * The docket photo, actually uploaded.
+   *
+   * This used to call `crypto.randomUUID()` and toast "saved" — no bytes left
+   * the phone, and the id sent as `docketPhotoId` pointed at nothing in storage.
+   * The server stores it as `docketPhotoKey` on the run, so every tip-off
+   * recorded to date carries a dead reference where the monthly tipping bill is
+   * meant to be audited from. The presign endpoint existed the whole time; the
+   * screen simply never called it.
+   */
   const photographDocket = () => {
+    if (activeRunId === null) return;
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*';
     input.capture = 'environment';
-    const accept = () => {
-      setDocketPhotoId(crypto.randomUUID());
-      setErrors(({ docket: _drop, ...rest }) => rest);
-      toast.success('Docket photo saved on this phone');
-    };
-    input.addEventListener('change', accept);
+
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      void (async () => {
+        try {
+          const key = await uploadDocket.mutateAsync({ runId: activeRunId, blob: file });
+          setDocketPhotoId(key);
+          setErrors(({ docket: _drop, ...rest }) => rest);
+          toast.success('Docket photo saved');
+        } catch {
+          toast.error(
+            'Could not save the docket photo',
+            'The weighbridge usually has signal — try again before you leave.',
+          );
+        }
+      })();
+    });
     input.click();
-    window.setTimeout(() => {
-      if (docketPhotoId === null) accept();
-    }, 400);
   };
 
   if (alreadyDone) {

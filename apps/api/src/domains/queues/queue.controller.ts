@@ -4,6 +4,7 @@ import { AppError } from '../../lib/app-error.js';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { queueService, type Caller } from './queue.service.js';
 import type {
+  ChangeRequestDecisionBodySchema,
   ChargeDecisionBodySchema,
   QueueIdParamsSchema,
   QueueIdsSchema,
@@ -90,6 +91,31 @@ export const queueController = {
       callerFrom(req),
     );
     res.json({ changed });
+  },
+
+
+  /* ── M5.4 · Change requests ────────────────────────────────────────────── */
+
+  changeRequestList: async (
+    req: ValidatedRequest<{ query: typeof QueueListQuerySchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await queueService.changeRequestList(req.validated.query, callerFrom(req)));
+  },
+
+  changeRequestDecide: async (
+    req: ValidatedRequest<{
+      params: typeof QueueIdParamsSchema;
+      body: typeof ChangeRequestDecisionBodySchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    await queueService.changeRequestDecide(
+      req.validated.params.id,
+      req.validated.body,
+      callerFrom(req),
+    );
+    res.status(204).send();
   },
 
   /* ── M7.3 · Awaiting a purchase order ──────────────────────────────────── */

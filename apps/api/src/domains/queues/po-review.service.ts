@@ -110,9 +110,13 @@ export const poReviewService = {
     assertReviewer(caller);
 
     /*
-     * The review reason is decided HERE, not by the extractor. A vendor that
-     * reported its own confidence as "high" would otherwise be deciding whether
-     * a human looks at it, which is exactly backwards.
+     * The review reason is decided HERE, not by the extractor — it says what a
+     * reviewer should look at first, and a vendor does not get a say in that.
+     *
+     * It no longer decides WHETHER anybody looks. Nothing ever auto-accepted,
+     * but a score sitting on the screen invited waving through the high ones;
+     * the reason is now a hint about where to start, and the document itself is
+     * the check.
      */
     const reason = await resolveReason(input);
 
@@ -123,7 +127,6 @@ export const poReviewService = {
         extractionId: id,
         from: input.fromAddress,
         poNumber: input.poNumber,
-        confidence: input.overallConfidence,
         reason,
       },
       'purchase-order extraction received for review',
@@ -231,7 +234,7 @@ export const poReviewService = {
       subject: extraction.fileName,
     });
 
-    const reason = await resolveReason({ ...input, reason: 'below-threshold' });
+    const reason = await resolveReason({ ...input, reason: 'awaiting-check' });
 
     const id = await poExtractionRepository.ingest({
       ...input,
@@ -244,7 +247,6 @@ export const poReviewService = {
         extractionId: id,
         externalId: extraction.id,
         poNumber: input.poNumber,
-        confidence: input.overallConfidence,
         reason,
         ...diagnostics,
       },
@@ -372,7 +374,6 @@ export const poReviewService = {
         // The accuracy metric. Which fields the model got wrong, per document.
         correctedFields: corrected,
         correctionCount: corrected.length,
-        confidence: extraction.overallConfidence,
         by: caller.name,
       },
       'purchase order confirmed from extraction',
@@ -423,21 +424,11 @@ export const poReviewService = {
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 /**
- * Confidence below which a human always looks.
- *
- * A single number rather than per-field thresholds, deliberately: the office
- * needs one dial they understand, and `correctedFields` is what tells them
- * where to set it. Starts high because the cost of a wrong PO is much greater
- * than the cost of a human glancing at a correct one.
- */
-const AUTO_ACCEPT_THRESHOLD = 0.95;
-
-/**
  * Why this extraction needs a human, decided server-side.
  *
  * ⚠️ Order matters: the FIRST true reason wins, and they are ordered by how
  * actionable they are. "No account match" is a more useful thing to tell a
- * reviewer than "low confidence", even when both are true.
+ * reviewer than "not checked yet", even when both are true.
  */
 async function resolveReason(input: IngestExtractionInput): Promise<IngestExtractionInput['reason']> {
   if (!input.suggestedAccountId) return 'no-account-match';
@@ -445,7 +436,7 @@ async function resolveReason(input: IngestExtractionInput): Promise<IngestExtrac
   if (input.accountCandidates.length > 1) {
     const [best, second] = input.accountCandidates;
     // Two candidates within a whisker of each other is ambiguity, not a match.
-    if (best && second && best.confidence - second.confidence < 0.1) return 'ambiguous-account';
+    if (best && second) return 'ambiguous-account';
   }
 
   if (
@@ -455,16 +446,17 @@ async function resolveReason(input: IngestExtractionInput): Promise<IngestExtrac
     return 'duplicate-po';
   }
 
-  if (input.overallConfidence < AUTO_ACCEPT_THRESHOLD) return 'below-threshold';
-
   /*
-   * Everything scored well and nothing conflicted — and it STILL goes to a
-   * human. `no-job-match` is the honest reason: a purchase order arrives three
-   * to four months before the work (Matt, 28:40), so there is usually no job to
-   * attach it to, and confirming which account it belongs to is a judgement
-   * nobody should skip on a document that authorises invoicing.
+   * Nothing conflicted — and it STILL goes to a human. `no-job-match` is the
+   * honest reason where there is no job: a purchase order arrives three to four
+   * months before the work (Matt, 28:40), so there is usually nothing to attach
+   * it to, and confirming which account it belongs to is a judgement nobody
+   * should skip on a document that authorises invoicing.
+   *
+   * Otherwise it has simply not been read by anyone yet, which is what
+   * `awaiting-check` says.
    */
-  return input.suggestedJobId ? 'below-threshold' : 'no-job-match';
+  return input.suggestedJobId ? 'awaiting-check' : 'no-job-match';
 }
 
 /**

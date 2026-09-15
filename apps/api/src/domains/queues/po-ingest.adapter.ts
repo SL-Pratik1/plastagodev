@@ -57,34 +57,6 @@ export const FIELD_KEYS = {
   documentText: 'document_text',
 } as const;
 
-/**
- * ⚠️ These are VALIDATION scores, not model confidence.
- *
- * The extractor's API returns extracted values and no per-field score. Rather
- * than invent one — a number that looks like a measurement and is not — each
- * field is scored on how well what arrived parses against what the field has to
- * be: a mobile that matches an Australian mobile, an amount that parses as a
- * decimal, a suburb that resolves to a serviceable place.
- *
- * That is honest, reproducible from stored inputs, and serves the purpose the
- * score actually has here: EVERY extraction goes to a human (Risk 9), so
- * confidence only orders the reviewer's attention. It never decides whether
- * somebody looks.
- *
- * If the vendor later returns real per-field confidence, this table is where the
- * two would be combined.
- */
-const CONFIDENCE = {
-  /** Present and shaped as expected. */
-  good: 0.95,
-  /** Present, but nothing about it could be checked. */
-  unverified: 0.7,
-  /** Present and the wrong shape — a reviewer should look here first. */
-  malformed: 0.35,
-  /** Absent. Not always an error — see `areaM2` below. */
-  absent: 0,
-} as const;
-
 /** Australian mobile, with or without spaces: 04xx xxx xxx. */
 const AU_MOBILE = /^(?:\+?61|0)4\d{8}$/;
 
@@ -194,76 +166,30 @@ export async function adaptExtraction(
    * comparing this list against a PDF, not debugging a schema.
    */
   const fields: ExtractedField[] = [
-    field('poNumber', 'Purchase order number', poNumber, poNumber ? CONFIDENCE.good : CONFIDENCE.absent),
-    field(
-      'accountName',
-      'Builder',
-      builderName,
-      // Scored on whether it RESOLVED, not on whether text was read. A name the
-      // model found but no account matches is the case a reviewer must catch.
-      match.accountId ? CONFIDENCE.good : builderName ? CONFIDENCE.malformed : CONFIDENCE.absent,
-    ),
-    field('issuedOn', 'Order date', orderDate, orderDate ? CONFIDENCE.good : CONFIDENCE.absent),
-    field('lotNumber', 'Lot number', lotNumber, lotNumber ? CONFIDENCE.good : CONFIDENCE.absent),
+    field('poNumber', 'Purchase order number', poNumber),
+    field('accountName', 'Builder', builderName),
+    field('issuedOn', 'Order date', orderDate),
+    field('lotNumber', 'Lot number', lotNumber),
     field(
       'siteAddress',
       'Site address',
       // The RESOLVED place is shown where there is one, because that is the
       // address the job will actually be booked against.
       place ? joinAddress(siteAddress, place.label) : joinAddress(siteAddress, suburbText),
-      /*
-       * ⚠️ Scored on whether the suburb resolves to a serviceable place, not on
-       * whether an address was read.
-       *
-       * A suburb absent from the places table means "we do not go there"
-       * (`place.model.ts`), and a purchase order for an unserviceable suburb can
-       * be confirmed and then never booked. That is the single most useful thing
-       * this screen can warn a reviewer about, so it drives the score.
-       */
-      place ? CONFIDENCE.good : suburbText || siteAddress ? CONFIDENCE.malformed : CONFIDENCE.absent,
     ),
-    field(
-      'areaM2',
-      'Plasterboard area (m²)',
-      areaM2 === null ? null : `${String(areaM2)} m²`,
-      /*
-       * ⚠️ Absent is a CORRECT answer here, not a failed read.
-       *
-       * Matt, 31:04, on the Wisdom order: *"we're on a fixed price with them. So
-       * they don't actually give us square metres… they just give us a line
-       * item."* Scoring a missing area as a failure would send every one of that
-       * builder's purchase orders to the top of the queue for a human to
-       * confirm a number that is genuinely not on the page.
-       */
-      areaM2 === null ? CONFIDENCE.unverified : CONFIDENCE.good,
-    ),
-    field(
-      'bagAllowance',
-      'Bag allowance',
-      bagAllowance === null ? null : String(bagAllowance),
-      bagAllowance === null ? CONFIDENCE.unverified : CONFIDENCE.good,
-    ),
-    field(
-      'siteSupervisorName',
-      'Site supervisor',
-      supervisorName,
-      supervisorName ? CONFIDENCE.unverified : CONFIDENCE.absent,
-    ),
-    field(
-      'siteSupervisorMobile',
-      'Supervisor mobile',
-      supervisorMobile,
-      // The one field on these documents that is reliably in small print, and
-      // the one a shape check can genuinely verify.
-      supervisorMobile ? CONFIDENCE.good : CONFIDENCE.absent,
-    ),
-    field(
-      'amountExGst',
-      'Order value (ex GST)',
-      amountExGst,
-      amountExGst ? CONFIDENCE.good : CONFIDENCE.absent,
-    ),
-  ];
+    /*
+     * ⚠️ A missing area is a CORRECT answer here, not a failed read.
+     *
+     * Matt, 31:04, on the Wisdom order: *"we’re on a fixed price with them. So
+     * they don’t actually give us square metres… they just give us a line
+     * item."* The reviewer sees the blank against the document and fills it in
+     * only if it is genuinely there.
+     */
+    field('areaM2', 'Plasterboard area (m²)', areaM2 === null ? null : `${String(areaM2)} m²`),
+    field('bagAllowance', 'Bag allowance', bagAllowance === null ? null : String(bagAllowance)),
+    field('siteSupervisorName', 'Site supervisor', supervisorName),
+    field('siteSupervisorMobile', 'Supervisor mobile', supervisorMobile),
+    field('amountExGst', 'Order value (ex GST)', amountExGst),  ];
 
   return {
     input: {
@@ -304,7 +230,6 @@ export async function adaptExtraction(
       accountCandidates: match.candidates,
       jobCandidates: [],
 
-      overallConfidence: overall(fields),
     },
     diagnostics: {
       matchedBy: match.matchedBy,
@@ -357,7 +282,7 @@ async function matchAccount(input: {
       return {
         accountId: found[0].id,
         accountName: found[0].name,
-        candidates: [toCandidate(found[0], 0.95)],
+        candidates: [toCandidate(found[0])],
         matchedBy: 'email-domain',
       };
     }
@@ -371,7 +296,7 @@ async function matchAccount(input: {
       return {
         accountId: null,
         accountName: null,
-        candidates: found.slice(0, 5).map((row) => toCandidate(row, 0.6)),
+        candidates: found.slice(0, 5).map((row) => toCandidate(row)),
         matchedBy: 'none',
       };
     }
@@ -394,7 +319,7 @@ async function matchAccount(input: {
       accountName: best.name,
       // Deliberately below the service's 0.95 auto-accept line: a name read off
       // a scan is a good guess, not an identification.
-      candidates: [toCandidate(best, 0.8)],
+      candidates: [toCandidate(best)],
       matchedBy: 'document-name',
     };
   }
@@ -402,7 +327,7 @@ async function matchAccount(input: {
   return {
     accountId: null,
     accountName: null,
-    candidates: found.slice(0, 5).map((row, index) => toCandidate(row, index === 0 ? 0.7 : 0.65)),
+    candidates: found.slice(0, 5).map((row) => toCandidate(row)),
     matchedBy: 'none',
   };
 }
@@ -421,9 +346,8 @@ async function searchAccounts(
 
 function toCandidate(
   row: { id: string; name: string; code: string },
-  confidence: number,
 ): MatchCandidate {
-  return { id: row.id, label: row.name, detail: row.code, confidence };
+  return { id: row.id, label: row.name, detail: row.code };
 }
 
 function domainOf(address: string): string | null {
@@ -757,28 +681,7 @@ function field(
   key: ExtractedField['key'],
   label: string,
   value: string | null,
-  confidence: number,
 ): ExtractedField {
-  return { key, label, value, confidence };
+  return { key, label, value };
 }
 
-/**
- * One number for the queue to sort by.
- *
- * The MINIMUM of the fields that matter commercially, not an average. An average
- * lets nine good fields hide the one unreadable purchase-order number, and the
- * purchase-order number is the field an invoice is rejected for.
- */
-function overall(fields: readonly ExtractedField[]): number {
-  /*
-   * The three that decide whether this order can become an invoiced job:
-   * the number the builder's AP system matches on, the value they authorised,
-   * and an address in a suburb PlastaGo actually services.
-   */
-  const critical = new Set<ExtractedField['key']>(['poNumber', 'amountExGst', 'siteAddress']);
-  const scores = fields.filter((row) => critical.has(row.key)).map((row) => row.confidence);
-
-  if (scores.length === 0) return 0;
-
-  return Math.min(...scores);
-}

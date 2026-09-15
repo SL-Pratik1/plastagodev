@@ -25,6 +25,48 @@ vi.mock('../src/domains/settings/settings.repository.js', () => ({
   },
 }));
 
+/** Keys the fake bucket holds. `confirmLogo` reads one back before accepting it. */
+let storedObjects = new Set<string>();
+const removedObjects: string[] = [];
+
+/*
+ * The bucket, faked.
+ *
+ * ⚠️ Not optional. `confirmLogo` deliberately READS the object back before it
+ * will store the key — an upload that never finished must not be able to
+ * replace a working logo with a blank space on every invoice. Without a fake
+ * here the real provider reaches for S3 and every confirm fails that check,
+ * which is what the first run of these tests did.
+ */
+vi.mock('../src/integrations/storage.js', () => ({
+  SETTINGS_OWNER: 'singleton',
+  buildKey: (input: { scope: string; ownerId: string; kind: string }) =>
+    `plastago/${input.scope}/${input.ownerId}/${input.kind}/test.png`,
+  getStorage: () => ({
+    presignUpload: ({ key }: { key: string }) =>
+      Promise.resolve({
+        key,
+        uploadUrl: `http://storage.test/${key}`,
+        headers: {},
+        expiresAt: '2026-09-15T00:00:00.000Z',
+      }),
+    presignDownload: (key: string) => Promise.resolve(`http://storage.test/${key}?signed`),
+    get: (key: string) =>
+      storedObjects.has(key)
+        ? Promise.resolve(null)
+        : Promise.reject(new Error('no such object')),
+    put: (key: string) => {
+      storedObjects.add(key);
+      return Promise.resolve();
+    },
+    remove: (key: string) => {
+      removedObjects.push(key);
+      storedObjects.delete(key);
+      return Promise.resolve();
+    },
+  }),
+}));
+
 const { settingsService } = await import('../src/domains/settings/settings.service.js');
 
 const ADMIN = { roles: ['super-admin'] as Role[], accountId: null };
@@ -32,6 +74,8 @@ const OFFICE = { roles: ['office-staff'] as Role[], accountId: null };
 
 beforeEach(() => {
   repo = createFakeSettingsRepository();
+  storedObjects = new Set();
+  removedObjects.length = 0;
 });
 
 function invoicing(overrides: Partial<Settings['invoicing']> = {}): Settings['invoicing'] {
@@ -281,5 +325,104 @@ describe('resolving which template an invoice prints on', () => {
      */
     const resolved = await repo.repository.resolveTemplateFor(null, 'brickgo');
     expect(resolved).toBeNull();
+  });
+});
+
+/* ── M7.5 · the logo ─────────────────────────────────────────────────────── */
+
+describe('the invoice logo', () => {
+  const LOGO_KEY = 'plastago/settings/singleton/logo/abc.png';
+
+  it('hands back somewhere to PUT the bytes, without changing the logo yet', async () => {
+    const ticket = await settingsService.presignLogo(
+      { contentType: 'image/png', contentLength: 4_096 },
+      ADMIN,
+    );
+
+    expect(ticket.uploadUrl).toContain('http');
+    /*
+     * ⚠️ The point of the test. An upload the browser then abandons must leave
+     * the invoices printing whatever logo they had — so nothing is stored until
+     * the confirm.
+     */
+    expect(repo.calls.logoKeys).toEqual([]);
+  });
+
+  it('stores the key once the bytes are confirmed', async () => {
+    storedObjects.add(LOGO_KEY);
+
+    await settingsService.confirmLogo(LOGO_KEY, ADMIN);
+
+    expect(repo.calls.logoKeys).toEqual([LOGO_KEY]);
+  });
+
+  /*
+   * The key comes back from a client, so it is checked. Without this, a caller
+   * could point the invoice logo at any object in the bucket — a docket photo,
+   * or a customer's purchase order document.
+   */
+  it('refuses a key from outside the logo’s own prefix', async () => {
+    await expect(
+      settingsService.confirmLogo('plastago/jobs/000000000000000000000000/photos/x.png', ADMIN),
+    ).rejects.toMatchObject({ status: 422 });
+
+    expect(repo.calls.logoKeys).toEqual([]);
+  });
+
+  /*
+   * ⚠️ A QA find. The first version of the check matched on "settings"
+   * anywhere in the key, which admitted a template PREVIEW — and a PDF stored
+   * as the logo cannot be embedded, so the renderer falls back to text and
+   * every invoice silently loses its mark with nothing reporting an error.
+   */
+  it('refuses a template preview posing as a logo', async () => {
+    storedObjects.add('plastago/settings/singleton/template-preview/x.pdf');
+
+    await expect(
+      settingsService.confirmLogo('plastago/settings/singleton/template-preview/x.pdf', ADMIN),
+    ).rejects.toMatchObject({ status: 422 });
+
+    expect(repo.calls.logoKeys).toEqual([]);
+  });
+
+  /* Deployments without an S3 key prefix produce keys with no leading segment. */
+  it('accepts an unprefixed logo key', async () => {
+    storedObjects.add('settings/singleton/logo/abc.png');
+
+    await settingsService.confirmLogo('settings/singleton/logo/abc.png', ADMIN);
+
+    expect(repo.calls.logoKeys).toEqual(['settings/singleton/logo/abc.png']);
+  });
+
+  it('clears the key when the logo is removed', async () => {
+    storedObjects.add(LOGO_KEY);
+
+    await settingsService.confirmLogo(LOGO_KEY, ADMIN);
+    await settingsService.removeLogo(ADMIN);
+
+    expect(repo.calls.logoKeys).toEqual([LOGO_KEY, '']);
+    // The bytes go too — an unreferenced logo is just cost.
+    expect(removedObjects).toEqual([LOGO_KEY]);
+  });
+
+  /*
+   * ⚠️ The refusal that protects the invoices. A PUT that never landed leaves
+   * the previous logo in place rather than replacing it with a dead key, which
+   * the renderer would degrade to plain text — silently, on every invoice.
+   */
+  it('refuses a key whose bytes never arrived', async () => {
+    await expect(settingsService.confirmLogo(LOGO_KEY, ADMIN)).rejects.toMatchObject({
+      status: 422,
+    });
+
+    expect(repo.calls.logoKeys).toEqual([]);
+  });
+
+  it('refuses a non-administrator', async () => {
+    await expect(
+      settingsService.presignLogo({ contentType: 'image/png', contentLength: 10 }, OFFICE),
+    ).rejects.toMatchObject({ status: 403 });
+
+    await expect(settingsService.removeLogo(OFFICE)).rejects.toMatchObject({ status: 403 });
   });
 });

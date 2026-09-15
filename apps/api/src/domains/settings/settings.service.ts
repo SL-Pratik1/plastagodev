@@ -1,4 +1,4 @@
-import { DEFAULT_RATE_CARD_ID, PROTECTED_SERVICE_CODES } from '@plastago/shared';
+import { isValidAbn, DEFAULT_RATE_CARD_ID, PROTECTED_SERVICE_CODES } from '@plastago/shared';
 import type {
   AdditionalServiceCreate,
   AdditionalServiceSetting,
@@ -11,10 +11,19 @@ import type {
   Settings,
   InvoiceTemplate,
   InvoiceTemplateWrite,
+  InvoicingSettings,
+  Invoice,
+  LogoUploadRequest,
+  PresignedUpload,
+  TemplatePreview,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { settingsRepository } from './settings.repository.js';
+import { buildKey, getStorage, SETTINGS_OWNER } from '../../integrations/storage.js';
+import { renderInvoicePdf } from '../../integrations/invoice-pdf.js';
+import { invoiceRenderService } from '../invoices/invoice-render.service.js';
+import { todayInSydney } from '../../lib/business-day.js';
 
 const log = logger.child({ module: 'settings' });
 
@@ -65,7 +74,7 @@ export const settingsService = {
    * no account number gets paid into nothing, and the customer finds out weeks
    * later.
    */
-  async saveInvoicing(input: Settings['invoicing'], caller: Caller): Promise<Settings['invoicing']> {
+  async saveInvoicing(input: InvoicingSettings, caller: Caller): Promise<Settings['invoicing']> {
     assertWriter(caller);
 
     const bsb = input.bankBsb.trim();
@@ -118,6 +127,21 @@ export const settingsService = {
       ]);
     }
 
+    /*
+     * Eleven digits is a shape, not a check.
+     *
+     * ⚠️ This is the one ABN that appears on every tax invoice PlastaGo issues,
+     * so a transposed digit here is wrong on all of them at once — and the
+     * customer's accountant is who finds out. `11111111111` passed the length
+     * test happily. Empty still saves: an ABN nobody has typed yet is a
+     * half-configured letterhead, which the pairing rule below already covers.
+     */
+    if (abn !== '' && !isValidAbn(abn)) {
+      throw AppError.validation('That is not a valid ABN', [
+        { path: 'companyAbn', message: 'Check it on ABN Lookup — the digits do not add up' },
+      ]);
+    }
+
     if (input.companyName.trim() === '' && abn !== '') {
       throw AppError.validation('An ABN needs the name it belongs to', [
         { path: 'companyName', message: 'Which entity issues these invoices?' },
@@ -127,6 +151,103 @@ export const settingsService = {
     await settingsRepository.saveInvoicing(input);
     const saved = await settingsRepository.get();
     return saved.invoicing;
+  },
+
+  /* ── The invoice logo (M7.5) ───────────────────────────────────────────── */
+
+  /**
+   * Somewhere to PUT the logo bytes.
+   *
+   * ── Why the key is not stored yet ─────────────────────────────────────────
+   * ⚠️ Handing back a ticket is not the same as having a logo. If `logoKey`
+   * were written here, an upload the browser then abandoned — a closed tab, a
+   * dropped connection — would leave every invoice pointing at an object that
+   * does not exist. The renderer degrades to text on a missing logo, so the
+   * failure would be silent and permanent.
+   *
+   * So the client uploads first and confirms second, and until it confirms the
+   * invoices keep the logo they had.
+   */
+  async presignLogo(input: LogoUploadRequest, caller: Caller): Promise<PresignedUpload> {
+    assertWriter(caller);
+
+    const key = buildKey({
+      scope: 'settings',
+      ownerId: SETTINGS_OWNER,
+      kind: 'logo',
+      contentType: input.contentType,
+    });
+
+    return getStorage().presignUpload({
+      key,
+      contentType: input.contentType,
+      contentLength: input.contentLength,
+    });
+  },
+
+  /**
+   * Confirm the bytes landed, and point the invoices at them.
+   *
+   * ⚠️ The object is READ back before it is accepted. A key that 404s means the
+   * PUT never completed, and storing it would replace a working logo with a
+   * blank space on every invoice from then on — so a failed upload leaves the
+   * previous one exactly where it was.
+   */
+  async confirmLogo(key: string, caller: Caller): Promise<string | null> {
+    assertWriter(caller);
+
+    /*
+     * The key came back from a client, so the path it names is checked.
+     *
+     * ⚠️ Matched on the LOGO segment specifically, not merely on `settings`.
+     * The looser test admitted `settings/singleton/template-preview/…`, which
+     * is a PDF — and a PDF stored as the logo fails to embed, so the renderer
+     * would fall back to text and every invoice would quietly lose its mark
+     * with nothing reporting an error. Found in QA by reading the two key
+     * shapes side by side.
+     *
+     * Anchored with the separator on both sides so a crafted key cannot smuggle
+     * the segment in as part of a longer name.
+     */
+    if (!LOGO_KEY_SEGMENT.test(key)) {
+      throw AppError.validation('That is not an invoice logo', [
+        { path: 'key', message: 'Upload the logo again' },
+      ]);
+    }
+
+    try {
+      await getStorage().get(key);
+    } catch {
+      throw AppError.validation('The logo did not finish uploading', [
+        { path: 'key', message: 'Try the upload again' },
+      ]);
+    }
+
+    const previous = await settingsRepository.logoKey();
+    await settingsRepository.setLogoKey(key);
+
+    /*
+     * The old object is removed only AFTER the new one is stored. The other
+     * order leaves a window where the invoices have no logo at all, and a
+     * failure inside it makes that permanent.
+     */
+    if (previous !== '' && previous !== key) await removeQuietly(previous);
+
+    log.info({ key }, 'invoice logo updated');
+    return (await settingsRepository.get()).invoicing.logoUrl;
+  },
+
+  /** Take the logo off the invoices. They fall back to the company name in text. */
+  async removeLogo(caller: Caller): Promise<void> {
+    assertWriter(caller);
+
+    const previous = await settingsRepository.logoKey();
+    if (previous === '') return;
+
+    await settingsRepository.setLogoKey('');
+    await removeQuietly(previous);
+
+    log.info('invoice logo removed');
   },
 
   /* ── Invoice templates (M7.5) ──────────────────────────────────────────── */
@@ -201,6 +322,58 @@ export const settingsService = {
 
     await settingsRepository.deleteInvoiceTemplate(id);
     log.info({ templateId: id }, 'invoice template deleted');
+  },
+
+  /**
+   * M7.5 — draw one template with invented figures, so it can be looked at.
+   *
+   * ── Why this exists ───────────────────────────────────────────────────────
+   * ⚠️ Until now a template was chosen blind: an administrator picked a layout
+   * and typed a hex colour, and the first rendering anybody ever saw was on a
+   * real invoice already on its way to a builder. Getting it wrong was not
+   * recoverable — a sent invoice cannot be unsent.
+   *
+   * ── Why the figures are invented ──────────────────────────────────────────
+   * Previewing the most recent real invoice would put one customer's site,
+   * job and amounts on screen for whoever happened to be editing a template,
+   * which is a disclosure nobody asked for. The sample below is fiction, and
+   * the branding around it — company, ABN, bank, logo — is real, because that
+   * is the half a person is checking.
+   */
+  async previewTemplate(id: string, caller: Caller): Promise<TemplatePreview> {
+    assertWriter(caller);
+
+    const template = (await settingsRepository.get()).invoicing.templates.find(
+      (candidate) => candidate.id === id,
+    );
+    if (!template) throw AppError.notFound(`No invoice template is configured for "${id}"`);
+
+    const context = await invoiceRenderService.context();
+
+    const pdf = await renderInvoicePdf({
+      invoice: sampleInvoice(template.name),
+      template,
+      branding: context.branding,
+      invoiceNumberPrefix: context.invoiceNumberPrefix,
+      logo: context.logo,
+      jobContext: SAMPLE_JOB_CONTEXT,
+    });
+
+    const key = buildKey({
+      scope: 'settings',
+      ownerId: SETTINGS_OWNER,
+      kind: 'template-preview',
+      contentType: 'application/pdf',
+    });
+
+    await getStorage().put(key, pdf, 'application/pdf');
+
+    log.info({ templateId: id }, 'template preview rendered');
+
+    return {
+      url: await getStorage().presignDownload(key),
+      fileName: `Preview — ${template.name}.pdf`,
+    };
   },
 
   /* ── Rate cards (M6.1) ─────────────────────────────────────────────────── */
@@ -341,6 +514,58 @@ export const settingsService = {
     log.info({ rateCardId: id }, 'rate card deleted');
   },
 
+  /**
+   * M6.2 — remove a schedule that was issued by mistake.
+   *
+   * ── The two refusals, and why they are the only two ───────────────────────
+   * Issuing a schedule is safe because it never changes a price that has been
+   * used. Removing one is the opposite: it can, so it is allowed in exactly the
+   * case where it cannot.
+   *
+   *  1. **It must not be in force, or past.** Only a schedule that starts in the
+   *     FUTURE can go. One that covers today is pricing bookings being taken
+   *     right now, and one that has passed priced jobs that were invoiced on it.
+   *     "I typed 2026 instead of 2027" is the mistake this exists for, and that
+   *     mistake is always in the future.
+   *
+   *  2. **It must not be the card's only schedule.** Deleting the last one
+   *     leaves a card that prices nothing, and every quote against it silently
+   *     falls back to the default card — a mispricing nobody would see. Deleting
+   *     the CARD is the operation for that, and it already refuses while
+   *     accounts point at it.
+   *
+   * The repository reopens the previous schedule as part of the same removal,
+   * so the card is left exactly as it was before the mistake.
+   */
+  async deleteSchedule(id: string, effectiveFrom: string, caller: Caller): Promise<RateCardSummary> {
+    assertWriter(caller);
+    await assertCardExists(id);
+
+    const starts = await settingsRepository.scheduleStarts(id);
+    if (!starts.includes(effectiveFrom)) {
+      throw AppError.notFound(`That card has no schedule starting on ${effectiveFrom}`);
+    }
+
+    if (starts.length === 1) {
+      throw AppError.conflict(
+        'This is the card’s only schedule. A card with no rates prices nothing — delete the card itself, or issue a replacement schedule first.',
+      );
+    }
+
+    if (effectiveFrom <= todayInSydney()) {
+      throw AppError.conflict(
+        effectiveFrom === todayInSydney()
+          ? 'That schedule is in force today — issue a new one instead of removing this.'
+          : `That schedule started on ${effectiveFrom} and may have priced work already. Only a schedule that has not started yet can be removed.`,
+      );
+    }
+
+    await settingsRepository.deleteSchedule(id, effectiveFrom);
+
+    log.info({ rateCardId: id, effectiveFrom }, 'future rate schedule removed');
+    return findCardOrThrow(id);
+  },
+
   /* ── Additional services (M6.5) ────────────────────────────────────────── */
 
   async createAdditionalService(
@@ -384,19 +609,12 @@ export const settingsService = {
     assertPercentageInRange(existing.kind, input.value);
 
     /*
-     * A system-generated charge cannot be made driver-raisable. It is derived
-     * from data the driver already captured — bag counts, on-site minutes — so
-     * offering it as a button on their phone would let the same charge be
-     * raised twice for one job, once by hand and once by the derivation.
+     * ⚠️ The "a system charge cannot be driver-raisable" refusal used to sit
+     * here. It is gone because the thing it refused is now unrepresentable:
+     * `driverRaisable` left the write contract along with the checkbox that
+     * set it, so no request can ask for it. A rule enforced by a shape that
+     * cannot express the mistake is stronger than one enforced by a check.
      */
-    if (existing.systemGenerated && input.driverRaisable) {
-      throw AppError.validation('This charge is raised by the system, not by a driver', [
-        {
-          path: 'driverRaisable',
-          message: `"${existing.label}" is derived from what the driver captured, so offering it as a button would raise it twice`,
-        },
-      ]);
-    }
 
     await settingsRepository.updateAdditionalService(code, input);
     log.info({ code, value: input.value }, 'additional service updated');
@@ -437,13 +655,41 @@ export const settingsService = {
 
 /* ── Guards ──────────────────────────────────────────────────────────────── */
 
+/**
+ * Who may READ the settings.
+ *
+ * ⚠️ This was a denylist — it refused customer roles and admitted everything
+ * else, which silently included DRIVERS. The comment on the route reasons
+ * entirely about office staff needing the rate cards on screen while they book
+ * a job; drivers were never the case it had in mind, they simply were not
+ * customers.
+ *
+ * What that handed a driver’s phone: all seven rate cards with the service
+ * charge and per-m² rate for every zone, the additional-services price list,
+ * `assumedCostPerJob` — the figure every margin in the financial report is
+ * computed from — and the bank BSB, account number and account name, which are
+ * blank in development and are not in production.
+ *
+ * The driver app never asks for this endpoint, so naming the office roles
+ * explicitly costs nothing. An allowlist also means the next role added to the
+ * product does not inherit the price list by default.
+ *
+ * The allocator IS included: confirmed 2026-09-11 that an allocator seeing what
+ * a job is worth is accepted — see the note on `OFFICE_ROLES` in the queues.
+ */
+const SETTINGS_READERS = new Set<Role>(['super-admin', 'operations', 'office-staff', 'allocator']);
+
 function assertStaff(caller: Caller): void {
+  if (caller.roles.some((role) => SETTINGS_READERS.has(role))) return;
+
   if (caller.roles.some((role) => CUSTOMER_ROLES.has(role))) {
     // Plain 403 here rather than the 404 the accounts domain uses: settings are
     // not a row whose existence is a secret, and pretending the endpoint is
     // missing would just make a support call harder.
     throw AppError.forbidden('Platform settings are not available on a customer account');
   }
+
+  throw AppError.forbidden('Pricing and invoicing settings are for the office');
 }
 
 function assertWriter(caller: Caller): void {
@@ -538,3 +784,99 @@ async function findTemplateOrThrow(id: string): Promise<InvoiceTemplate> {
   if (!template) throw AppError.notFound(`No invoice template is configured for "${id}"`);
   return template;
 }
+
+/* ── The preview's fiction (M7.5) ────────────────────────────────────────── */
+
+/**
+ * The site a preview claims to be about.
+ *
+ * ⚠️ Obviously invented, on purpose. A preview that used a plausible real
+ * address is one somebody eventually mistakes for a real invoice — so the
+ * estate is named "Sample Estate" and the number is a round 99999.
+ */
+const SAMPLE_JOB_CONTEXT = {
+  siteName: 'Sample Estate, Lot 42',
+  addressLine: '42 Example Road',
+  suburb: 'Sydney',
+  collectedOn: '2026-09-01',
+  recoveredWeightKg: 1_240,
+  expectedAreaM2: 823,
+} as const;
+
+/**
+ * A believable invoice that is not anybody's.
+ *
+ * Deliberately exercises the parts of a layout that differ: several lines, a
+ * per-unit quantity, a PO number and a weight — so the `detailed` and `compact`
+ * drawings actually look different from `standard` in the preview, which is the
+ * whole reason somebody opens it.
+ */
+function sampleInvoice(templateName: string): Invoice {
+  return {
+    id: '000000000000000000000000',
+    invoiceNumber: 99_999,
+    kind: 'base',
+    status: 'draft',
+    brandId: 'plastago',
+    accountId: '000000000000000000000000',
+    accountName: 'Sample Constructions Pty Ltd',
+    jobId: null,
+    jobNumber: 99_999,
+    poNumber: 'PO-SAMPLE-001',
+    issuedOn: '2026-09-01',
+    dueOn: '2026-09-08',
+    subtotalExGst: '351.75',
+    gst: '35.18',
+    totalIncGst: '386.93',
+    paidAt: null,
+    lines: [
+      {
+        id: '1',
+        description: 'Service charge — Sydney',
+        quantity: 1,
+        unitRate: '220.00',
+        amount: '220.00',
+        raisedBy: null,
+      },
+      {
+        id: '2',
+        description: 'Plasterboard recycling — 823 m² @ $0.1600',
+        quantity: 823,
+        unitRate: '0.1600',
+        amount: '131.68',
+        raisedBy: null,
+      },
+    ],
+    templateName,
+    pdfKey: null,
+    sentAt: null,
+    xeroState: 'not-synced',
+    xeroLastSyncAt: null,
+    xeroMessage: null,
+    paymentTermsDays: 7,
+    notes: 'This is a sample invoice, produced to preview a template. It is not a real invoice.',
+  };
+}
+
+/**
+ * Delete an object without letting the failure reach the caller.
+ *
+ * An orphaned logo costs a few kilobytes; a settings save that fails because a
+ * previous file could not be deleted costs the administrator their change.
+ */
+async function removeQuietly(key: string): Promise<void> {
+  try {
+    await getStorage().remove(key);
+  } catch (error) {
+    log.warn({ err: error, key }, 'old logo could not be removed — left in storage');
+  }
+}
+
+/**
+ * The shape of a key `buildKey` mints for the invoice logo.
+ *
+ * `<prefix?>/settings/singleton/logo/<uuid>.<ext>` — the prefix is optional
+ * because `S3_KEY_PREFIX` is. Anchored at the end so the segment cannot be a
+ * substring of a longer directory name.
+ */
+const LOGO_KEY_SEGMENT = /(?:^|\/)settings\/singleton\/logo\/[^/]+$/;

@@ -10,6 +10,7 @@ import {
   buildReadinessEmail,
   buildReadinessSms,
 } from '../../integrations/notice-messages.js';
+import { accountRepository } from '../accounts/account.repository.js';
 import { jobRepository } from '../jobs/job.repository.js';
 import { notificationService } from './notification.service.js';
 import { outboundService } from './outbound.service.js';
@@ -28,11 +29,15 @@ const log = logger.child({ module: 'job-notices' });
  * job.
  *
  * ── Who gets told ─────────────────────────────────────────────────────────
- * The SITE contact on the job, not the account's billing contact. Matt, 14:16:
- * the site contact is *"often the builder's supervisor, who has no login here"*
- * — which is exactly why these go out as messages rather than only appearing in
- * the portal. The portal notification goes up alongside for the people who do
- * have logins.
+ * The SITE contact on the job first. Matt, 14:16: the site contact is *"often
+ * the builder's supervisor, who has no login here"* — which is exactly why
+ * these go out as messages rather than only appearing in the portal. The portal
+ * notification goes up alongside for the people who do have logins.
+ *
+ * Where the job carries no site contact, `recipientFor` falls back to the
+ * account's own contacts rather than sending nothing. See the note there: with
+ * no fallback these notices silently reached nobody, which is the failure they
+ * exist to prevent.
  *
  * ⚠️ Every function here is best-effort and never throws. A booking, a status
  * update from a phone on a building site, and a completed job are all things
@@ -89,7 +94,7 @@ export const jobNotices = {
       await outboundService.send({
         event: 'job-booked',
         subjectKey: `job-booked:${job.id}`,
-        recipient: recipientFor(job),
+        recipient: await recipientFor(job),
         email: (to) => buildJobBookedEmail(to, context),
         sms: (to) => buildJobBookedSms(to, context),
         accountId: job.accountId,
@@ -128,7 +133,7 @@ export const jobNotices = {
       await outboundService.send({
         event: 'job-en-route',
         subjectKey: `job-en-route:${job.id}`,
-        recipient: recipientFor(job),
+        recipient: await recipientFor(job),
         email: (to) => buildJobEnRouteEmail(to, context),
         sms: (to) => buildJobEnRouteSms(to, context),
         accountId: job.accountId,
@@ -159,7 +164,7 @@ export const jobNotices = {
       await outboundService.send({
         event: 'job-completed',
         subjectKey: `job-completed:${job.id}`,
-        recipient: recipientFor(job),
+        recipient: await recipientFor(job),
         email: (to) => buildJobCompletedEmail(to, context),
         sms: (to) => buildJobCompletedSms(to, context),
         accountId: job.accountId,
@@ -198,7 +203,7 @@ export const jobNotices = {
       // and the once-only guard must not silence tomorrow's reminder because
       // one went out for a date that has since moved.
       subjectKey: `pickup-reminder:${job.id}:${job.targetDate}`,
-      recipient: recipientFor(job),
+      recipient: await recipientFor(job),
       email: (to) => buildReadinessEmail(to, context),
       sms: (to) => buildReadinessSms(to, context),
       accountId: job.accountId,
@@ -241,13 +246,39 @@ async function loadJob(jobId: string, event: string): Promise<CompletedJob | nul
 }
 
 /**
- * The site contact.
+ * Who to tell, preferring the person standing on the site.
  *
  * Email is preferred by `outboundService`; the mobile is what reaches a
  * supervisor who has no email, which on a building site is most of them.
+ *
+ * ── Why there is a fallback at all ────────────────────────────────────────
+ * ⚠️ This used to return the job's site contact and nothing else, so a job
+ * booked without one sent NOTHING — logged as `skipped: no email or mobile on
+ * file`, in a place nobody reads. It was not an edge case: no booking form
+ * could set a site contact until recently, so in practice every pickup booked
+ * through the product told the customer nothing, while the account sat there
+ * with an accounts contact and a site contact on file.
+ *
+ * The account's own contacts are the right fallback, and the invoice path
+ * already resolves recipients this way. Order matters: the SITE contact is
+ * preferred over the accounts contact, because "your pickup is booked" is
+ * operational news for whoever is on site, not for whoever pays.
  */
-function recipientFor(job: NoticeJob) {
-  return { email: job.siteContactEmail, mobile: job.siteContactMobile };
+async function recipientFor(job: NoticeJob): Promise<{ email: string | null; mobile: string | null }> {
+  if (job.siteContactEmail || job.siteContactMobile) {
+    return { email: job.siteContactEmail, mobile: job.siteContactMobile };
+  }
+
+  const account = await accountRepository.findById(job.accountId, { accountId: null });
+  const contacts = account?.contacts ?? [];
+
+  const reachable = (contact: (typeof contacts)[number]) => contact.email ?? contact.mobile;
+  const onSite = contacts.find((contact) => contact.role === 'site' && reachable(contact));
+  const fallback = onSite ?? contacts.find(reachable);
+
+  if (!fallback) return { email: null, mobile: null };
+
+  return { email: fallback.email, mobile: fallback.mobile };
 }
 
 function contextFor(job: NoticeJob) {

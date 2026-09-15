@@ -1,4 +1,4 @@
-import type { AccountDraft, AccountType } from '@plastago/shared';
+import type { AccountDraft, AccountType, AccountUpdate } from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
 import { useServices } from '@/services/services-context';
@@ -39,6 +39,28 @@ export function useCreateCustomer() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
       // The account picker on job creation is one of these.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.lookups.all });
+    },
+  });
+}
+
+/**
+ * Correct an account’s details.
+ *
+ * ── Why the lookups go stale too ──────────────────────────────────────────
+ * The company name is on this form, and the account pickers on job creation and
+ * the booking screens cache it. An account renamed here and still listed under
+ * its old name in a dropdown is the same record disagreeing with itself on two
+ * screens at once.
+ */
+export function useUpdateCustomer(accountId: string | undefined) {
+  const { customers } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: AccountUpdate) => customers.update(accountId ?? '', input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.lookups.all });
     },
   });
@@ -86,6 +108,26 @@ export function useCustomerJobs(id: string | undefined, query: ListQuery, enable
  * every inheriting row — and leaving them stale would show a grid that
  * contradicts the switch immediately above it.
  */
+/**
+ * M7.5 — point this account at an invoice template, or back at its brand.
+ *
+ * Invalidates the customers tree so the detail page's "Invoice template" row
+ * re-reads. Nothing else depends on it: the choice reaches an invoice only when
+ * one is rendered.
+ */
+export function useSetInvoiceTemplate(accountId: string | undefined) {
+  const { customers } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (invoiceTemplateId: string | null) =>
+      customers.setInvoiceTemplate(accountId ?? '', invoiceTemplateId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
+    },
+  });
+}
+
 export function useSetRiskAssessmentRequired(accountId: string | undefined) {
   const { customers } = useServices();
   const queryClient = useQueryClient();

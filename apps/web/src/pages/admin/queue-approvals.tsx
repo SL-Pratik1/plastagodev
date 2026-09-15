@@ -31,11 +31,19 @@ import { formatDateTime, formatMoney } from '@/lib/format';
  * Additional service approvals (M2.7) — their #3 daily screen.
  *
  * ── Why bulk approve exists but bulk reject does not ──────────────────────
- * Approving twelve routine contamination charges in one action is the job. But a
- * rejection tells a driver their charge was refused, and "you were all wrong,
- * see attached: nothing" is not a message this system should be able to send in
- * one click. Rejection is per charge and carries a required reason, because the
- * driver reads it.
+ * Approving twelve routine contamination charges in one action is the job.
+ * Refusing twelve is not: each one overrules a driver who stood on the site and
+ * photographed what they saw, and "you were all wrong" is not a judgement this
+ * screen should be able to make in a single click. So a rejection is per charge
+ * and carries a required reason.
+ *
+ * ⚠️ The reason is a RECORD, not a message. There is no driver notification
+ * channel in this product — `notificationService` reaches accounts and the
+ * office, and nothing else — so nobody is told automatically. The reason is
+ * stored against the charge and shown on the job’s Charges tab, which is where
+ * anyone asking "why was this refused?" a month later will look. Whoever
+ * rejects it tells the driver themselves. The copy on this screen used to
+ * promise delivery that does not happen; see the note on the field below.
  *
  * ── The commercial argument, on the screen ────────────────────────────────
  * ~2 contamination charges a week at $90 is ~$9k a year moving through here, and
@@ -366,7 +374,7 @@ export function AdminQueueApprovalsPage() {
               'The charge is now billable on this job.',
             );
           } else {
-            toast.success('Charge rejected', 'The driver will see your reason on their next sync.');
+            toast.success('Charge rejected', 'Your reason is saved on the job. Let the driver know.');
           }
         }}
       />
@@ -403,7 +411,7 @@ function ChargeEvidenceDialog({ id, onClose, onDecided }: ChargeEvidenceDialogPr
 
     // A rejection is a message to a person. An empty one is worse than none.
     if (decision === 'reject' && note.trim().length < 5) {
-      setNoteError('Tell the driver why — they see this, and “no” on its own is not reviewable.');
+      setNoteError('Say why — this is the only record of the decision, and “no” on its own is not reviewable.');
       return;
     }
 
@@ -539,7 +547,11 @@ function ChargeEvidenceDialog({ id, onClose, onDecided }: ChargeEvidenceDialogPr
               id="reject-note"
               label="Why is this being rejected?"
               required
-              hint="The driver sees this on their next sync. Be specific enough that they can do it differently next time."
+              // Not "the driver sees this" — they do not. Nothing is sent to a
+              // driver anywhere in this product. Saying so here would be a promise
+              // the system cannot keep, and the office would stop repeating it in
+              // person believing the app had.
+              hint="Saved against the charge and shown on the job, so the decision can be explained later. The driver is not notified — tell them yourself."
               error={noteError ?? undefined}
             >
               {(control) => (

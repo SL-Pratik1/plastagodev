@@ -13,6 +13,7 @@ import {
   type InvoiceLayout,
   type InvoiceTemplate,
   type InvoiceTemplateWrite,
+  type InvoicingSettings,
   type RateCardSummary,
   type RateSchedule,
   type Settings,
@@ -44,14 +45,18 @@ import {
   Textarea,
   useToast,
 } from '@plastago/ui';
-import { ChevronDownIcon, PlusIcon, Trash2Icon } from 'lucide-react';
-import { useState } from 'react';
+import { ChevronDownIcon, EyeIcon, ImageIcon, PlusIcon, Trash2Icon, UploadIcon } from 'lucide-react';
+import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { PageHeader } from '@/components/page-header';
 import { UnsavedBar } from '@/components/unsaved-bar';
 import { CAPABILITY_GROUPS, ROLE_CAPABILITIES, can } from '@/features/auth/permissions';
 import {
   useCreateAdditionalService,
+  useDeleteSchedule,
+  usePreviewTemplate,
+  useRemoveLogo,
+  useUploadLogo,
   useCreateInvoiceTemplate,
   useCreateRateCard,
   useDeleteAdditionalService,
@@ -200,7 +205,17 @@ export function AdminSettingsPage() {
           <PricingSection settings={data} />
         </TabsPanel>
         <TabsPanel value="invoicing">
-          <InvoicingSection key={JSON.stringify(data.invoicing)} settings={data} />
+          {/*
+            ⚠️ Keyed on the WRITABLE fields, not on `data.invoicing`.
+
+            That object now carries `logoUrl`, which is a freshly signed
+            storage link minted on every read — so keying on the whole thing
+            produced a new key on every refetch, remounting this section and
+            discarding whatever the administrator was halfway through typing.
+            A derived, non-deterministic value must never reach an identity
+            comparison.
+          */}
+          <InvoicingSection key={JSON.stringify(writable(data.invoicing))} settings={data} />
         </TabsPanel>
       </Tabs>
     </div>
@@ -237,7 +252,18 @@ function RolesSection() {
             allocator not see prices*. Reading down the "See prices" row answers
             it in about two seconds.
           */}
-          <div className="overflow-x-auto">
+          {/*
+            `relative` is load-bearing, not decoration.
+
+            The cells carry `sr-only` labels, and `sr-only` positions absolutely.
+            With no positioned ancestor those resolve against the INITIAL
+            containing block rather than this scroller — so they sat out at the
+            table's full 1437px width, outside the clip, and dragged the whole
+            document to 1383px. Settings was the only screen in the console that
+            scrolled sideways below 1400px, and the table itself was innocent: it
+            was already being clipped correctly.
+          */}
+          <div className="relative overflow-x-auto">
             <table className="w-full min-w-[46rem] text-sm">
               <caption className="sr-only">
                 Capabilities by role. A tick means the role holds that capability; a dash means it
@@ -473,7 +499,19 @@ function RateCardRow({ card }: { card: RateCardSummary }) {
   const current = card.schedules.find(
     (schedule) => schedule.effectiveFrom === currentScheduleFrom(card),
   );
-  const history = card.schedules.filter((schedule) => schedule !== current);
+
+  /*
+   * Three groups, not two. A schedule that starts tomorrow is neither in force
+   * nor superseded — it is what this card is ABOUT to charge, and that is the
+   * only one an administrator may remove.
+   */
+  const today = todayInSydney();
+  const pending = card.schedules.filter(
+    (schedule) => schedule !== current && schedule.effectiveFrom > today,
+  );
+  const superseded = card.schedules.filter(
+    (schedule) => schedule !== current && schedule.effectiveFrom <= today,
+  );
 
   const submitDelete = async () => {
     try {
@@ -588,12 +626,41 @@ function RateCardRow({ card }: { card: RateCardSummary }) {
         <div className="border-t border-border p-3">
           <ScheduleTable schedule={current} label="In force now" />
 
-          {history.length > 0 && (
+          {/*
+            ⚠️ Pending and superseded are separated, and the split is not
+            cosmetic.
+
+            Everything that is not in force today used to be listed under
+            "Superseded", which is wrong in the one direction that matters: a
+            schedule starting next month has superseded nothing — it is what
+            this card will charge, and reading it as history is how a wrong
+            future rate goes unnoticed until the day it takes effect.
+
+            Only a PENDING schedule can be removed, which is the same boundary,
+            so the two facts are drawn from one comparison.
+          */}
+          {pending.length > 0 && (
+            <div className="mt-4 space-y-3">
+              <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                Scheduled — not yet in force
+              </p>
+              {pending.map((schedule) => (
+                <ScheduleTable
+                  key={schedule.effectiveFrom}
+                  schedule={schedule}
+                  label={`From ${schedule.effectiveFrom}`}
+                  removableFrom={card.id}
+                />
+              ))}
+            </div>
+          )}
+
+          {superseded.length > 0 && (
             <div className="mt-4 space-y-3">
               <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
                 Superseded
               </p>
-              {history.map((schedule) => (
+              {superseded.map((schedule) => (
                 <ScheduleTable
                   key={schedule.effectiveFrom}
                   schedule={schedule}
@@ -653,23 +720,77 @@ function currentScheduleFrom(card: RateCardSummary): string | undefined {
   )?.effectiveFrom;
 }
 
+/**
+ * One schedule's rates, and — for a schedule that has not started — the undo.
+ *
+ * `removableFrom` carries the CARD id rather than a boolean, so a row can only
+ * offer the action when it also knows what to act on. Undefined means the
+ * schedule is in force or past, which is exactly when removing it would move a
+ * figure on an invoice somebody already has.
+ */
 function ScheduleTable({
   schedule,
   label,
   muted = false,
+  removableFrom,
 }: {
   schedule: RateSchedule | undefined;
   label: string;
   muted?: boolean;
+  removableFrom?: string | undefined;
 }) {
+  const toast = useToast();
+  const remove = useDeleteSchedule();
+  const [confirming, setConfirming] = useState(false);
+
+  const submit = async () => {
+    if (removableFrom === undefined || !schedule) return;
+
+    try {
+      await remove.mutateAsync({ id: removableFrom, effectiveFrom: schedule.effectiveFrom });
+      setConfirming(false);
+      toast.success('Schedule removed', 'The rates in force before it apply again.');
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
   if (!schedule) return null;
 
   return (
     <div className={muted ? 'opacity-70' : undefined}>
-      <p className="mb-1 text-xs text-muted-foreground">
+      <p className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         {label}
         {!muted && ` · from ${schedule.effectiveFrom}`}
+        {removableFrom !== undefined && (
+          <>
+            <Badge variant="secondary">Starts in the future</Badge>
+            <button
+              type="button"
+              onClick={() => {
+                setConfirming(true);
+              }}
+              className="focus-ring rounded text-destructive underline underline-offset-4"
+            >
+              Remove
+            </button>
+          </>
+        )}
       </p>
+
+      <ConfirmDialog
+        open={confirming}
+        onCancel={() => {
+          setConfirming(false);
+        }}
+        onConfirm={() => void submit()}
+        title={`Remove the schedule starting ${schedule.effectiveFrom}?`}
+        description="It has not started, so nothing has been priced on it. The schedule in force before it becomes open-ended again."
+        confirmLabel="Remove schedule"
+        tone="destructive"
+        pending={remove.isPending}
+      />
       <div className="overflow-x-auto">
         <table className="w-full min-w-[24rem] text-sm">
           <caption className="sr-only">Zone rates {label}</caption>
@@ -1192,14 +1313,12 @@ function ServiceRow({ service }: { service: AdditionalServiceSetting }) {
   const [value, setValue] = useState(service.value);
   const [label, setLabel] = useState(service.label);
   const [requiresApproval, setRequiresApproval] = useState(service.requiresApproval);
-  const [driverRaisable, setDriverRaisable] = useState(service.driverRaisable);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const dirty =
     value !== service.value ||
     label !== service.label ||
-    requiresApproval !== service.requiresApproval ||
-    driverRaisable !== service.driverRaisable;
+    requiresApproval !== service.requiresApproval;
 
   const submit = async () => {
     if (!/^\d+(\.\d{1,4})?$/.test(value.trim())) {
@@ -1214,7 +1333,6 @@ function ServiceRow({ service }: { service: AdditionalServiceSetting }) {
           label: label.trim(),
           value: value.trim(),
           requiresApproval,
-          driverRaisable,
         },
       });
       toast.success(`${label.trim()} updated`);
@@ -1299,6 +1417,20 @@ function ServiceRow({ service }: { service: AdditionalServiceSetting }) {
         </span>
       </div>
 
+      {/*
+        ⚠️ "Driver can raise it" used to sit beside this, and it is gone.
+
+        It wrote a column nothing read. The driver app offers the screens it
+        ships — report contamination, report futile — and decides what to show
+        from those screens existing, never from a flag here. So ticking it told
+        an administrator they had just put a button on a driver's phone, and
+        put nothing anywhere.
+
+        Removed rather than disabled: a control that cannot be used still
+        implies the setting matters. The FIELD survives on the record, so
+        wiring the driver app to it later is a change to that app rather than a
+        migration.
+      */}
       <div className="mt-3 flex flex-wrap items-center gap-4">
         <label className="flex items-center gap-2 text-sm">
           <Checkbox
@@ -1308,22 +1440,6 @@ function ServiceRow({ service }: { service: AdditionalServiceSetting }) {
             }}
           />
           Requires approval
-        </label>
-
-        <label className="flex items-center gap-2 text-sm">
-          <Checkbox
-            checked={driverRaisable}
-            /*
-              A system-generated charge is derived from what the driver already
-              captured — bag counts, on-site minutes. Offering it as a button
-              on their phone as well would let one job be charged twice.
-            */
-            disabled={service.systemGenerated}
-            onChange={() => {
-              setDriverRaisable(!driverRaisable);
-            }}
-          />
-          Driver can raise it
         </label>
 
         {service.systemGenerated && (
@@ -1356,7 +1472,6 @@ function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => voi
   const [kind, setKind] = useState<'fixed' | 'percentage'>('fixed');
   const [value, setValue] = useState('');
   const [requiresApproval, setRequiresApproval] = useState(true);
-  const [driverRaisable, setDriverRaisable] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const reset = () => {
@@ -1365,7 +1480,6 @@ function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => voi
     setKind('fixed');
     setValue('');
     setRequiresApproval(true);
-    setDriverRaisable(false);
     setError(null);
   };
 
@@ -1391,7 +1505,6 @@ function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => voi
         kind,
         value: value.trim(),
         requiresApproval,
-        driverRaisable,
       });
       reset();
       onClose();
@@ -1528,17 +1641,18 @@ function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => voi
             />
             The office approves it before it can be invoiced
           </label>
-
-          <label className="flex items-center gap-2 text-sm">
-            <Checkbox
-              checked={driverRaisable}
-              onChange={() => {
-                setDriverRaisable(!driverRaisable);
-              }}
-            />
-            A driver can raise it from the job screen
-          </label>
         </div>
+
+        {/*
+          Said plainly, because the alternative is an administrator creating a
+          charge and waiting for it to appear on a driver's phone. A new charge
+          is a PRICE the office applies to a job; the driver app's buttons are
+          the ones it ships with.
+        */}
+        <Alert variant="neutral" title="A new charge is added by the office">
+          Drivers report contamination and futile pickups from their own screens. A charge created
+          here is one the office applies to a job.
+        </Alert>
       </div>
     </Dialog>
   );
@@ -1549,11 +1663,22 @@ function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => voi
 function InvoicingSection({ settings }: { settings: Settings }) {
   const toast = useToast();
   const save = useSaveInvoicingSettings();
-  const [draft, setDraft] = useState(settings.invoicing);
+  /*
+   * The draft is the WRITE shape. Holding the read shape here would mean the
+   * save body carried `logoUrl` back to a server that only strips it, and —
+   * worse — that the comparison below saw it.
+   */
+  const [draft, setDraft] = useState(() => writable(settings.invoicing));
   const [termsError, setTermsError] = useState<string | null>(null);
   const [prefixError, setPrefixError] = useState<string | null>(null);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(settings.invoicing);
+  /*
+   * ⚠️ Compared against the writable projection for the same reason the key
+   * above uses it: `logoUrl` differs on every read, so comparing it would put
+   * this form into "unsaved changes" — with a navigation guard attached —
+   * without anybody having typed anything.
+   */
+  const dirty = JSON.stringify(draft) !== JSON.stringify(writable(settings.invoicing));
   useUnsavedChanges(dirty);
 
   const submit = async () => {
@@ -1667,6 +1792,8 @@ function InvoicingSection({ settings }: { settings: Settings }) {
           </div>
         </CardContent>
       </Card>
+
+      <LogoCard logoUrl={settings.invoicing.logoUrl} />
 
       <Card>
         <CardHeader>
@@ -1851,7 +1978,7 @@ function InvoicingSection({ settings }: { settings: Settings }) {
         pending={save.isPending}
         onSave={() => void submit()}
         onDiscard={() => {
-          setDraft(settings.invoicing);
+          setDraft(writable(settings.invoicing));
           setTermsError(null);
         }}
       />
@@ -1859,6 +1986,160 @@ function InvoicingSection({ settings }: { settings: Settings }) {
   );
 }
 
+
+/* ── The logo (M7.5) ─────────────────────────────────────────────────────── */
+
+/**
+ * The mark every invoice carries.
+ *
+ * ── Why this is its own card and not a field in the form below ────────────
+ * Because it does not save with the form. The bytes go straight to storage and
+ * the change takes effect the moment they land, so putting it inside a section
+ * with an unsaved-changes bar would promise a "discard" that cannot undo it.
+ *
+ * ⚠️ PNG or JPEG only. The renderer embeds those two and nothing else, so an
+ * SVG would store happily and then silently fail to appear on every invoice —
+ * the fallback is the company name in text, so nobody would see an error.
+ */
+function LogoCard({ logoUrl }: { logoUrl: string | null }) {
+  const toast = useToast();
+  const upload = useUploadLogo();
+  const remove = useRemoveLogo();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
+  const choose = async (file: File | undefined) => {
+    if (!file) return;
+
+    /*
+     * Checked here as well as on the server, so somebody who picks a 12 MB
+     * photograph is told at the button rather than after the upload.
+     */
+    if (!['image/png', 'image/jpeg', 'image/jpg'].includes(file.type)) {
+      toast.error('That file type cannot be printed', 'Use a PNG or a JPEG.');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('That logo is too large', 'Keep it under 2 MB — it goes on every invoice.');
+      return;
+    }
+
+    try {
+      await upload.mutateAsync(file);
+      toast.success('Logo updated', 'It will appear on the next invoice rendered.');
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  const submitRemove = async () => {
+    try {
+      await remove.mutateAsync();
+      setConfirmRemove(false);
+      toast.success('Logo removed', 'Invoices will print the company name instead.');
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Logo</CardTitle>
+        <CardDescription>
+          Printed at the top of every invoice. Without one, the company name is printed as text.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-wrap items-center gap-4">
+          {/*
+            A real preview rather than a filename. The only question a person
+            has here is whether that is the right mark, the right way up, and a
+            storage key answers neither.
+          */}
+          <span className="flex size-24 shrink-0 items-center justify-center rounded-lg border border-border bg-muted/30 p-2">
+            {logoUrl === null ? (
+              <ImageIcon className="size-8 text-muted-foreground/50" aria-hidden />
+            ) : (
+              <img
+                src={logoUrl}
+                alt="The logo as it appears on invoices"
+                className="max-h-full max-w-full object-contain"
+              />
+            )}
+          </span>
+
+          <span className="flex min-w-0 flex-col gap-2">
+            <span className="text-sm text-muted-foreground">
+              {logoUrl === null
+                ? 'No logo yet — invoices print the company name.'
+                : 'This is what your invoices carry today.'}
+            </span>
+
+            <span className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={upload.isPending}
+                onClick={() => {
+                  inputRef.current?.click();
+                }}
+              >
+                {upload.isPending && <Spinner className="text-current" />}
+                <UploadIcon aria-hidden />
+                {logoUrl === null ? 'Upload a logo' : 'Replace'}
+              </Button>
+
+              {logoUrl !== null && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={remove.isPending}
+                  onClick={() => {
+                    setConfirmRemove(true);
+                  }}
+                >
+                  <Trash2Icon aria-hidden />
+                  Remove
+                </Button>
+              )}
+            </span>
+
+            <span className="text-xs text-muted-foreground">PNG or JPEG, up to 2 MB.</span>
+          </span>
+        </div>
+
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png,image/jpeg"
+          className="sr-only"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            // Cleared so picking the SAME file again still fires a change.
+            event.target.value = '';
+            void choose(file);
+          }}
+        />
+      </CardContent>
+
+      <ConfirmDialog
+        open={confirmRemove}
+        onCancel={() => {
+          setConfirmRemove(false);
+        }}
+        onConfirm={() => void submitRemove()}
+        title="Remove the logo?"
+        description="Invoices will print the company name as text instead. Invoices already rendered keep the logo they were drawn with."
+        confirmLabel="Remove logo"
+        tone="destructive"
+        pending={remove.isPending}
+      />
+    </Card>
+  );
+}
 
 /* ── Invoice templates (M7.5) ────────────────────────────────────────────── */
 
@@ -1927,7 +2208,32 @@ function InvoiceTemplatesCard({ templates }: { templates: readonly InvoiceTempla
 function InvoiceTemplateRow({ template }: { template: InvoiceTemplate }) {
   const toast = useToast();
   const remove = useDeleteInvoiceTemplate();
+  const preview = usePreviewTemplate();
   const [editing, setEditing] = useState(false);
+
+  const showPreview = async () => {
+    /*
+     * The tab is reserved DURING the click, before the await. Opening it after
+     * the render comes back is the call a popup blocker silently refuses, and
+     * the button would appear to do nothing — the same trap the invoice
+     * download hook documents.
+     */
+    const reserved = window.open('', '_blank');
+
+    try {
+      const rendered = await preview.mutateAsync(template.id);
+      if (reserved) {
+        reserved.opener = null;
+        reserved.location.href = rendered.url;
+      } else {
+        toast.error('The preview could not be opened', 'Allow pop-ups for this site, then retry.');
+      }
+    } catch (caught) {
+      reserved?.close();
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
 
   const destroy = async () => {
     try {
@@ -1959,6 +2265,29 @@ function InvoiceTemplateRow({ template }: { template: InvoiceTemplate }) {
       <span className="text-xs text-muted-foreground">
         {template.assignedAccountCount} assigned
       </span>
+
+      {/*
+        ⚠️ The control this screen was missing.
+
+        A template used to be chosen blind — pick a layout, type a hex colour,
+        and the first rendering anybody saw was on a real invoice already on
+        its way to a builder. A sent invoice cannot be unsent, so "check it
+        afterwards" was never a recovery.
+
+        The sample is drawn server-side from invented figures; previewing a
+        real invoice would put one customer's job and amounts on screen for
+        whoever happens to be editing a template.
+      */}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={preview.isPending}
+        onClick={() => void showPreview()}
+      >
+        {preview.isPending && <Spinner className="text-current" />}
+        <EyeIcon aria-hidden />
+        Preview
+      </Button>
 
       <Button
         size="sm"
@@ -2163,4 +2492,22 @@ function InvoiceTemplateDialog({
       </div>
     </Dialog>
   );
+}
+
+/**
+ * The invoicing settings with the derived fields removed.
+ *
+ * ── Why this exists at all ────────────────────────────────────────────────
+ * ⚠️ `logoUrl` is minted fresh on every read — a signed link with its own
+ * expiry — so two reads of an unchanged database produce two different values.
+ * Anything that asks "is this the same as it was?" therefore has to compare the
+ * fields a person can actually change, and nothing else.
+ *
+ * Both callers here learned that the hard way: the section's remount key and
+ * its unsaved-changes check each said "changed" on every refetch, which
+ * discarded a half-typed form and raised a navigation guard over nothing.
+ */
+function writable(invoicing: Settings['invoicing']): InvoicingSettings {
+  const { logoUrl: _logoUrl, ...rest } = invoicing;
+  return rest;
 }

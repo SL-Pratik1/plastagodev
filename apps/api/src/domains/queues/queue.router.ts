@@ -34,6 +34,7 @@ import {
 } from './po-review.schemas.js';
 import { queueController } from './queue.controller.js';
 import {
+  ChangeRequestDecisionBodySchema,
   ChargeDecisionBodySchema,
   QueueIdParamsSchema,
   QueueIdsSchema,
@@ -102,6 +103,21 @@ queueRouter.post(
   '/approvals/decision',
   validate({ body: ChargeDecisionBodySchema }),
   asyncHandler(queueController.approvalDecide),
+);
+
+/* ── M5.4 · Change requests raised from the portal ─────────────────────── */
+
+queueRouter.get(
+  '/change-requests',
+  validate({ query: QueueListQuerySchema }),
+  asyncHandler(queueController.changeRequestList),
+);
+
+/** Records the answer; it does not move the job. See `changeRequestDecide`. */
+queueRouter.post(
+  '/change-requests/:id/decision',
+  validate({ params: QueueIdParamsSchema, body: ChangeRequestDecisionBodySchema }),
+  asyncHandler(queueController.changeRequestDecide),
 );
 
 /* ── M7.3 · Approved charges awaiting a PO ───────────────────────────────── */

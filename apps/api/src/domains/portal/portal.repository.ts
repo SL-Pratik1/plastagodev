@@ -388,21 +388,36 @@ export const portalRepository = {
   async findJobForEdit(
     id: string,
     scope: PortalScope,
-  ): Promise<{ id: string; status: JobStatus; editable: boolean; runId: string | null } | null> {
+  ): Promise<{
+    id: string;
+    jobNumber: number;
+    status: JobStatus;
+    editable: boolean;
+    runId: string | null;
+  } | null> {
     if (!mongoose.isValidObjectId(id)) return null;
 
     const filter = scoped(scope);
     filter._id = new mongoose.Types.ObjectId(id);
 
+    //  is here because the office notifications raised off a change
+    // request and an urgency flag have to name the job in their title.
     const row = await JobModel.findOne(filter, {
+      jobNumber: 1,
       status: 1,
       runId: 1,
-    }).lean<{ _id: mongoose.Types.ObjectId; status: JobStatus; runId: mongoose.Types.ObjectId | null }>();
+    }).lean<{
+      _id: mongoose.Types.ObjectId;
+      jobNumber: number;
+      status: JobStatus;
+      runId: mongoose.Types.ObjectId | null;
+    }>();
 
     if (!row) return null;
 
     return {
       id: row._id.toHexString(),
+      jobNumber: row.jobNumber,
       status: row.status,
       editable: isEditable(row.status, row.runId),
       runId: row.runId ? row.runId.toHexString() : null,
@@ -634,7 +649,12 @@ function resolveWindow(window: string): { $gte?: string; $lte?: string } | null 
  */
 export async function listInvoices(
   accountId: string,
-  query: { page: number; pageSize: number; status?: string | undefined },
+  query: {
+    page: number;
+    pageSize: number;
+    status?: string | undefined;
+    q?: string | undefined;
+  },
 ): Promise<{ data: PortalInvoice[]; meta: PageMeta }> {
   const filter: Record<string, unknown> = {
     accountId: new mongoose.Types.ObjectId(accountId),
@@ -646,6 +666,33 @@ export async function listInvoices(
   const requested = query.status as PortalInvoice['status'] | undefined;
   if (requested && VISIBLE_INVOICE_STATUSES.includes(requested)) {
     filter.status = requested;
+  }
+
+  /*
+   * What a customer actually types into this box is an invoice number or
+   * their own PO — those are the two strings they hold. The site name is
+   * included because a supervisor knows the address and not the number.
+   *
+   * The site lives on the JOB, so matching it means resolving job ids first:
+   * one extra query on a search only, rather than a `$lookup` on every list.
+   */
+  if (query.q) {
+    const term = escapeRegex(query.q);
+    const like = { $regex: term, $options: 'i' };
+    const digits = Number(query.q.replace(/\D/g, ""));
+
+    const matchingJobs = await JobModel.find(
+      { siteName: like },
+      { _id: 1 },
+    ).lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+
+    filter.$or = [
+      { poNumber: like },
+      ...(Number.isFinite(digits) && digits > 0 ? [{ invoiceNumber: digits }] : []),
+      ...(matchingJobs.length > 0
+        ? [{ jobId: { $in: matchingJobs.map((job) => job._id) } }]
+        : []),
+    ];
   }
 
   const [rows, total] = await Promise.all([
@@ -716,4 +763,15 @@ export async function ownedInvoiceIds(
   ).lean<Array<{ _id: mongoose.Types.ObjectId }>>();
 
   return rows.map((row) => row._id.toHexString());
+}
+
+/**
+ * Escapes a user-typed search term before it becomes a regex.
+ *
+ * Local, matching `queue.repository` and `vehicle.repository`, which each keep
+ * their own. Without it a customer typing `(` in the search box sends an
+ * invalid expression to Mongo and the list 500s.
+ */
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -1,5 +1,10 @@
 import * as z from 'zod';
-import { IsoDateSchema, MoneySchema, NonEmptyStringSchema } from './primitives.js';
+import {
+  IsoDateSchema,
+  MoneySchema,
+  NonEmptyStringSchema,
+  NonNegativeMoneySchema,
+} from './primitives.js';
 import { BrandIdSchema, RateCardIdSchema, ZONES, ZoneSchema } from './party.js';
 
 /**
@@ -30,6 +35,14 @@ import { BrandIdSchema, RateCardIdSchema, ZONES, ZoneSchema } from './party.js';
 export const ZoneRateSchema = z
   .object({
     zone: ZoneSchema,
+    /*
+     * Deliberately permissive, unlike `ZoneRateInput` below.
+     *
+     * This is a RESPONSE shape. Tightening it would mean one bad stored row
+     * fails the whole settings payload and blanks the screen, which is exactly
+     * how a single malformed record can hide everything else. The refusal
+     * belongs on the way in, where somebody can still be told about it.
+     */
     serviceCharge: MoneySchema,
     ratePerM2: MoneySchema,
   })
@@ -174,8 +187,18 @@ export const RateCardSummarySchema = z
 export const ZoneRateInputSchema = z
   .object({
     zone: ZoneSchema,
-    serviceCharge: MoneySchema,
-    ratePerM2: MoneySchema,
+    /*
+     * ⚠️ Non-negative. `MoneySchema` permits a leading minus, and a schedule
+     * issued with `serviceCharge: "-220.00"` saved cleanly with a 201 — every
+     * job priced on that card from its start date would then bill the customer
+     * minus two hundred dollars. Nothing in v1 credits anybody (see
+     * `XeroSyncState`), and because rates are effective-dated it would price
+     * silently until somebody read an invoice.
+     *
+     * Zero stays legal: a card that charges no call-out is a real arrangement.
+     */
+    serviceCharge: NonNegativeMoneySchema,
+    ratePerM2: NonNegativeMoneySchema,
   })
   .meta({ id: 'ZoneRateInput' });
 
@@ -206,7 +229,16 @@ export const RateCardCreateSchema = z
      * id an external system already knows.
      */
     id: RateCardIdSchema.optional(),
-    label: NonEmptyStringSchema.max(80),
+    /*
+     * Worded, because unlabelled Zod answers an empty name with "Too small:
+     * expected string to have >=1 characters" — raw validator output on a
+     * screen whose other messages are written for the office.
+     */
+    label: z
+      .string()
+      .trim()
+      .min(1, 'Name the rate card — the office picks it by this on a customer')
+      .max(80, 'Keep the name under 80 characters'),
     effectiveFrom: IsoDateSchema,
     zones: CompleteZoneRatesSchema,
   })
@@ -306,9 +338,22 @@ export const AdditionalServiceUpdateSchema = z
     label: NonEmptyStringSchema.max(80),
     value: MoneySchema,
     requiresApproval: z.boolean(),
-    driverRaisable: z.boolean(),
   })
   .meta({ id: 'AdditionalServiceUpdate' });
+
+/*
+ * ── `driverRaisable` is no longer writable, and the control is gone ────────
+ *
+ * ⚠️ It was a checkbox over a value NOTHING read. The driver app offers a fixed
+ * set of screens — report contamination, report futile — and decides what to
+ * show from those screens existing, never from this flag. So ticking it changed
+ * a database column and nothing else, while promising an administrator they had
+ * just put a button on a driver's phone.
+ *
+ * The FIELD survives on the model and in the read contract: the seed sets it,
+ * and removing a stored value is a migration rather than a schema edit. What is
+ * gone is the ability to change it and the screen that offered to.
+ */
 
 export const AdditionalServiceCreateSchema = AdditionalServiceUpdateSchema.extend({
   code: ServiceCodeSchema,
@@ -321,6 +366,59 @@ export const AdditionalServiceCreateSchema = AdditionalServiceUpdateSchema.exten
    * on the approvals queue next to something a person invented.
    */
   .meta({ id: 'AdditionalServiceCreate' });
+
+/**
+ * M7.5 — asking for somewhere to put the invoice logo.
+ *
+ * ── Why the bytes do not come through this API ────────────────────────────
+ * The browser PUTs them straight to storage against a presigned URL, the same
+ * way a driver's photos and a lead's attachments already do. Routing a logo
+ * through Node would mean a body parser sized for images on every request this
+ * service handles, to save one round trip on something done once a year.
+ */
+export const LogoUploadRequestSchema = z
+  .object({
+    /**
+     * ⚠️ Raster or SVG both refused except for the three below.
+     *
+     * The renderer draws with `pdf-lib`, which embeds PNG and JPEG and nothing
+     * else. Accepting an SVG here would store a file that silently fails to
+     * appear on every invoice afterwards — the fallback is the company name in
+     * text, so nobody would see an error, just a missing logo.
+     */
+    contentType: z.enum(['image/png', 'image/jpeg', 'image/jpg']),
+    /**
+     * Capped at 2 MB. A logo is a letterhead mark a few hundred pixels wide;
+     * anything larger is a photograph somebody has picked by mistake, and it
+     * would be embedded in every invoice PDF the business ever sends.
+     */
+    contentLength: z
+      .number()
+      .int()
+      .positive()
+      .max(2 * 1024 * 1024, 'A logo must be 2 MB or smaller'),
+  })
+  .meta({ id: 'LogoUploadRequest' });
+
+export type LogoUploadRequest = z.infer<typeof LogoUploadRequestSchema>;
+
+/**
+ * M7.5 — a rendered sample of one invoice template.
+ *
+ * ⚠️ Drawn from INVENTED figures, never from a real invoice. A preview that
+ * pulled the most recent invoice would put one customer's job, address and
+ * amounts on screen for whoever happened to be editing a template.
+ *
+ * The URL is short-lived, like every other storage link.
+ */
+export const TemplatePreviewSchema = z
+  .object({
+    url: NonEmptyStringSchema,
+    fileName: NonEmptyStringSchema,
+  })
+  .meta({ id: 'TemplatePreview' });
+
+export type TemplatePreview = z.infer<typeof TemplatePreviewSchema>;
 
 export const PricingSettingsSchema = z
   .object({
@@ -435,7 +533,19 @@ export const InvoicingSettingsSchema = z
       .regex(/^[A-Za-z0-9-]*$/, 'Letters, digits and hyphens only'),
     /** M7.2 — base invoice now, additional charges on their own PO later. */
     splitAdditionalCharges: z.boolean(),
-    defaultPaymentTermsDays: z.number().int().min(0).max(90),
+    /**
+     * ⚠️ The bounds carry their own words.
+     *
+     * Unlabelled, Zod answered a mistyped figure with "Too small: expected
+     * number to be >=0" and "Too big: expected number to be <=90" — raw
+     * validator output on a screen whose every other message is written in the
+     * office's language. 0 is deliberately allowed: due on receipt.
+     */
+    defaultPaymentTermsDays: z
+      .number()
+      .int('Whole days only')
+      .min(0, 'Payment terms cannot be negative — use 0 for due on receipt')
+      .max(90, 'Ninety days is the longest term we invoice on — check the figure'),
 
     /*
      * ── Branding, which is what Scope Call 1 puts in scope ────────────────
@@ -480,10 +590,28 @@ export const InvoicingSettingsSchema = z
   })
   .meta({ id: 'InvoicingSettings' });
 
+/**
+ * What the settings SCREEN receives, as opposed to what it sends back.
+ *
+ * ── Why the read and the write are not the same shape ─────────────────────
+ * `logoUrl` is derived — a short-lived link minted from `logoKey` so the screen
+ * can show the mark that is actually on the invoices. It must not be part of
+ * the write: a client echoing back a URL that expired ten minutes ago would be
+ * asking the server to store a dead link as the logo.
+ *
+ * So the write stays `InvoicingSettingsSchema` and this is read-only. The
+ * server ignores the field if a client sends it, which is what Zod's default
+ * stripping already does.
+ */
+export const InvoicingSettingsReadSchema = InvoicingSettingsSchema.extend({
+  /** Null when no logo has been uploaded, or when the stored one cannot be read. */
+  logoUrl: z.string().nullable(),
+}).meta({ id: 'InvoicingSettingsRead' });
+
 export const SettingsSchema = z
   .object({
     pricing: PricingSettingsSchema,
-    invoicing: InvoicingSettingsSchema,
+    invoicing: InvoicingSettingsReadSchema,
   })
   .meta({ id: 'Settings' });
 

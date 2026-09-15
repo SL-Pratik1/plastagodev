@@ -35,9 +35,11 @@ Three separate features depend on Google. They are being switched on in stages, 
 |---|---|---|
 | **The driver's map** | Shows the route to the site *inside* the app, so the driver never leaves PlastaGo mid-run and lose the photo and weight prompts | Switching on now |
 | **Finding the actual address** | Turns "Lot 42, 18 Ashworth Bvd, Kellyville" into a precise location, saved on the job | Switching on now |
-| **Ordering the run** | Puts a run's stops into the shortest driving order | Ready for later |
+| **Ordering the run** | Puts a run's stops into the shortest driving order | Switching on now |
 
-**Why the third one has to wait.** Today a job is pinned to the *middle of its suburb*, not to the house. Kellyville is several kilometres across, so a driver can be well away from the site. Route optimisation cannot work at all on suburb centres — which is why precise addresses come first.
+**The third one depends on the second.** A job booked before this setup is pinned to the *middle of its suburb*, not to the house. Kellyville is several kilometres across, so a driver can be well away from the site — and a route calculated between suburb centres is optimal for points no truck is driving to. PlastaGo therefore refuses to order a run unless every stop on it has a precise address, and groups the stops by suburb instead, saying so rather than claiming a route.
+
+In practice that means run ordering starts working for runs built from **new** bookings, and older jobs keep the suburb pin they were booked with.
 
 **Not requested:** access to any Google Workspace data, your email, your files, your calendar, or anything about your users. This is a metered map service and nothing else.
 
@@ -50,7 +52,7 @@ Three separate features depend on Google. They are being switched on in stages, 
 | | Key 1 — Browser | Key 2 — Server |
 |---|---|---|
 | **Used by** | The driver's phone | Our API server only |
-| **Google APIs** | Maps Embed API | Geocoding API, Route Optimization API |
+| **Google APIs** | Maps Embed API | Geocoding API, Routes API |
 | **Locked to** | Your web addresses | The server's IP address |
 | **Cost** | Free | Charged per request |
 | **Visibility** | **Public** — readable by anyone using the app | **Private** — treat like a password |
@@ -95,6 +97,14 @@ Three separate features depend on Google. They are being switched on in stages, 
 
    Use your real addresses if they differ, and tell us what they are.
 
+   > **The `localhost` line matters and is easy to leave out.** Without it the
+   > map works on your live site and shows *"This site is not authorized to use
+   > this API key"* on every developer's machine — so the feature cannot be
+   > tested or supported before it ships. It grants nothing to anyone else:
+   > `localhost` only ever means the machine the browser is running on.
+   >
+   > On the first setup this line was missed, which is how we know to say so.
+
 5. Under **API restrictions**, choose **Restrict key** and tick **Maps Embed API** only.
 
 6. **Save.**
@@ -113,9 +123,11 @@ Confirm on the Credentials list that the key shows a restriction rather than "No
 
    This is the one that turns a written address into a precise location.
 
-2. **APIs & Services** → **Library** → search **Route Optimization API** → **Enable**.
+2. **APIs & Services** → **Library** → search **Routes API** → **Enable**.
 
-   Enabling it now costs nothing — you are only charged when it is called, and nothing calls it yet. It saves a second trip through this process later.
+   This is the one that puts a run's stops into the shortest driving order.
+
+   > **Correction to an earlier version of this document.** It previously asked for the **Route Optimization API**. That API cannot be used with an API key at all — it requires a service account — so PlastaGo uses the **Routes API**, which does the same job for a single truck, accepts the key you are creating, and costs less. If you already enabled Route Optimization, you can safely disable it; nothing calls it.
 
 ---
 
@@ -129,7 +141,7 @@ Confirm on the Credentials list that the key shows a restriction rather than "No
 
    If you do not have it yet, leave this as **None** and tell us — we will set it before go-live rather than leave it open.
 
-4. Under **API restrictions**, choose **Restrict key** and tick **Geocoding API** and **Route Optimization API** — nothing else.
+4. Under **API restrictions**, choose **Restrict key** and tick **Geocoding API** and **Routes API** — nothing else.
 
 5. **Save.**
 
@@ -142,7 +154,7 @@ The Credentials page should now list exactly two keys:
 | Name | Restrictions |
 |---|---|
 | PlastaGo — Browser | Websites · Maps Embed API |
-| PlastaGo — Server | IP addresses · Geocoding, Route Optimization |
+| PlastaGo — Server | IP addresses · Geocoding, Routes |
 
 Neither should read "None" under restrictions, with the one documented exception in section 6 step 3.
 
@@ -183,7 +195,7 @@ VITE_GOOGLE_MAPS_EMBED_KEY=AIza...
 
 # ── Key 2 · Server ──────────────────────────────────────
 # Goes on the API server only. Treat as a password.
-GOOGLE_MAPS_SERVER_KEY=AIza...
+GOOGLE_MAPS_EMBED_API_SERVER=AIza...
 
 # ── Also tell us ────────────────────────────────────────
 # The Google Cloud project name you used
@@ -208,7 +220,7 @@ If it does go out in plain text, just say so — we will rotate it, which takes 
 | Variable | Which key | Installed in |
 |---|---|---|
 | `VITE_GOOGLE_MAPS_EMBED_KEY` | Key 1 · Browser | `apps/web/.env`, `apps/driver/.env` |
-| `GOOGLE_MAPS_SERVER_KEY` | Key 2 · Server | `apps/api/.env` |
+| `GOOGLE_MAPS_EMBED_API_SERVER` | Key 2 · Server | `apps/api/.env` |
 
 The last row is why the keys cannot be merged: anything named `VITE_…` is compiled into the app that runs on the phone.
 

@@ -1,4 +1,8 @@
-import { AccountDraftSchema } from '@plastago/shared';
+import {
+  AccountInvoiceTemplateBodySchema,
+  AccountDraftSchema,
+  AccountUpdateSchema,
+} from '@plastago/shared';
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
 import { requireAuth, requireRole } from '../../middleware/require-auth.js';
@@ -78,11 +82,46 @@ accountRouter.get(
   asyncHandler(accountController.get),
 );
 
-accountRouter.get(
-  '/:id/terms',
-  MAY_READ,
-  validate({ params: AccountIdParamsSchema }),
-  asyncHandler(accountController.getTerms),
+/**
+ * Correct an account's details.
+ *
+ * ── Why these three roles ─────────────────────────────────────────────────
+ * The same three that can already change an account's type and its risk-
+ * assessment rule: onboarding a customer and correcting how they were onboarded
+ * are the same job, done by the same people, frequently in the same week.
+ * Office staff are included deliberately — they are the ones who notice the
+ * misspelt company name, because they are the ones raising the invoice it
+ * prints on.
+ *
+ * ⚠️ The two CUSTOMER roles are absent. A customer administrator maintains
+ * their own details in the portal, on a form written for them; reaching this
+ * one would let them edit an account record the office is responsible for. The
+ * service refuses a customer-role caller independently of this gate.
+ *
+ * PATCH rather than PUT: it changes the details and leaves the commercial terms
+ * — rate card, payment terms, PO policy, capture mode — untouched. They are not
+ * in the schema at all, so this endpoint cannot re-price anything.
+ */
+accountRouter.patch(
+  '/:id',
+  requireRole('super-admin', 'operations', 'office-staff'),
+  validate({ params: AccountIdParamsSchema, body: AccountUpdateSchema }),
+  asyncHandler(accountController.update),
+);
+
+/**
+ * M7.5 — which template this account's invoices are drawn with.
+ *
+ * Its own route rather than a field on the details PATCH above, for the reason
+ * that endpoint's own note gives: the details form must not be able to change
+ * anything commercial. What an invoice LOOKS like is commercial — it is the
+ * document a builder's accounts department receives.
+ */
+accountRouter.patch(
+  '/:id/invoice-template',
+  requireRole('super-admin', 'operations', 'office-staff'),
+  validate({ params: AccountIdParamsSchema, body: AccountInvoiceTemplateBodySchema }),
+  asyncHandler(accountController.setInvoiceTemplate),
 );
 
 /**

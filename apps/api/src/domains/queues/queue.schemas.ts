@@ -1,4 +1,5 @@
-import { ObjectIdSchema } from '@plastago/shared';
+import {
+  ChangeRequestDecisionSchema, ObjectIdSchema } from '@plastago/shared';
 import * as z from 'zod';
 
 /**
@@ -52,7 +53,15 @@ export const ChargeDecisionBodySchema = z
       .min(1, 'Select at least one charge')
       .max(200, 'Select fewer charges — up to 200 at a time'),
     decision: z.enum(['approve', 'reject']),
-    /** Required on reject — the driver is told why. Checked in the service. */
+    /** Required on reject — it is the only record of why. Checked in the service. */
     note: z.string().trim().max(500).default(''),
   })
   .meta({ id: 'ChargeDecisionBody' });
+
+/**
+ * The body of a change-request decision.
+ *
+ * Re-exported from the shared contract rather than redeclared, so the office
+ * console and the API cannot drift on what a decision is.
+ */
+export const ChangeRequestDecisionBodySchema = ChangeRequestDecisionSchema;

@@ -77,20 +77,27 @@ export function JobPhotosPage() {
       }
     };
 
+    /*
+     * Only a file the driver actually chose.
+     *
+     * This used to fall back to a stub blob — on `change` with no file, and
+     * again on a 400ms timer after `click()` — so the demo could show the flow
+     * without a camera. On a phone that timer ALWAYS wins: the camera app takes
+     * seconds to open, and 400ms later a 22-byte text file has already been
+     * filed as the evidence photo. The guard below then counts it, the office
+     * approves the charge "by looking at the picture", and the picture is not an
+     * image of anything.
+     *
+     * Cancelling the picker now does nothing at all, which is the honest
+     * outcome — the driver is asked again for the photo, rather than handed a
+     * receipt for one that does not exist.
+     */
     input.addEventListener('change', () => {
       const file = input.files?.[0];
-      void submit(file ?? new Blob([`demo:${caption}`], { type: 'image/jpeg' }));
+      if (!file) return;
+      void submit(file);
     });
-
-    // Cancelling the picker fires no event on most browsers, so the demo path
-    // needs a way through. `showPicker` is unavailable for file inputs, hence
-    // the click plus a fallback if nothing arrives.
     input.click();
-    window.setTimeout(() => {
-      if (input.files?.length === 0 && busySlot === null) {
-        void submit(new Blob([`demo:${caption}`], { type: 'image/jpeg' }));
-      }
-    }, 400);
   };
 
   const remove = async (photoId: string) => {

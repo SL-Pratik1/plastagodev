@@ -153,3 +153,48 @@ export const InvoiceSchema = InvoiceListItemSchema.extend({
 
 export type InvoiceLine = z.infer<typeof InvoiceLineSchema>;
 export type Invoice = z.infer<typeof InvoiceSchema>;
+
+/**
+ * M7.6 — a rendered invoice, and where to fetch it from.
+ *
+ * ── Why a short-lived URL rather than the bytes ───────────────────────────
+ * The PDF lives in object storage, so the API hands back a presigned link the
+ * browser follows directly instead of streaming megabytes through Node. That is
+ * the same shape docket photos, lead attachments and PO documents already use.
+ *
+ * ⚠️ The URL EXPIRES (`S3_URL_TTL_SECONDS`). It is a fetch instruction for right
+ * now, never something to store on a record or print in an email — a saved one
+ * is a link that works in testing and is dead by the time a customer clicks it.
+ */
+export const InvoiceDownloadSchema = z
+  .object({
+    id: ObjectIdSchema,
+    invoiceNumber: z.number().int().positive(),
+    /**
+     * What the file is called once saved — "Invoice PGA-104312.pdf".
+     *
+     * Carries the prefix because that is what the office and the builder both
+     * quote; the bare sequence is an internal key that Xero matches on.
+     */
+    fileName: NonEmptyStringSchema,
+    url: NonEmptyStringSchema,
+  })
+  .meta({ id: 'InvoiceDownload' });
+
+export type InvoiceDownload = z.infer<typeof InvoiceDownloadSchema>;
+
+/**
+ * The answer to "render these and give me the files".
+ *
+ * `downloads` can be SHORTER than what was asked for: one invoice whose brand
+ * has no template fails on its own, and the screen has to be able to say so
+ * rather than report a success it did not have.
+ */
+export const InvoiceDownloadsSchema = z
+  .object({
+    requested: z.number().int().nonnegative(),
+    downloads: z.array(InvoiceDownloadSchema),
+  })
+  .meta({ id: 'InvoiceDownloads' });
+
+export type InvoiceDownloads = z.infer<typeof InvoiceDownloadsSchema>;

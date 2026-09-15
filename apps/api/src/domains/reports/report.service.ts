@@ -186,7 +186,7 @@ export const reportService = {
    * customer's total never counts somebody else's tonnage.
    */
   async certificates(
-    query: { page: number; pageSize: number; state?: string | undefined },
+    query: { page: number; pageSize: number; state?: string | undefined; q?: string | undefined },
     caller: Caller,
   ): Promise<{ data: Certificate[]; meta: PageMeta }> {
     return reportRepository.listCertificates(query, scopeAccount(caller));

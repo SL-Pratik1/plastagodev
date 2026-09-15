@@ -628,7 +628,9 @@ export function AdminJobDetailPage() {
                         </th>
                         <th
                           scope="col"
-                          className="py-2 text-left text-xs font-semibold tracking-wide text-muted-foreground uppercase"
+                          // `pl-4` because this column follows a right-aligned one: without it
+                          // the two headings touch and read as "AMOUNTRAISED BY".
+                          className="py-2 pl-4 text-left text-xs font-semibold tracking-wide text-muted-foreground uppercase"
                         >
                           Raised by
                         </th>
@@ -652,7 +654,7 @@ export function AdminJobDetailPage() {
                           <td className="py-2.5 text-right font-medium tabular-nums">
                             {formatMoney(charge.amount)}
                           </td>
-                          <td className="py-2.5">
+                          <td className="py-2.5 pl-4">
                             <span className="flex flex-wrap items-center gap-1.5">
                               <Badge variant="outline">
                                 {charge.source === 'driver'
@@ -667,6 +669,13 @@ export function AdminJobDetailPage() {
                               {charge.approvalState === 'approved' && (
                                 <Badge variant="success">Approved</Badge>
                               )}
+                              {/*
+                                A rejected charge used to carry no badge at all, so it sat
+                                in the table looking exactly like a billable line.
+                              */}
+                              {charge.approvalState === 'rejected' && (
+                                <Badge variant="destructive">Rejected</Badge>
+                              )}
                               {charge.photoCount > 0 && (
                                 <span className="flex items-center gap-1 text-xs text-muted-foreground">
                                   <ImageIcon aria-hidden className="size-3" />
@@ -674,6 +683,26 @@ export function AdminJobDetailPage() {
                                 </span>
                               )}
                             </span>
+                            {/*
+                              Who turned this into money, and why.
+
+                              The approvals queue is where the decision is made, and a
+                              charge drops out of that queue the moment it is decided — so
+                              this was the one screen where "who approved the $160?" could
+                              be asked, and it had no answer.
+                            */}
+                            {charge.decidedBy !== null && (
+                              <span className="mt-1 block text-xs text-muted-foreground">
+                                {charge.approvalState === 'rejected' ? 'Rejected' : 'Approved'}
+                                {` by ${charge.decidedBy}`}
+                                {charge.decidedAt !== null && ` · ${formatDate(charge.decidedAt)}`}
+                              </span>
+                            )}
+                            {charge.decisionNote !== null && (
+                              <span className="mt-0.5 block text-xs italic text-muted-foreground">
+                                “{charge.decisionNote}”
+                              </span>
+                            )}
                           </td>
                         </tr>
                       ))}

@@ -75,6 +75,16 @@ export interface MatchedOrder {
   addressLine: string | null;
   suburb: string | null;
   siteSupervisorName: string | null;
+  /**
+   * ⚠️ Carried because the JOB needs it, not because this queue shows it.
+   *
+   * The order captured a supervisor mobile at PO review and `book()` then
+   * hard-coded the job’s `siteContactMobile` to an empty string — so every job
+   * booked from a call-up reached the driver with a name and no number, and
+   * the driver app fell back to "No site contact on this job — ring the
+   * office". The number was sitting on the order the whole time.
+   */
+  siteSupervisorMobile: string | null;
   siteSupervisorUserId: string | null;
   /** The job already booked against it, if any. */
   jobId: string | null;
@@ -134,7 +144,12 @@ export const callUpRepository = {
       jobId: input.jobId ? new mongoose.Types.ObjectId(input.jobId) : null,
       jobNumber: input.jobNumber,
       note: input.note,
-      externalId: input.externalId,
+      /*
+       * Omitted rather than stored as null — the unique index only covers rows
+       * that actually carry a vendor id, and writing a null would put this row
+       * back into it. See the note on the index.
+       */
+      ...(input.externalId ? { externalId: input.externalId } : {}),
       raisedBy: input.raisedBy,
     });
 
@@ -207,11 +222,25 @@ export const callUpRepository = {
   /** The office queue. Oldest first: a call-up is about a date that is coming. */
   async list(query: {
     state?: CallUpState;
+    q?: string | undefined;
     page: number;
     pageSize: number;
   }): Promise<{ data: CallUp[]; meta: PageMeta }> {
     const filter: Record<string, unknown> = {};
     if (query.state) filter.state = query.state;
+
+    /*
+     * ⚠️ The screen has always had a search box and nothing read the term.
+     *
+     * What the office types here is a PO number — this queue is worked from a
+     * builder ringing up about one order. The account name and the note are
+     * included because the note is where the extractor put the email subject,
+     * which is often the only thing that names the site.
+     */
+    if (query.q) {
+      const like = { $regex: escapeRegex(query.q), $options: 'i' };
+      filter.$or = [{ poNumber: like }, { accountName: like }, { note: like }];
+    }
 
     const [rows, total] = await Promise.all([
       CallUpModel.find(filter)
@@ -267,6 +296,7 @@ export const callUpRepository = {
         addressLine: string | null;
         suburb: string | null;
         siteSupervisorName: string | null;
+        siteSupervisorMobile: string | null;
         siteSupervisorUserId: mongoose.Types.ObjectId | null;
       }>
     >();
@@ -300,6 +330,7 @@ export const callUpRepository = {
         addressLine: order.addressLine ?? null,
         suburb: order.suburb ?? null,
         siteSupervisorName: order.siteSupervisorName ?? null,
+        siteSupervisorMobile: order.siteSupervisorMobile ?? null,
         siteSupervisorUserId: order.siteSupervisorUserId
           ? order.siteSupervisorUserId.toHexString()
           : null,
@@ -406,3 +437,9 @@ export const callUpRepository = {
     };
   },
 };
+
+/** Local, as in `queue.repository` — an unescaped `(` from the search box
+ *  would otherwise reach Mongo as an invalid expression and 500 the list. */
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

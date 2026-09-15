@@ -100,6 +100,26 @@ vi.mock('../src/domains/notifications/notification.repository.js', () => ({
   notificationRepository: makeFakeNotificationRepository(),
 }));
 
+/**
+ * Google, as a recording double (I3).
+ *
+ * ⚠️ Nothing in this file may reach the real geocoder. These tests run on every
+ * commit and each lookup is BILLED, so a suite that quietly spends money is a
+ * suite somebody eventually turns off. The default is `null` — no answer —
+ * which is also the honest default in an environment with no key.
+ */
+const maps = {
+  geocode: vi.fn().mockResolvedValue(null),
+  optimiseStopOrder: vi.fn().mockResolvedValue(null),
+};
+
+vi.mock('../src/integrations/maps.js', async (importOriginal) => {
+  // `isPrecise` is real policy, not a collaborator — faking it would leave the
+  // rule that decides which pins are good enough untested.
+  const actual = await importOriginal<typeof import('../src/integrations/maps.js')>();
+  return { ...actual, getMapsProvider: () => ({ name: 'test', ...maps }) };
+});
+
 const { jobService } = await import('../src/domains/jobs/job.service.js');
 const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 
@@ -163,6 +183,11 @@ beforeEach(() => {
   accountScope = null;
   accountFound = true;
   account.status = 'active';
+
+  // Call counts are asserted on ("was Google reached at all?"), so they cannot
+  // carry over between tests.
+  maps.geocode.mockClear().mockResolvedValue(null);
+  maps.optimiseStopOrder.mockClear().mockResolvedValue(null);
 });
 
 /*
@@ -593,5 +618,157 @@ describe('the quote is persisted as the job’s own charge lines', () => {
     // Against what the service asked to STORE on the job, which is the figure
     // the customer was quoted.
     expect(summed).toBe(Math.round(Number(repo.calls.lastCreate?.totalExGst) * 100));
+  });
+});
+
+/*
+ * ── Where a job's pin comes from (I3) ──────────────────────────────────────
+ * A latitude is a latitude: nothing about the number says whether it is the
+ * house or the middle of the suburb, and the two are kilometres apart. These
+ * pin the rule that a pin is only kept when it is BETTER than the suburb
+ * centre the job would otherwise carry — and that a booking survives every way
+ * that lookup can go wrong, because an office user is on the phone to a builder
+ * while it happens.
+ */
+describe('resolving the pin on a booking', () => {
+  const KELLYVILLE = { latitude: -33.7118, longitude: 150.9542 };
+
+  it('keeps the suburb pin when the geocoder has no answer', async () => {
+    await jobService.create(draft(), OFFICE);
+
+    expect(repo.calls.lastCreate?.latitude).toBe(KELLYVILLE.latitude);
+    expect(repo.calls.lastCreate?.longitude).toBe(KELLYVILLE.longitude);
+    expect(repo.calls.lastCreate?.locationSource).toBe('suburb');
+  });
+
+  it('stores a rooftop match as the job pin', async () => {
+    maps.geocode.mockResolvedValueOnce({
+      latitude: -33.7035,
+      longitude: 150.9431,
+      precision: 'rooftop',
+      formattedAddress: '46 Allambie Circuit, Kellyville NSW 2155',
+    });
+
+    await jobService.create(draft(), OFFICE);
+
+    expect(repo.calls.lastCreate?.latitude).toBe(-33.7035);
+    expect(repo.calls.lastCreate?.locationSource).toBe('geocoded');
+  });
+
+  /*
+   * The common good case in a greenfield estate: the street exists in Google's
+   * data but the individual house does not, so the pin is interpolated along
+   * the block. Metres out, not kilometres — a driver can work with it.
+   */
+  it('accepts an interpolated match', async () => {
+    maps.geocode.mockResolvedValueOnce({
+      latitude: -33.7035,
+      longitude: 150.9431,
+      precision: 'interpolated',
+      formattedAddress: 'Allambie Circuit, Kellyville NSW 2155',
+    });
+
+    await jobService.create(draft(), OFFICE);
+
+    expect(repo.calls.lastCreate?.locationSource).toBe('geocoded');
+  });
+
+  /*
+   * `block` is a street's midpoint and `approximate` is usually the locality's
+   * — the same class of answer the job already holds. Storing one would swap a
+   * pin we can explain for one we cannot, while marking the job as precisely
+   * located, which is what the run optimiser reads.
+   */
+  it.each(['block', 'approximate'] as const)(
+    'rejects a %s match as no better than the suburb',
+    async (precision) => {
+      maps.geocode.mockResolvedValueOnce({
+        latitude: -33.7035,
+        longitude: 150.9431,
+        precision,
+        formattedAddress: 'Kellyville NSW 2155',
+      });
+
+      await jobService.create(draft(), OFFICE);
+
+      expect(repo.calls.lastCreate?.latitude).toBe(KELLYVILLE.latitude);
+      expect(repo.calls.lastCreate?.locationSource).toBe('suburb');
+    },
+  );
+
+  /*
+   * ⚠️ The failure this exists for. Google answers a half-built estate's
+   * address with a real street of the same name in another state, at full
+   * ROOFTOP confidence, because as far as it knows that IS the address. The
+   * suburb is the one part a human definitely chose from a list, so it wins.
+   */
+  it('rejects a confident match that landed in another state', async () => {
+    maps.geocode.mockResolvedValueOnce({
+      // Allambie Circuit, somewhere in Victoria — 700km from Kellyville.
+      latitude: -37.8136,
+      longitude: 144.9631,
+      precision: 'rooftop',
+      formattedAddress: '46 Allambie Circuit, Melbourne VIC 3000',
+    });
+
+    await jobService.create(draft(), OFFICE);
+
+    expect(repo.calls.lastCreate?.latitude).toBe(KELLYVILLE.latitude);
+    expect(repo.calls.lastCreate?.locationSource).toBe('suburb');
+  });
+
+  it('accepts a match just inside the drift allowance', async () => {
+    // ~11km north of Kellyville — a different suburb, but the right city.
+    maps.geocode.mockResolvedValueOnce({
+      latitude: -33.6118,
+      longitude: 150.9542,
+      precision: 'rooftop',
+      formattedAddress: '46 Allambie Circuit, Box Hill NSW 2765',
+    });
+
+    await jobService.create(draft(), OFFICE);
+
+    expect(repo.calls.lastCreate?.locationSource).toBe('geocoded');
+  });
+
+  /*
+   * The whole feature is an improvement on a pin the job already has, so there
+   * is no failure here worth showing a builder on the phone.
+   */
+  it('books the job anyway when the geocoder throws', async () => {
+    maps.geocode.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+
+    const job = await jobService.create(draft(), OFFICE);
+
+    expect(job.jobNumber).toBeGreaterThan(0);
+    expect(repo.calls.lastCreate?.locationSource).toBe('suburb');
+  });
+
+  it('does not spend a lookup on a booking with no street address', async () => {
+    await jobService.create(draft({ addressLine: '   ' }), OFFICE);
+
+    expect(maps.geocode).not.toHaveBeenCalled();
+    expect(repo.calls.lastCreate?.locationSource).toBe('suburb');
+  });
+
+  it('sends the picked suburb, not just the typed line', async () => {
+    await jobService.create(draft(), OFFICE);
+
+    // The suburb and postcode are what stop Google wandering interstate — they
+    // are the parts of the address a human chose from a list.
+    expect(maps.geocode).toHaveBeenCalledWith({
+      addressLine: '46 Allambie Circuit',
+      suburb: 'Kellyville',
+      postcode: '2155',
+      state: 'NSW',
+    });
+  });
+
+  it('does not geocode a price preview', async () => {
+    // A preview is keystrokes-fast and repeated as the form is filled in.
+    // Geocoding each one would bill for answers nothing keeps.
+    await jobService.preview(draft(), OFFICE);
+
+    expect(maps.geocode).not.toHaveBeenCalled();
   });
 });

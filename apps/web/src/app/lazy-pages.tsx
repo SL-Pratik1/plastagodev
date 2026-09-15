@@ -50,6 +50,10 @@ export const QueueApprovalsPage = lazy(async () => ({
   default: (await import('@/pages/admin/queue-approvals')).AdminQueueApprovalsPage,
 }));
 
+export const QueueChangeRequestsPage = lazy(async () => ({
+  default: (await import('@/pages/admin/queue-change-requests')).AdminQueueChangeRequestsPage,
+}));
+
 export const QueueAwaitingPoPage = lazy(async () => ({
   default: (await import('@/pages/admin/queue-awaiting-po')).AdminQueueAwaitingPoPage,
 }));

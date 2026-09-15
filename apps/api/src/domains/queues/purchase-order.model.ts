@@ -27,14 +27,6 @@ const extractedFieldSchema = new Schema(
     key: { type: String, required: true },
     label: { type: String, required: true },
     value: { type: String, default: null },
-    /**
-     * Per FIELD, not just per document.
-     *
-     * They fail independently: a Domain PO's number is printed large at the top
-     * and its supervisor's mobile is in eight-point type at the bottom, and one
-     * being unreadable should not send the other back to a human.
-     */
-    confidence: { type: Number, required: true, min: 0, max: 1 },
   },
   { _id: false },
 );
@@ -44,7 +36,6 @@ const matchCandidateSchema = new Schema(
     id: { type: String, required: true },
     label: { type: String, required: true },
     detail: { type: String, required: false, default: '' },
-    confidence: { type: Number, required: true, min: 0, max: 1 },
   },
   { _id: false },
 );
@@ -106,14 +97,17 @@ const poExtractionSchema = new Schema(
     accountCandidates: { type: [matchCandidateSchema], default: [] },
     jobCandidates: { type: [matchCandidateSchema], default: [] },
 
-    overallConfidence: { type: Number, required: true, min: 0, max: 1, default: 0 },
-
     /**
      * WHY this is in a human queue, as a first-class field.
      *
-     * "Below threshold" and "no account match" are different problems needing
-     * different corrections, and lumping them into one "needs review" state
-     * hides that from the person who has to fix it.
+     * "No account match" and "PO number already used" are different problems
+     * needing different corrections, and lumping them into one "needs review"
+     * state hides that from the person who has to fix it.
+     *
+     * ⚠️ The old `below-threshold` — and the `overallConfidence` it was
+     * derived from — are gone. A score told the reviewer about the model, not
+     * about the document in front of them, and invited waving through the
+     * high ones. Every extraction is read against its PDF by a person now.
      */
     reason: { type: String, required: true, enum: PO_REVIEW_REASONS },
     state: { type: String, required: true, enum: PO_REVIEW_STATES, default: 'needs-review' },
@@ -127,12 +121,13 @@ const poExtractionSchema = new Schema(
     purchaseOrderId: { type: Schema.Types.ObjectId, default: null, ref: 'PurchaseOrder' },
 
     /**
-     * ⚠️ M2.12: *"log confidence and correction rate from day one, so accuracy
-     * is a measured number."*
+     * ⚠️ M2.12: *"log correction rate from day one, so accuracy is a measured
+     * number."*
      *
-     * Which fields the human actually changed. Without this the accuracy of the
-     * extractor is an opinion — and the decision to raise or lower the
-     * auto-accept threshold has nothing behind it.
+     * Which fields the human actually changed — now the ONLY accuracy signal,
+     * with the confidence scores gone. It is also the better of the two: what a
+     * reviewer corrected against the document is a fact, where a score was the
+     * model's own opinion of itself.
      */
     correctedFields: { type: [String], default: [] },
   },

@@ -42,11 +42,7 @@ function toSupervisor(row: RawUser): PortalSupervisor {
      * time somebody is activated by a path that forgets to clear it.
      */
     state:
-      row.status === 'suspended'
-        ? 'suspended'
-        : row.lastSignedInAt === null
-          ? 'invited'
-          : 'active',
+      row.status === 'suspended' ? 'suspended' : row.lastSignedInAt === null ? 'invited' : 'active',
     invitedAt: row.createdAt.toISOString(),
     lastSignedInAt: row.lastSignedInAt ? row.lastSignedInAt.toISOString() : null,
     awaitingApproval: row.awaitingApproval ?? false,
@@ -180,11 +176,7 @@ export const supervisorRepository = {
    * every job they raised, making them invisible to the supervisors who
    * replaced them.
    */
-  async setState(
-    id: string,
-    accountId: string,
-    state: 'active' | 'suspended',
-  ): Promise<boolean> {
+  async setState(id: string, accountId: string, state: 'active' | 'suspended'): Promise<boolean> {
     if (!mongoose.isValidObjectId(id)) return false;
 
     const result = await UserModel.updateOne(
@@ -338,10 +330,16 @@ export const portalAccountRepository = {
   },
 
   /**
-   * Journey A.4 — the registered details the CUSTOMER is the authority on.
+   * The registered details the CUSTOMER is the authority on.
    *
    * Separate from anything the office set at conversion. The customer knows
    * their own registered name, ABN and address; the office does not.
+   *
+   * ⚠️ `detailsCompletedAt` is stamped HERE and nowhere else. It means "the
+   * customer confirmed this", which is a different and stronger claim than "the
+   * office typed it in" — so the office's own correction endpoint deliberately
+   * leaves it alone. Re-submitting moves the date forward, which is the point:
+   * the office needs to know how current these are, not merely that they exist.
    */
   async completeOnboarding(
     accountId: string,
@@ -366,6 +364,7 @@ export const portalAccountRepository = {
           suburb: input.suburb,
           postcode: input.postcode,
           certificateEmail: input.certificateEmail,
+          detailsCompletedAt: new Date(),
         },
       },
     );

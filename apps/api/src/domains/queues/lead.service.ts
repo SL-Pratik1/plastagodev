@@ -19,11 +19,10 @@ import {
   getStorage,
   type PresignedUpload,
 } from '../../integrations/storage.js';
-import { buildLeadAckEmail, buildWelcomeEmail } from '../../integrations/notice-messages.js';
-import { accountRepository } from '../accounts/account.repository.js';
+import { buildLeadAckEmail } from '../../integrations/notice-messages.js';
+import { accountService } from '../accounts/account.service.js';
 import { notificationService } from '../notifications/notification.service.js';
 import { outboundService } from '../notifications/outbound.service.js';
-import { settingsRepository } from '../settings/settings.repository.js';
 import { leadRepository, type ListLeadsQuery } from './lead.repository.js';
 
 const log = logger.child({ module: 'leads' });
@@ -180,7 +179,7 @@ export const leadService = {
         severity: 'action',
         title: `New website enquiry — ${input.companyName}`,
         body: `${input.contactName} asked about ${String(input.typicalVolumeM2)} m² in ${input.zone}. They have been sent an acknowledgement; somebody owes them a call.`,
-        href: `/queues/leads/${id}`,
+        href: `/admin/queues/leads/${id}`,
         subjectKey: `lead-new:${id}`,
       });
     }
@@ -324,42 +323,20 @@ export const leadService = {
       );
     }
 
-    if (await accountRepository.codeExists(input.customerCode)) {
-      /*
-       * The suggestion is the point.
-       *
-       * The dialog proposes "first three letters + 001", so every builder whose
-       * name starts the same way collides on the same code — and the old
-       * message ("choose a code that is not already taken") asked the office to
-       * guess against a list only the server can see.
-       */
-      const suggestion = await accountRepository.nextFreeCode(input.customerCode);
-
-      throw AppError.validation(`Customer code ${input.customerCode} is already in use`, [
-        {
-          path: 'customerCode',
-          message: suggestion
-            ? `${suggestion} is free — use that, or type another code.`
-            : 'Choose a code that is not already taken',
-        },
-      ]);
-    }
-
     /*
-     * Same reason as the accounts domain: rate cards are runtime data now, so an
-     * id that names nothing has to be refused HERE. Converting a lead onto a
-     * card that no longer exists would create an account that cannot price its
-     * first booking.
+     * ⚠️ ONE creation path, shared with the Customers tab.
+     *
+     * Every rule that decides what an account looks like — the customer code,
+     * the rate card that must exist, the contact the invoices go to — lives in
+     * `accountService.provision`. This used to be a second implementation of the
+     * same thing, and the two drifted: a duplicate code suggested a free one
+     * here and did not there, the contact rules were enforced on one side only.
+     * A customer must not be able to tell which door the office came through.
      */
-    if (!(await settingsRepository.findRateCard(input.rateCardId))) {
-      throw AppError.validation('That rate card does not exist', [
-        { path: 'rateCardId', message: 'Pick a card from the list — it may have been retired' },
-      ]);
-    }
-
-    const account = await accountRepository.create({
-      code: input.customerCode,
-      name: input.legalName,
+    const account = await accountService.provision({
+      customerCode: input.customerCode,
+      legalName: input.legalName,
+      abn: input.abn,
       /*
        * Asked on the form, never defaulted. It decides whether the customer
        * gets site supervisors and which booking form they see (Matt, 21:55),
@@ -372,17 +349,26 @@ export const leadService = {
       rateCardId: input.rateCardId,
       poPolicy: input.poPolicy,
       captureMode: input.captureMode,
-      abn: input.abn,
       paymentTermsDays: input.paymentTermsDays,
       primaryZone: input.primaryZone,
-      notes: `Converted from lead — ${lead.companyName}`,
-      // The lead's own contact carries across — otherwise the first thing the
-      // office does with a brand-new account is retype what it already had.
-      contact: { name: lead.contactName, email: lead.email },
-      // Terms are accepted by the customer in the portal (M5.2), not asserted
-      // here. A conversion that pre-signed them would be PlastaGo agreeing on
-      // the builder's behalf.
-      termsAgreedOffSystem: null,
+      /*
+       * The lead's own contact carries across when the office did not correct
+       * it — otherwise the first thing they do with a brand-new account is
+       * retype what it already had. The dialog pre-fills these, so in practice
+       * the fallback only catches a payload written before the fields existed.
+       */
+      accountsContactName: input.accountsContactName || lead.contactName,
+      accountsContactEmail: input.accountsContactEmail || lead.email,
+      /*
+       * Where the account came from, kept ABOVE whatever the office typed.
+       *
+       * The provenance line used to be the entire notes field, so conversion was
+       * the one door with nowhere to record what was agreed on the phone.
+       */
+      notes: [`Converted from lead — ${lead.companyName}`, input.notes]
+        .filter((part) => part !== '')
+        .join('\n\n'),
+      sendInvitation: input.sendInvitation,
     });
 
     /*
@@ -405,13 +391,13 @@ export const leadService = {
 
     await leadRepository.addNote({
       leadId: id,
-      body: `Converted to account ${input.customerCode} (${input.legalName}).`,
+      body: `Converted to account ${account.code} (${account.name}).`,
       author: caller.name,
       authorId: caller.userId,
     });
 
     log.info(
-      { leadId: id, accountId: account.id, code: input.customerCode, by: caller.name },
+      { leadId: id, accountId: account.id, code: account.code, by: caller.name },
       'lead converted to account',
     );
 
@@ -427,23 +413,13 @@ export const leadService = {
     let welcome: InvitationResult | null = null;
 
     if (input.sendInvitation) {
-      welcome = await outboundService.send({
-        event: 'account-welcome',
-        subjectKey: `account-welcome:${account.id}`,
-        recipient: { email: lead.email, mobile: null },
-        email: (to) =>
-          buildWelcomeEmail(to, {
-            contactName: lead.contactName,
-            legalName: input.legalName,
-            customerCode: input.customerCode,
-          }),
-        accountId: account.id,
+      welcome = await accountService.sendWelcome(account, {
+        contactName: input.accountsContactName || lead.contactName,
+        email: input.accountsContactEmail || lead.email,
       });
-
-      log.info({ accountId: account.id, outcome: welcome.outcome }, 'welcome email attempted');
     }
 
-    return { accountId: account.id, customerCode: input.customerCode, welcome };
+    return { accountId: account.id, customerCode: account.code, welcome };
   },
 
   /** The nav badge. */

@@ -1,10 +1,13 @@
 import type { DriverRunService } from './driver-run.types.js';
 import type {
   Account,
+  ChangeRequestDecision,
+  ChangeRequestItem,
   AccountDraft,
   AccountListItem,
   AccountOnboarding,
   AccountType,
+  AccountUpdate,
   AdditionalServiceCreate,
   AdditionalServiceSetting,
   AdditionalServiceUpdate,
@@ -40,6 +43,7 @@ import type {
   DriverProfile,
   FinancialReport,
   Invoice,
+  InvoiceDownloads,
   MonthlyVolumeReport,
   Notification,
   NotificationSummary,
@@ -91,6 +95,8 @@ import type {
   InvitationResult,
   InvoiceTemplate,
   InvoiceTemplateWrite,
+  InvoicingSettings,
+  TemplatePreview,
   InvitedUser,
   UserDraft,
   UserListItem,
@@ -208,6 +214,21 @@ export interface UserService {
  * (M1.2). The nested lists are separate calls so a detail page loads its header
  * immediately and fills each tab on demand.
  */
+/**
+ * What a create returns: the row, and what actually reached the customer.
+ *
+ * ⚠️ The welcome outcome is part of the RESPONSE, not an exception. A send
+ * that failed is not a failed create — the account stands either way — but the
+ * screen used to announce an invitation it had no way of knowing about, so the
+ * office learnt nothing had gone out only when the customer rang.
+ *
+ * `null` means none was asked for, which is different from one that did not go.
+ */
+export interface CreatedAccount {
+  account: AccountListItem;
+  welcome: InvitationResult | null;
+}
+
 export interface CustomerService {
   list: (query: ListQuery) => Promise<ListResult<AccountListItem>>;
   get: (id: string) => Promise<Account>;
@@ -219,7 +240,19 @@ export interface CustomerService {
    * Clarendon Homes, they won't go through… we'll just create the account for
    * them."*
    */
-  create: (draft: AccountDraft) => Promise<AccountListItem>;
+  create: (draft: AccountDraft) => Promise<CreatedAccount>;
+  /**
+   * Correct an existing account's details.
+   *
+   * ⚠️ Not a commercial edit. The rate card, the payment terms, the PO policy
+   * and the capture mode are absent from `AccountUpdate` entirely — they
+   * re-price every invoice on the account and belong to a deliberate act, not
+   * to the form somebody opens to fix a misspelt suburb.
+   *
+   * Returns the updated `Account` so the detail page renders what was actually
+   * stored, including the fields the server normalised.
+   */
+  update: (accountId: string, input: AccountUpdate) => Promise<Account>;
   jobs: (accountId: string, query: ListQuery) => Promise<ListResult<JobListItem>>;
   invoices: (accountId: string, query: ListQuery) => Promise<ListResult<InvoiceListItem>>;
 
@@ -233,6 +266,17 @@ export interface CustomerService {
    * tick.
    */
   setRiskAssessmentRequired: (accountId: string, required: boolean) => Promise<Account>;
+  /**
+   * M7.5 — which invoice template this account's invoices are drawn with.
+   *
+   * `null` means follow the brand, and it is the right answer for almost every
+   * account. Resolved at render time and then frozen onto the invoice, so this
+   * changes the NEXT invoice and never one already sent.
+   */
+  setInvoiceTemplate: (
+    accountId: string,
+    invoiceTemplateId: string | null,
+  ) => Promise<Account>;
   /**
    * Builder or contractor — the account's journey (Matt, 21:55).
    *
@@ -362,8 +406,16 @@ export interface InvoiceService {
   approve: (ids: readonly string[]) => Promise<number>;
   /** Records the PO number that unblocks an additional-charges invoice. */
   recordPo: (id: string, poNumber: string) => Promise<void>;
-  /** Queues a PDF. Rendering is server-side (Playwright, §6A.6). */
-  requestPdf: (ids: readonly string[]) => Promise<void>;
+  /**
+   * M7.6 — render the invoices' PDFs and get links to them.
+   *
+   * ⚠️ Resolves with what was actually PRODUCED, which can be fewer than were
+   * asked for: an invoice whose brand has no template fails on its own. The
+   * caller has to read `downloads`, not assume the request covered everything.
+   *
+   * The URLs are short-lived. Follow them now; never store one.
+   */
+  requestPdf: (ids: readonly string[]) => Promise<InvoiceDownloads>;
   /** I1 — re-push to Xero after a failure. */
   /** Resolves with what Xero actually did — `pushed: false` is a rejection, not an error. */
   retryXero: (id: string) => Promise<{ pushed: boolean; message: string | null }>;
@@ -454,7 +506,23 @@ export interface NotificationService {
  */
 export interface SettingsService {
   get: () => Promise<Settings>;
-  saveInvoicing: (input: Settings['invoicing']) => Promise<Settings['invoicing']>;
+  saveInvoicing: (input: InvoicingSettings) => Promise<Settings['invoicing']>;
+
+  /* ── The invoice logo (M7.5) ─────────────────────────────────────────── */
+
+  /**
+   * Upload a logo and put it on the invoices.
+   *
+   * Three steps behind one method, because the middle one does not go through
+   * this API at all: ask for a ticket, PUT the bytes straight to storage, then
+   * confirm. Resolves with the link to the logo now in force.
+   *
+   * ⚠️ Nothing changes until the confirm. An upload abandoned halfway leaves
+   * the invoices printing whatever logo they had.
+   */
+  uploadLogo: (file: File) => Promise<string | null>;
+  /** Take the logo off. Invoices fall back to the company name in text. */
+  removeLogo: () => Promise<void>;
 
   /* ── Rate cards (M6.1, M6.2) ─────────────────────────────────────────── */
 
@@ -468,6 +536,14 @@ export interface SettingsService {
    * operation is adding a dated version, and it is the only one offered.
    */
   issueSchedule: (id: string, input: RateScheduleCreate) => Promise<RateCardSummary>;
+  /**
+   * Undo a schedule issued with the wrong start date.
+   *
+   * ⚠️ The server admits only a schedule that has NOT started, and never a
+   * card's last one — a schedule that has priced work cannot be removed, so
+   * nothing already invoiced can move.
+   */
+  deleteSchedule: (id: string, effectiveFrom: string) => Promise<RateCardSummary>;
   deleteRateCard: (id: string) => Promise<void>;
 
   /* ── Additional services (M6.5) ──────────────────────────────────────── */
@@ -486,6 +562,13 @@ export interface SettingsService {
   updateInvoiceTemplate: (id: string, input: InvoiceTemplateWrite) => Promise<InvoiceTemplate>;
   /** Refused while any account still invoices on it. */
   deleteInvoiceTemplate: (id: string) => Promise<void>;
+  /**
+   * Draw a sample invoice with this template, so it is never chosen blind.
+   *
+   * The figures are invented server-side — a preview of a real invoice would
+   * put one customer's job and amounts in front of whoever is editing.
+   */
+  previewTemplate: (id: string) => Promise<TemplatePreview>;
 }
 
 /**
@@ -564,7 +647,8 @@ export interface CustomerPortalService {
 
   // M5.10 · W72, W73 — Customer Administrator only.
   invoices: (query: ListQuery) => Promise<ListResult<PortalInvoice>>;
-  requestInvoicePdf: (ids: readonly string[]) => Promise<void>;
+  /** Same contract as the office's — see `InvoiceService.requestPdf`. */
+  requestInvoicePdf: (ids: readonly string[]) => Promise<InvoiceDownloads>;
 
   /** M5.11 · F1 — the report PlastaGo currently produces and sends by hand. */
   monthlyReport: (filters: ReportFilters) => Promise<MonthlyVolumeReport>;
@@ -626,6 +710,17 @@ export interface QueueService {
 
   // M7.3 — approved charges awaiting a PO.
   awaitingPoList: (query: ListQuery) => Promise<ListResult<AwaitingPoItem>>;
+
+  /**
+   * M5.4 — what a customer asked for on a job already on a run sheet.
+   *
+   * The office end of a channel that previously had none: the portal wrote
+   * these rows and nothing read them.
+   */
+  changeRequestList: (query: ListQuery) => Promise<ListResult<ChangeRequestItem>>;
+
+  /** Records the answer. It does NOT move the job — see the service. */
+  changeRequestDecide: (id: string, decision: ChangeRequestDecision) => Promise<void>;
   /** Records that a chase went out, so ageing is measured against contact. */
   awaitingPoChase: (ids: readonly string[]) => Promise<number>;
 
@@ -690,11 +785,19 @@ export interface QueueService {
   /** Remove an attachment. Deliberately a hard delete — a wrong file is noise. */
   leadDetach: (leadId: string, attachmentId: string) => Promise<void>;
 
-  /** A.4 — creates the account, the first site, and sends the invitation. */
+  /**
+   * A.4 — creates the account and sends the welcome email.
+   *
+   * ⚠️ `welcome` is part of the answer, not an exception. The account stands
+   * whether or not the message got out, and the screen has to be able to say
+   * which of the two happened while the office can still act on it. The HTTP
+   * layer has always parsed it; this type used to drop it, so the dialog
+   * announced a send it had no way of knowing about.
+   */
   leadConvert: (
     id: string,
     input: LeadConversion,
-  ) => Promise<{ accountId: string; customerCode: string }>;
+  ) => Promise<{ accountId: string; customerCode: string; welcome: InvitationResult | null }>;
 }
 
 export type { DriverRunService } from './driver-run.types.js';

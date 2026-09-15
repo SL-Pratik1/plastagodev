@@ -1,4 +1,5 @@
 import {
+  CalendarSyncIcon,
   BellIcon,
   BriefcaseIcon,
   CalendarClockIcon,
@@ -137,6 +138,20 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         icon: CalendarClockIcon,
         capability: 'queues:action',
         scope: 'M2.12b — confirmed orders whose call-up has not arrived, bookable by hand',
+      },
+      {
+        /*
+         * M5.4 — a customer cannot edit a pickup once it is on a run sheet;
+         * the portal sends them here instead and tells them the office has
+         * it. Nothing read these rows until this screen existed, so the
+         * promise was empty. Listed beside the other worklists because it
+         * is the same activity: answering something the system cannot.
+         */
+        to: '/admin/queues/change-requests',
+        label: 'Change requests',
+        icon: CalendarSyncIcon,
+        capability: 'queues:action',
+        scope: 'M5.4 — reschedules and cancellations asked for from the portal',
       },
       {
         to: '/admin/queues/call-up-review',

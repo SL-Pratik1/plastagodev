@@ -169,12 +169,19 @@ export const CAPABILITIES = [
   'brands:manage',
   'integrations:manage',
   /**
-   * I6 — the embedded Extractor tab.
+   * I6 — the embedded Extractor tab. The Administrator's alone.
    *
-   * Separate from `integrations:manage`, which is the Administrator's alone and
-   * covers configuring what the platform talks to. This is USING one: reading a
-   * purchase order off a PDF is intake work, and gating it on the config
-   * capability would hide it from the office staff who do that work daily.
+   * ⚠️ Held briefly by operations, office staff and the allocator too, on the
+   * argument that reading a purchase order off a PDF is intake work. That reads
+   * the tab as though it were the review queue, and it is not: the frame carries
+   * the VENDOR's own settings — the mailbox connection, the field templates that
+   * decide what is read off every builder's order, and embed-token rotation.
+   * Those are configuration, and a mistaken edit silently changes every
+   * extraction afterwards rather than one document.
+   *
+   * The intake work is unaffected, because none of it happens in here. Turning
+   * an extraction into a purchase order is `queues:action`, and the office keeps
+   * it.
    */
   'extractor:use',
   'notifications:manage',
@@ -266,7 +273,6 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'users:manage-customers',
     'drivers:manage',
     'vehicles:manage',
-    'extractor:use',
   ],
 
   /*
@@ -297,7 +303,6 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'reports:read',
     'certificates:manage',
     'pricing:view',
-    'extractor:use',
   ],
 
   /*
@@ -327,7 +332,6 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'driver-comms',
     'drivers:manage',
     'vehicles:manage',
-    'extractor:use',
   ],
 
   /*
@@ -449,7 +453,6 @@ export const CAPABILITY_GROUPS: ReadonlyArray<{
       { capability: 'dispatch:manage', label: 'Dispatch board and run sheets' },
       { capability: 'queues:action', label: 'Work the exception queues' },
       { capability: 'driver-comms', label: 'Message drivers on a job' },
-      { capability: 'extractor:use', label: 'Read purchase orders with the Extractor' },
     ],
   },
   {
@@ -481,6 +484,7 @@ export const CAPABILITY_GROUPS: ReadonlyArray<{
     capabilities: [
       { capability: 'brands:manage', label: 'Brands' },
       { capability: 'integrations:manage', label: 'Integrations' },
+      { capability: 'extractor:use', label: 'Read purchase orders with the Extractor' },
       { capability: 'notifications:manage', label: 'Notification rules' },
       { capability: 'settings:manage', label: 'Settings' },
     ],

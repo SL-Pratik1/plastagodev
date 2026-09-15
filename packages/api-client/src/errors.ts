@@ -35,9 +35,31 @@ export class ApiRequestError extends Error {
     return this.status >= 500 || this.status === 429;
   }
 
-  /** Field errors keyed by path, ready for react-hook-form's `setError`. */
+  /**
+   * Field errors keyed by FORM FIELD name, ready for `setError`.
+   *
+   * ── Why the path is trimmed ───────────────────────────────────────────────
+   * The API sends field issues in two shapes. A service raising its own
+   * validation names the field bare — `customerCode` — while the schema
+   * middleware prefixes the request part it parsed: `body.abn`, `query.page`,
+   * `params.id`. Forms are keyed by the bare name, so every prefixed issue
+   * silently missed its input: the dialog said "check the highlighted fields"
+   * and highlighted none, because `errors['body.abn']` matches no field called
+   * `abn`. It looked like the server had sent nothing.
+   *
+   * The prefix describes where the value travelled, which is a fact about HTTP
+   * and no business of a form, so it is dropped here — once, rather than in
+   * each of the nine screens that map these onto inputs. Nested paths keep
+   * their shape (`body.contact.email` → `contact.email`), which is what
+   * react-hook-form expects for a nested field.
+   */
   get fieldErrors(): Record<string, string> {
-    return Object.fromEntries(this.issues.map((issue) => [issue.path, issue.message]));
+    return Object.fromEntries(
+      this.issues.map((issue) => [
+        issue.path.replace(/^(?:body|query|params)\./, ''),
+        issue.message,
+      ]),
+    );
   }
 }
 

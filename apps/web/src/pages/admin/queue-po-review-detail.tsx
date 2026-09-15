@@ -27,8 +27,8 @@ import { useNavigate, useParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
 import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
-import { bandOf, percent } from '@/components/queues/confidence-bands';
-import { ConfidenceBadge } from '@/components/queues/confidence';
+
+import { useAccountOptions } from '@/features/lookups/queries';
 import { usePoExtraction, usePoReviewConfirm, usePoReviewReject } from '@/features/queues/queries';
 import { describeError } from '@/lib/error-message';
 import { formatDateTime, formatMoney } from '@/lib/format';
@@ -196,10 +196,41 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
   const navigate = useNavigate();
   const confirm = usePoReviewConfirm();
   const reject = usePoReviewReject();
+  const accounts = useAccountOptions();
 
   const [poNumber, setPoNumber] = useState(extraction.poNumber ?? '');
   const [accountId, setAccountId] = useState(extraction.suggestedAccountId ?? '');
   const [jobId, setJobId] = useState(extraction.suggestedJobId ?? '');
+
+  /*
+   * ── The spec, as typed by the reviewer ─────────────────────────────────
+   * These used to be read-only. The confirm sent `extraction.extractedAreaM2`
+   * and friends straight through, so a reviewer could see the document said 400
+   * m² while the screen said 707, and had no way to fix it — the wrong figure
+   * became a purchase order, and the job was priced on it. `suburb` was worse:
+   * hard-coded `null`, so the zone that sets the price was never carried at all.
+   *
+   * They also make the correction rate real. `whatChanged()` compares these
+   * against what was extracted, and with nothing editable it could only ever
+   * report "no corrections" — which is now the only accuracy signal there is,
+   * the confidence scores having gone.
+   */
+  const [areaM2, setAreaM2] = useState(
+    extraction.extractedAreaM2 === null ? '' : String(extraction.extractedAreaM2),
+  );
+  const [bagAllowance, setBagAllowance] = useState(
+    extraction.extractedBagAllowance === null ? '' : String(extraction.extractedBagAllowance),
+  );
+  const [lotNumber, setLotNumber] = useState(extraction.extractedLotNumber ?? '');
+  const [addressLine, setAddressLine] = useState(extraction.extractedSiteAddress ?? '');
+  const [suburb, setSuburb] = useState('');
+  const [supervisorName, setSupervisorName] = useState(
+    extraction.extractedSupervisorName ?? '',
+  );
+  const [supervisorMobile, setSupervisorMobile] = useState(
+    extraction.extractedSupervisorMobile ?? '',
+  );
+  const [amount, setAmount] = useState(extraction.amountExGst ?? '');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState('');
@@ -216,6 +247,21 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
       next.poNumber = 'That is longer than any PO number we have seen. Check for a pasted line.';
     }
     if (!accountId) next.accountId = 'Choose the account this purchase order belongs to.';
+
+    /*
+     * Checked here so the reviewer is told at the field rather than by a toast.
+     * The API enforces all of it again — see `PoConfirmationSchema`.
+     */
+    if (areaM2.trim() !== '' && !(Number(areaM2) >= 0 && Number(areaM2) <= 100_000)) {
+      next.areaM2 = 'Enter the square metres as a plain number, or leave it blank.';
+    }
+    if (bagAllowance.trim() !== '' && !Number.isInteger(Number(bagAllowance))) {
+      next.bagAllowance = 'Whole bags only, or leave it blank.';
+    }
+    if (amount.trim() !== '' && !/^\d+(\.\d{1,2})?$/.test(amount.trim())) {
+      next.amount =
+        'Enter the value as it appears, like "1250.00". A purchase order cannot be negative.';
+    }
     /*
      * The job is optional, deliberately.
      *
@@ -235,16 +281,17 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
           poNumber: poNumber.trim(),
           accountId,
           jobId: jobId || null,
-          // The spec as extracted. Sent back even unchanged: the correction rate
-          // is the accuracy metric, and it needs the accepted values too.
-          expectedAreaM2: extraction.extractedAreaM2,
-          bagAllowance: extraction.extractedBagAllowance,
-          lotNumber: extraction.extractedLotNumber,
-          addressLine: extraction.extractedSiteAddress,
-          suburb: null,
-          siteSupervisorName: extraction.extractedSupervisorName,
-          siteSupervisorMobile: extraction.extractedSupervisorMobile,
-          amountExGst: extraction.amountExGst,
+          // The spec as the reviewer left it. Sent back even where unchanged:
+          // the correction rate is the accuracy metric, and it needs the values
+          // that were accepted as well as the ones that were fixed.
+          expectedAreaM2: areaM2.trim() === '' ? null : Number(areaM2),
+          bagAllowance: bagAllowance.trim() === '' ? null : Number(bagAllowance),
+          lotNumber: lotNumber.trim() || null,
+          addressLine: addressLine.trim() || null,
+          suburb: suburb.trim() || null,
+          siteSupervisorName: supervisorName.trim() || null,
+          siteSupervisorMobile: supervisorMobile.trim() || null,
+          amountExGst: amount.trim() || null,
         },
       });
       toast.success(
@@ -277,7 +324,6 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
     }
   };
 
-  const shakyFields = extraction.fields.filter((field) => bandOf(field.confidence) !== 'high');
 
   return (
     <div className="space-y-6">
@@ -296,7 +342,6 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
               {PO_REVIEW_STATE_LABELS[extraction.state]}
             </Badge>
             <Badge variant="outline">{PO_REVIEW_REASON_LABELS[extraction.reason]}</Badge>
-            <ConfidenceBadge confidence={extraction.overallConfidence} />
             {!decided && <AgeBadge since={extraction.receivedAt} warnDays={2} alarmDays={5} />}
           </span>
         }
@@ -332,13 +377,10 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
         </Alert>
       )}
 
-      {!decided && shakyFields.length > 0 && (
-        <Alert
-          variant="warning"
-          title={`${shakyFields.length} field${shakyFields.length === 1 ? '' : 's'} worth checking`}
-        >
-          {shakyFields.map((field) => field.label).join(', ')} came back below 85% confidence. The
-          rest matched cleanly — check these against the document and correct them in place.
+      {!decided && (
+        <Alert variant="info" title="Check every figure against the document">
+          Nothing here is confirmed until you say so. Read the order beside these fields and
+          correct anything that does not match — what you change is what gets saved.
         </Alert>
       )}
 
@@ -367,46 +409,163 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
         </Card>
 
         <div className="space-y-6">
+          {/*
+            ── The figures, editable ─────────────────────────────────────────
+            This was a read-only list with a confidence percentage beside each
+            row. Both halves were wrong. The percentage reported the model’s
+            opinion of itself, which invited confirming a high-scoring order
+            without opening the document; and being read-only meant a reviewer
+            who DID open it, and saw the area was wrong, could do nothing about
+            it. The wrong figure became a purchase order, and the job was priced
+            on it.
+
+            So the values are inputs, pre-filled with what was read. Blank is a
+            real answer everywhere here — Matt, 31:04, on the Wisdom orders:
+            *"we’re on a fixed price with them. So they don’t actually give us
+            square metres."* Forcing a number would invent one.
+          */}
           <Card>
             <CardHeader>
               <CardTitle className="text-base">What was read from it</CardTitle>
               <p className="text-xs text-muted-foreground">
-                Per-field confidence, so you check two fields instead of re-reading eight.
+                Pre-filled from the document. Correct anything that does not match it.
               </p>
             </CardHeader>
-            <CardContent className="p-0">
-              <ul className="divide-y divide-border">
-                {extraction.fields.map((field) => {
-                  const band = bandOf(field.confidence);
-                  return (
-                    <li
-                      key={field.key}
-                      className="flex flex-wrap items-center justify-between gap-2 px-6 py-2.5"
-                    >
-                      <span className="min-w-0">
-                        <span className="block text-xs text-muted-foreground">{field.label}</span>
-                        <span className="block truncate text-sm font-medium">
-                          {field.value ?? <span className="text-destructive">not legible</span>}
-                        </span>
-                      </span>
-                      <span
-                        className={
-                          band === 'high'
-                            ? 'text-xs text-muted-foreground tabular-nums'
-                            : band === 'medium'
-                              ? 'text-xs font-medium text-warning tabular-nums'
-                              : 'text-xs font-medium text-destructive tabular-nums'
-                        }
-                      >
-                        {percent(field.confidence)}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
+            <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field
+                id="po-area"
+                label="Plasterboard area (m²)"
+                error={errors.areaM2}
+                hint="Blank where the order is a fixed price and carries no area."
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={areaM2}
+                    disabled={decided}
+                    inputMode="decimal"
+                    onChange={(event) => {
+                      setAreaM2(event.target.value);
+                      setErrors(({ areaM2: _drop, ...rest }) => rest);
+                    }}
+                  />
+                )}
+              </Field>
+
+              <Field id="po-bags" label="Bag allowance" error={errors.bagAllowance}>
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={bagAllowance}
+                    disabled={decided}
+                    inputMode="numeric"
+                    onChange={(event) => {
+                      setBagAllowance(event.target.value);
+                      setErrors(({ bagAllowance: _drop, ...rest }) => rest);
+                    }}
+                  />
+                )}
+              </Field>
+
+              <Field id="po-lot" label="Lot number">
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={lotNumber}
+                    disabled={decided}
+                    onChange={(event) => {
+                      setLotNumber(event.target.value);
+                    }}
+                  />
+                )}
+              </Field>
+
+              <Field
+                id="po-suburb"
+                label="Suburb"
+                hint="Sets the zone, and the zone is the price."
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={suburb}
+                    disabled={decided}
+                    placeholder="Medowie"
+                    onChange={(event) => {
+                      setSuburb(event.target.value);
+                    }}
+                  />
+                )}
+              </Field>
+
+              <Field id="po-address" label="Site address" className="sm:col-span-2">
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={addressLine}
+                    disabled={decided}
+                    onChange={(event) => {
+                      setAddressLine(event.target.value);
+                    }}
+                  />
+                )}
+              </Field>
+
+              <Field id="po-supervisor" label="Site supervisor">
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={supervisorName}
+                    disabled={decided}
+                    onChange={(event) => {
+                      setSupervisorName(event.target.value);
+                    }}
+                  />
+                )}
+              </Field>
+
+              <Field
+                id="po-supervisor-mobile"
+                label="Supervisor mobile"
+                hint="They are given a portal login from this number."
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={supervisorMobile}
+                    disabled={decided}
+                    type="tel"
+                    inputMode="tel"
+                    onChange={(event) => {
+                      setSupervisorMobile(event.target.value);
+                    }}
+                  />
+                )}
+              </Field>
+
+              <Field
+                id="po-amount"
+                label="Order value (ex GST)"
+                error={errors.amount}
+                className="sm:col-span-2"
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    value={amount}
+                    disabled={decided}
+                    inputMode="decimal"
+                    className="font-mono"
+                    placeholder="1250.00"
+                    onChange={(event) => {
+                      setAmount(event.target.value);
+                      setErrors(({ amount: _drop, ...rest }) => rest);
+                    }}
+                  />
+                )}
+              </Field>
             </CardContent>
           </Card>
-
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Attach it</CardTitle>
@@ -443,7 +602,7 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
                 label="Account"
                 required
                 error={errors.accountId}
-                hint="Ranked by how well the sender and the document matched."
+                hint="Best matches first. Any account can be chosen — the sender is often new."
               >
                 {(control) => (
                   <Select
@@ -456,19 +615,58 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
                     }}
                   >
                     <option value="">Choose an account…</option>
-                    {extraction.accountCandidates.map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {candidate.label} — {candidate.detail} ({percent(candidate.confidence)})
-                      </option>
-                    ))}
+                    {/*
+                      Best matches first, then EVERY other account.
+
+                      ⚠️ This list used to be the candidates alone. When the
+                      extractor matched nothing — which is `no-account-match`, one
+                      of the reasons that puts an order in this queue in the first
+                      place — the list held only the placeholder, and the field is
+                      required. The reviewer could not confirm the order at all.
+                      Their only way out was Reject, which files a genuine purchase
+                      order as "not a purchase order" because it came from an
+                      address nobody had seen before.
+                    */}
+                    {extraction.accountCandidates.length > 0 && (
+                      <optgroup label="Best match">
+                        {extraction.accountCandidates.map((candidate) => (
+                          <option key={candidate.id} value={candidate.id}>
+                            {candidate.label} — {candidate.detail}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    <optgroup label="All accounts">
+                      {(accounts.data ?? [])
+                        .filter(
+                          (option) =>
+                            !extraction.accountCandidates.some(
+                              (candidate) => candidate.id === option.value,
+                            ),
+                        )
+                        .map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                    </optgroup>
                   </Select>
                 )}
               </Field>
 
+              {/*
+                NOT required, and it used to say it was.
+
+                The validation above deliberately does not check this field, and
+                explains why: a builder’s order lands three to four months before
+                the work, so there is usually no job to attach it to yet. The
+                control still rendered a red asterisk and “(required)”, which is
+                the exact pressure that comment warns about — a reviewer picking
+                a wrong job to get past the form. The label now matches the rule.
+              */}
               <Field
                 id="po-review-job"
                 label="Job"
-                required
                 error={errors.jobId}
                 hint="Open jobs on that account. Attaching releases anything waiting on this PO."
               >
@@ -504,10 +702,6 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
                 columns={2}
                 items={[
                   { label: 'Amount on document', value: formatMoney(extraction.amountExGst) },
-                  {
-                    label: 'Overall confidence',
-                    value: <ConfidenceBadge confidence={extraction.overallConfidence} />,
-                  },
                 ]}
               />
             </CardContent>

@@ -112,6 +112,28 @@ const jobSchema = new Schema(
     latitude: { type: Number, required: true, min: -90, max: 90 },
     longitude: { type: Number, required: true, min: -180, max: 180 },
 
+    /**
+     * Where the pin above came from (I3).
+     *
+     * ── Why the provenance is stored and not inferred ─────────────────────
+     * A latitude is a latitude: nothing about the number says whether it is the
+     * house or the middle of the suburb, and the two are kilometres apart. The
+     * run optimiser must not order stops that are all pinned to suburb centres
+     * — it would return a confident ordering of points nobody is driving to —
+     * and this is the only field that can tell it.
+     *
+     * `suburb` is the honest default and what every job booked before the
+     * geocoder existed carries. Jobs are never back-filled in place: a job's
+     * address is frozen at booking on purpose (see the note at the top of this
+     * model), so a backfill is a deliberate, separate act.
+     */
+    locationSource: {
+      type: String,
+      required: true,
+      enum: ['suburb', 'geocoded'],
+      default: 'suburb',
+    },
+
     /* ── Getting a truck in ──────────────────────────────────────────── */
     accessNotes: { type: String, required: false, default: '', trim: true },
     gateHours: { type: String, default: null, trim: true },
@@ -446,7 +468,25 @@ const jobChargeSchema = new Schema(
     raisedBy: { type: String, default: null, trim: true },
     raisedAt: { type: Date, required: true, default: Date.now },
     photoCount: { type: Number, required: true, min: 0, default: 0 },
+    /**
+     * What the DRIVER said they saw. Never overwritten by the office.
+     *
+     * The approval path used to `$set` the office’s reason straight over this
+     * field, destroying the only first-hand account of the contamination the
+     * charge is for — and the customer disputes the charge, not the decision.
+     */
     note: { type: String, default: null, trim: true },
+    /**
+     * Who approved or rejected it, when, and why (M2.7).
+     *
+     * A charge becoming billable is a money decision, and until now it left no
+     * trace of who made it: `decideCharges` took a `decidedBy` argument and
+     * never wrote it anywhere. `decisionNote` is the office’s reason, kept
+     * apart from the driver’s note above so neither voice overwrites the other.
+     */
+    decidedBy: { type: String, default: null, trim: true },
+    decidedAt: { type: Date, default: null },
+    decisionNote: { type: String, default: null, trim: true },
   },
   { collection: JOB_CHARGES_COLLECTION, timestamps: true, versionKey: false },
 );

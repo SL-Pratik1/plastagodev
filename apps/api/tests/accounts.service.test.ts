@@ -2,6 +2,12 @@ import { AccountListItemSchema, AccountSchema } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountDraft, Role } from '@plastago/shared';
 import { createFakeAccountRepository } from './helpers/fake-accounts.js';
+import {
+  clearOutbound,
+  makeFakeNotificationRepository,
+  recordingProviders,
+  sentMessages,
+} from './helpers/fake-outbound.js';
 
 /**
  * Account rules (M2.8 · W8).
@@ -55,9 +61,21 @@ vi.mock('../src/domains/settings/settings.repository.js', () => ({
   },
 }));
 
-const { accountService, TERMS_VERSION } = await import(
-  '../src/domains/accounts/account.service.js'
-);
+/*
+ * The welcome email (M8.1).
+ *
+ * Creating an account sends one now — it always claimed to and never did — so
+ * the outbound log has to be faked here for the same reason it is in the leads
+ * suite: the real repository would buffer a write against a MongoDB that is not
+ * there, and the test would hang rather than fail.
+ */
+vi.mock('../src/domains/notifications/notification.repository.js', () => ({
+  notificationRepository: makeFakeNotificationRepository(),
+}));
+
+const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
+
+const { accountService } = await import('../src/domains/accounts/account.service.js');
 
 const OFFICE = { roles: ['operations'] as Role[], accountId: null };
 const CUSTOMER = { roles: ['customer-administrator'] as Role[], accountId: 'a'.repeat(24) };
@@ -85,12 +103,14 @@ function draft(overrides: Partial<AccountDraft> = {}): AccountDraft {
 beforeEach(() => {
   repo = createFakeAccountRepository();
   liveSupervisors = 0;
+  clearOutbound();
+  setMessagingProvidersForTests(recordingProviders());
 });
 
 describe('creating an account', () => {
   it('returns a row the contract accepts', async () => {
-    const created = await accountService.create(draft());
-    expect(() => AccountListItemSchema.parse(created)).not.toThrow();
+    const { account } = await accountService.create(draft());
+    expect(() => AccountListItemSchema.parse(account)).not.toThrow();
   });
 
   it('upper-cases the customer code, so cla001 and CLA001 cannot both exist', async () => {
@@ -112,6 +132,24 @@ describe('creating an account', () => {
     expect((error as { issues?: { path: string }[] }).issues?.[0]?.path).toBe('customerCode');
   });
 
+  /*
+   * Both screens propose "first three letters + 001", so every builder whose
+   * name starts the same way collides on the same code. A bare "that code is
+   * taken" asks the office to guess against a list only the server can see —
+   * the conversion wizard has always offered a free one, and this screen did
+   * not.
+   */
+  it('offers a free code when the one asked for is taken', async () => {
+    repo.seedCode('DUP001');
+
+    const error = await accountService
+      .create(draft({ customerCode: 'DUP001' }))
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+    expect((error as { issues?: { message: string }[] }).issues?.[0]?.message).toContain('DUP002');
+  });
+
   it('rejects an email with nobody attached to it', async () => {
     const error = await accountService
       .create(draft({ accountsContactName: '', accountsContactEmail: 'nobody@acme.com.au' }))
@@ -127,19 +165,60 @@ describe('creating an account', () => {
   });
 
   /*
-   * Matt, 6:36 — the large builders never see the self-serve flow, and their
-   * terms live in a contract signed long before this screen existed. Leaving
-   * those accounts "awaiting terms" forever would make the flag meaningless for
-   * the accounts where it does matter.
+   * The two terms tests that stood here — "records terms as agreed off-system
+   * when no invitation is sent" and its opposite — went with the terms feature.
+   * They were also the LAST difference between this path and a lead conversion;
+   * `account-creation.parity.test.ts` now asserts the two are identical.
    */
-  it('records terms as agreed off-system when no invitation is sent', async () => {
-    await accountService.create(draft({ sendInvitation: false }));
-    expect(repo.lastCreate?.termsAgreedOffSystem).toEqual({ termsVersion: TERMS_VERSION });
+});
+
+/*
+ * ── The invitation ───────────────────────────────────────────────────────
+ *
+ * This screen accepted `sendInvitation`, showed a toast reading "an onboarding
+ * link is on its way to their accounts contact", and sent nothing: the only
+ * welcome email in the platform was the one the lead conversion sent. The
+ * customer waited for a message that was never queued, and nobody in the office
+ * had any reason to look.
+ */
+describe('the welcome email', () => {
+  it('emails the accounts contact when an invitation is asked for', async () => {
+    const { welcome } = await accountService.create(draft({ sendInvitation: true }));
+
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]?.channel).toBe('email');
+    expect(welcome).toMatchObject({ outcome: 'sent', channel: 'email' });
   });
 
-  it('leaves terms outstanding when an invitation IS sent', async () => {
-    await accountService.create(draft({ sendInvitation: true }));
-    expect(repo.lastCreate?.termsAgreedOffSystem).toBeNull();
+  it('carries the customer code, which is what they quote back to us', async () => {
+    await accountService.create(draft({ customerCode: 'ACM001', sendInvitation: true }));
+    expect(sentMessages[0]?.body).toContain('ACM001');
+  });
+
+  it('sends nothing when no invitation was asked for', async () => {
+    const { welcome } = await accountService.create(draft({ sendInvitation: false }));
+
+    expect(sentMessages).toHaveLength(0);
+    expect(welcome).toBeNull();
+  });
+
+  /*
+   * ⚠️ Refused BEFORE the account exists, rather than reported afterwards as a
+   * skipped send. "Email them the onboarding link" with no address to email is
+   * a promise the screen cannot keep, and this is the last moment it is still
+   * cheap to fix.
+   */
+  it('refuses an invitation with nowhere to send it', async () => {
+    const error = await accountService
+      .create(draft({ accountsContactName: '', accountsContactEmail: '', sendInvitation: true }))
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ status: 422, code: 'VALIDATION_FAILED' });
+    expect((error as { issues?: { path: string }[] }).issues?.[0]?.path).toBe(
+      'accountsContactEmail',
+    );
+    expect(repo.lastCreate).toBeNull();
   });
 });
 
@@ -201,23 +280,10 @@ describe('scoping the list', () => {
   });
 
   /*
-   * ── Regression ────────────────────────────────────────────────────────
-   * The `onboarding` facet was accepted by the schema, passed through, and
-   * never applied — "show me who has not signed" silently returned everybody.
-   * Caught by QA against a real database, not by a unit test, because the
-   * service hands facets to the repository untouched.
-   *
-   * Pinned here so the facet cannot be dropped again on its way down: the
-   * repository's own handling is verified against Mongo, but this proves the
-   * service still passes it along.
+   * The `onboarding` facet regression test stood here. The facet filtered on
+   * whether an account had accepted the terms, which is no longer a state an
+   * account can be in.
    */
-  it('passes the onboarding facet through to the repository', async () => {
-    await accountService.list(
-      { page: 1, pageSize: 20, onboarding: 'awaiting-terms' },
-      OFFICE,
-    );
-    expect(repo.lastQuery?.onboarding).toBe('awaiting-terms');
-  });
 });
 
 describe('changing the account type (builder ↔ contractor)', () => {

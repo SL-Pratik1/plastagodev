@@ -1,14 +1,16 @@
 import { Badge, cn, useToast } from '@plastago/ui';
 import {
   ClipboardListIcon,
+  CloudOffIcon,
   LogOutIcon,
+  RefreshCwIcon,
   ScaleIcon,
   TriangleAlertIcon,
   type LucideIcon,
 } from 'lucide-react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { useAuth, useDriver } from '@/features/auth/auth-context';
-import { useOutboxSummary } from '@/offline/use-offline-state';
+import { useOnlineStatus, useOutboxSummary } from '@/offline/use-offline-state';
 
 /**
  * The driver shell.
@@ -42,6 +44,44 @@ const TABS: readonly Tab[] = [
   { to: '/report', label: 'Report', icon: TriangleAlertIcon },
 ];
 
+/**
+ * What the strip says, in the driver's terms.
+ *
+ * "Waiting to send" rather than "queued" or "pending sync": the question a
+ * driver is actually asking is whether the office knows yet. Nothing here
+ * blames the phone or the signal — being out of range is the normal condition
+ * this app was built for, not an error.
+ */
+function offlineMessage({
+  online,
+  pending,
+  failed,
+}: {
+  online: boolean;
+  pending: number;
+  failed: number;
+}): string {
+  const count = pending + failed;
+  const work = count === 1 ? '1 update' : `${String(count)} updates`;
+
+  if (failed > 0) {
+    // Split by connectivity, because the two cases ask different things of the
+    // driver. With no signal there is nothing to do but keep working; with signal,
+    // a queue that will not clear is something the office has to be told about.
+    return online
+      ? `${work} could not be sent. They are saved and still being retried — tell the office if this stays here.`
+      : `${work} could not be sent — they are saved, and will go through when you are back in range.`;
+  }
+
+  if (!online) {
+    return count > 0
+      ? `No signal — ${work} saved on this phone, and will send when you are back in range.`
+      : 'No signal. Keep working — everything is saved on this phone.';
+  }
+
+  return `Sending ${work} to the office…`;
+}
+
 export function DriverLayout() {
   const driver = useDriver();
   const location = useLocation();
@@ -49,6 +89,7 @@ export function DriverLayout() {
   const toast = useToast();
   const { signOut } = useAuth();
   const { pending, failed } = useOutboxSummary();
+  const online = useOnlineStatus();
 
   const leave = async () => {
     // Blocked, not warned. Photos, positions and timestamps taken on site cannot
@@ -92,6 +133,40 @@ export function DriverLayout() {
           <LogOutIcon aria-hidden className="size-5" />
         </button>
       </header>
+
+      {/*
+        ── Whether the office has actually heard any of this ──────────────────
+        The queue counts existed and nothing showed them: `useOutboxSummary` was
+        read only by the sign-out guard below, so a driver in a black spot
+        pressed "Start driving", watched the screen update, and had no way to
+        know it had gone no further than the phone. They found out when they
+        tried to sign out at the end of the day.
+
+        Silent on a good day — a strip that is always there is one nobody reads.
+        It appears only when there is something to say: no signal, work waiting,
+        or a send that failed.
+      */}
+      {(!online || pending > 0 || failed > 0) && (
+        <p
+          role="status"
+          aria-live="polite"
+          className={cn(
+            'flex shrink-0 items-center gap-2 px-4 py-2 text-xs font-medium',
+            failed > 0
+              ? 'bg-destructive/10 text-destructive'
+              : 'bg-secondary text-secondary-foreground',
+          )}
+        >
+          {failed > 0 ? (
+            <CloudOffIcon aria-hidden className="size-3.5 shrink-0" />
+          ) : online ? (
+            <RefreshCwIcon aria-hidden className="size-3.5 shrink-0" />
+          ) : (
+            <CloudOffIcon aria-hidden className="size-3.5 shrink-0" />
+          )}
+          <span>{offlineMessage({ online, pending, failed })}</span>
+        </p>
+      )}
 
       <main
         id="driver-main"

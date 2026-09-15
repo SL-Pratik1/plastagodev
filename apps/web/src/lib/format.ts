@@ -193,3 +193,24 @@ export function formatCount(value: number, singular: string, plural?: string): s
   const word = value === 1 ? singular : (plural ?? `${singular}s`);
   return `${value.toLocaleString('en-AU')} ${word}`;
 }
+
+/**
+ * An ABN as it is being typed: digits only, never more than eleven.
+ *
+ * ── Why the input is narrowed rather than just validated ──────────────────
+ * Every ABN box in the console accepted any characters of any length, so a
+ * twelve-digit number or one with a letter in it could only be caught after the
+ * fact — by a resolver on blur, or by the API on submit. A field that cannot
+ * hold an impossible value is better than a message explaining that it does.
+ *
+ * ⚠️ Stripping, NOT `maxLength`. An ABN is quoted with spaces on every invoice
+ * and letterhead ("24 118 552 901"), and maxLength truncates a paste to eleven
+ * CHARACTERS first — silently dropping the last three digits of exactly the
+ * value most people paste. This keeps the digits and discards the spacing.
+ *
+ * The ATO checksum stays where it belongs, in `AbnSchema`: this shapes the
+ * input, it does not decide whether the number is real.
+ */
+export function normaliseAbnInput(value: string): string {
+  return value.replace(/\D/g, '').slice(0, 11);
+}

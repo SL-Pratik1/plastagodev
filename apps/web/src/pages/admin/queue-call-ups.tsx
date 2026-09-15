@@ -19,6 +19,7 @@ import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
 import { useAwaitingCallUps, useCallUpOrder } from '@/features/queues/queries';
 import { describeError } from '@/lib/error-message';
+import { isServiceError } from '@/services/service-error';
 import { formatDateTime } from '@/lib/format';
 
 /**
@@ -100,6 +101,22 @@ export function AdminQueueCallUpsPage(): React.JSX.Element {
 
       setTarget(null);
     } catch (caught) {
+      /*
+       * ⚠️ Put the server’s own message on the field.
+       *
+       * Without this the catch fell through to a toast reading "Check the
+       * highlighted fields" — and nothing was highlighted, because the only
+       * field error this dialog ever set was its own empty-date check. A
+       * reviewer typing 2020 instead of 2026 pressed "Book it", got a toast
+       * pointing at highlights that did not exist, and never saw the sentence
+       * the API had already written for them: "Check the year. A job ready on
+       * 2020-01-01 would be overdue the moment it is saved."
+       */
+      if (isServiceError(caught) && caught.fieldErrors.readyDate) {
+        setDateError(caught.fieldErrors.readyDate);
+        return;
+      }
+
       const described = describeError(caught);
       toast.error(described.title, described.detail);
     }

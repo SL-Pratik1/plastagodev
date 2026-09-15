@@ -11,13 +11,12 @@ import {
 } from '@plastago/ui';
 import { ChevronDownIcon, LogOutIcon, PhoneIcon } from 'lucide-react';
 import { useState } from 'react';
-import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
 import { NotificationsMenu } from '@/components/notifications-menu';
 import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { visiblePortalNav } from '@/config/portal-navigation';
-import { useOnboardingInvite } from '@/features/portal/queries';
 import { SessionExpiry } from '@/features/auth/session-expiry';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
 import { usePortalScope } from '@/features/portal/queries';
@@ -58,22 +57,21 @@ export function PortalLayout() {
   const items = visiblePortalNav(can, scope.data?.accountType);
 
   /*
-   * Journey A.4 — an account with no accepted terms goes to the welcome screen.
+   * ── The terms gate: REMOVED ─────────────────────────────────────────────
    *
-   * Until the terms are accepted there is no director's guarantee on file, which
-   * is the only reason Matt's paper form exists (7:49). So the rest of the portal
-   * waits.
+   * An administrator whose account had not accepted the terms was redirected
+   * here to `/portal/welcome` and could reach no other screen until they did.
+   * Removed with the rest of the terms feature, on the client's instruction —
+   * see the note in `packages/shared/src/schemas/party.ts`.
    *
-   * Only for an administrator. A site supervisor cannot bind their employer and
-   * must not be presented with a page implying they can — they see the portal as
-   * normal and their administrator gets the prompt.
+   * ⚠️ It cost more than it earned. An account converted without an invitation
+   * was left needing terms with no email ever sent, so the first thing that
+   * customer met was a screen nobody had told them was coming, blocking the
+   * booking they had signed in to make.
+   *
+   * Their company details are still worth having, so the same screen is offered
+   * rather than imposed — see the prompt on the Account page.
    */
-  const isAdministrator = user.role === 'customer-administrator';
-  const onboarding = useOnboardingInvite({ enabled: isAdministrator });
-  const needsTerms =
-    isAdministrator &&
-    onboarding.data?.state === 'awaiting-terms' &&
-    !location.pathname.startsWith('/portal/welcome');
   const tabs = items.filter((item) => item.primary);
 
   const confirmSignOut = async () => {
@@ -91,8 +89,6 @@ export function PortalLayout() {
       setSigningOut(false);
     }
   };
-
-  if (needsTerms) return <Navigate to="/portal/welcome" replace />;
 
   return (
     <div className="flex min-h-dvh bg-canvas">

@@ -76,6 +76,15 @@ export interface DriverRunService {
    */
   /** Keyed by RUN — a driver tips off twice on a two-run day (Matt, 43:50). */
   previewTipOff: (runId: string, totalKg: number) => Promise<TipOffReconciliation>;
+  /**
+   * The weighbridge docket photo, stored against the RUN.
+   *
+   * Run-scoped rather than job-scoped because the docket evidences the whole
+   * load, and filing it against an arbitrary stop would misattribute the
+   * evidence the monthly tipping bill is audited against. Resolves to the
+   * storage key, which goes back as `docketPhotoId` on the tip-off.
+   */
+  uploadDocketPhoto: (runId: string, blob: Blob) => Promise<string>;
   recordTipOff: (input: TipOffEntry) => Promise<void>;
 
   // ── M4.9 · vehicle defects ─────────────────────────────────────────────

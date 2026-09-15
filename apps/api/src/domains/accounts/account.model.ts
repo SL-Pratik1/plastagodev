@@ -11,7 +11,6 @@ import { Schema, model } from 'mongoose';
 
 export const ACCOUNTS_COLLECTION = 'accounts';
 export const CONTACTS_COLLECTION = 'contacts';
-export const TERMS_ACCEPTANCES_COLLECTION = 'termsacceptances';
 
 /**
  * The account — the party that gets invoiced (M1.2).
@@ -112,17 +111,33 @@ const accountSchema = new Schema(
     approveNewSupervisors: { type: Boolean, required: true, default: false },
 
     /*
-     * ── The registered business details the CUSTOMER supplies (Journey A.4) ─
+     * ── The registered business details the CUSTOMER supplies ──────────────
      *
      * Separate from `name`, which is what the office typed at conversion. The
-     * customer is the authority on their own registered name and address, and
-     * these are the fields the paper account application collected — the form
-     * Matt chases a director's guarantee on today (7:49).
+     * customer is the authority on their own registered name and address.
+     *
+     * ⚠️ Also writable by the OFFICE now. These used to be set exclusively by
+     * the portal form, which meant a wrong suburb could not be corrected by the
+     * people who invoice from it — see `accountService.update`.
      */
     tradingName: { type: String, default: null, trim: true },
     addressLine: { type: String, default: null, trim: true },
     suburb: { type: String, default: null, trim: true },
     postcode: { type: String, default: null, trim: true },
+
+    /**
+     * When the customer last completed their own details, if ever.
+     *
+     * Replaces the derived onboarding state that the terms acceptance used to
+     * provide. A date rather than a flag: "have they filled this in?" and "is
+     * what they filled in still current?" are the same question a year later,
+     * and only a date answers both.
+     *
+     * ⚠️ Set by the PORTAL form only. An office correction does not stamp it —
+     * the office typing an address is not the customer confirming one, and
+     * conflating the two would make the date claim something it cannot.
+     */
+    detailsCompletedAt: { type: Date, default: null },
     notes: { type: String, default: '', trim: true },
   },
   { collection: ACCOUNTS_COLLECTION, timestamps: true, versionKey: false },
@@ -188,50 +203,21 @@ contactSchema.index({ accountId: 1, role: 1 }, { name: 'account_role' });
 
 export const ContactModel = model('Contact', contactSchema);
 
-/**
- * The signed terms — Journey A.4, and the record Matt chases on paper today.
+/*
+ * ── The terms acceptance collection: REMOVED ──────────────────────────────
  *
- * ── Why its own collection, and why append-only ───────────────────────────
- * Matt, 7:49: *"some customers require them to give a **director's
- * guarantee**… it's more of a legal precedent that they have to sign off on."*
+ * `TermsAcceptanceModel` used to live here — one append-only row per account
+ * recording who accepted the terms, their role, when, and the wording version.
+ * The account's onboarding state was derived from whether a row existed, and
+ * the portal refused a customer administrator every screen until one did.
  *
- * That makes this evidence, not a field. It is written once and never updated:
- * a guarantee that can be silently edited is not evidence of anything. Storing
- * it separately also means the account document carries no legal state that
- * could be overwritten by an unrelated save.
+ * Removed on the client's instruction; see the note in
+ * `packages/shared/src/schemas/party.ts` for the reasoning and for what was
+ * kept. Whether the customer has filled in their own details is now
+ * `detailsCompletedAt` on the account itself, which carries no legal meaning.
  *
- * The account's `onboardingState` is DERIVED from whether a row exists here.
- * There is deliberately no second flag that could disagree with the record it
- * describes.
+ * ⚠️ The `termsacceptances` COLLECTION is deliberately not dropped. Rows a real
+ * customer signed are their signature, and a code change is not the place to
+ * destroy them — nothing reads the collection any more, and it can be dropped
+ * by hand once the client confirms they want it gone.
  */
-const termsAcceptanceSchema = new Schema(
-  {
-    /** REFERENCE → `accounts._id`. */
-    accountId: { type: Schema.Types.ObjectId, required: true, ref: 'Account' },
-    acceptedAt: { type: Date, required: true },
-
-    /**
-     * Typed by the person accepting, not taken from the session.
-     *
-     * A guarantee is given by a named individual, and whoever is signed in may
-     * be an accounts clerk acting for a director.
-     */
-    acceptedByName: { type: String, required: true, trim: true },
-    acceptedByRole: { type: String, required: true, trim: true },
-
-    /** The wording accepted, so a later change to the terms is provable. */
-    termsVersion: { type: String, required: true, trim: true },
-  },
-  { collection: TERMS_ACCEPTANCES_COLLECTION, timestamps: true, versionKey: false },
-);
-
-/**
- * One acceptance per account.
- *
- * Unique rather than a plain index: accepting twice is not an error, but it
- * must not create a second row — the date and the person on the first one are
- * the evidence, and a duplicate makes "when did they sign?" ambiguous.
- */
-termsAcceptanceSchema.index({ accountId: 1 }, { unique: true, name: 'account_unique' });
-
-export const TermsAcceptanceModel = model('TermsAcceptance', termsAcceptanceSchema);

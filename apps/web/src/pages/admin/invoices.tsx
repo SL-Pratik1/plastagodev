@@ -29,6 +29,7 @@ import {
   useRequestInvoicePdf,
   useSendInvoices,
 } from '@/features/invoices/queries';
+import { useInvoiceDownloads } from '@/features/invoices/use-invoice-downloads';
 import { useAccountOptions } from '@/features/lookups/queries';
 import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
@@ -192,6 +193,7 @@ export function AdminInvoicesPage() {
   const sendInvoices = useSendInvoices();
   const approveInvoices = useApproveInvoices();
   const requestPdf = useRequestInvoicePdf();
+  const downloads = useInvoiceDownloads();
 
   const filters: readonly FilterDefinition[] = [
     ...STATIC_FILTERS,
@@ -223,12 +225,28 @@ export function AdminInvoicesPage() {
   };
 
   const downloadPdfs = async () => {
+    // Reserved before the await — see `useInvoiceDownloads`.
+    const deliver = downloads.begin();
+
     try {
-      await requestPdf.mutateAsync(selected);
-      toast.success(
-        `${String(selected.length)} PDF${selected.length === 1 ? '' : 's'} queued`,
-        'Rendered server-side; they will appear in your downloads shortly.',
-      );
+      const summary = deliver(await requestPdf.mutateAsync(selected));
+
+      if (summary.delivered === 0) {
+        toast.error(
+          'None of those invoices could be rendered',
+          'Check that their brands have invoice templates in Settings.',
+        );
+      } else if (summary.failed > 0) {
+        /*
+         * Said plainly rather than rounded up to a success. A partial render is
+         * the case where somebody walks away believing they have forty invoices
+         * and has thirty-nine.
+         */
+        toast.error(
+          `${String(summary.failed)} of ${String(summary.failed + summary.delivered)} could not be rendered`,
+          'The rest are ready. The others need an invoice template for their brand.',
+        );
+      }
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);
@@ -355,6 +373,8 @@ export function AdminInvoicesPage() {
         confirmLabel={confirm === 'send' ? 'Send invoices' : 'Approve invoices'}
         pending={busy}
       />
+
+      {downloads.dialog}
     </div>
   );
 }

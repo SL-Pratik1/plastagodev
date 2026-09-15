@@ -25,7 +25,12 @@ import {
 import { MailIcon, PhoneIcon, SaveIcon } from 'lucide-react';
 import { useState } from 'react';
 import { DetailList } from '@/components/detail-list';
-import { usePortalAccount, usePortalUpdateAccount } from '@/features/portal/queries';
+import { Link } from 'react-router';
+import {
+  useOnboardingInvite,
+  usePortalAccount,
+  usePortalUpdateAccount,
+} from '@/features/portal/queries';
 import { describeError } from '@/lib/error-message';
 import { formatMobile } from '@/lib/format';
 
@@ -82,6 +87,7 @@ export function PortalAccountPage() {
 }
 
 function AccountSettings({ account }: { account: PortalAccount }) {
+  const onboarding = useOnboardingInvite();
   const toast = useToast();
   const update = usePortalUpdateAccount();
 
@@ -136,6 +142,30 @@ function AccountSettings({ account }: { account: PortalAccount }) {
     }
   };
 
+  const detailsPrompt = onboarding.data ? (
+    onboarding.data.completedAt === null ? (
+      <Alert variant="info" title="We are missing your company details">
+        <p>
+          Your registered address, ABN and the mailbox your recycling certificates should go to.
+          They take a minute, and they appear on your invoices.
+        </p>
+        <Link
+          to="/portal/welcome"
+          className="mt-2 inline-block text-sm font-medium underline underline-offset-4"
+        >
+          Fill them in
+        </Link>
+      </Alert>
+    ) : (
+      <p className="text-sm text-muted-foreground">
+        <Link to="/portal/welcome" className="font-medium underline underline-offset-4">
+          Your company details
+        </Link>{' '}
+        — registered address, ABN and where certificates go.
+      </p>
+    )
+  ) : null;
+
   return (
     <div className="space-y-5">
       <header>
@@ -144,6 +174,21 @@ function AccountSettings({ account }: { account: PortalAccount }) {
           Who we contact, when we prefer to collect, and how new supervisors get access.
         </p>
       </header>
+
+      {/*
+        The company details, offered rather than imposed.
+
+        ⚠️ This prompt is the ONLY route to that screen now. It used to be
+        reached by force — an administrator whose account had not accepted the
+        terms was redirected there and could open nothing else — and removing
+        that gate (see `portal-layout.tsx`) left the page with no way in at all.
+        A screen nothing links to is a screen that does not exist.
+
+        Worded differently depending on whether they have ever filled it in: a
+        customer who completed it a year ago needs "check this is still right",
+        not "we are missing your details".
+      */}
+      {detailsPrompt}
 
       <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-3">
         <div className="space-y-5 lg:col-span-2">

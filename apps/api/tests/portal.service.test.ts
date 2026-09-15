@@ -119,6 +119,19 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
   accountRepository: { findById: () => Promise.resolve({ ...ACCOUNT }) },
 }));
 
+/*
+ * `requestChange` and `setUrgency` now tell the office — the whole point of
+ * both, and neither did before. Stubbed here so the unit tests do not reach
+ * the notification repository; the notifications themselves are covered
+ * against the running API.
+ */
+vi.mock('../src/domains/notifications/notification.service.js', () => ({
+  notificationService: {
+    notifyOffice: vi.fn(async () => undefined),
+    notifyAccount: vi.fn(async () => undefined),
+  },
+}));
+
 vi.mock('../src/domains/settings/settings.repository.js', () => ({
   settingsRepository: {
     get: () =>
@@ -362,6 +375,61 @@ describe('booking (M5.1)', () => {
     ).rejects.toMatchObject({ status: 422 });
 
     expect(certified).toHaveLength(0);
+  });
+});
+
+/**
+ * A ready date the customer cannot have meant.
+ *
+ * The office paths have refused these since `assertPlausibleReadyDate` was
+ * written; the portal did not call it, so a customer could book — or edit — a
+ * pickup ready in 2020 or 2099 and the API took both. `targetDate` is derived
+ * from this date, so the SLA clock inherited the mistyped year: the job either
+ * sat permanently at the top of every at-risk list, or below the fold forever.
+ */
+describe('a ready date that cannot be meant (M5.1, M5.4)', () => {
+  it('refuses a booking dated years in the past', async () => {
+    await expect(
+      portalService.book({ ...draft(), readyDate: '2020-01-01' }, SUPERVISOR),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('refuses a booking dated decades ahead', async () => {
+    await expect(
+      portalService.book({ ...draft(), readyDate: '2099-12-31' }, SUPERVISOR),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('names the field, so the form can point at the control', async () => {
+    await expect(
+      portalService.book({ ...draft(), readyDate: '2099-12-31' }, SUPERVISOR),
+    ).rejects.toMatchObject({ issues: [{ path: 'readyDate' }] });
+  });
+
+  it('refuses the same date on an edit, which moves the SLA clock too', async () => {
+    await expect(
+      portalService.editJob(
+        'job1',
+        {
+          readyDate: '2020-01-01',
+          expectedAreaM2: 900,
+          bagCount: 2,
+          serviceLevel: 'standard',
+          poNumber: 'PO-88213',
+          notes: '',
+        },
+        ADMIN,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  /* Back-dating inside the window stays allowed — see `isPlausibleReadyDate`. */
+  it('still allows a date a few days back, which is ordinary', async () => {
+    const recent = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+
+    await expect(
+      portalService.book({ ...draft(), readyDate: recent }, SUPERVISOR),
+    ).resolves.toBeDefined();
   });
 });
 

@@ -177,13 +177,28 @@ export const reportRepository = {
     return rows.map((row) => ({ month: row._id, jobs: row.jobs, areaM2: row.areaM2 }));
   },
 
-  /** M9.3 — the Sydney / Wollongong / Newcastle split. */
+  /**
+   * M9.3 — the Sydney / Wollongong / Newcastle split.
+   *
+   * ── Revenue comes from the CHARGES, not from `job.totalExGst` ─────────────
+   * ⚠️ This used to `$sum: '$totalExGst'`, which is the quote frozen on the job
+   * when it was booked. Every charge raised afterwards — contamination, extra
+   * bags, extra load time, the futile fee, anything the office added — lives in
+   * `jobcharges` and never reaches that field, so the zone tab under-reported
+   * revenue against the volume and financial tabs on the same screen. On this
+   * dataset it was $3,933 short over ten weeks, while jobs and m² matched
+   * exactly, which is the worst shape for a reconciliation error: everything
+   * looks right except the money.
+   *
+   * `financial` already reads the charge rows for exactly this reason. Same
+   * source here, same answer, and the three tabs now agree.
+   */
   async byZone(filters: ReportFilters): Promise<ZoneAggregate[]> {
     const rows = await JobModel.aggregate<{
       _id: Zone;
       jobs: number;
       areaM2: number;
-      revenue: mongoose.Types.Decimal128;
+      jobIds: mongoose.Types.ObjectId[];
     }>([
       { $match: matchStage(filters) },
       {
@@ -191,18 +206,30 @@ export const reportRepository = {
           _id: '$zone',
           jobs: { $sum: 1 },
           areaM2: { $sum: { $ifNull: ['$expectedAreaM2', 0] } },
-          revenue: { $sum: '$totalExGst' },
+          jobIds: { $push: '$_id' },
         },
       },
       { $sort: { _id: 1 } },
     ]);
 
-    return rows.map((row) => ({
-      zone: row._id,
-      jobs: row.jobs,
-      areaM2: row.areaM2,
-      revenueCents: decimalToCents(row.revenue),
-    }));
+    // One read for every job in the report, then bucketed — not a lookup per
+    // zone. Same approach as `financial`.
+    const chargesByJob = await chargesByJobId(rows.flatMap((row) => row.jobIds));
+
+    return rows.map((row) => {
+      let revenueCents = 0;
+      for (const jobId of row.jobIds) {
+        const split = chargesByJob.get(jobId.toHexString());
+        revenueCents += (split?.base ?? 0) + (split?.additional ?? 0);
+      }
+
+      return {
+        zone: row._id,
+        jobs: row.jobs,
+        areaM2: row.areaM2,
+        revenueCents,
+      };
+    });
   },
 
   /**
@@ -265,7 +292,12 @@ export const reportRepository = {
   /* ── M9.5 · certificates ───────────────────────────────────────────────── */
 
   async listCertificates(
-    query: { page: number; pageSize: number; state?: string | undefined },
+    query: {
+      page: number;
+      pageSize: number;
+      state?: string | undefined;
+      q?: string | undefined;
+    },
     accountId: string | null,
   ): Promise<{ data: Certificate[]; meta: PageMeta }> {
     const filter: Record<string, unknown> = {};
@@ -273,6 +305,17 @@ export const reportRepository = {
     // Non-null scopes a customer to their own. The office passes null.
     if (accountId) filter.accountId = new mongoose.Types.ObjectId(accountId);
     if (query.state) filter.state = query.state;
+
+    /*
+     * ⚠️ The screen has always had a search box and nothing read the term.
+     *
+     * A certificate is looked up by its reference — that is the string quoted
+     * in a GBCA submission — or by the site it covers.
+     */
+    if (query.q) {
+      const like = { $regex: escapeRegex(query.q), $options: 'i' };
+      filter.$or = [{ reference: like }, { siteName: like }];
+    }
 
     const [rows, total] = await Promise.all([
       CertificateModel.find(filter)
@@ -573,4 +616,10 @@ function decimalToCents(value: mongoose.Types.Decimal128 | number | null | undef
   const cents = Number(whole) * 100 + Number(fraction.padEnd(2, '0').slice(0, 2));
 
   return negative ? -cents : cents;
+}
+
+/** Local, as in the sibling repositories — an unescaped `(` from the search
+ *  box would otherwise reach Mongo as an invalid expression. */
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

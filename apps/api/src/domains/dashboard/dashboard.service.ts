@@ -140,7 +140,7 @@ async function queueSummaries(): Promise<QueueSummary[]> {
       // The fee is per job and the same on each; a queue total would imply a
       // single invoice that does not exist.
       valueExGst: null,
-      href: '/queues/futile',
+      href: '/admin/queues/futile',
     },
     {
       key: 'service-approvals',
@@ -149,7 +149,7 @@ async function queueSummaries(): Promise<QueueSummary[]> {
       oldestAt: approvals.data[0]?.raisedAt ?? null,
       // Money genuinely sitting unapproved — the argument for opening it.
       valueExGst: sumMoney(approvals.data.map((charge) => charge.amountExGst)),
-      href: '/queues/approvals',
+      href: '/admin/queues/approvals',
     },
     {
       key: 'awaiting-po',
@@ -157,7 +157,7 @@ async function queueSummaries(): Promise<QueueSummary[]> {
       count: counts.awaitingPo,
       oldestAt: awaitingPo.data[0]?.approvedAt ?? null,
       valueExGst: sumMoney(awaitingPo.data.map((invoice) => invoice.totalExGst)),
-      href: '/queues/awaiting-po',
+      href: '/admin/queues/awaiting-po',
     },
     {
       key: 'po-review',
@@ -167,7 +167,7 @@ async function queueSummaries(): Promise<QueueSummary[]> {
       // An extraction is a proposal, not money — nothing is owed until a human
       // confirms it into a purchase order.
       valueExGst: null,
-      href: '/queues/po-review',
+      href: '/admin/queues/po-review',
     },
   ];
 }

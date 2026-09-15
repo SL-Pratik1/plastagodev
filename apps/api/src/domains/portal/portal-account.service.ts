@@ -10,15 +10,17 @@ import type {
   PortalSupervisorInvite,
   Role,
 } from '@plastago/shared';
-import { hasSiteSupervisors } from '@plastago/shared';
+import type { InvoiceDownloads } from '@plastago/shared';
+import { hasSiteSupervisors, isAustralianMobile, looksLikeEmail } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { accountRepository } from '../accounts/account.repository.js';
-import { TERMS_VERSION } from '../accounts/account.service.js';
 import { reportRepository } from '../reports/report.repository.js';
 import { reportService } from '../reports/report.service.js';
+import { invoiceService } from '../invoices/invoice.service.js';
 import { listInvoices, ownedInvoiceIds } from './portal.repository.js';
 import { portalAccountRepository, supervisorRepository } from './supervisor.repository.js';
+import { supervisorProvisioning } from './supervisor-provisioning.service.js';
 
 const log = logger.child({ module: 'portal-account' });
 
@@ -54,15 +56,30 @@ export const portalAccountService = {
    * than a filtered list, so nothing leaks through a count or a total.
    */
   async invoices(
-    query: { page: number; pageSize: number; status?: string | undefined },
+    query: { page: number; pageSize: number; status?: string | undefined; q?: string | undefined },
     caller: Caller,
   ): Promise<{ data: PortalInvoice[]; meta: PageMeta }> {
     const accountId = assertAdministrator(caller);
     return listInvoices(accountId, query);
   },
 
-  /** M5.10 — queue PDFs for invoices this account actually owns. */
-  async requestInvoicePdf(ids: readonly string[], caller: Caller): Promise<{ queued: number }> {
+  /**
+   * M5.10 — the customer's own invoices, as files they can open.
+   *
+   * ── Why this delegates rather than rendering here ─────────────────────────
+   * ⚠️ This method used to write a log line and return a count. Nothing was
+   * rendered and no link came back, so the portal's "Download PDFs" button was
+   * a no-op a customer could press all day. Rendering is `invoiceService`'s job
+   * and it now hands back links, so the fix is to actually call it.
+   *
+   * ── The two gates, and why both are needed ────────────────────────────────
+   * `ownedInvoiceIds` first, because it filters to the statuses a customer may
+   * SEE — a draft of their own invoice is still not theirs to read. The invoice
+   * service then applies its own account scope on top. Delegating without the
+   * first gate would let an administrator who knew an id render a draft that
+   * the portal list deliberately withholds.
+   */
+  async requestInvoicePdf(ids: readonly string[], caller: Caller): Promise<InvoiceDownloads> {
     const accountId = assertAdministrator(caller);
 
     if (ids.length === 0) throw AppError.validation('Select at least one invoice');
@@ -72,11 +89,13 @@ export const portalAccountService = {
     const owned = await ownedInvoiceIds(accountId, ids);
     if (owned.length === 0) throw AppError.notFound('None of those invoices could be found');
 
+    const result = await invoiceService.requestPdf(owned, caller);
+
     log.info(
-      { count: owned.length, accountId, by: caller.name },
-      'customer requested invoice PDFs',
+      { count: result.downloads.length, of: owned.length, accountId, by: caller.name },
+      'customer downloaded invoice PDFs',
     );
-    return { queued: owned.length };
+    return result;
   },
 
   /* ── M5.14 · site supervisors ──────────────────────────────────────────── */
@@ -97,10 +116,7 @@ export const portalAccountService = {
    * Gmail address or have no work email at all. Requiring an email would exclude
    * the exact population this screen exists to serve.
    */
-  async inviteSupervisor(
-    input: PortalSupervisorInvite,
-    caller: Caller,
-  ): Promise<PortalSupervisor> {
+  async inviteSupervisor(input: PortalSupervisorInvite, caller: Caller): Promise<PortalSupervisor> {
     const accountId = await assertBuilderAdministrator(caller);
 
     const email = input.email.trim().toLowerCase() || null;
@@ -109,6 +125,34 @@ export const portalAccountService = {
     if (!email && !mobile) {
       throw AppError.validation('Give a mobile or an email', [
         { path: 'mobile', message: 'A mobile is usually faster on site' },
+      ]);
+    }
+
+    /*
+     * ⚠️ The SHAPE of each, checked here as well as on the contract.
+     *
+     * A supervisor signs in by their `phoneNumber`, so a landline or a typo is
+     * a login that can never be used — while the administrator is told "We have
+     * texted them a link". The invite dialog checked both shapes and nothing
+     * behind it did, so `mobile: "hello"` created a real user.
+     *
+     * Beside the check above rather than only on the schema, because that is
+     * where the "one of the two is required" rule already lives, and because a
+     * guard that only runs in the HTTP layer is one an internal caller walks
+     * straight past.
+     */
+    if (mobile && !isAustralianMobile(mobile)) {
+      throw AppError.validation('That is not an Australian mobile', [
+        {
+          path: 'mobile',
+          message: 'Enter an Australian mobile, e.g. 0412 345 678 — that is how they sign in',
+        },
+      ]);
+    }
+
+    if (email && !looksLikeEmail(email)) {
+      throw AppError.validation('That does not look like an email address', [
+        { path: 'email', message: 'Check it — the invitation is sent to this address' },
       ]);
     }
 
@@ -143,6 +187,32 @@ export const portalAccountService = {
 
     const supervisor = await supervisorRepository.findOne(id, accountId);
     if (!supervisor) throw new Error('Supervisor vanished immediately after being invited');
+
+    /*
+     * ⚠️ Actually send it.
+     *
+     * The portal told the administrator "We have texted them a link — nothing to
+     * install", and nothing was sent: this method created the user row and
+     * stopped. The invited supervisor was never contacted, and the builder had
+     * no way to tell — the row showed as "invited" either way.
+     *
+     * The office path has done this correctly all along (a purchase order that
+     * names a supervisor provisions and notifies them), so this is the same
+     * call, not a new mechanism. It is keyed on the user, so a re-invite cannot
+     * text somebody who already has their access.
+     *
+     * `notify` swallows its own failures deliberately: a login that exists but
+     * whose SMS bounced is recoverable by resending, whereas throwing here
+     * would leave the supervisor created and the caller told it failed.
+     */
+    await supervisorProvisioning.notify({
+      userId: id,
+      name: supervisor.name,
+      email: supervisor.email,
+      mobile: supervisor.mobile,
+      provisionedBy: caller.name,
+      sourceLabel: 'portal invite',
+    });
 
     log.info({ supervisorId: id, accountId, by: caller.name }, 'site supervisor invited');
     return supervisor;
@@ -190,7 +260,20 @@ export const portalAccountService = {
     const accountId = await assertBuilderAdministrator(caller);
 
     const approved = await supervisorRepository.approve(id, accountId);
+
     if (!approved) {
+      /*
+       * ⚠️ Two different failures, and they must not share a message.
+       *
+       * `approve` is scoped by account, so it returns false both for somebody
+       * already approved HERE and for an id belonging to another builder. It
+       * answered both with "they may already have been approved" — which, sent
+       * to a rival builder probing ids, confirms that the person exists and
+       * describes their state. Suspending the same id already answered 404.
+       */
+      const onThisAccount = await supervisorRepository.findOne(id, accountId);
+      if (!onThisAccount) throw AppError.notFound('No such supervisor on your account');
+
       throw AppError.conflict(
         'That request is no longer waiting — they may already have been approved',
       );
@@ -240,16 +323,23 @@ export const portalAccountService = {
     return account;
   },
 
-  /* ── Journey A.4 · the customer completes their own account ────────────── */
+  /* ── The customer completes their own details ──────────────────────────── */
 
-  /** What the welcome screen needs before anything is filled in. */
+  /**
+   * What the details screen opens on.
+   *
+   * ⚠️ Returns what is already on file, not just a suggested name. Nothing
+   * gates this form any more, so a customer correcting one line of their
+   * address can reach it again — and a form that arrives blank on the second
+   * visit is how a complete record gets replaced with a half-filled one.
+   */
   async onboardingInvite(caller: Caller): Promise<OnboardingInvite> {
     const accountId = assertAdministrator(caller);
 
     const account = await accountRepository.findById(accountId, { accountId });
     if (!account) throw AppError.forbidden('Your customer account could not be found');
 
-    const acceptance = await accountRepository.findTermsAcceptance(accountId);
+    const accounts = account.contacts.find((contact) => contact.role === 'accounts');
 
     return {
       accountId: account.id,
@@ -258,41 +348,38 @@ export const portalAccountService = {
       // are the authority on their own registered name.
       suggestedLegalName: account.name,
       accountType: account.accountType,
-      // The two states this screen distinguishes: the terms are outstanding, or
-      // they are signed. Nothing in between, because nothing in between changes
-      // what the customer has to do.
-      state: acceptance ? 'complete' : 'awaiting-terms',
-      acceptance,
-      termsVersion: TERMS_VERSION,
+      completedAt: account.detailsCompletedAt,
+      details: {
+        tradingName: account.tradingName,
+        abn: account.abn,
+        addressLine: account.addressLine,
+        suburb: account.suburb,
+        postcode: account.postcode,
+        accountsContactName: accounts?.name ?? null,
+        accountsContactEmail: accounts?.email ?? null,
+        certificateEmail: account.certificateEmail,
+      },
     };
   },
 
   /**
-   * Journey A.4 — the customer supplies their own details and accepts the terms.
+   * The customer supplies their own registered details.
    *
-   * ── Why this exists at all ────────────────────────────────────────────────
-   * Matt has a paper account application his customers fill in today, and it is
-   * there for a legal reason. 7:49: *"it's a contractual thing where some
-   * customers require them to give a director's guarantee… it's more of a legal
-   * precedent that they have to sign off on those account terms and
-   * conditions."* This is that form, and the tick is the record he currently
-   * chases as a signed PDF.
+   * ── Why the customer fills this in and not the office ─────────────────────
+   * Because they are the authority on it. A registered address, a trading name,
+   * the ABN that prints on every invoice and the mailbox their diversion
+   * certificates go to are all things the office would otherwise get by ringing
+   * up and asking, and getting wrong in the meantime.
    *
-   * ⚠️ The acceptance names the person who ACCEPTED, typed by them — not the
-   * session user. A director's guarantee is given by a named individual, and the
-   * person logged in may be an accounts clerk acting on their behalf. Taking it
-   * from the session would make who signed an inference from whose password was
-   * used.
+   * ⚠️ RE-SUBMITTABLE, unlike the version that came before it. This used to
+   * refuse a second submission, because it also recorded a terms acceptance and
+   * a guarantee that can be silently replaced is not evidence of anything. The
+   * terms are gone (see `party.ts`), and what is left is ordinary correctable
+   * data — refusing a customer who has moved office would be refusing the one
+   * person who knows their new address.
    */
   async completeOnboarding(input: AccountOnboarding, caller: Caller): Promise<void> {
     const accountId = assertAdministrator(caller);
-
-    const existing = await accountRepository.findTermsAcceptance(accountId);
-    if (existing) {
-      throw AppError.conflict(
-        `These terms were already accepted by ${existing.acceptedByName}. Contact us on 1300 395 438 to change anything.`,
-      );
-    }
 
     await portalAccountRepository.completeOnboarding(accountId, {
       legalName: input.legalName,
@@ -311,31 +398,7 @@ export const portalAccountService = {
       email: input.accountsContactEmail,
     });
 
-    /*
-     * The acceptance is written LAST and cannot overwrite an existing one.
-     * Everything above is correctable by the office; this is the legal record,
-     * and a second write would silently replace who signed and when.
-     */
-    const recorded = await accountRepository.recordTermsAcceptance({
-      accountId,
-      acceptedByName: input.acceptedByName,
-      acceptedByRole: input.acceptedByRole,
-      termsVersion: TERMS_VERSION,
-    });
-
-    if (!recorded) {
-      throw AppError.conflict('These terms were accepted by somebody else while you were filling this in');
-    }
-
-    log.info(
-      {
-        accountId,
-        acceptedBy: input.acceptedByName,
-        role: input.acceptedByRole,
-        termsVersion: TERMS_VERSION,
-      },
-      'customer completed onboarding and accepted the terms',
-    );
+    log.info({ accountId }, 'customer completed their own account details');
   },
 };
 
@@ -419,7 +482,7 @@ async function assertBuilderAdministrator(caller: Caller): Promise<string> {
  */
 export const portalCertificateService = {
   async certificates(
-    query: { page: number; pageSize: number },
+    query: { page: number; pageSize: number; q?: string | undefined },
     caller: Caller,
   ): Promise<{ data: Certificate[]; meta: PageMeta }> {
     const accountId = assertAdministrator(caller);
@@ -448,7 +511,10 @@ export const portalCertificateService = {
       throw AppError.conflict('That certificate has not been issued yet');
     }
 
-    log.info({ certificateId: id, accountId, by: caller.name }, 'customer requested a certificate PDF');
+    log.info(
+      { certificateId: id, accountId, by: caller.name },
+      'customer requested a certificate PDF',
+    );
     return { queued: 1 };
   },
 };

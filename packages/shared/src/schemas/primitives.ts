@@ -27,6 +27,29 @@ export const MoneySchema = z
   .meta({ id: 'Money', description: 'Decimal string. Never a float.', example: '220.00' });
 
 /**
+ * Money that cannot sensibly be negative.
+ *
+ * `MoneySchema` allows a leading minus because a ledger eventually needs one.
+ * Nothing in v1 does: credit notes, part-payments and reconciliation are
+ * explicitly v1.1 and unmodelled (see the note on `XeroSyncState`). So on the
+ * way IN, a negative is not a credit — it is a typo or a probe, and it was
+ * accepted: a purchase order confirmed at `-100.00` returned 204 and wrote a
+ * real order for minus a hundred dollars.
+ *
+ * Use this for request bodies. Responses keep `MoneySchema`, so a figure the
+ * system computes — a reconciliation variance, a figure read off a document by
+ * the extractor — can still come back negative and be shown as what it is.
+ */
+export const NonNegativeMoneySchema = z
+  .string()
+  .regex(/^\d+(\.\d{1,4})?$/, 'Must be a decimal amount like "220.00", and never negative')
+  .meta({
+    id: 'NonNegativeMoney',
+    description: 'Decimal string, zero or more. Never a float.',
+    example: '220.00',
+  });
+
+/**
  * The ATO's check on an ABN: subtract 1 from the first digit, weight each digit,
  * and the total must divide by 89.
  *
@@ -81,4 +104,5 @@ export type ObjectId = z.infer<typeof ObjectIdSchema>;
 export type IsoDateTime = z.infer<typeof IsoDateTimeSchema>;
 export type IsoDate = z.infer<typeof IsoDateSchema>;
 export type Money = z.infer<typeof MoneySchema>;
+export type NonNegativeMoney = z.infer<typeof NonNegativeMoneySchema>;
 export type IdempotencyKey = z.infer<typeof IdempotencyKeySchema>;

@@ -13,28 +13,26 @@ import type { DataTableColumn, FilterDefinition } from '@/components/data-table/
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
-import { ConfidenceBar } from '@/components/queues/confidence';
 import { usePoReviewList } from '@/features/queues/queries';
 import { formatDateTime } from '@/lib/format';
 
 /**
- * Purchase orders the AI could not place with confidence (M2.12 · I6 + I8).
+ * Purchase orders extracted from email, waiting to be checked (M2.12 · I6 + I8).
  *
- * ── This queue is the mitigation, not the feature ─────────────────────────
- * Risk 9 says the OCR pipeline must ship *with confidence thresholds and a human
- * review queue*, and M2.12's first design rule is **never silently guess**. So
- * everything above the threshold auto-attaches and is not here at all. What
- * reaches this screen is only what the pipeline refused to decide — which is why
- * the queue being short is a good sign, and why the reason it landed here is a
- * first-class column rather than a detail.
+ * ── Every order is read by a person ───────────────────────────────────────
+ * M2.12's first design rule is **never silently guess**, and nothing here ever
+ * auto-attached: every extraction has always landed in this queue. What used to
+ * sit beside each one was a confidence score, and it has been removed — it
+ * reported the model's opinion of itself, and a high number invited confirming
+ * an order without opening the document it came from. The PDF is the check.
  *
  * ── The reason column is the whole triage ─────────────────────────────────
- * "Low OCR confidence" needs someone to read a document. "No matching account"
- * needs someone to know the business. "PO number already used" is probably a
- * resend and takes four seconds. Collapsing those into one "needs review" state
- * would make every item look equally expensive.
+ * "No matching account" needs someone who knows the business. "PO number already
+ * used" is probably a resend and takes four seconds. "Not checked yet" is simply
+ * the ordinary case. Collapsing those into one "needs review" state would make
+ * every item look equally expensive.
  */
-const FILTER_KEYS = ['state', 'reason', 'confidence', 'age'] as const;
+const FILTER_KEYS = ['state', 'reason', 'age'] as const;
 
 const STATE_VARIANT: Record<PoReviewState, BadgeProps['variant']> = {
   'needs-review': 'warning',
@@ -62,16 +60,7 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
       label: PO_REVIEW_REASON_LABELS[reason],
     })),
   },
-  {
-    key: 'confidence',
-    label: 'Confidence',
-    allLabel: 'Any confidence',
-    options: [
-      { value: 'low', label: 'Below 60%' },
-      { value: 'medium', label: '60–85%' },
-      { value: 'high', label: '85% and above' },
-    ],
-  },
+
   {
     key: 'age',
     label: 'Received',
@@ -178,13 +167,6 @@ const COLUMNS: readonly DataTableColumn<PoExtractionItem>[] = [
     header: 'Why it is here',
     priority: 'secondary',
     cell: (row) => <Badge variant="outline">{PO_REVIEW_REASON_LABELS[row.reason]}</Badge>,
-  },
-  {
-    id: 'overallConfidence',
-    header: 'Confidence',
-    sortKey: 'overallConfidence',
-    priority: 'secondary',
-    cell: (row) => <ConfidenceBar confidence={row.overallConfidence} />,
   },
   {
     id: 'receivedAt',

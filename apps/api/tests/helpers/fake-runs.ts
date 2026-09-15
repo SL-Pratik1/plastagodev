@@ -79,6 +79,14 @@ export function createFakeRunRepository() {
   const jobFacts = new Map<string, { jobNumber: number; suburb: string }>();
   let nextJobNumber = 61_300;
 
+  /**
+   * Which stops carry a real address rather than their suburb's centre (I3).
+   *
+   * Empty by default, because that is what every job booked before the geocoder
+   * existed carries and the state a run is most likely to be in.
+   */
+  const geocoded = new Set<string>();
+
   function factsFor(jobId: string) {
     let facts = jobFacts.get(jobId);
     if (!facts) {
@@ -224,6 +232,29 @@ export function createFakeRunRepository() {
       return Promise.resolve([...(runs.get(runId)?.stops ?? [])]);
     },
 
+    /**
+     * I3 — the stops as points, in sequence.
+     *
+     * Coordinates are derived from the job's own facts so they are stable
+     * across a reorder, and spread far enough apart that a route between them
+     * is a meaningful thing to ask for. `locationSource` defaults to `suburb`,
+     * which is what an ungeocoded job carries and what makes `routeStops`
+     * refuse — a test that wants a route calls `geocodeStops` first.
+     */
+    async stopPoints(runId: string) {
+      return Promise.resolve(
+        (runs.get(runId)?.stops ?? []).map((jobId) => {
+          const facts = factsFor(jobId);
+          return {
+            id: jobId,
+            latitude: -33.7 - (facts.jobNumber % 20) / 100,
+            longitude: 150.9 + (facts.jobNumber % 20) / 100,
+            locationSource: geocoded.has(jobId) ? ('geocoded' as const) : ('suburb' as const),
+          };
+        }),
+      );
+    },
+
     async resequence(
       runId: string,
       jobIds: readonly string[],
@@ -301,6 +332,21 @@ export function createFakeRunRepository() {
     setStatus(runId: string, status: RunStatus): void {
       const run = runs.get(runId);
       if (run) run.status = status;
+    },
+
+    /**
+     * I3 — mark a run's stops as carrying real addresses.
+     *
+     * Explicit rather than a default, because `routeStops` refusing a
+     * suburb-pinned run is itself one of the behaviours under test.
+     */
+    geocodeStops(runId: string): void {
+      for (const jobId of runs.get(runId)?.stops ?? []) geocoded.add(jobId);
+    },
+
+    /** The inverse — one stop left on its suburb's centre. */
+    pinToSuburb(jobId: string): void {
+      geocoded.delete(jobId);
     },
   };
 }

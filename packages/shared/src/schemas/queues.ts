@@ -4,6 +4,7 @@ import {
   IsoDateSchema,
   IsoDateTimeSchema,
   MoneySchema,
+  NonNegativeMoneySchema,
   NonEmptyStringSchema,
   ObjectIdSchema,
 } from './primitives.js';
@@ -102,6 +103,67 @@ export const FutileDecisionSchema = z
   })
   .meta({ id: 'FutileDecision' });
 
+/* ── M5.4 · Change requests raised from the portal ───────────────────────── */
+
+/**
+ * What the customer asked for on a job that is already on a run sheet.
+ *
+ * ⚠️ This queue is the office end of a channel that had no office end. The
+ * portal wrote `changerequests` rows, told the customer "Request sent to the
+ * office" — and nothing read them: no screen, no queue, no notification. Once a
+ * job reaches a run sheet the portal refuses a direct edit and points here, so
+ * this was the ONLY way a customer could reach anybody, and it went nowhere.
+ *
+ * The model was always shaped for it — `state`, `resolvedBy`, `resolutionNote`
+ * and an index commented "the office’s worklist" — so this completes a design
+ * rather than inventing one.
+ */
+export const ChangeRequestItemSchema = z
+  .object({
+    id: ObjectIdSchema,
+    jobId: ObjectIdSchema,
+    jobNumber: z.number().int().positive(),
+    accountId: ObjectIdSchema,
+    accountName: NonEmptyStringSchema,
+    siteName: NonEmptyStringSchema,
+    suburb: NonEmptyStringSchema,
+    /** Where the job is now — what the office can still do depends on it. */
+    status: z.enum(['booked', 'assigned', 'in-transit', 'arrived']),
+    /** The run it is already on, which is why the customer could not self-serve. */
+    driverName: z.string().nullable(),
+    readyDate: IsoDateSchema,
+
+    kind: z.enum(['reschedule', 'cancel', 'other']),
+    /** Only meaningful on a reschedule. */
+    requestedDate: IsoDateSchema.nullable(),
+    note: z.string(),
+
+    requestedByName: NonEmptyStringSchema,
+    /** The clock the queue ages against. */
+    requestedAt: IsoDateTimeSchema,
+  })
+  .meta({ id: 'ChangeRequestItem' });
+
+/**
+ * The office’s answer.
+ *
+ * Deliberately NOT applied automatically. A reschedule the customer asked for
+ * may collide with a run that is already staffed, and only the allocator can
+ * see that — so this records the decision and the office moves the job through
+ * the normal reschedule path if they are agreeing to it.
+ */
+export const ChangeRequestDecisionSchema = z
+  .object({
+    outcome: z.enum(['actioned', 'declined']),
+    /**
+     * Required on a decline, and for the same reason a rejected charge needs
+     * one: the customer asked for something and is being told no, and "no" with
+     * nothing after it is what makes them ring up.
+     */
+    note: z.string().trim().max(500),
+  })
+  .meta({ id: 'ChangeRequestDecision' });
+
 /* ── M2.7 · Additional service approvals ──────────────────────────────────── */
 
 export const ChargeApprovalItemSchema = z
@@ -147,7 +209,7 @@ export const ChargeApprovalDetailSchema = ChargeApprovalItemSchema.extend({
 export const ChargeDecisionSchema = z
   .object({
     decision: z.enum(['approve', 'reject']),
-    /** Required on reject: the driver is told why, so it must say something. */
+    /** Required on reject: it is the only record of why, so it must say something. */
     note: z.string().trim().max(500),
   })
   .meta({ id: 'ChargeDecision' });
@@ -188,8 +250,19 @@ export const AwaitingPoItemSchema = z
  * are different problems needing different corrections, and lumping them into
  * one "needs review" state hides that.
  */
+/*
+ * ⚠️ `below-threshold` is gone with the confidence scores.
+ *
+ * It read "Low OCR confidence", which was the one reason a reviewer could do
+ * nothing with — it described the model, not the document. Every extraction
+ * goes to a person now regardless, so the honest fallback is simply that this
+ * one has not been checked yet.
+ *
+ * ⚙️ Rows written before this change still hold `below-threshold`; they are
+ * migrated to `awaiting-check` by `migrate-po-review-reasons`.
+ */
 export const PO_REVIEW_REASONS = [
-  'below-threshold',
+  'awaiting-check',
   'no-account-match',
   'ambiguous-account',
   'no-job-match',
@@ -199,7 +272,7 @@ export const PoReviewReasonSchema = z.enum(PO_REVIEW_REASONS).meta({ id: 'PoRevi
 export type PoReviewReason = z.infer<typeof PoReviewReasonSchema>;
 
 export const PO_REVIEW_REASON_LABELS: Record<PoReviewReason, string> = {
-  'below-threshold': 'Low OCR confidence',
+  'awaiting-check': 'Not checked yet',
   'no-account-match': 'No matching account',
   'ambiguous-account': 'More than one account matches',
   'no-job-match': 'No matching job',
@@ -217,24 +290,16 @@ export const PO_REVIEW_STATE_LABELS: Record<PoReviewState, string> = {
 };
 
 /**
- * One field Mistral pulled off the document, with the confidence it had.
- *
- * Confidence travels per field rather than only per document, because that is
- * what lets the UI highlight the two fields that are actually shaky instead of
- * making a human re-read all eight. M2.12: *"log confidence and correction rate
- * from day one, so accuracy is a measured number."*
- */
-/**
- * The fields pulled off a purchase order, each with its own confidence.
- *
- * Per field rather than per document, because they fail independently: a Domain
- * PO's number is printed large at the top and its site supervisor's mobile is in
- * eight-point type at the bottom, and one being unreadable should not send the
- * other back to a human.
+ * The fields pulled off a purchase order.
  *
  * The list is exactly what Matt read out of the Domain order at 28:12 — order
  * number, address down to the lot, square metres, bag allowance, supervisor and
  * their mobile. Anything else on the page is not something PlastaGo acts on.
+ *
+ * ⚠️ No confidence score. These are shown beside the document itself and the
+ * reviewer checks them against it — a percentage next to a value is a worse
+ * signal than the page it was read from, and it invited trusting the high ones
+ * without looking. Every extraction is checked by a person either way.
  */
 export const ExtractedFieldSchema = z
   .object({
@@ -253,17 +318,15 @@ export const ExtractedFieldSchema = z
     ]),
     label: NonEmptyStringSchema,
     value: z.string().nullable(),
-    confidence: z.number().min(0).max(1),
   })
   .meta({ id: 'ExtractedField' });
 
-/** A candidate the extraction was matched against, with why it scored. */
+/** A candidate the extraction was matched against, best first. */
 export const MatchCandidateSchema = z
   .object({
     id: ObjectIdSchema,
     label: NonEmptyStringSchema,
     detail: z.string(),
-    confidence: z.number().min(0).max(1),
   })
   .meta({ id: 'MatchCandidate' });
 
@@ -577,7 +640,6 @@ export const PoExtractionItemSchema = z
     extractedSupervisorName: z.string().nullable(),
     extractedSupervisorMobile: z.string().nullable(),
 
-    overallConfidence: z.number().min(0).max(1),
     reason: PoReviewReasonSchema,
     state: PoReviewStateSchema,
   })
@@ -645,7 +707,11 @@ export const PoConfirmationSchema = z
     siteSupervisorName: z.string().trim().max(80).nullable(),
     siteSupervisorMobile: z.string().trim().max(20).nullable(),
 
-    amountExGst: MoneySchema.nullable(),
+    /*
+     * ⚠️ Non-negative. A purchase order for minus a hundred dollars is not a
+     * credit — it is a typo — and `-100.00` used to confirm cleanly with a 204.
+     */
+    amountExGst: NonNegativeMoneySchema.nullable(),
   })
   .meta({ id: 'PoConfirmation' });
 
@@ -912,6 +978,39 @@ export const LeadConversionSchema = z
      * card, terms and a signed set of conditions. Where the truck goes is typed
      * on the first booking.
      */
+    /**
+     * Where their invoices go.
+     *
+     * Pre-filled from the lead and editable, rather than copied silently. The
+     * lead captured whoever rang; the person who handles the invoices is
+     * frequently somebody else, and the conversion is the last moment anybody
+     * looks at this before the first invoice is raised.
+     *
+     * Blank falls back to the lead's own contact — the previous behaviour, kept
+     * so a payload written before these fields existed still converts.
+     */
+    accountsContactName: z
+      .string()
+      .trim()
+      .max(80, 'Keep the contact name under 80 characters')
+      .default(''),
+    accountsContactEmail: z
+      .string()
+      .trim()
+      .max(160, 'Keep the email under 160 characters')
+      .refine(
+        (value) => value === '' || /^[^s@]+@[^s@]+.[^s@]+$/.test(value),
+        'Enter a valid email address, or leave it blank',
+      )
+      .default(''),
+    /**
+     * Anything the office should know about this account.
+     *
+     * The same field the direct-create screen has. Conversion used to write a
+     * provenance line and nothing else, so the one path that begins with a
+     * conversation on the phone was the one path with nowhere to record it.
+     */
+    notes: z.string().trim().max(500).default(''),
     /** A.4 finishes by sending the welcome email; skipping it is a choice. */
     sendInvitation: z.boolean(),
   })
@@ -1000,4 +1099,6 @@ export type LeadUpdate = z.infer<typeof LeadUpdateSchema>;
 export type LeadCreate = z.infer<typeof LeadCreateSchema>;
 export type LeadConversion = z.infer<typeof LeadConversionSchema>;
 export type LeadPipelineStats = z.infer<typeof LeadPipelineStatsSchema>;
+export type ChangeRequestItem = z.infer<typeof ChangeRequestItemSchema>;
+export type ChangeRequestDecision = z.infer<typeof ChangeRequestDecisionSchema>;
 export type QueueCounts = z.infer<typeof QueueCountsSchema>;

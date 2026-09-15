@@ -583,8 +583,27 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
                 onSelect={() => {
                   void guard(
                     () =>
-                      optimise.mutateAsync(run.id).then(() => {
-                        toast.success('Route optimised', `${run.name} reordered by Google`);
+                      optimise.mutateAsync(run.id).then((updated) => {
+                        /*
+                         * ⚠️ The two outcomes are told apart, because they are
+                         * not the same thing. A real route sets `optimisedAt`;
+                         * without it the server grouped the stops by suburb —
+                         * which happens when a stop is still pinned to its
+                         * suburb's centre, or Google could not be reached.
+                         *
+                         * Saying "reordered by Google" either way is how an
+                         * allocator comes to trust a sequence nobody computed,
+                         * and a driver then follows it.
+                         */
+                        if (updated.optimisedAt !== null) {
+                          toast.success('Route optimised', `${run.name} reordered by Google`);
+                          return;
+                        }
+
+                        toast.info(
+                          'Grouped by suburb',
+                          `${run.name} was tidied, but no route was calculated — its stops need exact addresses.`,
+                        );
                       }),
                     'Could not optimise that run',
                   );

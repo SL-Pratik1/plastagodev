@@ -9,29 +9,55 @@
  * page — which is the whole argument for the driver surface being one screen at
  * a time.
  *
- * ── Why it degrades instead of pretending ─────────────────────────────────
- * The Embed API needs a billed key, and this build has no credentials. Rather
- * than render a fake map — which would imply an integration that does not exist
- * and would be believed — the screen falls back to the destination detail plus
- * the external hand-off that works today. When the key lands, the same screen
- * shows the real map with no other change.
+ * ── Two embeds, because the API has two ───────────────────────────────────
+ * ⚠️ The Embed API's `directions` mode REQUIRES an origin. It does not fall
+ * back to the device's own location — it answers `400 Missing the 'origin'
+ * parameter` and renders an error where the map should be. This file used to
+ * omit the origin on purpose, with a comment claiming the opposite; with no key
+ * on any environment, nothing ever rendered the thing that would have proved it
+ * wrong.
+ *
+ * So there are two URLs. `place` needs nothing but the destination and is what
+ * the screen opens with. `directions` is the upgrade, once the browser has told
+ * us where the driver actually is — which it may never do, on a phone in a
+ * basement or with location denied.
  */
 const embedKey = import.meta.env.VITE_GOOGLE_MAPS_EMBED_KEY?.trim() ?? '';
 
 /** True when the in-app map can actually render. */
 export const MAPS_EMBED_ENABLED = embedKey !== '';
 
+export interface LatLng {
+  latitude: number;
+  longitude: number;
+}
+
 /**
- * A directions embed URL for one destination.
+ * The destination on a map, with no route.
  *
- * `origin` is deliberately omitted: the Embed API then routes from the device's
- * own location, which is what a driver leaving the last stop needs and what
- * passing a stale coordinate would get wrong.
+ * Always available when there is a key, because it asks nothing of the device.
+ * A driver who can see the site, the street around it and the shape of the
+ * block has most of what the map was for.
  */
-export function directionsEmbedUrl(latitude: number, longitude: number): string | null {
+export function placeEmbedUrl(latitude: number, longitude: number): string | null {
   if (!MAPS_EMBED_ENABLED) return null;
+  const query = `${String(latitude)},${String(longitude)}`;
+  // Zoom 16 is a few streets across — close enough to see which corner of the
+  // estate, wide enough to show how to get into it.
+  return `https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(embedKey)}&q=${encodeURIComponent(query)}&zoom=16`;
+}
+
+/**
+ * The driving route from where the driver is standing to the site.
+ *
+ * ⚠️ `from` is not optional, and that is the API's rule rather than a choice
+ * made here. See the note at the top of this file.
+ */
+export function directionsEmbedUrl(from: LatLng, latitude: number, longitude: number): string | null {
+  if (!MAPS_EMBED_ENABLED) return null;
+  const origin = `${String(from.latitude)},${String(from.longitude)}`;
   const destination = `${String(latitude)},${String(longitude)}`;
-  return `https://www.google.com/maps/embed/v1/directions?key=${encodeURIComponent(embedKey)}&destination=${encodeURIComponent(destination)}&mode=driving`;
+  return `https://www.google.com/maps/embed/v1/directions?key=${encodeURIComponent(embedKey)}&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&mode=driving`;
 }
 
 /** The hand-off to the phone's own maps app. Always available. */

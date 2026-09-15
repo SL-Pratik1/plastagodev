@@ -52,7 +52,7 @@ import { useCreateUser, useUpdateUser } from '../queries';
  */
 const FormSchema = z
   .object({
-    name: z.string().trim().min(2, 'Enter their full name').max(80),
+    name: z.string().trim().min(2, 'Enter their full name').max(80, 'Keep the name under 80 characters'),
     email: z.string().trim(),
     mobile: z.string().trim(),
     role: z.enum(ROLES),
@@ -65,10 +65,10 @@ const FormSchema = z
      * matrix would invite combinations nobody has asked for and nobody tests.
      */
     alsoDrives: z.boolean(),
-    jobTitle: z.string().trim().max(80),
+    jobTitle: z.string().trim().max(80, 'Keep the job title under 80 characters'),
     brandIds: z.array(z.enum(BRAND_IDS)).min(1, 'Choose at least one brand'),
     accountId: z.string(),
-    notes: z.string().trim().max(500),
+    notes: z.string().trim().max(500, 'Keep notes under 500 characters'),
   })
   .check((ctx) => {
     const { email, mobile, role, accountId } = ctx.value;

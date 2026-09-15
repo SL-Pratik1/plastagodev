@@ -137,7 +137,21 @@ export const RunStopSummarySchema = z
  */
 export const RunTipOffSchema = z
   .object({
-    facility: NonEmptyStringSchema,
+    /**
+     * Null when the DRIVER recorded the tip-off.
+     *
+     * There is no facility picker on the driver’s Tip-off screen — they are at
+     * the weighbridge with a docket in their hand, and which transfer station
+     * the truck is standing in is not a question worth asking them. The office
+     * fills it in afterwards; `driver.repository.ts` writes null on that path
+     * and says so.
+     *
+     * This was `NonEmptyStringSchema`, which made the office dispatch board fail
+     * to parse for the whole day as soon as any driver weighed off — the single
+     * most routine end-of-day action in the product killed the allocator’s only
+     * screen. Nullable is what the write path has always produced.
+     */
+    facility: NonEmptyStringSchema.nullable(),
     docketNumber: z.string().nullable(),
     netKg: z.number().nonnegative(),
     tippedOffAt: IsoDateTimeSchema,

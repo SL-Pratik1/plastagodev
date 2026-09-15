@@ -45,14 +45,19 @@ export const portalAccountController = {
     res.json(await portalAccountService.invoices(req.validated.query, callerFrom(req)));
   },
 
-  /** 202: the render is queued, not done. */
+  /**
+   * 200 with the links — the documents exist by the time this answers.
+   *
+   * ⚠️ Was a 202 over a service that rendered nothing, which made the portal's
+   * download button report acceptance of work that never happened.
+   */
   requestInvoicePdf: async (
     req: ValidatedRequest<{ body: typeof PortalInvoiceIdsSchema }>,
     res: Response,
   ): Promise<void> => {
-    res
-      .status(202)
-      .json(await portalAccountService.requestInvoicePdf(req.validated.body.ids, callerFrom(req)));
+    res.json(
+      await portalAccountService.requestInvoicePdf(req.validated.body.ids, callerFrom(req)),
+    );
   },
 
   /* ── M5.14 · supervisors ───────────────────────────────────────────────── */
@@ -135,7 +140,13 @@ export const portalCertificateController = {
   ): Promise<void> => {
     res.json(
       await portalCertificateService.certificates(
-        { page: req.validated.query.page, pageSize: req.validated.query.pageSize },
+        {
+          page: req.validated.query.page,
+          pageSize: req.validated.query.pageSize,
+          // Dropped here before, so the search box on the certificates screen
+          // sent a term the service never received.
+          q: req.validated.query.q,
+        },
         callerFrom(req),
       ),
     );

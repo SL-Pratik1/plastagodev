@@ -45,12 +45,12 @@ const FormSchema = z.object({
     .min(1, 'Enter the reading at the time')
     .refine((value) => Number(value) >= 0, 'Enter the reading at the time'),
   kind: z.enum(VEHICLE_EXPENSE_KINDS),
-  description: z.string().trim().min(2, 'Say what it was for, e.g. “A service”').max(120),
+  description: z.string().trim().min(2, 'Say what it was for, e.g. “A service”').max(120, 'Keep the description under 120 characters'),
   amountExGst: z
     .string()
     .min(1, 'Enter the amount excluding GST')
     .refine((value) => Number(value) > 0, 'Enter the amount excluding GST'),
-  supplier: z.string().trim().max(60),
+  supplier: z.string().trim().max(60, 'Keep the supplier under 60 characters'),
 });
 
 type FormValues = z.infer<typeof FormSchema>;

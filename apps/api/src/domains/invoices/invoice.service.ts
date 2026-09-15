@@ -1,5 +1,7 @@
 import type {
   Invoice,
+  InvoiceDownload,
+  InvoiceDownloads,
   InvoiceKind,
   InvoiceListItem,
   InvoiceStatus,
@@ -7,6 +9,7 @@ import type {
   Role,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
+import { getStorage } from '../../integrations/storage.js';
 import { logger } from '../../lib/logger.js';
 import { centsToMoney, moneyToCents } from '../../lib/money.js';
 import { withTransaction } from '../../lib/transaction.js';
@@ -412,13 +415,21 @@ export const invoiceService = {
   },
 
   /**
-   * M7.6 — render the invoice PDFs.
+   * M7.6 — render the invoice PDFs and hand back links to them.
    *
-   * Returns how many were PRODUCED, not how many were asked for: a template
-   * missing for one brand fails that invoice alone, and the screen needs to
-   * say so rather than report a success it did not have.
+   * ── Why this returns URLs and no longer just a count ──────────────────────
+   * ⚠️ It used to render into storage and answer `{ queued }`, which meant the
+   * document existed and nobody could open it: the office pressed "PDF", saw a
+   * toast, and the only rendering of an invoice anyone ever laid eyes on was the
+   * copy attached to the customer's email. An invoice that has been sent to a
+   * builder but never seen by the business that sent it is the defect this
+   * closes.
+   *
+   * `downloads` may be SHORTER than `requested`: a brand with no template fails
+   * that invoice alone, and the screen has to be able to say so rather than
+   * report a success it did not have.
    */
-  async requestPdf(ids: readonly string[], caller: Caller): Promise<{ queued: number }> {
+  async requestPdf(ids: readonly string[], caller: Caller): Promise<InvoiceDownloads> {
     if (ids.length === 0) throw AppError.validation('Select at least one invoice');
 
     // Through the caller's own scope, so a customer cannot render somebody
@@ -427,8 +438,7 @@ export const invoiceService = {
     if (existing.length === 0) throw AppError.notFound('None of those invoices could be found');
 
     /*
-     * ⚠️ Rendered here rather than handed to a queue, and the doc comment above
-     * no longer claims otherwise.
+     * ⚠️ Rendered here rather than handed to a queue.
      *
      * `pdf-lib` draws in-process with no browser, so one invoice is a few
      * milliseconds — the connection-holding problem that justified a queue was
@@ -437,27 +447,21 @@ export const invoiceService = {
      * request that never returns.
      */
     const context = await invoiceRenderService.context();
-    let rendered = 0;
+    const downloads: InvoiceDownload[] = [];
 
     for (const id of existing) {
       const invoice = await invoiceRepository.findById(id, scopeFor(caller));
       if (!invoice) continue;
 
-      try {
-        await invoiceRenderService.render(invoice, context);
-        rendered += 1;
-      } catch (error) {
-        /*
-         * Per invoice, never fatal to the batch. One invoice whose template is
-         * missing must not deny the other forty-nine their PDFs, and the
-         * office can see which one failed.
-         */
-        log.error({ err: error, invoiceId: id }, 'invoice pdf render failed');
-      }
+      const download = await downloadFor(invoice, context);
+      if (download) downloads.push(download);
     }
 
-    log.info({ count: rendered, of: existing.length, by: caller.name }, 'invoice PDFs rendered');
-    return { queued: rendered };
+    log.info(
+      { count: downloads.length, of: existing.length, by: caller.name },
+      'invoice PDFs rendered',
+    );
+    return { requested: existing.length, downloads };
   },
 
   /**
@@ -526,6 +530,48 @@ async function pushInvoicesToXero(ids: readonly string[], caller: Caller): Promi
        */
       log.error({ err: error, invoiceId: id, by: caller.name }, 'xero push threw');
     }
+  }
+}
+
+/* ── Fetching the rendered document (M7.6) ──────────────────────────────── */
+
+/**
+ * One invoice's PDF, as a link the browser can follow.
+ *
+ * ── Why an existing PDF is reused rather than re-rendered ─────────────────
+ * ⚠️ The stored bytes ARE the invoice. Re-rendering on every download would
+ * quietly reprint the document against whatever the branding, the template and
+ * the rate card say TODAY — so an invoice reprinted a year later would not match
+ * the one in the builder's filing system, and the difference would surface in a
+ * payment dispute rather than here. A PDF is drawn once and served forever.
+ *
+ * Returns `null` rather than throwing: this is called per invoice inside a
+ * batch, and one brand with no template configured must not deny the other
+ * forty-nine their documents.
+ */
+async function downloadFor(
+  invoice: Invoice,
+  context: Awaited<ReturnType<typeof invoiceRenderService.context>>,
+): Promise<InvoiceDownload | null> {
+  try {
+    const key = invoice.pdfKey ?? (await invoiceRenderService.render(invoice, context));
+
+    return {
+      id: invoice.id,
+      invoiceNumber: invoice.invoiceNumber,
+      /*
+       * Named for a filing system, not for a URL — this is what somebody sees
+       * in their downloads folder and searches for a year later. Deliberately
+       * the same name the emailed attachment carries, so the copy the office
+       * downloads and the copy the customer received are one document with one
+       * name rather than two files that have to be reconciled.
+       */
+      fileName: `Invoice ${context.invoiceNumberPrefix}${String(invoice.invoiceNumber)}.pdf`,
+      url: await getStorage().presignDownload(key),
+    };
+  } catch (error) {
+    log.error({ err: error, invoiceId: invoice.id }, 'invoice pdf unavailable for download');
+    return null;
   }
 }
 

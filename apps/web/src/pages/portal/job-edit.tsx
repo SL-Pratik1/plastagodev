@@ -56,8 +56,8 @@ const FormSchema = z.object({
     .max(200, 'That is more bags than a truck holds — check the figure'),
   serviceLevel: z.enum(['standard', 'urgent']),
 
-  poNumber: z.string().trim().max(60),
-  notes: z.string().trim().max(1000),
+  poNumber: z.string().trim().max(60, 'A PO or job reference is at most 60 characters'),
+  notes: z.string().trim().max(1000, 'Keep notes under 1000 characters'),
 });
 
 type FormValues = z.input<typeof FormSchema>;

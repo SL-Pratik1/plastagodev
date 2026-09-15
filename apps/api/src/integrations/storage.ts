@@ -131,6 +131,9 @@ export function contentTypeForKey(key: string): string | null {
  */
 export { MAX_UPLOAD_BYTES } from '@plastago/shared';
 
+/** The only non-id owner `buildKey` accepts. See the note there. */
+export const SETTINGS_OWNER = 'singleton';
+
 /**
  * Builds the key an object lives at.
  *
@@ -141,16 +144,26 @@ export { MAX_UPLOAD_BYTES } from '@plastago/shared';
  * a caller-supplied name is a path-traversal vector besides.
  */
 export function buildKey(input: {
-  scope: 'jobs' | 'runs' | 'vehicles' | 'invoices' | 'leads' | 'purchase-orders';
+  scope: 'jobs' | 'runs' | 'vehicles' | 'invoices' | 'leads' | 'purchase-orders' | 'settings';
   ownerId: string;
   kind: string;
   contentType: string;
 }): string {
   const extension = EXTENSIONS[input.contentType] ?? 'bin';
-  // The owner id is checked rather than trusted: it reaches here from a route
-  // parameter, and a `..` in a storage key escapes the prefix it is meant to
-  // stay inside.
-  if (!/^[a-f0-9]{24}$/i.test(input.ownerId)) {
+  /*
+   * The owner id is checked rather than trusted: it reaches here from a route
+   * parameter, and a `..` in a storage key escapes the prefix it is meant to
+   * stay inside.
+   *
+   * `settings` is the one owner that is not a document id, because the settings
+   * document is a singleton — it owns the invoice logo and the template
+   * previews. Admitted as an exact literal rather than by relaxing the pattern,
+   * so it can only ever be this one constant and never something that arrived
+   * in a request.
+   */
+  const ownedBySingleton = input.scope === 'settings' && input.ownerId === SETTINGS_OWNER;
+
+  if (!ownedBySingleton && !/^[a-f0-9]{24}$/i.test(input.ownerId)) {
     throw new Error(`Refusing to build a storage key for a non-id owner: ${input.ownerId}`);
   }
   /*

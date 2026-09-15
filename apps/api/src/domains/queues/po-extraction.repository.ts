@@ -57,7 +57,6 @@ export interface IngestExtractionInput {
   suggestedJobNumber: number | null;
   accountCandidates: MatchCandidate[];
   jobCandidates: MatchCandidate[];
-  overallConfidence: number;
   reason: PoReviewReason;
 }
 
@@ -103,7 +102,6 @@ interface RawExtraction {
   suggestedJobNumber: number | null;
   accountCandidates: MatchCandidate[];
   jobCandidates: MatchCandidate[];
-  overallConfidence: number;
   reason: PoReviewReason;
   state: PoReviewState;
   reviewedAt: Date | null;
@@ -130,7 +128,6 @@ function toItem(row: RawExtraction): PoExtractionItem {
     extractedLotNumber: row.extractedLotNumber,
     extractedSupervisorName: row.extractedSupervisorName,
     extractedSupervisorMobile: row.extractedSupervisorMobile,
-    overallConfidence: row.overallConfidence,
     reason: row.reason,
     state: row.state,
   };

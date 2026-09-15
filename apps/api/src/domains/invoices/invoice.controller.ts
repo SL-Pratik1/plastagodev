@@ -89,13 +89,18 @@ export const invoiceController = {
     res.status(204).send();
   },
 
-  /** 202: the render is queued, not done. See the note on the service. */
+  /**
+   * 200 with the links — the render has happened by the time this answers.
+   *
+   * ⚠️ This used to be a 202. That was a promise the caller could do nothing
+   * with: the PDF was written to storage and no route ever served it back, so
+   * "accepted" was the end of the story rather than the start of one.
+   */
   requestPdf: async (
     req: ValidatedRequest<{ body: typeof InvoiceIdsSchema }>,
     res: Response,
   ): Promise<void> => {
-    const result = await invoiceService.requestPdf(req.validated.body.ids, callerFrom(req));
-    res.status(202).json(result);
+    res.json(await invoiceService.requestPdf(req.validated.body.ids, callerFrom(req)));
   },
 
   /**

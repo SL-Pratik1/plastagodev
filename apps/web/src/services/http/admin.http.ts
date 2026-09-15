@@ -8,6 +8,8 @@ import {
   CertificateSchema,
   DriverSchema,
   FinancialReportSchema,
+  InvitationResultSchema,
+  InvoiceDownloadsSchema,
   InvoiceListItemSchema,
   InvoiceSchema,
   JobCommentSchema,
@@ -33,6 +35,7 @@ import {
   type VehicleExpenseDraft,
 } from '@plastago/shared';
 import * as z from 'zod';
+import type { AccountUpdate } from '@plastago/shared';
 import type {
   CustomerService,
   DispatchService,
@@ -42,7 +45,7 @@ import type {
   ReportService,
   VehicleService,
 } from '../types.js';
-import { AcceptedSchema, NoContentSchema, listParams, pageOf } from './list-params.js';
+import { NoContentSchema, listParams, pageOf } from './list-params.js';
 import { viaService } from './to-service-error.js';
 
 /**
@@ -73,7 +76,37 @@ export function createHttpCustomerService(api: ApiClient): CustomerService {
 
     create: (draft: AccountDraft) =>
       viaService(() =>
-        api.request(base, { method: 'POST', body: draft, schema: AccountListItemSchema }),
+        api.request(base, {
+          method: 'POST',
+          body: draft,
+          /*
+           * Inline rather than a shared schema, matching the lead conversion
+           * response below it: the envelope is this endpoint's, and putting it
+           * in `@plastago/shared` would make `party.ts` import `users.ts`,
+           * which already imports `party.ts`.
+           */
+          schema: z.object({
+            account: AccountListItemSchema,
+            welcome: InvitationResultSchema.nullable(),
+          }),
+        }),
+      ),
+
+    /**
+     * Correct an account's details.
+     *
+     * PATCH, and the full `AccountSchema` back. The server trims, lower-cases
+     * the certificate email and turns blanks into nulls, so rendering the
+     * request body instead of the response would show the office what they
+     * typed rather than what was stored.
+     */
+    update: (accountId: string, input: AccountUpdate) =>
+      viaService(() =>
+        api.request(`${base}/${accountId}`, {
+          method: 'PATCH',
+          body: input,
+          schema: AccountSchema,
+        }),
       ),
 
     /*
@@ -109,6 +142,18 @@ export function createHttpCustomerService(api: ApiClient): CustomerService {
           // The whole account, so the page renders the stored journey. The
           // server can refuse this (409) when supervisors can still sign in,
           // in which case nothing comes back and the caller shows the message.
+          schema: AccountSchema,
+        }),
+      ),
+
+    setInvoiceTemplate: (accountId: string, invoiceTemplateId: string | null) =>
+      viaService(() =>
+        api.request(`${base}/${accountId}/invoice-template`, {
+          method: 'PATCH',
+          body: { invoiceTemplateId },
+          // The whole account back, so the page renders what was stored rather
+          // than what was asked for — the server refuses a template that has
+          // since been deleted, and the row must show the refusal's outcome.
           schema: AccountSchema,
         }),
       ),
@@ -258,8 +303,7 @@ export function createHttpDispatchService(api: ApiClient): DispatchService {
       );
     },
 
-    addJobToRun: (runId: string, jobId: string) =>
-      command(`${base}/runs/${runId}/jobs`, { jobId }),
+    addJobToRun: (runId: string, jobId: string) => command(`${base}/runs/${runId}/jobs`, { jobId }),
 
     removeJobFromRun: async (runId: string, jobId: string) => {
       await viaService(() =>
@@ -289,9 +333,7 @@ export function createHttpDispatchService(api: ApiClient): DispatchService {
     unassignRun: (runId: string) => command(`${base}/runs/${runId}/unassign`),
 
     runSheet: (runId: string) =>
-      viaService(() =>
-        api.request(`${base}/runs/${runId}/sheet`, { schema: RunSheetSchema }),
-      ),
+      viaService(() => api.request(`${base}/runs/${runId}/sheet`, { schema: RunSheetSchema })),
 
     mapPins: (date: string) =>
       viaService(() =>
@@ -354,16 +396,15 @@ export function createHttpInvoiceService(api: ApiClient): InvoiceService {
       );
     },
 
-    requestPdf: async (ids: readonly string[]) => {
-      await viaService(() =>
+    requestPdf: (ids: readonly string[]) =>
+      viaService(() =>
         api.request(`${base}/pdf`, {
           method: 'POST',
           body: { ids },
-          // 202 — the render is queued server-side (Playwright, §6A.6), not done.
-          schema: AcceptedSchema,
+          // 200 — the documents exist and their links come back with the answer.
+          schema: InvoiceDownloadsSchema,
         }),
-      );
-    },
+      ),
 
     /*
      * ⚠️ Answers with an OUTCOME, not 204.
@@ -504,8 +545,7 @@ export function createHttpVehicleService(api: ApiClient): VehicleService {
     assignDriver: (id: string, driverName: string | null) =>
       mutate(`${base}/${id}/driver`, { driverName }),
 
-    addExpense: (id: string, draft: VehicleExpenseDraft) =>
-      mutate(`${base}/${id}/expenses`, draft),
+    addExpense: (id: string, draft: VehicleExpenseDraft) => mutate(`${base}/${id}/expenses`, draft),
 
     setDefectState: (vehicleId: string, defectId: string, state: VehicleDefectState) =>
       mutate(`${base}/${vehicleId}/defects/${defectId}/state`, { state }),

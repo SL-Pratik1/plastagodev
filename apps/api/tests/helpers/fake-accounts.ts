@@ -1,10 +1,4 @@
-import type {
-  Account,
-  AccountListItem,
-  AccountType,
-  PageMeta,
-  TermsAcceptance,
-} from '@plastago/shared';
+import type { Account, AccountListItem, AccountType, PageMeta } from '@plastago/shared';
 import type {
   AccountScope,
   CreateAccountInput,
@@ -54,7 +48,6 @@ function listItemOf(id: string, code: string, accountType: AccountType): Account
     brandId: 'plastago',
     rateCardId: 'tier-1',
     accountType,
-    onboardingState: 'awaiting-terms',
     poPolicy: 'not-required',
     captureMode: 'area-only',
     status: 'active',
@@ -72,6 +65,15 @@ function accountOf(id: string, row: StoredAccount): Account {
     riskAssessmentRequired: row.riskAssessmentRequired,
     certificateEmail: null,
     abn: '12345678901',
+    /*
+     * The customer's own registered details. Null across the board because the
+     * fake never runs the portal form — the rules under test are the office's.
+     */
+    tradingName: null,
+    addressLine: null,
+    suburb: null,
+    postcode: null,
+    detailsCompletedAt: null,
     paymentTermsDays: 7,
     primaryZone: 'sydney',
     contacts: [],
@@ -144,6 +146,26 @@ export function createFakeAccountRepository() {
         return takenCodes.has(code.trim().toUpperCase());
       },
 
+      /*
+       * The suggestion a rejected code comes back with.
+       *
+       * Same walk as the real one — prefix + 001 upwards until something is
+       * free — because the point of the test is the MESSAGE the office reads,
+       * and a stub returning a fixed string would prove only that a string
+       * arrives.
+       */
+      async nextFreeCode(code: string): Promise<string | null> {
+        const prefix = code.trim().toUpperCase().slice(0, 3);
+        if (!/^[A-Z]{3}$/.test(prefix)) return null;
+
+        for (let n = 1; n <= 999; n += 1) {
+          const candidate = `${prefix}${String(n).padStart(3, '0')}`;
+          if (!takenCodes.has(candidate)) return candidate;
+        }
+
+        return null;
+      },
+
       async create(input: CreateAccountInput): Promise<AccountListItem> {
         state.lastCreate = input;
         const id = nextId();
@@ -153,10 +175,7 @@ export function createFakeAccountRepository() {
           accountType: input.accountType,
         });
         takenCodes.add(input.code);
-        return {
-          ...listItemOf(id, input.code, input.accountType),
-          onboardingState: input.termsAgreedOffSystem ? 'complete' : 'awaiting-terms',
-        };
+        return listItemOf(id, input.code, input.accountType);
       },
 
       async setRiskAssessmentRequired(id: string, required: boolean): Promise<boolean> {
@@ -171,10 +190,6 @@ export function createFakeAccountRepository() {
         if (!row) return false;
         row.accountType = accountType;
         return true;
-      },
-
-      async findTermsAcceptance(): Promise<TermsAcceptance | null> {
-        return null;
       },
     },
   };

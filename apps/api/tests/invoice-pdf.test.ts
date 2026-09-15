@@ -22,6 +22,8 @@ const BRANDING: Settings['invoicing'] = {
   splitAdditionalCharges: true,
   defaultPaymentTermsDays: 7,
   logoKey: '',
+  // Derived from `logoKey`; null because this fixture has no logo uploaded.
+  logoUrl: null,
   companyName: 'PlastaGo Pty Ltd',
   companyAbn: '51824753556',
   companyAddress: '1 Recycling Way, Smithfield NSW 2164',

@@ -3,6 +3,7 @@ import {
   AdditionalServiceUpdateSchema,
   InvoiceTemplateWriteSchema,
   InvoicingSettingsSchema,
+  LogoUploadRequestSchema,
   RateCardCreateSchema,
   RateCardUpdateSchema,
   RateScheduleCreateSchema,
@@ -14,8 +15,10 @@ import { validate } from '../../middleware/validate.js';
 import { settingsController } from './settings.controller.js';
 import {
   InvoiceTemplateIdParamsSchema,
+  LogoConfirmSchema,
   QuoteQuerySchema,
   RateCardIdParamsSchema,
+  ScheduleParamsSchema,
   ServiceCodeParamsSchema,
 } from './settings.schemas.js';
 
@@ -80,6 +83,30 @@ settingsRouter.put(
   asyncHandler(settingsController.saveInvoicing),
 );
 
+/* ── The invoice logo (M7.5) ─────────────────────────────────────────────── */
+
+/*
+ * Two steps on purpose: the browser asks for somewhere to PUT the bytes, then
+ * confirms once they have landed. The logo the invoices print only changes on
+ * the second call, so an upload that is abandoned halfway leaves the previous
+ * one exactly where it was.
+ */
+settingsRouter.post(
+  '/invoicing/logo',
+  ADMIN,
+  validate({ body: LogoUploadRequestSchema }),
+  asyncHandler(settingsController.presignLogo),
+);
+
+settingsRouter.put(
+  '/invoicing/logo',
+  ADMIN,
+  validate({ body: LogoConfirmSchema }),
+  asyncHandler(settingsController.confirmLogo),
+);
+
+settingsRouter.delete('/invoicing/logo', ADMIN, asyncHandler(settingsController.removeLogo));
+
 /* ── Invoice templates (M7.5) ────────────────────────────────────────────── */
 
 settingsRouter.post(
@@ -101,6 +128,20 @@ settingsRouter.delete(
   ADMIN,
   validate({ params: InvoiceTemplateIdParamsSchema }),
   asyncHandler(settingsController.deleteInvoiceTemplate),
+);
+
+/**
+ * A rendered sample of one template.
+ *
+ * POST rather than GET because it PRODUCES an object — it draws a PDF and puts
+ * it in storage. Calling it twice leaves two previews, which is why it is not
+ * something a browser may retry or prefetch on its own.
+ */
+settingsRouter.post(
+  '/invoice-templates/:id/preview',
+  ADMIN,
+  validate({ params: InvoiceTemplateIdParamsSchema }),
+  asyncHandler(settingsController.previewTemplate),
 );
 
 /* ── Rate cards (M6.1, M6.2) ─────────────────────────────────────────────── */
@@ -134,6 +175,21 @@ settingsRouter.post(
   ADMIN,
   validate({ params: RateCardIdParamsSchema, body: RateScheduleCreateSchema }),
   asyncHandler(settingsController.issueSchedule),
+);
+
+/**
+ * ⚠️ Undo for a schedule issued with the wrong date — and nothing more.
+ *
+ * The service admits only a schedule that has NOT started yet, and never a
+ * card's last one. That is what keeps this from becoming the "edit a rate"
+ * operation the POST above deliberately refuses to be: a schedule that has
+ * priced work cannot be removed, so nothing already invoiced can move.
+ */
+settingsRouter.delete(
+  '/rate-cards/:id/schedules/:effectiveFrom',
+  ADMIN,
+  validate({ params: ScheduleParamsSchema }),
+  asyncHandler(settingsController.deleteSchedule),
 );
 
 settingsRouter.delete(

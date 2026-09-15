@@ -77,14 +77,14 @@ import { isServiceError } from '@/services/service-error';
  * conversion, in one place, where it can be read.
  */
 const FormSchema = z.object({
-  companyName: z.string().trim().min(1, 'Enter the company name').max(120),
-  contactName: z.string().trim().min(1, 'Enter who you spoke to').max(80),
-  email: z.email('Enter a valid email address').max(160),
-  mobile: z.string().trim().max(20),
+  companyName: z.string().trim().min(1, 'Enter the company name').max(120, 'Keep the company name under 120 characters'),
+  contactName: z.string().trim().min(1, 'Enter who you spoke to').max(80, 'Keep the contact name under 80 characters'),
+  email: z.email('Enter a valid email address').max(160, 'Keep the email under 160 characters'),
+  mobile: z.string().trim().max(20, 'A mobile number is at most 20 characters'),
   source: z.enum(LEAD_SOURCES),
   /** '' is "outside the service area" — the same answer the grid filters on. */
   zone: z.union([z.enum(ZONES), z.literal('')]),
-  suburbs: z.string().trim().max(200),
+  suburbs: z.string().trim().max(200, 'Keep the suburb list under 200 characters'),
   /**
    * Kept as a string so '' survives as its own answer. `z.coerce.number()` turns
    * '' into 0, and 0 m² is a claim the caller never made — it would render as
@@ -99,10 +99,10 @@ const FormSchema = z.object({
       (value) => value === '' || Number(value) <= 100000,
       'That looks too large — check the figure',
     ),
-  expectedFrequency: z.string().trim().max(80),
-  heardAbout: z.string().trim().max(200),
-  ownerName: z.string().trim().max(80),
-  note: z.string().trim().max(1000),
+  expectedFrequency: z.string().trim().max(80, 'Keep this under 80 characters'),
+  heardAbout: z.string().trim().max(200, 'Keep this under 200 characters'),
+  ownerName: z.string().trim().max(80, 'Keep the name under 80 characters'),
+  note: z.string().trim().max(1000, 'Keep the note under 1000 characters'),
 });
 
 type FormValues = z.input<typeof FormSchema>;

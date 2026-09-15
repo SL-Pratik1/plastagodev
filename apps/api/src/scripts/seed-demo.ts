@@ -8,11 +8,7 @@ import {
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { connectMongo, disconnectMongo, isMongoConnected } from '../db/mongo.js';
-import {
-  AccountModel,
-  ContactModel,
-  TermsAcceptanceModel,
-} from '../domains/accounts/account.model.js';
+import { AccountModel, ContactModel } from '../domains/accounts/account.model.js';
 import { UserModel } from '../domains/auth/auth.model.js';
 import { RunModel, RunTipOffModel } from '../domains/dispatch/run.model.js';
 import { VehicleDefectModel } from '../domains/driver/defect.model.js';
@@ -703,7 +699,6 @@ async function seedAccounts(): Promise<SeededAccount[]> {
   const seeded: SeededAccount[] = [];
   const accountDocs: Record<string, unknown>[] = [];
   const contactDocs: Record<string, unknown>[] = [];
-  const termsDocs: Record<string, unknown>[] = [];
   for (const seed of ACCOUNTS) {
     const id = oid();
     seeded.push({ ...seed, id });
@@ -769,25 +764,9 @@ async function seedAccounts(): Promise<SeededAccount[]> {
         notifyByEmail: true,
       });
     }
-
-    /*
-     * Terms are accepted by everyone except Newlands, so the portal's
-     * awaiting-terms gate has a live example behind it rather than only a code
-     * path.
-     */
-    if (seed.code !== 'NEW001') {
-      termsDocs.push({
-        accountId: id,
-        acceptedAt: at(day(-int(60, 400)), 10, int(0, 59)),
-        acceptedByName: pick(['Angela Fitzgerald', 'Robert Clarendon', 'Peter Lam']),
-        acceptedByRole: 'Accounts Manager',
-        termsVersion: '2026-01',
-      });
-    }
   }
   await AccountModel.insertMany(accountDocs);
   await ContactModel.insertMany(contactDocs);
-  await TermsAcceptanceModel.insertMany(termsDocs);
   log.info({ accounts: accountDocs.length, contacts: contactDocs.length }, 'accounts seeded');
   return seeded;
 }
@@ -2561,7 +2540,22 @@ async function seedPurchaseOrders(
     const poId = oid();
     const poNumber = `PO-${String(int(80_000, 99_999))}`;
     job.doc.poNumber = poNumber;
-    job.doc.purchaseOrderId = poId;
+
+    /*
+     * ⚠️ A CANCELLED job releases its order, exactly as `jobRepository.cancel`
+     * does in the product: it nulls `purchaseOrderId` so the builder can
+     * re-book work they called off.
+     *
+     * The seed used to attach the order regardless, which left four orders
+     * that the "Waiting for a date" queue listed as bookable and
+     * `jobService.create` then refused — "PO-88793 is already on job 61432" —
+     * naming a job that had been cancelled weeks earlier. Nothing the office
+     * could do would clear them.
+     *
+     * The PO NUMBER stays on the job, because that is what was quoted at the
+     * time and the cancellation does not rewrite history.
+     */
+    job.doc.purchaseOrderId = job.doc.status === 'cancelled' ? null : poId;
 
     poDocs.push({
       _id: poId,
@@ -2799,9 +2793,9 @@ function buildCallUps(waiting: readonly Record<string, unknown>[]): Record<strin
  *
  * Every reason the extractor can hand something back is represented, because
  * each one renders a different screen: an ambiguous account offers candidates
- * to choose between, a duplicate offers the order it collides with, a
- * low-confidence read offers the fields to correct. A queue holding six copies
- * of the same reason exercises one of those.
+ * to choose between, a duplicate offers the order it collides with, an
+ * unchecked one offers the fields to correct. A queue holding six copies of
+ * the same reason exercises one of those.
  */
 function buildExtractions(accounts: readonly SeededAccount[]): Record<string, unknown>[] {
   const docs: Record<string, unknown>[] = [];
@@ -2809,12 +2803,12 @@ function buildExtractions(accounts: readonly SeededAccount[]): Record<string, un
   if (reviewable.length === 0) return docs;
 
   const REVIEW_CASES = [
-    { reason: 'below-threshold', confidence: 0.58, subject: 'Purchase Order 91882' },
-    { reason: 'no-account-match', confidence: 0.81, subject: 'PO for plasterboard pickup' },
-    { reason: 'ambiguous-account', confidence: 0.74, subject: 'Order - Lot 218 Kellyville' },
-    { reason: 'no-job-match', confidence: 0.88, subject: 'PO-90114 Marsden Park' },
-    { reason: 'duplicate-po', confidence: 0.93, subject: 'RE: PO-88213' },
-    { reason: 'below-threshold', confidence: 0.41, subject: 'Scanned document' },
+    { reason: 'awaiting-check', subject: 'Purchase Order 91882' },
+    { reason: 'no-account-match', subject: 'PO for plasterboard pickup' },
+    { reason: 'ambiguous-account', subject: 'Order - Lot 218 Kellyville' },
+    { reason: 'no-job-match', subject: 'PO-90114 Marsden Park' },
+    { reason: 'duplicate-po', subject: 'RE: PO-88213' },
+    { reason: 'awaiting-check', subject: 'Scanned document' },
   ] as const;
 
   REVIEW_CASES.forEach((review, index) => {
@@ -2844,24 +2838,14 @@ function buildExtractions(accounts: readonly SeededAccount[]): Record<string, un
       extractedSupervisorName: pick(['Dave Miller', 'Karen Whitby', 'Nick Farrugia']),
       extractedSupervisorMobile: `04${String(int(10, 99))}${String(int(100_000, 999_999))}`,
       /*
-       * Per-field confidence, not just an overall score. The reviewer needs to
-       * know WHICH value to distrust — an order read perfectly except for a
-       * smudged area figure is one correction, not a re-key.
+       * The values as read, with no score beside them. The reviewer checks each
+       * against the document itself — which is the only thing that can actually
+       * tell them whether a figure is right.
        */
       fields: [
-        { key: 'poNumber', label: 'PO number', value: poNumber, confidence: review.confidence },
-        {
-          key: 'areaM2',
-          label: 'Area (m2)',
-          value: String(areaValue),
-          confidence: Math.max(0.3, review.confidence - 0.12),
-        },
-        {
-          key: 'siteAddress',
-          label: 'Site address',
-          value: siteAddress,
-          confidence: review.confidence,
-        },
+        { key: 'poNumber', label: 'PO number', value: poNumber },
+        { key: 'areaM2', label: 'Area (m2)', value: String(areaValue) },
+        { key: 'siteAddress', label: 'Site address', value: siteAddress },
       ],
       suggestedAccountId: unmatched ? null : account.id,
       suggestedAccountName: unmatched ? null : account.name,
@@ -2873,11 +2857,9 @@ function buildExtractions(accounts: readonly SeededAccount[]): Record<string, un
               id: candidate.id.toHexString(),
               label: candidate.name,
               detail: candidate.code,
-              confidence: Math.round((0.4 + random() * 0.3) * 100) / 100,
             }))
           : [],
       jobCandidates: [],
-      overallConfidence: review.confidence,
       reason: review.reason,
       state: 'needs-review',
       reviewedAt: null,
@@ -2919,7 +2901,7 @@ function buildExtractions(accounts: readonly SeededAccount[]): Record<string, un
       accountCandidates: [],
       jobCandidates: [],
       overallConfidence: confirmed ? 0.96 : 0.22,
-      reason: confirmed ? 'below-threshold' : 'no-account-match',
+      reason: confirmed ? 'awaiting-check' : 'no-account-match',
       state,
       reviewedAt: at(day(-int(1, 6)), 11, int(0, 59)),
       reviewedByUserId: null,
@@ -3610,7 +3592,7 @@ async function seedNotifications(
       body: 'Six purchase orders are waiting to be matched to an account.',
       at: at(TODAY, 7, 5),
       readAt: null,
-      href: '/queues/po-review',
+      href: '/admin/queues/po-review',
       valueExGst: null,
       jobId: null,
       jobNumber: null,
@@ -3629,7 +3611,7 @@ async function seedNotifications(
         // sitting for days is the thing the screen is meant to make impossible
         // to miss.
         readAt: index === 0 ? null : at(day(-1), 16),
-        href: `/jobs/${job.id.toHexString()}`,
+        href: `/admin/jobs/${job.id.toHexString()}`,
         valueExGst: null,
         jobId: job.id,
         jobNumber: job.jobNumber,
@@ -3646,7 +3628,7 @@ async function seedNotifications(
         body: `Raised on job ${String(job.jobNumber)} at ${String(job.doc.suburb)}.`,
         at: job.completedAt ?? at(job.readyDate, 12),
         readAt: null,
-        href: '/queues/approvals',
+        href: '/admin/queues/approvals',
         valueExGst: decimal(int(8_000, 24_000)),
         jobId: job.id,
         jobNumber: job.jobNumber,
@@ -3663,7 +3645,7 @@ async function seedNotifications(
         body: `Target was ${job.targetDate} and it is still unallocated.`,
         at: at(TODAY, 6, 30),
         readAt: null,
-        href: '/dispatch',
+        href: '/admin/dispatch',
         valueExGst: null,
         jobId: job.id,
         jobNumber: job.jobNumber,
@@ -3679,7 +3661,7 @@ async function seedNotifications(
       body: 'Two invoices could not be pushed — the contact is missing in Xero.',
       at: at(day(-1), 9, 12),
       readAt: null,
-      href: '/invoices?xero=failed',
+      href: '/admin/xero',
       valueExGst: null,
       jobId: null,
       jobNumber: null,
@@ -3694,7 +3676,7 @@ async function seedNotifications(
       body: 'Last night’s run produced 9 invoices, all synced to Xero.',
       at: at(day(-1), 19, 0),
       readAt: at(TODAY, 7, 20),
-      href: '/invoices',
+      href: '/admin/invoices',
       valueExGst: null,
       jobId: null,
       jobNumber: null,
@@ -3709,7 +3691,7 @@ async function seedNotifications(
       body: 'Two credentials expire within 30 days. One has already lapsed.',
       at: at(day(-2), 7, 0),
       readAt: null,
-      href: '/drivers',
+      href: '/admin/drivers',
       valueExGst: null,
       jobId: null,
       jobNumber: null,

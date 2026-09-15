@@ -24,13 +24,13 @@ let onboardings: Array<Record<string, unknown>> = [];
 let contactUpserts: Array<Record<string, unknown>> = [];
 let termsWrites: Array<Record<string, unknown>> = [];
 let pdfIdsSeen: readonly string[] = [];
+/** What actually reached the renderer, after the ownership filter. */
+let renderedIds: readonly string[] = [];
 
 /** What the repositories report back. Set per test. */
 let existingLogin: { id: string; accountId: string | null } | null = null;
 let stateChangeMatches = true;
 let approveMatches = true;
-let existingTerms: Record<string, unknown> | null = null;
-let termsRecorded = true;
 let ownedIds: string[] = ['inv1'];
 /** Builder or contractor — the supervisor endpoints are builders-only (M5.14). */
 let accountType: 'builder' | 'contractor' | null = 'builder';
@@ -43,6 +43,42 @@ vi.mock('../src/domains/portal/portal.repository.js', () => ({
   ownedInvoiceIds: (_accountId: string, ids: readonly string[]) => {
     pdfIdsSeen = ids;
     return Promise.resolve(ownedIds);
+  },
+}));
+
+/*
+ * The renderer itself is another domain's, and it is exercised by the invoice
+ * tests. What matters HERE is which ids the portal lets through to it — the
+ * ownership filter is the portal's own rule, and mocking this is what makes the
+ * assertion about that rule rather than about pdf-lib.
+ */
+vi.mock('../src/domains/invoices/invoice.service.js', () => ({
+  invoiceService: {
+    requestPdf: (ids: readonly string[]) => {
+      renderedIds = ids;
+      return Promise.resolve({
+        requested: ids.length,
+        downloads: ids.map((id, index) => ({
+          id,
+          invoiceNumber: 104_100 + index,
+          fileName: `Invoice PGA-${String(104_100 + index)}.pdf`,
+          url: `https://storage.test/${id}.pdf`,
+        })),
+      });
+    },
+  },
+}));
+
+/*
+ * Inviting a supervisor now SENDS the invitation — the portal told the
+ * administrator "We have texted them a link" while the service created the
+ * user row and stopped. Stubbed so the unit tests do not reach the outbound
+ * queue; that it is called at all is asserted below.
+ */
+vi.mock('../src/domains/portal/supervisor-provisioning.service.js', () => ({
+  supervisorProvisioning: {
+    notify: vi.fn(async () => undefined),
+    ensureForAccount: vi.fn(async () => ({ status: 'skipped' })),
   },
 }));
 
@@ -114,23 +150,43 @@ vi.mock('../src/domains/portal/supervisor.repository.js', () => ({
 
 vi.mock('../src/domains/accounts/account.repository.js', () => ({
   accountRepository: {
+    /*
+     * A whole account, not the four fields the old invite happened to read.
+     *
+     * The details screen opens on what is ALREADY on file — a form that arrived
+     * blank on a second visit is how a complete record gets replaced with a
+     * half-filled one — so the invite now reads the address, the ABN and the
+     * accounts contact off this too.
+     */
     findById: () =>
       Promise.resolve({
         id: ACCOUNT_ID,
         code: 'CLA001',
         name: 'Clarendon Homes',
         accountType: 'builder',
+        abn: '12345678901',
+        tradingName: 'Clarendon',
+        addressLine: '1 Builder Street',
+        suburb: 'Kellyville',
+        postcode: '2155',
+        certificateEmail: 'sustainability@clarendon.com.au',
+        detailsCompletedAt: null,
+        contacts: [
+          {
+            id: 'contact1',
+            name: 'Marcus Webb',
+            role: 'accounts',
+            email: 'ap@clarendon.com.au',
+            mobile: null,
+            notifyBySms: false,
+            notifyByEmail: true,
+          },
+        ],
       }),
-    findTermsAcceptance: () => Promise.resolve(existingTerms),
-    recordTermsAcceptance: (input: Record<string, unknown>) => {
-      termsWrites.push(input);
-      return Promise.resolve(termsRecorded);
-    },
   },
 }));
 
-vi.mock('../src/domains/accounts/account.service.js', () => ({ TERMS_VERSION: '2026-02' }));
-
+import { supervisorProvisioning } from '../src/domains/portal/supervisor-provisioning.service.js';
 const { portalAccountService } = await import('../src/domains/portal/portal-account.service.js');
 
 const ADMIN = {
@@ -162,9 +218,6 @@ function onboarding(overrides: Partial<AccountOnboarding> = {}): AccountOnboardi
     accountsContactName: 'Marcus Webb',
     accountsContactEmail: 'ap@clarendon.com.au',
     certificateEmail: 'sustainability@clarendon.com.au',
-    acceptedByName: 'Robert Clarendon',
-    acceptedByRole: 'Director',
-    termsAccepted: true,
     ...overrides,
   };
 }
@@ -179,11 +232,10 @@ beforeEach(() => {
   contactUpserts = [];
   termsWrites = [];
   pdfIdsSeen = [];
+  renderedIds = [];
   existingLogin = null;
   stateChangeMatches = true;
   approveMatches = true;
-  existingTerms = null;
-  termsRecorded = true;
   ownedIds = ['inv1'];
   accountType = 'builder';
 });
@@ -206,9 +258,9 @@ describe('a supervisor sees none of this (M1.5)', () => {
   });
 
   it('refuses inviting anybody', async () => {
-    await expect(
-      portalAccountService.inviteSupervisor(invite(), SUPERVISOR),
-    ).rejects.toMatchObject({ status: 403 });
+    await expect(portalAccountService.inviteSupervisor(invite(), SUPERVISOR)).rejects.toMatchObject(
+      { status: 403 },
+    );
 
     expect(invited).toHaveLength(0);
   });
@@ -226,9 +278,9 @@ describe('a supervisor sees none of this (M1.5)', () => {
   });
 
   it('refuses a session with no account at all', async () => {
-    await expect(
-      portalAccountService.account({ ...ADMIN, accountId: null }),
-    ).rejects.toMatchObject({ status: 403 });
+    await expect(portalAccountService.account({ ...ADMIN, accountId: null })).rejects.toMatchObject(
+      { status: 403 },
+    );
   });
 });
 
@@ -300,10 +352,36 @@ describe('an account that has vanished', () => {
 
 describe('invoice PDFs', () => {
   it('renders only invoices the account owns', async () => {
-    await portalAccountService.requestInvoicePdf(['inv1', 'inv-someone-else'], ADMIN);
+    const result = await portalAccountService.requestInvoicePdf(
+      ['inv1', 'inv-someone-else'],
+      ADMIN,
+    );
 
     // Both ids reach the ownership filter; only the owned one comes back.
     expect(pdfIdsSeen).toHaveLength(2);
+
+    /*
+     * ⚠️ The one that matters. Another customer's id must not reach the
+     * renderer at all — not be rendered and then filtered out of the response,
+     * which would still have produced their document.
+     */
+    expect(renderedIds).toEqual(['inv1']);
+    expect(result.downloads).toHaveLength(1);
+  });
+
+  it('hands back a link, not a promise that one is coming', async () => {
+    /*
+     * This endpoint used to log a line and answer `{ queued: 1 }` while
+     * rendering nothing, so the portal's download button did nothing at all.
+     * A URL in the response is what makes the button real.
+     */
+    const result = await portalAccountService.requestInvoicePdf(['inv1'], ADMIN);
+
+    expect(result.downloads[0]).toMatchObject({
+      id: 'inv1',
+      fileName: 'Invoice PGA-104100.pdf',
+      url: 'https://storage.test/inv1.pdf',
+    });
   });
 
   it('404s when none of the ids belong to this account', async () => {
@@ -378,6 +456,67 @@ describe('inviting a supervisor (M5.14)', () => {
     await portalAccountService.inviteSupervisor(invite(), ADMIN);
 
     expect(invited[0]?.awaitingApproval).toBe(false);
+  });
+});
+
+describe('an invitation that could never arrive', () => {
+  /*
+   * ⚠️ The contract used to check only the LENGTH of these.
+   *
+   * The invite dialog checked the shape of both and the schema checked neither,
+   * so the rule was drawn rather than enforced: posted directly, a landline or
+   * `mobile: "hello"` returned 201 and created a real login. It can never be
+   * used — a supervisor signs in by their `phoneNumber`, so the one-time code
+   * goes nowhere — while the administrator is told it was texted.
+   */
+  it('refuses a landline where a mobile belongs', async () => {
+    await expect(
+      portalAccountService.inviteSupervisor(invite({ email: '', mobile: '0298765432' }), ADMIN),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('refuses something that is not a number at all', async () => {
+    await expect(
+      portalAccountService.inviteSupervisor(invite({ email: '', mobile: 'hello' }), ADMIN),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('refuses an email with no @', async () => {
+    await expect(
+      portalAccountService.inviteSupervisor(invite({ mobile: '', email: 'not-an-email' }), ADMIN),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  /* Spaces and +61 are how people actually type a number. */
+  it('accepts an Australian mobile however it was typed', async () => {
+    await expect(
+      portalAccountService.inviteSupervisor(invite({ email: '', mobile: '+61 412 345 678' }), ADMIN),
+    ).resolves.toBeDefined();
+  });
+});
+
+describe('the invitation is actually sent', () => {
+  /*
+   * The office path (a purchase order naming a supervisor) has provisioned AND
+   * notified from the beginning. The portal path created the row and sent
+   * nothing, so the person was never contacted and the builder had no way to
+   * tell — the row read "invited" either way.
+   */
+  it('tells the person they have access', async () => {
+    await portalAccountService.inviteSupervisor(invite({ email: '' }), ADMIN);
+
+    /*
+     * Notified from the STORED record, not the input: the repository is what
+     * normalised the number and settled which of email or mobile survived, and
+     * the message has to match what was actually saved against the login.
+     */
+    expect(supervisorProvisioning.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'sup1',
+        provisionedBy: ADMIN.name,
+        sourceLabel: 'portal invite',
+      }),
+    );
   });
 });
 
@@ -459,7 +598,7 @@ describe('account preferences (M5.15)', () => {
   });
 });
 
-describe('onboarding — the legal record (Journey A.4)', () => {
+describe('the customer completing their own details', () => {
   it('saves the details the customer is the authority on', async () => {
     await portalAccountService.completeOnboarding(onboarding(), ADMIN);
 
@@ -489,60 +628,43 @@ describe('onboarding — the legal record (Journey A.4)', () => {
   });
 
   /*
-   * ⚠️ The acceptance names the person who ACCEPTED, typed by them — not the
-   * session user. A director's guarantee is given by a named individual, and the
-   * person logged in may be an accounts clerk acting on their behalf.
+   * ⚠️ RE-SUBMITTABLE, and that is a deliberate reversal.
+   *
+   * This used to refuse a second submission with a 409, because the same call
+   * also recorded a terms acceptance and a guarantee that can be silently
+   * replaced is not evidence of anything. The terms are gone, and what is left
+   * is ordinary correctable data — refusing a customer who has moved office
+   * would be refusing the one person who knows their new address.
    */
-  it('records the typed name, not the session user', async () => {
+  it('lets a customer correct details they have already given', async () => {
     await portalAccountService.completeOnboarding(onboarding(), ADMIN);
+    await portalAccountService.completeOnboarding(
+      onboarding({ addressLine: '9 New Road', suburb: 'Penrith', postcode: '2750' }),
+      ADMIN,
+    );
 
-    expect(termsWrites[0]).toMatchObject({
-      acceptedByName: 'Robert Clarendon',
-      acceptedByRole: 'Director',
-      termsVersion: '2026-02',
-    });
-    expect(termsWrites[0]?.acceptedByName).not.toBe(ADMIN.name);
+    expect(onboardings).toHaveLength(2);
+    expect(onboardings[1]).toMatchObject({ suburb: 'Penrith', postcode: '2750' });
   });
 
-  /* The record Matt chases as a signed PDF. A second write would silently
-   * replace who signed and when. */
-  it('refuses when the terms were already accepted', async () => {
-    existingTerms = { acceptedByName: 'Robert Clarendon', acceptedAt: '2026-09-01T00:00:00.000Z' };
-
-    await expect(
-      portalAccountService.completeOnboarding(onboarding(), ADMIN),
-    ).rejects.toMatchObject({ status: 409 });
-
-    expect(termsWrites).toHaveLength(0);
-  });
-
-  it('refuses when somebody accepted mid-flow', async () => {
-    termsRecorded = false;
-
-    await expect(
-      portalAccountService.completeOnboarding(onboarding(), ADMIN),
-    ).rejects.toMatchObject({ status: 409 });
-  });
-
-  it('reports the terms as outstanding before acceptance', async () => {
+  it('opens on what is already on file, so one correction does not blank the rest', async () => {
     const invite = await portalAccountService.onboardingInvite(ADMIN);
 
-    expect(invite.state).toBe('awaiting-terms');
-    expect(invite.acceptance).toBeNull();
-    expect(invite.termsVersion).toBe('2026-02');
+    /*
+     * The form is re-openable now that nothing gates it. A screen that arrived
+     * blank on the second visit is how a complete record gets replaced with a
+     * half-filled one — so the invite carries the stored details, not just a
+     * suggested name.
+     */
+    expect(invite.details).not.toBeNull();
+    expect(invite.suggestedLegalName).toBeTruthy();
   });
 
-  it('reports complete once accepted', async () => {
-    existingTerms = {
-      acceptedAt: '2026-09-01T00:00:00.000Z',
-      acceptedByName: 'Robert Clarendon',
-      acceptedByRole: 'Director',
-      termsVersion: '2026-02',
-    };
-
+  it('reports whether the customer has ever confirmed their details', async () => {
     const invite = await portalAccountService.onboardingInvite(ADMIN);
 
-    expect(invite.state).toBe('complete');
-    expect(invite.acceptance).not.toBeNull();
+    // A date, not a state: "have they filled this in?" and "is it still
+    // current?" are the same question a year later.
+    expect(invite).toHaveProperty('completedAt');
   });
 });

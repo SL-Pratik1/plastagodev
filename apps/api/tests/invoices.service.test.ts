@@ -137,6 +137,39 @@ vi.mock('../src/domains/notifications/notification.repository.js', () => ({
  */
 const xeroPushes: string[] = [];
 
+/*
+ * M7.6 — the renderer and the bucket.
+ *
+ * Faked together because the thing under test is not how a PDF is DRAWN — that
+ * is `invoice-pdf.test.ts` — but what the service does with the key it gets
+ * back: which invoices it renders, which it declines to re-render, and whether
+ * a link comes out the other end.
+ */
+const renderedIds: string[] = [];
+/** Ids the renderer should refuse, standing in for a brand with no template. */
+const unrenderable = new Set<string>();
+
+vi.mock('../src/domains/invoices/invoice-render.service.js', () => ({
+  invoiceRenderService: {
+    context: () =>
+      Promise.resolve({ branding: {}, invoiceNumberPrefix: 'PGA-', logo: null }),
+    render: (invoice: { id: string }) => {
+      if (unrenderable.has(invoice.id)) {
+        return Promise.reject(new Error('No invoice template is configured'));
+      }
+      renderedIds.push(invoice.id);
+      return Promise.resolve(`invoices/${invoice.id}/pdf`);
+    },
+    bytesForSending: () => Promise.resolve(null),
+  },
+}));
+
+vi.mock('../src/integrations/storage.js', () => ({
+  getStorage: () => ({
+    presignDownload: (key: string) => Promise.resolve(`https://storage.test/${key}?signed`),
+  }),
+}));
+
 vi.mock('../src/domains/xero/xero.service.js', () => ({
   xeroService: {
     pushInvoice: (id: string) => {
@@ -604,6 +637,73 @@ describe('customers see their own and no more', () => {
     await expect(invoiceService.requestPdf([other.id], CUSTOMER)).rejects.toMatchObject({
       status: 404,
     });
+  });
+});
+
+/* ── M7.6 · getting the document into somebody's hands ───────────────────── */
+
+describe('invoice PDFs (M7.6)', () => {
+  beforeEach(() => {
+    renderedIds.length = 0;
+    unrenderable.clear();
+  });
+
+  /*
+   * The whole point of the change: this used to render into storage and answer
+   * with a count, so the document existed and nobody could open it.
+   */
+  it('answers with a link and a filename, not just a count', async () => {
+    const invoice = invoices.seed({ status: 'sent' });
+
+    const result = await invoiceService.requestPdf([invoice.id], OFFICE);
+
+    expect(result.requested).toBe(1);
+    expect(result.downloads).toEqual([
+      {
+        id: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        fileName: `Invoice PGA-${String(invoice.invoiceNumber)}.pdf`,
+        url: `https://storage.test/invoices/${invoice.id}/pdf?signed`,
+      },
+    ]);
+  });
+
+  /*
+   * ⚠️ The rule that protects a document somebody has already been sent.
+   *
+   * Re-rendering on download would reprint the invoice against today's
+   * branding, template and rates — so a copy pulled a year later would not
+   * match the one in the builder's filing system, and the difference would
+   * surface in a payment dispute.
+   */
+  it('serves the stored PDF rather than drawing a new one', async () => {
+    const invoice = invoices.seed({ status: 'sent', pdfKey: 'invoices/original/pdf' });
+
+    const result = await invoiceService.requestPdf([invoice.id], OFFICE);
+
+    expect(renderedIds).toEqual([]);
+    expect(result.downloads[0]?.url).toBe('https://storage.test/invoices/original/pdf?signed');
+  });
+
+  /*
+   * A brand with no template fails that invoice alone. Reporting the batch as
+   * a success is how somebody walks away believing they have three invoices
+   * and has two.
+   */
+  it('drops the one that cannot be rendered and returns the rest', async () => {
+    const good = invoices.seed({ status: 'sent' });
+    const broken = invoices.seed({ status: 'sent' });
+    unrenderable.add(broken.id);
+
+    const result = await invoiceService.requestPdf([good.id, broken.id], OFFICE);
+
+    expect(result.requested).toBe(2);
+    expect(result.downloads).toHaveLength(1);
+    expect(result.downloads[0]?.id).toBe(good.id);
+  });
+
+  it('refuses an empty selection', async () => {
+    await expect(invoiceService.requestPdf([], OFFICE)).rejects.toMatchObject({ status: 422 });
   });
 });
 

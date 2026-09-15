@@ -1,5 +1,10 @@
 import * as z from 'zod';
-import { AbnSchema, IsoDateTimeSchema, NonEmptyStringSchema, ObjectIdSchema } from './primitives.js';
+import {
+  AbnSchema,
+  IsoDateTimeSchema,
+  NonEmptyStringSchema,
+  ObjectIdSchema,
+} from './primitives.js';
 
 /**
  * The party model (M1.2): **Account ≠ Builder ≠ Site ≠ Contact.**
@@ -166,34 +171,29 @@ export const ACCOUNT_STATUSES = ['active', 'inactive'] as const;
 export const AccountStatusSchema = z.enum(ACCOUNT_STATUSES).meta({ id: 'AccountStatus' });
 export type AccountStatus = z.infer<typeof AccountStatusSchema>;
 
-/**
- * Where an account is in its onboarding, and what it may do.
+/*
+ * ── Terms and conditions: REMOVED, deliberately ───────────────────────────
  *
- * `awaiting-terms` is not a cosmetic state. Until the terms are accepted there
- * is no director's guarantee on file, which is the whole reason Matt's paper
- * form exists (7:49) — so the account can be looked at but not traded with.
+ * `OnboardingState`, `ONBOARDING_STATE_LABELS` and `TermsAcceptance` used to
+ * live here. An account sat in `awaiting-terms` until its administrator ticked
+ * a terms box in the portal, and the portal refused them every screen until
+ * they did.
+ *
+ * It was removed on the client's instruction. The feature never appeared in the
+ * written scope (`08-MVP-20-DAY-SCOPE.md` §A.4 lists the account, rate card, PO
+ * policy, capture configuration, payment terms, brand, contacts and the
+ * invitation — and no terms), and it was costing more than it earned: a
+ * conversion sent without an invitation left the customer locked out of a screen
+ * nobody had told them about.
+ *
+ * ⚠️ What SURVIVED is the part that was doing real work — the customer still
+ * completes their own company details (address, ABN, certificate email), because
+ * they are the authority on those and the office is not. See
+ * `AccountOnboardingSchema` in `portal.ts`. What is gone is the tick, the named
+ * signatory, and the gate.
+ *
+ * Do not re-add without the client asking for it.
  */
-export const ONBOARDING_STATES = ['awaiting-terms', 'complete'] as const;
-export const OnboardingStateSchema = z.enum(ONBOARDING_STATES).meta({ id: 'OnboardingState' });
-export type OnboardingState = z.infer<typeof OnboardingStateSchema>;
-
-export const ONBOARDING_STATE_LABELS: Record<OnboardingState, string> = {
-  'awaiting-terms': 'Awaiting terms',
-  complete: 'Complete',
-};
-
-/** The signed record, once accepted. Read-only everywhere after that. */
-export const TermsAcceptanceSchema = z
-  .object({
-    acceptedAt: IsoDateTimeSchema,
-    acceptedByName: NonEmptyStringSchema,
-    acceptedByRole: NonEmptyStringSchema,
-    /** The version accepted, so a later change to the terms is provable. */
-    termsVersion: NonEmptyStringSchema,
-  })
-  .meta({ id: 'TermsAcceptance' });
-
-export type TermsAcceptance = z.infer<typeof TermsAcceptanceSchema>;
 
 /**
  * The two kinds of customer, which behave differently at almost every step.
@@ -285,15 +285,6 @@ export const AccountListItemSchema = z
     rateCardId: RateCardIdSchema,
     /** Builder or contractor — see `AccountTypeSchema`. Drives both journeys. */
     accountType: AccountTypeSchema,
-    /**
-     * Whether the customer has accepted the terms yet (Journey A.4).
-     *
-     * On the LIST item rather than only the detail, because the office needs to
-     * see at a glance who has not signed — an account sitting in
-     * `awaiting-terms` has no director's guarantee behind it, and that is a
-     * commercial exposure, not a paperwork gap.
-     */
-    onboardingState: OnboardingStateSchema,
     poPolicy: PoPolicySchema,
     captureMode: CaptureModeSchema,
     status: AccountStatusSchema,
@@ -328,14 +319,22 @@ export const AccountDraftSchema = z
       .string()
       .trim()
       .regex(/^[A-Z]{3}[0-9]{3}$/, 'Three letters then three digits, e.g. NEW001'),
-    legalName: z.string().trim().min(1, 'Enter the registered company name').max(120, 'Keep the registered name under 120 characters'),
+    legalName: z
+      .string()
+      .trim()
+      .min(1, 'Enter the registered company name')
+      .max(120, 'Keep the registered name under 120 characters'),
     abn: AbnSchema,
     accountType: AccountTypeSchema,
     brandId: BrandIdSchema,
     rateCardId: RateCardIdSchema,
     poPolicy: PoPolicySchema,
     captureMode: CaptureModeSchema,
-    paymentTermsDays: z.number().int().min(0, 'Payment terms cannot be negative').max(90, 'Payment terms are at most 90 days'),
+    paymentTermsDays: z
+      .number()
+      .int()
+      .min(0, 'Payment terms cannot be negative')
+      .max(90, 'Payment terms are at most 90 days'),
     primaryZone: ZoneSchema,
     /** Where their invoices go. The one contact an account cannot trade without. */
     accountsContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
@@ -407,6 +406,32 @@ export const AccountSchema = AccountListItemSchema.extend({
    */
   certificateEmail: z.string().nullable(),
   abn: z.string(),
+  /**
+   * The registered details the CUSTOMER supplies about themselves.
+   *
+   * ⚠️ These were written by the portal onboarding form and then returned by no
+   * endpoint at all — stored, and invisible to the office that needed them. A
+   * customer's own address being unreadable by the people who invoice them is
+   * not a display preference; it is the record being kept somewhere nobody can
+   * look. They are on the detail, not the list: a grid row is scanned, and an
+   * address is read once.
+   *
+   * Null where the customer has not completed their details and the office has
+   * not typed them in.
+   */
+  tradingName: z.string().nullable(),
+  addressLine: z.string().nullable(),
+  suburb: z.string().nullable(),
+  postcode: z.string().nullable(),
+  /**
+   * When the customer last completed their own details, if ever.
+   *
+   * Replaces the onboarding state flag. It says the same useful thing — "have
+   * they filled this in?" — without the legal meaning the terms gate carried,
+   * and it is a date rather than a state because "when" is the question the
+   * office actually asks about a detail that looks stale.
+   */
+  detailsCompletedAt: IsoDateTimeSchema.nullable(),
   paymentTermsDays: z.number().int().positive(),
   primaryZone: ZoneSchema,
   contacts: z.array(ContactSchema),
@@ -415,6 +440,98 @@ export const AccountSchema = AccountListItemSchema.extend({
   notes: z.string(),
   createdAt: IsoDateTimeSchema,
 }).meta({ id: 'Account' });
+
+/**
+ * What the office may correct on an existing account.
+ *
+ * ── Why this exists ───────────────────────────────────────────────────────
+ * Until now an account could be CREATED and then never edited. The only two
+ * things the API would change afterwards were the risk-assessment switch and
+ * builder ↔ contractor — so a misspelt company name, a wrong ABN, a changed
+ * registered address or a mistyped accounts email were permanent. Worse, half
+ * of those fields could only ever be set by the customer, on a portal form the
+ * office could not see, which left the people who raise the invoices unable to
+ * fix the details the invoice is printed from.
+ *
+ * ⚠️ Nothing here is a COMMERCIAL term. The rate card, the payment terms, the
+ * PO policy and the capture mode are absent on purpose: those are a negotiated
+ * position, they re-price every invoice on the account, and they belong to a
+ * deliberate act with its own endpoint — not to a general "edit details" form
+ * somebody opens to fix a typo in a suburb.
+ */
+export const AccountUpdateSchema = z
+  .object({
+    legalName: z
+      .string()
+      .trim()
+      .min(1, 'Enter the registered company name')
+      .max(120, 'Keep the registered name under 120 characters'),
+    /** Blank is a real answer — most builders trade under their legal name. */
+    tradingName: z.string().trim().max(120, 'Keep the trading name under 120 characters'),
+    abn: AbnSchema,
+    /*
+     * The registered address, optional as a whole.
+     *
+     * An account opened by the office for a builder whose terms were signed in a
+     * meeting frequently has no address on file for weeks, and refusing to save
+     * a corrected COMPANY NAME because the suburb is blank would make this form
+     * unusable for the case it was built for.
+     */
+    addressLine: z.string().trim().max(160, 'Keep the address under 160 characters'),
+    suburb: z.string().trim().max(80, 'Keep the suburb under 80 characters'),
+    postcode: z
+      .string()
+      .trim()
+      .refine((value) => value === '' || /^\d{4}$/.test(value), 'Four digits, or leave it blank'),
+    /** Where their invoices go. See `AccountDraftSchema` for the pairing rule. */
+    accountsContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
+    accountsContactEmail: z
+      .string()
+      .trim()
+      .max(160, 'Keep the email under 160 characters')
+      .refine(
+        (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
+        'Enter a valid email address, or leave it blank',
+      ),
+    /**
+     * Where diversion certificates go — often a different team from accounts.
+     *
+     * Matt, 31:04: *"invoices get sent off to the accounts department… and I
+     * need a section in customers where we could say that certificates are sent
+     * to this specific email address."* Blank falls back to the sustainability
+     * contact, then to accounts.
+     */
+    certificateEmail: z
+      .string()
+      .trim()
+      .max(160, 'Keep the email under 160 characters')
+      .refine(
+        (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
+        'Enter a valid email address, or leave it blank',
+      ),
+    notes: z.string().trim().max(500),
+  })
+  .meta({ id: 'AccountUpdate' });
+
+export type AccountUpdate = z.infer<typeof AccountUpdateSchema>;
+
+/**
+ * M7.5 — which invoice template this account's invoices are drawn with.
+ *
+ * ── Why null is a first-class value, not "unset" ──────────────────────────
+ * Null means *follow the brand*, and it is the right answer for almost every
+ * account: a new customer should look correct without anybody choosing, and
+ * changing the brand's template should carry those accounts with it. Only a
+ * customer who needs something different from the rest gets an explicit one.
+ *
+ * ⚠️ Resolved when the PDF is rendered and then FROZEN onto the invoice, so
+ * reassigning an account changes its next invoice and never one already sent.
+ */
+export const AccountInvoiceTemplateBodySchema = z
+  .object({ invoiceTemplateId: z.string().trim().min(1).max(60).nullable() })
+  .meta({ id: 'AccountInvoiceTemplateBody' });
+
+export type AccountInvoiceTemplateBody = z.infer<typeof AccountInvoiceTemplateBodySchema>;
 
 export type Contact = z.infer<typeof ContactSchema>;
 export type AccountListItem = z.infer<typeof AccountListItemSchema>;

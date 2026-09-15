@@ -15,6 +15,7 @@
     "lint": "eslint src",
     "test": "vitest run",
     "test:watch": "vitest",
+    "probe:maps": "tsx src/scripts/probe-maps.ts",
     "openapi": "tsx src/scripts/generate-openapi.ts",
     "clean": "rm -rf dist .turbo coverage openapi/openapi.json *.tsbuildinfo",
     "seed:auth": "tsx src/scripts/seed-auth.ts",
@@ -25,7 +26,9 @@
     "seed:reset": "tsx src/scripts/seed-reset.ts",
     "migrate:rate-schedules": "tsx src/scripts/migrate-rate-schedules.ts",
     "seed:demo": "tsx src/scripts/seed-demo.ts",
-    "seed:all": "npm run seed:reset && npm run seed:auth && npm run seed:settings && npm run seed:places && npm run seed:demo"
+    "seed:all": "npm run seed:reset && npm run seed:auth && npm run seed:settings && npm run seed:places && npm run seed:demo",
+    "migrate:po-review-reasons": "tsx src/scripts/migrate-po-review-reasons.ts",
+    "migrate:call-up-index": "tsx src/scripts/migrate-call-up-index.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",

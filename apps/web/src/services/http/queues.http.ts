@@ -1,5 +1,7 @@
 import type { ApiClient } from '@plastago/api-client';
+import type { ChangeRequestDecision } from '@plastago/shared';
 import {
+  ChangeRequestItemSchema,
   API_PREFIX,
   AwaitingCallUpSchema,
   AwaitingPoItemSchema,
@@ -195,6 +197,26 @@ export function createHttpQueueService(api: ApiClient): QueueService {
         }),
       );
       return changed;
+    },
+
+    /* ── M5.4 · change requests from the portal ───────────────────────────── */
+
+    changeRequestList: (query: ListQuery) =>
+      viaService(() =>
+        api.request(`${base}/change-requests`, {
+          searchParams: listParams(query),
+          schema: pageOf(ChangeRequestItemSchema),
+        }),
+      ),
+
+    changeRequestDecide: async (id: string, decision: ChangeRequestDecision) => {
+      await viaService(() =>
+        api.request(`${base}/change-requests/${id}/decision`, {
+          method: 'POST',
+          body: decision,
+          schema: z.null(),
+        }),
+      );
     },
 
     /* ── M7.3 · awaiting a purchase order ─────────────────────────────────── */

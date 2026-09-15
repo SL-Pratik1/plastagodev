@@ -229,12 +229,17 @@ export function createFakeSettingsRepository() {
     Object.entries(SEED_SERVICES).map(([code, service]) => [code, { ...service }]),
   );
 
+  /** The stored logo key, as `setLogoKey` last left it. */
+  let logoKey = '';
+
   const calls = {
     resolveRate: [] as Array<{ rateCardId: RateCardId; zone: Zone; onDate: string }>,
     findAdditionalService: [] as string[],
     savedInvoicing: null as Settings['invoicing'] | null,
     createdRateCards: [] as Array<{ id: RateCardId; effectiveFrom: string }>,
     issuedSchedules: [] as Array<{ id: RateCardId; effectiveFrom: string }>,
+    deletedSchedules: [] as Array<{ id: RateCardId; effectiveFrom: string }>,
+    logoKeys: [] as string[],
     deletedRateCards: [] as RateCardId[],
     createdServices: [] as AdditionalServiceCreate[],
     updatedServices: [] as Array<{ code: string; patch: AdditionalServiceUpdate }>,
@@ -455,6 +460,28 @@ export function createFakeSettingsRepository() {
       return Promise.resolve();
     },
 
+    async deleteSchedule(id: RateCardId, effectiveFrom: string): Promise<boolean> {
+      const starts = schedulesByCard.get(id) ?? [];
+      if (!starts.includes(effectiveFrom)) return Promise.resolve(false);
+
+      calls.deletedSchedules.push({ id, effectiveFrom });
+      schedulesByCard = new Map(schedulesByCard).set(
+        id,
+        starts.filter((start) => start !== effectiveFrom),
+      );
+      return Promise.resolve(true);
+    },
+
+    async setLogoKey(key: string): Promise<void> {
+      calls.logoKeys.push(key);
+      logoKey = key;
+      return Promise.resolve();
+    },
+
+    async logoKey(): Promise<string> {
+      return Promise.resolve(logoKey);
+    },
+
     async deleteRateCard(id: RateCardId): Promise<void> {
       calls.deletedRateCards.push(id);
       existingCards = new Set([...existingCards].filter((card) => card !== id));
@@ -480,8 +507,8 @@ export function createFakeSettingsRepository() {
         kind: input.kind,
         value: input.value,
         requiresApproval: input.requiresApproval,
-        driverRaisable: input.driverRaisable,
-        // Never settable from a request — mirrors the real repository.
+        // Neither is settable from a request — mirrors the real repository.
+        driverRaisable: false,
         systemGenerated: false,
       };
       settings = withServices(settings, services);
@@ -756,6 +783,11 @@ function baseSettings(): Settings {
       bankAccount: '45 327 0863',
       bankAccountName: 'PlastaGo Pty Ltd',
       showGbcaBadge: true,
+      /*
+       * Derived on read from `logoKey`, so the fake states it directly. Null is
+       * the honest default: no logo has been uploaded in a test.
+       */
+      logoUrl: null,
     },
   };
 }

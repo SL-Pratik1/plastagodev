@@ -15,7 +15,7 @@ import {
   useToast,
 } from '@plastago/ui';
 import { LinkIcon, RefreshCwIcon, Unlink2Icon } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
 import { PageHeader } from '@/components/page-header';
@@ -61,8 +61,23 @@ export function AdminXeroPage(): React.JSX.Element {
   const outcome = params.get('xero');
   const outcomeMessage = params.get('message');
 
+  /*
+   * Announced once per arrival, not once per effect run.
+   *
+   * The only thing stopping a repeat was `setParams` clearing the query, and
+   * a state update does not land between StrictMode’s two development passes
+   * — so every callback raised the toast twice on top of itself. Harmless in
+   * production, where StrictMode does not double-invoke, but it is the kind of
+   * thing that gets chased as a duplicate-notification bug.
+   */
+  const announced = useRef<string | null>(null);
+
   useEffect(() => {
     if (!outcome) return;
+
+    const key = `${outcome}:${outcomeMessage ?? ''}`;
+    if (announced.current === key) return;
+    announced.current = key;
 
     if (outcome === 'connected') {
       toast.success('Connected to Xero', outcomeMessage ?? undefined);

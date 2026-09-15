@@ -1,3 +1,4 @@
+import { RunTipOffSchema } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { RunTipOffModel } from '../src/domains/dispatch/run.model.js';
@@ -143,5 +144,58 @@ describe('recordTipOff, against a real database', () => {
     // One docket per run (Matt, 43:50) — two would make the split ambiguous.
     expect(rows).toHaveLength(1);
     expect(rows[0]?.netKg).toBe(3100);
+  });
+});
+
+/**
+ * That what the driver writes, the office can still READ.
+ *
+ * ── Why this exists ──────────────────────────────────────────────────────
+ * `RunTipOffSchema.facility` was `NonEmptyStringSchema`, and the driver path
+ * writes null — there is no facility picker on the Tip-off screen, and the
+ * repository says as much. The API does not validate its own responses, so it
+ * happily served `facility: null`; the web client parses with this schema and
+ * threw. The result was that the allocator’s dispatch board showed
+ * "Something went wrong" for the WHOLE DAY as soon as any driver weighed off —
+ * triggered by the most routine end-of-day action in the product.
+ *
+ * The persistence tests above prove the write lands. This proves the other
+ * half: that the shape it lands in is one the reading side accepts.
+ */
+describe('the board contract accepts a driver-recorded tip-off', () => {
+  it('allows a null facility, because the driver is never asked for one', () => {
+    const parsed = RunTipOffSchema.safeParse({
+      facility: null,
+      docketNumber: 'WB-0001',
+      netKg: 4200,
+      tippedOffAt: '2026-09-11T05:10:00.000Z',
+      docketPhotoUrl: 'http://localhost:4000/storage/plastago%2Fruns%2Fx%2Fdockets%2Fy.jpg',
+    });
+
+    expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+  });
+
+  it('still accepts the office path, which does name a facility', () => {
+    const parsed = RunTipOffSchema.safeParse({
+      facility: 'Cleanaway Erskine Park',
+      docketNumber: 'D138485',
+      netKg: 6062,
+      tippedOffAt: '2026-09-11T05:43:00.000Z',
+      docketPhotoUrl: null,
+    });
+
+    expect(parsed.success).toBe(true);
+  });
+
+  it('still refuses an empty facility, which is a blank field and not an absent one', () => {
+    const parsed = RunTipOffSchema.safeParse({
+      facility: '',
+      docketNumber: null,
+      netKg: 100,
+      tippedOffAt: '2026-09-11T05:43:00.000Z',
+      docketPhotoUrl: null,
+    });
+
+    expect(parsed.success).toBe(false);
   });
 });

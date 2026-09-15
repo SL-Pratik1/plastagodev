@@ -22,6 +22,7 @@ import {
   usePortalInvoices,
   usePortalScope,
 } from '@/features/portal/queries';
+import { useInvoiceDownloads } from '@/features/invoices/use-invoice-downloads';
 import { describeError } from '@/lib/error-message';
 import { formatDate, formatInvoiceNumber, formatMoney } from '@/lib/format';
 
@@ -169,6 +170,7 @@ export function PortalInvoicesPage() {
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = usePortalInvoices(controller.query);
   const requestPdf = usePortalInvoicePdf();
+  const downloads = useInvoiceDownloads();
   // Carried on the scope: the portal cannot read office settings, but the
   // customer has to quote the same number back when they pay.
   const prefix = usePortalScope().data?.invoiceNumberPrefix ?? '';
@@ -182,12 +184,24 @@ export function PortalInvoicesPage() {
     list.reduce((sum, row) => sum + Math.round(Number(row.totalIncGst) * 100), 0);
 
   const download = async () => {
+    // Reserved before the await — see `useInvoiceDownloads`.
+    const deliver = downloads.begin();
+
     try {
-      await requestPdf.mutateAsync(selected);
-      toast.success(
-        `${String(selected.length)} PDF${selected.length === 1 ? '' : 's'} on the way`,
-        'They will appear in your downloads shortly.',
-      );
+      const summary = deliver(await requestPdf.mutateAsync(selected));
+
+      if (summary.delivered === 0) {
+        /*
+         * Deliberately not the office's wording. A customer cannot act on
+         * "no invoice template is configured", so they are told who can.
+         */
+        toast.error(
+          'Those invoices could not be prepared',
+          'Please contact PlastaGo and we will send them to you.',
+        );
+        return;
+      }
+
       setSelected([]);
     } catch (caught) {
       const described = describeError(caught);
@@ -286,6 +300,8 @@ export function PortalInvoicesPage() {
         invoiced separately. That way the first invoice is never held up waiting for a second
         approval.
       </Alert>
+
+      {downloads.dialog}
     </div>
   );
 }

@@ -46,16 +46,16 @@ const FormSchema = z.object({
     .min(2, 'Enter the registration plate')
     .max(10, 'That is longer than a plate')
     .regex(/^[A-Za-z0-9 -]+$/, 'Letters and numbers only'),
-  label: z.string().trim().min(2, 'Describe it, e.g. Isuzu FVZ crane truck').max(60),
+  label: z.string().trim().min(2, 'Describe it, e.g. Isuzu FVZ crane truck').max(60, 'Keep the description under 60 characters'),
   type: z.enum(VEHICLE_TYPES),
-  make: z.string().trim().max(40),
-  model: z.string().trim().max(40),
+  make: z.string().trim().max(40, 'Keep the make under 40 characters'),
+  model: z.string().trim().max(40, 'Keep the model under 40 characters'),
   year: z.string().trim(),
   odometerKm: z.string().trim(),
   registrationExpiresOn: z.string().min(1, 'When does the registration expire?'),
   registrationPeriodMonths: z.string(),
   purchasedOn: z.string(),
-  notes: z.string().trim().max(500),
+  notes: z.string().trim().max(500, 'Keep notes under 500 characters'),
 });
 
 type FormValues = z.infer<typeof FormSchema>;

@@ -232,12 +232,17 @@ describe('reading the values that price a job', () => {
     expect(input.extractedAreaM2).toBeNull();
   });
 
-  it('does not treat a missing area as a low-confidence read', async () => {
+  /*
+   * Absent and CORRECT. The field is still listed so the reviewer sees the
+   * blank against the document rather than the row vanishing — which is what
+   * tells them the order genuinely carries no area.
+   */
+  it('still lists the area field when the order carries no area', async () => {
     const { input } = await adaptExtraction(extraction(WISDOM), context);
     const area = input.fields.find((field) => field.key === 'areaM2');
 
-    // Absent-and-correct, so it must not outrank a genuinely broken field.
-    expect(area?.confidence).toBeGreaterThan(0.5);
+    expect(area).toBeDefined();
+    expect(area?.value).toBeNull();
   });
 
   it('strips a currency symbol and thousands separator from money', async () => {
@@ -303,9 +308,9 @@ describe('deciding which customer an order belongs to', () => {
 
     expect(diagnostics.matchedBy).not.toBe('email-domain');
     expect(input.suggestedAccountId).toBe('us');
-    // It fell through to the document name, which is the weaker signal — and it
-    // is scored below the auto-accept line so a human still confirms.
-    expect(input.accountCandidates[0]?.confidence).toBeLessThan(0.95);
+    // It fell through to the document name, which is the weaker signal. A human
+    // confirms either way — nothing in this queue is applied without one.
+    expect(input.accountCandidates[0]?.label).toBe('PlastaGo');
   });
 
   it('ignores a public mailbox domain and falls back to the document', async () => {
@@ -344,14 +349,20 @@ describe('deciding which customer an order belongs to', () => {
     expect(input.accountCandidates).toHaveLength(2);
   });
 
-  it('scores the builder field as malformed when a name was read but nothing matched', async () => {
+  /*
+   * The name is KEPT even though nothing matched. It is what the reviewer
+   * reads off the document to find the right account by hand, and the reason
+   * on the row already says no account matched.
+   */
+  it('keeps the builder name when nothing matched, so a human can place it', async () => {
     accounts = [];
 
-    const { input } = await adaptExtraction(extraction(DOMAINE), context);
+    const { input, diagnostics } = await adaptExtraction(extraction(DOMAINE), context);
     const builder = input.fields.find((field) => field.key === 'accountName');
 
     expect(builder?.value).toBe('Domaine Homes (NSW) Pty Ltd');
-    expect(builder?.confidence).toBeLessThan(0.5);
+    expect(input.suggestedAccountId).toBeNull();
+    expect(diagnostics.matchedBy).toBe('none');
   });
 });
 
@@ -378,8 +389,9 @@ describe('resolving the site to a serviceable suburb', () => {
     expect(diagnostics.suburbResolved).toBe(false);
     expect(diagnostics.zone).toBeNull();
 
+    // The address is still shown, unresolved, for the reviewer to correct.
     const address = input.fields.find((field) => field.key === 'siteAddress');
-    expect(address?.confidence).toBeLessThan(0.5);
+    expect(address?.value?.toLowerCase()).toContain('edgeworth');
   });
 
   it('never falls back to a nearby suburb when the name does not match exactly', async () => {
@@ -441,46 +453,34 @@ describe('reading Australian formats', () => {
 
   /*
    * Kept rather than discarded: a blank field hides that the model read
-   * something, and the reviewer is looking at the document. The confidence
-   * score is what says the shape is wrong.
+   * something, and the reviewer is looking at the document. A landline where a
+   * mobile belongs is exactly what they are there to catch — and now they can
+   * correct it in place.
    */
-  it('keeps a malformed number but scores it down', async () => {
+  it('keeps a malformed number rather than dropping it', async () => {
     const { input } = await adaptExtraction(
       extraction({ ...DOMAINE, supervisor_mobile: '1300 855 775' }),
       context,
     );
 
     expect(input.extractedSupervisorMobile).toBe('1300 855 775');
-    expect(input.fields.find((field) => field.key === 'siteSupervisorMobile')?.confidence).toBe(
-      0.95,
+    expect(input.fields.find((field) => field.key === 'siteSupervisorMobile')?.value).toBe(
+      '1300 855 775',
     );
   });
 });
 
-/* ── Scoring ──────────────────────────────────────────────────────────────── */
-
-describe('the confidence the queue sorts by', () => {
-  it('takes the WORST critical field, so nine good ones cannot hide a bad one', async () => {
-    accounts = [{ id: 'acc1', name: 'Wisdom Homes', code: 'WIS001' }];
-
-    const good = await adaptExtraction(extraction(WISDOM), context);
-    const noNumber = await adaptExtraction(extraction({ ...WISDOM, po_number: null }), context);
-
-    expect(good.input.overallConfidence).toBeGreaterThan(0.9);
-    // The purchase-order number is the field an invoice is rejected for.
-    expect(noNumber.input.overallConfidence).toBe(0);
-  });
-
-  it('scores an unserviceable suburb down even when everything else is perfect', async () => {
-    accounts = [{ id: 'acc1', name: 'Domaine Homes', code: 'DOM001' }];
-
-    const { input } = await adaptExtraction(extraction(DOMAINE), context);
-
-    // Edgeworth is not serviceable, so this must not reach the 0.95 line.
-    expect(input.overallConfidence).toBeLessThan(0.95);
-  });
-});
-
+/*
+ * ⚠️ The "confidence the queue sorts by" block was deleted with the scores.
+ *
+ * It asserted that a missing PO number drove the document score to zero and
+ * that an unserviceable suburb kept it below the auto-accept line. Neither
+ * number exists now: the score reported the model’s opinion of itself, and a
+ * high one invited confirming an order without opening the document. What the
+ * block was really protecting — that a missing number and an unserviceable
+ * suburb both reach a human — is covered above and by `resolveReason`, and
+ * every extraction reaches one regardless.
+ */
 /* ── The original document ───────────────────────────────────────────────── */
 
 describe('the stored original', () => {

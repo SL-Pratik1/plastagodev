@@ -28,6 +28,7 @@ import {
   useRetryXero,
   useSendInvoices,
 } from '@/features/invoices/queries';
+import { useInvoiceDownloads } from '@/features/invoices/use-invoice-downloads';
 import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
 import {
@@ -62,6 +63,7 @@ export function AdminInvoiceDetailPage() {
   const recordPo = useRecordPo();
   const retryXero = useRetryXero();
   const requestPdf = useRequestInvoicePdf();
+  const downloads = useInvoiceDownloads();
 
   const [poOpen, setPoOpen] = useState(false);
   const [poNumber, setPoNumber] = useState('');
@@ -141,9 +143,18 @@ export function AdminInvoiceDetailPage() {
   };
 
   const pdf = async () => {
+    // Reserved before the await — see `useInvoiceDownloads`.
+    const deliver = downloads.begin();
+
     try {
-      await requestPdf.mutateAsync([invoice.id]);
-      toast.success('PDF queued', 'Rendered server-side from the invoice template.');
+      const summary = deliver(await requestPdf.mutateAsync([invoice.id]));
+
+      if (summary.delivered === 0) {
+        toast.error(
+          'That invoice could not be rendered',
+          'Check that its brand has an invoice template in Settings.',
+        );
+      }
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);
@@ -446,6 +457,8 @@ export function AdminInvoiceDetailPage() {
           </Field>
         </div>
       </Dialog>
+
+      {downloads.dialog}
     </div>
   );
 }

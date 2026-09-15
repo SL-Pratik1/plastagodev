@@ -105,7 +105,6 @@ export const IngestExtractionSchema = z
           id: z.string().trim().min(1),
           label: z.string().trim().min(1).max(120),
           detail: z.string().max(200).default(''),
-          confidence: z.number().min(0).max(1),
         }),
       )
       .max(20)
@@ -116,12 +115,10 @@ export const IngestExtractionSchema = z
           id: z.string().trim().min(1),
           label: z.string().trim().min(1).max(120),
           detail: z.string().max(200).default(''),
-          confidence: z.number().min(0).max(1),
         }),
       )
       .max(20)
       .default([]),
 
-    overallConfidence: z.number().min(0).max(1),
   })
   .meta({ id: 'IngestExtraction' });

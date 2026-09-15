@@ -3,6 +3,7 @@ import type {
   InvoiceTemplateWriteSchema,
   AdditionalServiceUpdateSchema,
   InvoicingSettingsSchema,
+  LogoUploadRequestSchema,
   RateCardCreateSchema,
   RateCardUpdateSchema,
   RateScheduleCreateSchema,
@@ -15,8 +16,10 @@ import type { ValidatedRequest } from '../../middleware/validate.js';
 import { pricingService } from './pricing.service.js';
 import type {
   InvoiceTemplateIdParamsSchema,
+  LogoConfirmSchema,
   QuoteQuerySchema,
   RateCardIdParamsSchema,
+  ScheduleParamsSchema,
   ServiceCodeParamsSchema,
 } from './settings.schemas.js';
 import { settingsService, type Caller } from './settings.service.js';
@@ -39,6 +42,46 @@ export const settingsController = {
   ): Promise<void> => {
     const saved = await settingsService.saveInvoicing(req.validated.body, callerOf(req));
     res.json(saved);
+  },
+
+  /* ── The invoice logo (M7.5) ─────────────────────────────────────────── */
+
+  presignLogo: async (
+    req: ValidatedRequest<{ body: typeof LogoUploadRequestSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await settingsService.presignLogo(req.validated.body, callerOf(req)));
+  },
+
+  /** 200 with the link to the logo now in force. */
+  confirmLogo: async (
+    req: ValidatedRequest<{ body: typeof LogoConfirmSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const logoUrl = await settingsService.confirmLogo(req.validated.body.key, callerOf(req));
+    res.json({ logoUrl });
+  },
+
+  removeLogo: async (req: Request, res: Response): Promise<void> => {
+    await settingsService.removeLogo(callerOf(req));
+    res.status(204).send();
+  },
+
+  /** M7.5 — a rendered sample, so a template is never chosen blind. */
+  previewTemplate: async (
+    req: ValidatedRequest<{ params: typeof InvoiceTemplateIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await settingsService.previewTemplate(req.validated.params.id, callerOf(req)));
+  },
+
+  /** M6.2 — undo a schedule issued with the wrong start date. */
+  deleteSchedule: async (
+    req: ValidatedRequest<{ params: typeof ScheduleParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const { id, effectiveFrom } = req.validated.params;
+    res.json(await settingsService.deleteSchedule(id, effectiveFrom, callerOf(req)));
   },
 
   /**

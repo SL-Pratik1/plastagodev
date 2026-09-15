@@ -265,7 +265,12 @@ export const callUpService = {
       inductionRequired: false,
       craneAvailable: false,
       siteContactName: order.siteSupervisorName ?? '',
-      siteContactMobile: '',
+      /*
+       * From the order. This was an empty string, so a driver sent to a job
+       * booked by call-up had a name and nothing to ring — the one thing the
+       * field exists to prevent, and the number was on the order already.
+       */
+      siteContactMobile: order.siteSupervisorMobile ?? '',
       siteContactEmail: '',
       poNumber: '',
       /*
@@ -537,7 +542,7 @@ export const callUpService = {
   /* ── Reading ──────────────────────────────────────────────────────────── */
 
   async list(
-    query: { state?: CallUpState; page: number; pageSize: number },
+    query: { state?: CallUpState; q?: string | undefined; page: number; pageSize: number },
     caller: Caller,
   ): Promise<{ data: CallUp[]; meta: PageMeta }> {
     assertReviewer(caller);

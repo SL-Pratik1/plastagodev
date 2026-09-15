@@ -5,11 +5,15 @@ import type {
   JobCommentDraft,
   JobDraft,
   JobListItem,
+  LocationSource,
   PageMeta,
   PricePreview,
   Role,
 } from '@plastago/shared';
+import { env } from '../../config/env.js';
 import { AppError } from '../../lib/app-error.js';
+import { distanceKm } from '../../lib/geo.js';
+import { getMapsProvider, isPrecise, type MapsProvider } from '../../integrations/maps.js';
 import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
 import { logger } from '../../lib/logger.js';
 import { withTransaction } from '../../lib/transaction.js';
@@ -327,6 +331,17 @@ export const jobService = {
       onDate: draft.readyDate,
     });
 
+    /*
+     * I3 — the pin, resolved BEFORE the number is taken.
+     *
+     * Deliberately outside the transaction below and ahead of the job number:
+     * a network call inside a transaction holds it open for as long as Google
+     * takes, and a number taken before a step that can be slow is a number
+     * wasted if the request is abandoned. This step cannot fail the booking in
+     * any case — see `resolveLocation`.
+     */
+    const location = await resolveLocation(draft, place);
+
     const jobNumber = await settingsRepository.takeNextNumber('nextJobNumber');
 
     /*
@@ -357,8 +372,9 @@ export const jobService = {
           suburb: place.suburb,
           postcode: place.postcode,
           zone: place.zone,
-          latitude: place.latitude,
-          longitude: place.longitude,
+          latitude: location.latitude,
+          longitude: location.longitude,
+          locationSource: location.locationSource,
           accessNotes: draft.accessNotes.trim(),
           gateHours: draft.gateHours.trim() || null,
           inductionRequired: draft.inductionRequired,
@@ -685,6 +701,95 @@ function isCancellable(status: Job['status']): boolean {
 }
 
 /* ── Resolving a draft ───────────────────────────────────────────────────── */
+
+/**
+ * The pin this job will carry, and an honest account of where it came from (I3).
+ *
+ * ── Why this can only ever succeed ────────────────────────────────────────
+ * The suburb the office PICKED already gives a usable answer, and it is the
+ * answer every job booked before this existed carries. So there is no failure
+ * mode worth propagating: Google being slow, rate-limited, unconfigured or
+ * simply ignorant of a three-week-old street all land in the same place —
+ * the suburb pin, marked as such. A booking must never fail because a map
+ * lookup did.
+ *
+ * ── The two gates, and why a pin has to pass both ─────────────────────────
+ * 1. PRECISION. `block` and `approximate` are Google saying "somewhere on this
+ *    street" or "somewhere in this locality" — the same class of answer the
+ *    suburb pin already is. Storing one would swap a pin we can explain for one
+ *    we cannot, while marking the job as precisely located.
+ * 2. DRIFT. Google will answer a half-built estate's address with a real street
+ *    of the same name in another state, at full ROOFTOP confidence, because as
+ *    far as it knows that IS the address. The suburb is the one part a human
+ *    definitely chose from a list, so a result too far from it loses.
+ *
+ * A rejected pin is logged with what was rejected and why. "Why is this job on
+ * the suburb centre?" is otherwise unanswerable after the fact, and the honest
+ * fallback would be indistinguishable from the geocoder never having run.
+ */
+async function resolveLocation(
+  draft: JobDraft,
+  place: { suburb: string; postcode: string; state: string; latitude: number; longitude: number },
+): Promise<{ latitude: number; longitude: number; locationSource: LocationSource }> {
+  const suburbPin = {
+    latitude: place.latitude,
+    longitude: place.longitude,
+    locationSource: 'suburb' as const,
+  };
+
+  const addressLine = draft.addressLine.trim();
+  if (addressLine === '') return suburbPin;
+
+  /*
+   * ⚠️ Belt AND braces. The provider's contract is that it returns null rather
+   * than throwing, and it honours that — but the promise being made here is
+   * that a BOOKING cannot fail because of a map lookup, and that promise should
+   * not rest on a second file continuing to be careful. One catch is cheaper
+   * than the incident where it was not.
+   */
+  let point: Awaited<ReturnType<MapsProvider['geocode']>>;
+  try {
+    point = await getMapsProvider().geocode({
+      addressLine,
+      suburb: place.suburb,
+      postcode: place.postcode,
+      state: place.state,
+    });
+  } catch (error) {
+    log.warn({ err: error, suburb: place.suburb }, 'geocode threw — keeping the suburb pin');
+    return suburbPin;
+  }
+
+  if (!point) return suburbPin;
+
+  if (!isPrecise(point)) {
+    log.debug(
+      { suburb: place.suburb, precision: point.precision },
+      'geocode was no more precise than the suburb — keeping the suburb pin',
+    );
+    return suburbPin;
+  }
+
+  const driftKm = distanceKm(point, place);
+  if (driftKm > env.GEOCODE_MAX_DRIFT_KM) {
+    log.warn(
+      {
+        suburb: place.suburb,
+        driftKm: Math.round(driftKm),
+        maxKm: env.GEOCODE_MAX_DRIFT_KM,
+        matched: point.formattedAddress,
+      },
+      'geocode landed too far from the chosen suburb — keeping the suburb pin',
+    );
+    return suburbPin;
+  }
+
+  return {
+    latitude: point.latitude,
+    longitude: point.longitude,
+    locationSource: 'geocoded',
+  };
+}
 
 /**
  * The account, the place and the purchase order behind a booking form.

@@ -49,6 +49,29 @@ describe('who may read settings', () => {
     expect(settings.invoicing.defaultPaymentTermsDays).toBe(7);
   });
 
+  /*
+   * ⚠️ A driver is not a customer, and the guard used to be a DENYLIST — it
+   * refused customer roles and admitted everything else. So a driver’s phone
+   * could read all seven rate cards with the per-zone service charge and rate,
+   * the additional-services price list, `assumedCostPerJob` (what every margin
+   * figure is computed from) and the bank BSB, account number and name.
+   *
+   * The driver app never asks for this endpoint; the exposure was entirely
+   * incidental.
+   */
+  it('refuses a driver', async () => {
+    await expect(
+      settingsService.get({ roles: ['driver'] as Role[], accountId: null }),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  /* Confirmed 2026-09-11: an allocator seeing what a job is worth is accepted. */
+  it('still lets an allocator read them', async () => {
+    await expect(
+      settingsService.get({ roles: ['allocator'] as Role[], accountId: null }),
+    ).resolves.toBeDefined();
+  });
+
   it('refuses a customer outright', async () => {
     await expect(settingsService.get(CUSTOMER)).rejects.toMatchObject({ status: 403 });
   });

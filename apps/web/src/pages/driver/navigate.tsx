@@ -1,14 +1,49 @@
 import { Alert, Badge, ErrorState, Skeleton, buttonVariants } from '@plastago/ui';
 import { ExternalLinkIcon, NavigationIcon, PhoneIcon } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import {
   MAPS_EMBED_ENABLED,
   directionsEmbedUrl,
   externalDirectionsUrl,
+  placeEmbedUrl,
+  type LatLng,
 } from '@/config/maps';
+import { currentPosition } from '@/lib/geolocation';
 import { useDriverJob } from '@/features/driver/queries';
-import { describeError } from '@/lib/error-message';
-import { formatMobile } from '@/lib/format';
+
+/**
+ * Where the driver is, once the device is willing to say (I3).
+ *
+ * ── Why the map does not wait for this ────────────────────────────────────
+ * A fix can take seconds, need a permission prompt, or never arrive at all —
+ * a phone inside a half-built house is the normal case here, not the edge one.
+ * So this starts null and the screen renders the destination map immediately;
+ * a fix upgrades it to a route. A driver never sits looking at a spinner over
+ * something the app could already have shown them.
+ *
+ * `currentPosition` settles within its own timeout no matter what the browser
+ * does, so there is no hang to guard against here.
+ */
+function useDriverPosition(): LatLng | null {
+  const [position, setPosition] = useState<LatLng | null>(null);
+
+  useEffect(() => {
+    let live = true;
+
+    void currentPosition().then((fix) => {
+      // The screen is one back-tap from being gone, and setting state on an
+      // unmounted component is a warning nobody needs at 6am.
+      if (live && fix) setPosition({ latitude: fix.latitude, longitude: fix.longitude });
+    });
+
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  return position;
+}
 
 /**
  * Navigation, in the app (I3).
@@ -35,13 +70,13 @@ import { formatMobile } from '@/lib/format';
 export function DriverNavigatePage() {
   const { jobId } = useParams();
   const { data: job, error, isPending, refetch } = useDriverJob(jobId);
+  const position = useDriverPosition();
 
   if (error) {
-    const described = describeError(error);
     return (
       <ErrorState
-        title={described.title}
-        description={described.detail}
+        title="Could not open this job"
+        description="You may be out of coverage. Go back to your run and try again."
         onRetry={() => void refetch()}
       />
     );
@@ -56,13 +91,22 @@ export function DriverNavigatePage() {
     );
   }
 
-  const embedUrl = directionsEmbedUrl(job.latitude, job.longitude);
+  /*
+   * A route where we know where the driver is, the destination alone where we
+   * do not. Never a spinner: the second is genuinely useful on its own, and it
+   * is what a driver gets in the places a fix is least likely — which are the
+   * same places they most need to see the site.
+   */
+  const embedUrl =
+    position === null
+      ? placeEmbedUrl(job.latitude, job.longitude)
+      : directionsEmbedUrl(position, job.latitude, job.longitude);
   const externalUrl = externalDirectionsUrl(job.latitude, job.longitude);
 
   return (
     <div className="space-y-4">
       <Link
-        to={`/driver/jobs/${job.jobId}`}
+        to={`/jobs/${job.jobId}`}
         className="focus-ring inline-block rounded text-sm text-muted-foreground underline-offset-4"
       >
         ← Back to the job
@@ -91,7 +135,9 @@ export function DriverNavigatePage() {
       {embedUrl !== null ? (
         <div className="overflow-hidden rounded-xl border border-border">
           <iframe
-            title={`Directions to ${job.siteName}`}
+            title={
+              position === null ? `Map of ${job.siteName}` : `Directions to ${job.siteName}`
+            }
             src={embedUrl}
             loading="lazy"
             referrerPolicy="no-referrer-when-downgrade"
@@ -135,7 +181,7 @@ export function DriverNavigatePage() {
             className={`${buttonVariants({ variant: 'outline', size: 'lg' })} min-h-14`}
           >
             <PhoneIcon aria-hidden />
-            {job.siteContactName ?? 'Site contact'} {formatMobile(job.siteContactMobile)}
+            {job.siteContactName ?? 'Site contact'}
           </a>
         )}
       </div>

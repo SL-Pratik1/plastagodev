@@ -44,6 +44,7 @@ interface StoredOrder {
   addressLine: string | null;
   suburb: string | null;
   siteSupervisorName: string | null;
+  siteSupervisorMobile: string | null;
   siteSupervisorUserId: string | null;
   jobId: string | null;
   jobNumber: number | null;
@@ -223,6 +224,7 @@ function order(overrides: Partial<StoredOrder> = {}): StoredOrder {
     addressLine: '46 Allambie Circuit',
     suburb: 'Kellyville',
     siteSupervisorName: 'Matthew French',
+    siteSupervisorMobile: '0412 345 678',
     siteSupervisorUserId: 'usr00000000000000000mf1',
     jobId: null,
     jobNumber: null,
@@ -296,6 +298,57 @@ describe('a new booking (Matt’s blue notice)', () => {
 
     expect(latest()?.state).toBe('applied');
     expect(latest()?.jobNumber).toBe(61501);
+  });
+});
+
+describe('what the driver is given', () => {
+  /*
+   * ⚠️ The mobile used to be dropped.
+   *
+   * `book()` hard-coded an empty `siteContactMobile` while carrying the
+   * supervisor’s NAME through — so every job booked from a call-up reached the
+   * driver with somebody to ask for and no way to ring them, and the app fell
+   * back to "No site contact on this job — ring the office". The number was on
+   * the order the whole time; `MatchedOrder` simply never carried it.
+   */
+  it('carries the supervisor’s mobile onto the job', async () => {
+    await callUpService.record(email());
+
+    expect(created[0]?.draft.siteContactName).toBe('Matthew French');
+    expect(created[0]?.draft.siteContactMobile).toBe('0412 345 678');
+  });
+
+  it('leaves the mobile empty when the order has none, rather than failing', async () => {
+    orders = [order({ siteSupervisorMobile: null })];
+
+    const outcome = await callUpService.record(email());
+
+    expect(outcome.state).toBe('applied');
+    expect(created[0]?.draft.siteContactMobile).toBe('');
+  });
+});
+
+describe('an order whose job was cancelled', () => {
+  /*
+   * A builder may re-book work they called off, and `book`, `listAwaiting` and
+   * `jobsForPurchaseOrders` all agree that a cancelled job does not hold its
+   * order. The product enforces it by nulling `purchaseOrderId` on cancel; this
+   * pins the call-up half.
+   */
+  it('books it again rather than calling it already-booked', async () => {
+    orders = [
+      order({
+        jobId: 'job1',
+        jobNumber: 61501,
+        jobStatus: 'cancelled',
+        jobReadyDate: '2026-09-21',
+      }),
+    ];
+
+    const outcome = await callUpService.record(email());
+
+    expect(outcome.state).toBe('applied');
+    expect(created).toHaveLength(1);
   });
 });
 

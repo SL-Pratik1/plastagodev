@@ -42,7 +42,11 @@ let reachable = false;
 
 beforeAll(async () => {
   try {
-    await mongoose.connect(`${MONGO_URL}/${TEST_DB}`, { serverSelectionTimeoutMS: 2000 });
+    // `dbName`, not a path segment: MONGODB_URI may already name a database,
+    // and appending one builds an invalid namespace rather than overriding it.
+    // It also pins `dropDatabase()` below to the TEST database, whatever the
+    // environment points at.
+    await mongoose.connect(MONGO_URL, { dbName: TEST_DB, serverSelectionTimeoutMS: 2000 });
     reachable = true;
   } catch {
     reachable = false;

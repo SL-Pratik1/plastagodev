@@ -396,6 +396,50 @@ const EnvSchema = z
      * This is the client's accountant's decision, not a technical one.
      */
     XERO_INVOICE_STATUS: z.enum(['DRAFT', 'AUTHORISED']).default('DRAFT'),
+
+    /**
+     * I3 — Google Maps on the SERVER side: geocoding and route ordering.
+     *
+     * ── Why this is separate from the browser key ─────────────────────────
+     * `VITE_GOOGLE_MAPS_EMBED_KEY` lives in the frontend bundles and is public
+     * by definition — it is compiled into an app that runs on a driver's phone.
+     * This one can spend money, so it never reaches a browser. Two keys costs
+     * nothing and means the readable credential cannot be billed against.
+     *
+     * `off` is the safe default and the behaviour this platform shipped with:
+     * a job takes the pin of its chosen suburb, and `optimiseRun` groups stops
+     * by suburb without claiming to have computed a route. Turning it on is
+     * this variable plus the key — never a code change (§8).
+     */
+    MAPS_PROVIDER: z.enum(['off', 'google']).default('off'),
+
+    /**
+     * ⚠️ Named for the value the client sent us, not for what it does — it is a
+     * Geocoding and Routes key, nothing to do with the Embed API. Renaming it
+     * means the client re-sending a credential, which is the more expensive
+     * mistake of the two.
+     *
+     * ⚠️ Needs Geocoding API *and* Routes API enabled on the Google project.
+     * Route Optimization API is deliberately NOT used: it authenticates by
+     * service account and IAM only, and rejects an API key outright.
+     */
+    GOOGLE_MAPS_EMBED_API_SERVER: z.string().min(1).optional(),
+
+    /**
+     * How far a geocoded pin may sit from the suburb it was booked into, in km.
+     *
+     * ── Why a sanity check at all ─────────────────────────────────────────
+     * Google answers "18 Ashworth Bvd" with a street in Victoria as readily as
+     * the one in Kellyville, and it does so with no lower confidence. A pin
+     * that lands interstate is not a worse pin — it sends a truck to the wrong
+     * state — so a result further than this from the picked suburb is DISCARDED
+     * and the suburb centroid stands. The suburb is the one part of the address
+     * a human definitely chose from a list.
+     *
+     * 25km comfortably contains any Sydney suburb plus its neighbours; the NSW
+     * suburbs PlastaGo services are nothing like that wide.
+     */
+    GEOCODE_MAX_DRIFT_KM: z.coerce.number().positive().max(200).default(25),
   })
   .superRefine((value, ctx) => {
     const isProd = value.NODE_ENV === 'production';
@@ -542,6 +586,16 @@ const EnvSchema = z
         code: 'custom',
         path: ['SMS_PROVIDER'],
         message: 'Cannot be "stub" in production — drivers sign in by SMS (§9 A2)',
+      });
+    }
+
+    // Selecting the provider without the key would fail at the moment an office
+    // user books a job — i.e. in front of a customer on the phone. Fail at boot.
+    if (value.MAPS_PROVIDER === 'google' && !value.GOOGLE_MAPS_EMBED_API_SERVER) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['GOOGLE_MAPS_EMBED_API_SERVER'],
+        message: 'Required when MAPS_PROVIDER=google',
       });
     }
   });

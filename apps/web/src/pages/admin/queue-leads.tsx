@@ -8,9 +8,17 @@ import {
   type LeadListItem,
   type LeadStatus,
 } from '@plastago/shared';
-import { Alert, Badge, Card, Pagination, buttonVariants, type BadgeProps } from '@plastago/ui';
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Pagination,
+  buttonVariants,
+  type BadgeProps,
+} from '@plastago/ui';
 import { PlusIcon, SproutIcon } from 'lucide-react';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
@@ -19,6 +27,7 @@ import { useListQuery } from '@/components/data-table/use-list-query';
 import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
 import { StatCard } from '@/components/stat-card';
+import { ConvertLeadDialog } from '@/features/queues/components/convert-lead-dialog';
 import { useLeadList, useLeadStats } from '@/features/queues/queries';
 import { formatArea, formatDate, formatMobile } from '@/lib/format';
 
@@ -118,21 +127,6 @@ const COLUMNS: readonly DataTableColumn<LeadListItem>[] = [
     cell: (row) => (
       <span className="block">
         <Badge variant={STATUS_VARIANT[row.status]}>{LEAD_STATUS_LABELS[row.status]}</Badge>
-        {row.convertedAccountId !== null && (
-          // A dead "Account created" label was the end of the trail: the lead is
-          // hidden from the default grid and the account it became was never
-          // named, so "what happened to that enquiry" had no answer on screen.
-          <Link
-            to={`/admin/customers/${row.convertedAccountId}`}
-            className="focus-ring mt-1 block truncate rounded text-xs text-success underline-offset-4 hover:underline"
-            onClick={(event) => {
-              // The row itself navigates to the lead; this link means the account.
-              event.stopPropagation();
-            }}
-          >
-            View the account
-          </Link>
-        )}
       </span>
     ),
   },
@@ -207,25 +201,88 @@ const COLUMNS: readonly DataTableColumn<LeadListItem>[] = [
   },
 ];
 
+/**
+ * Whether this enquiry became a customer — and the way to make it one.
+ *
+ * ── Why converting lives in the grid and not only on the lead ─────────────
+ * A.4 was reachable from one place: open the lead, then press Convert. But the
+ * question "which of these still need an account?" is a question about the
+ * LIST, and answering it meant opening each row in turn to find out. The column
+ * answers it at a glance, and puts the action next to the answer.
+ *
+ * ⚠️ No capability guard on the button. Reaching this page requires
+ * `leads:manage`, which only Operations and the Super Admin hold — the same two
+ * roles the API's `CONVERTER_ROLES` allows — so a guard here could never be
+ * false. If that matrix ever widens, the check belongs here and in the service.
+ */
+function accountColumn(onConvert: (lead: LeadListItem) => void): DataTableColumn<LeadListItem> {
+  return {
+    id: 'account',
+    header: 'Account',
+    priority: 'secondary',
+    className: 'w-36',
+    cell: (row) => {
+      if (row.convertedAccountId !== null) {
+        return (
+          <Link
+            to={`/admin/customers/${row.convertedAccountId}`}
+            className="focus-ring inline-flex rounded underline-offset-4 hover:underline"
+          >
+            <Badge variant="success">Converted</Badge>
+          </Link>
+        );
+      }
+
+      /*
+       * A lost enquiry gets no button. Converting one is not forbidden — the
+       * API would allow it — but offering it here invites an account for a
+       * builder who already said no, and reviving a lead is a decision made on
+       * the lead itself, by moving it back down the pipeline first. The detail
+       * page hides Convert for lost leads on the same grounds.
+       */
+      if (row.status === 'lost') {
+        return <span className="text-xs text-muted-foreground">Not converted</span>;
+      }
+
+      return (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            onConvert(row);
+          }}
+        >
+          <SproutIcon aria-hidden />
+          Convert
+        </Button>
+      );
+    },
+  };
+}
+
 export function AdminQueueLeadsPage() {
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
 
   /*
-   * ⚠️ Asking for "Won" has to un-hide the converted leads.
+   * ⚠️ Converted leads are shown, always — this grid is the whole pipeline.
    *
-   * The grid hides anything with an account behind it, which is right for the
-   * working pipeline and exactly wrong for this one filter: converting is the
-   * only route to `won`, so every genuine win is hidden. Picking Won therefore
-   * used to return an empty grid, with nothing on screen to say why.
+   * The API hides them by default, and for a while so did this page. It was the
+   * wrong default in both directions: landing here showed a list with the wins
+   * silently missing, and the one filter that names them — Won — returned an
+   * empty grid with nothing on screen to explain it. A lead that became a
+   * customer is the outcome the pipeline exists to produce; hiding the
+   * successes is hiding the answer to "how are we doing".
+   *
+   * The Account column carries the distinction instead, which is where a reader
+   * can actually see it.
    */
-  const query = useMemo(() => {
-    if (controller.query.filters?.status !== 'won') return controller.query;
-
-    return {
+  const query = useMemo(
+    () => ({
       ...controller.query,
       filters: { ...controller.query.filters, includeConverted: 'true' },
-    };
-  }, [controller.query]);
+    }),
+    [controller.query],
+  );
 
   const { data, error, isPending, isFetching, refetch } = useLeadList(query);
 
@@ -240,6 +297,19 @@ export function AdminQueueLeadsPage() {
    */
   const stats = useLeadStats().data;
   const rows = data?.data ?? [];
+
+  /*
+   * The lead the convert dialog is open for, or null.
+   *
+   * Held as the ROW rather than an id: `ConvertLeadDialog` needs only a name, a
+   * contact and a zone, all of which the row already carries, so opening it
+   * costs no extra fetch.
+   */
+  const [converting, setConverting] = useState<LeadListItem | null>(null);
+
+  // Built here, not at module scope, because the Account column has to reach
+  // back into this component's state to open the dialog.
+  const columns = useMemo(() => [...COLUMNS, accountColumn(setConverting)], []);
   const open = stats?.open ?? 0;
   const won = stats?.won ?? 0;
   const closed = (stats?.won ?? 0) + (stats?.lost ?? 0);
@@ -280,7 +350,7 @@ export function AdminQueueLeadsPage() {
 
         <DataTable
           caption="Leads and onboarding"
-          columns={COLUMNS}
+          columns={columns}
           rows={rows}
           getRowId={(row) => row.id}
           isPending={isPending}
@@ -299,6 +369,21 @@ export function AdminQueueLeadsPage() {
               'Leads arrive from the public enquiry form on plastago.com.au. Took one by phone? Add it with “New lead”.',
           }}
         />
+
+        {/*
+          One dialog for the whole grid, not one per row: it is a single modal
+          either way, and mounting twenty of them to show at most one is twenty
+          forms' worth of state for no gain.
+        */}
+        {converting && (
+          <ConvertLeadDialog
+            lead={converting}
+            open
+            onClose={() => {
+              setConverting(null);
+            }}
+          />
+        )}
 
         {data && (
           <Pagination

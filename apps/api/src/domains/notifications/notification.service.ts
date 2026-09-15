@@ -117,6 +117,25 @@ export const notificationService = {
 
     let raised = 0;
 
+    /*
+     * ⚠️ Every `href` below is an OFFICE route and must carry the `/admin`
+     * prefix the console is mounted under.
+     *
+     * They did not, and every link in the notification centre was therefore a
+     * 404: `/queues/futile`, `/queues/approvals`, `/invoices`, `/dispatch`,
+     * `/users/:id` — none of those exist, the console lives at `/admin/*`. One
+     * was worse than a missing prefix: `/fleet/:id` names a section that has
+     * never existed, the route is `/admin/vehicles/:id`.
+     *
+     * The model's own rule is that "every notification must be actionable. One
+     * that tells somebody a problem exists without saying where to fix it is a
+     * notification they learn to dismiss" — and a dead link is exactly that,
+     * with the added insult of looking like the product is broken.
+     *
+     * Two of these deliberately point at a LIST rather than a row: there is no
+     * `queues/futile/:id` or `queues/approvals/:id` route, because both open
+     * their detail in a dialog from the list.
+     */
     for (const recipient of recipients) {
       for (const review of futile.data) {
         await notificationRepository.raise({
@@ -127,7 +146,7 @@ export const notificationService = {
           severity: 'action',
           title: `Futile pickup #${String(review.jobNumber)} still needs a decision`,
           body: `${review.accountName} at ${review.siteName}. Marked futile ${daysAgo(review.markedAt)} — reschedule or cancel.`,
-          href: `/queues/futile/${review.id}`,
+          href: `/admin/queues/futile`,
           subjectKey: `futile-review:${review.id}`,
           valueExGst: review.feeExGst,
           jobId: review.jobId,
@@ -143,7 +162,7 @@ export const notificationService = {
           severity: 'action',
           title: `${charge.description} on #${String(charge.jobNumber)} awaits approval`,
           body: `${charge.accountName}. Raised by ${charge.raisedBy ?? 'a driver'} ${daysAgo(charge.raisedAt)}${charge.poRequired ? ' — approving moves it to the awaiting-PO queue.' : '.'}`,
-          href: `/queues/approvals/${charge.id}`,
+          href: `/admin/queues/approvals`,
           subjectKey: `charge-approval:${charge.id}`,
           // The amount IS the argument for looking at it.
           valueExGst: charge.amountExGst,
@@ -164,7 +183,7 @@ export const notificationService = {
               ? `Last chased ${daysAgo(invoice.lastChasedAt)} (${String(invoice.chaseCount)}×).`
               : 'Never chased.'
           }`,
-          href: `/queues/awaiting-po`,
+          href: `/admin/queues/awaiting-po`,
           subjectKey: `awaiting-po:${invoice.id}`,
           valueExGst: invoice.totalExGst,
           jobId: invoice.jobId || null,
@@ -187,7 +206,7 @@ export const notificationService = {
           severity: overdue && vehicle.kind === 'registration' ? 'urgent' : 'action',
           title: `${vehicle.rego} ${vehicle.kind} ${overdue ? 'has expired' : 'is due'}`,
           body: `${vehicle.label} — ${vehicle.kind} ${overdue ? 'expired' : 'due'} ${vehicle.dueOn}.`,
-          href: `/fleet/${vehicle.id}`,
+          href: `/admin/vehicles/${vehicle.id}`,
           subjectKey: `vehicle-${vehicle.kind}:${vehicle.id}:${vehicle.dueOn}`,
         });
         raised += 1;
@@ -205,7 +224,7 @@ export const notificationService = {
           severity: 'action',
           title: `${device.label} has ${String(device.pendingSyncActions)} unsent actions`,
           body: `Last synced ${device.lastSyncAt ? daysAgo(device.lastSyncAt.toISOString()) : 'never'}. The driver may be out of signal, or the app may be stuck.`,
-          href: `/users/${device.userId}`,
+          href: `/admin/users/${device.userId}`,
           subjectKey: `stuck-sync:${device.userId}`,
         });
         raised += 1;

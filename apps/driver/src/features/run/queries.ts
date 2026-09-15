@@ -157,6 +157,21 @@ export function useTipOffPreview(runId: string | null, totalKg: number, enabled:
   });
 }
 
+/**
+ * The weighbridge docket photo.
+ *
+ * Not a `useRunMutation`: it uploads bytes and resolves to the storage key the
+ * tip-off then carries, so there is nothing to invalidate until the tip-off
+ * itself is recorded.
+ */
+export function useUploadDocketPhoto() {
+  const { run } = useServices();
+  return useMutation({
+    mutationFn: ({ runId, blob }: { runId: string; blob: Blob }) =>
+      run.uploadDocketPhoto(runId, blob),
+  });
+}
+
 export function useRecordTipOff() {
   const { run } = useServices();
   return useRunMutation((input: TipOffEntry) => run.recordTipOff(input));

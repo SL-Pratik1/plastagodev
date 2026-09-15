@@ -49,7 +49,12 @@ vi.mock('../src/domains/queues/lead.repository.js', () => ({
     },
     addNote: (input: { leadId: string; body: string }) => {
       notes.push(input);
-      return Promise.resolve({ id: 'n1', at: new Date().toISOString(), author: 'x', body: input.body });
+      return Promise.resolve({
+        id: 'n1',
+        at: new Date().toISOString(),
+        author: 'x',
+        body: input.body,
+      });
     },
     addAttachment: () => Promise.resolve({ id: 'att1' }),
     findAttachment: () => Promise.resolve({ id: 'att1', storageKey: 'leads/x/f.pdf' }),
@@ -214,6 +219,14 @@ function conversion(overrides: Partial<LeadConversion> = {}): LeadConversion {
     captureMode: 'area-only',
     paymentTermsDays: 7,
     primaryZone: 'sydney',
+    /*
+     * Blank by default, so the default case is the one that exercises the
+     * fallback to the lead's own contact. A test that always overrode it would
+     * never notice the fallback breaking.
+     */
+    accountsContactName: '',
+    accountsContactEmail: '',
+    notes: '',
     sendInvitation: true,
     ...overrides,
   };
@@ -531,16 +544,6 @@ describe('converting a lead (A.4)', () => {
     });
   });
 
-  /*
-   * Terms are accepted by the customer in the portal (M5.2). Pre-signing them
-   * here would be PlastaGo agreeing on the builder's behalf.
-   */
-  it('does not pre-sign the terms', async () => {
-    await leadService.convert(ID, conversion(), OPERATIONS);
-
-    expect(accountsCreated[0]?.termsAgreedOffSystem).toBeNull();
-  });
-
   it('marks the lead converted and notes it in the thread', async () => {
     await leadService.convert(ID, conversion(), OPERATIONS);
 
@@ -567,8 +570,10 @@ describe('converting a lead (A.4)', () => {
      * can see; naming the next free code answers it.
      */
     await expect(leadService.convert(ID, conversion(), OPERATIONS)).rejects.toMatchObject({
-      status: 422,
-      issues: [{ path: 'customerCode', message: 'NEW002 is free — use that, or type another code.' }],
+      status: 409,
+      issues: [
+        { path: 'customerCode', message: 'NEW002 is free — use that, or type another code.' },
+      ],
     });
     expect(accountsCreated).toHaveLength(0);
   });

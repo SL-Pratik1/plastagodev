@@ -47,6 +47,24 @@ vi.mock('../src/domains/jobs/job.repository.js', () => ({
   },
 }));
 
+/**
+ * Google, as a recording double (I3).
+ *
+ * ⚠️ Nothing in this file may reach the real provider. These tests run on every
+ * commit, the geocoding and routing calls are BILLED per request, and a suite
+ * that quietly spends money is a suite somebody eventually turns off. The
+ * default is `null` — "no route" — because that is the honest answer when
+ * nothing has been configured, and it is the path most runs take.
+ */
+const maps = {
+  geocode: vi.fn().mockResolvedValue(null),
+  optimiseStopOrder: vi.fn().mockResolvedValue(null),
+};
+
+vi.mock('../src/integrations/maps.js', () => ({
+  getMapsProvider: () => ({ name: 'test', ...maps }),
+}));
+
 const { dispatchService } = await import('../src/domains/dispatch/dispatch.service.js');
 
 const DATE = '2026-03-02';
@@ -57,6 +75,11 @@ beforeEach(() => {
   runs = createFakeRunRepository();
   drivers = createFakeDriverRepository();
   settings = createFakeSettingsRepository();
+
+  // Call counts are asserted on ("did this run reach Google at all?"), so they
+  // cannot carry over between tests.
+  maps.geocode.mockClear().mockResolvedValue(null);
+  maps.optimiseStopOrder.mockClear().mockResolvedValue(null);
 });
 
 /** A planning run with `count` stops on it. */
@@ -315,22 +338,122 @@ describe('ordering the stops', () => {
     expect(runs.run(run.id)?.optimisedAt).toBeNull();
   });
 
-  it('stamps the run when it is optimised', async () => {
-    const { run } = await runWithStops(3);
-    const optimised = await dispatchService.optimiseRun(run.id);
-
-    expect(optimised.optimisedAt).not.toBeNull();
-    expect(runs.calls.resequences.at(-1)?.optimised).toBe(true);
-  });
-
-  it('groups stops by suburb when optimising', async () => {
-    // Honest grouping rather than a route nobody computed — the Google
-    // integration (I11) is not wired yet.
+  it('groups stops by suburb when no route can be computed', async () => {
     const { run } = await runWithStops(4);
     const optimised = await dispatchService.optimiseRun(run.id);
 
     const suburbs = optimised.stops.map((stop) => stop.suburb);
     expect(suburbs).toEqual([...suburbs].sort((a, b) => a.localeCompare(b)));
+  });
+
+  /*
+   * ⚠️ The board renders `optimisedAt` as a "Route optimised" badge. A grouping
+   * is not a route, so the fallback path must NOT stamp it — otherwise an
+   * allocator is told Google planned a day that Google never saw.
+   */
+  it('does not claim a route when it only grouped by suburb', async () => {
+    const { run } = await runWithStops(4);
+    const optimised = await dispatchService.optimiseRun(run.id);
+
+    expect(optimised.optimisedAt).toBeNull();
+    expect(runs.calls.resequences.at(-1)?.optimised).toBe(false);
+  });
+
+  it('stamps the run when Google really ordered it', async () => {
+    const { run, jobIds } = await runWithStops(4);
+    runs.geocodeStops(run.id);
+
+    // The order is the provider's to choose; the service's job is to write it.
+    maps.optimiseStopOrder.mockResolvedValueOnce([
+      jobIds[0]!,
+      jobIds[2]!,
+      jobIds[1]!,
+      jobIds[3]!,
+    ]);
+
+    const optimised = await dispatchService.optimiseRun(run.id);
+
+    expect(optimised.optimisedAt).not.toBeNull();
+    expect(runs.calls.resequences.at(-1)?.optimised).toBe(true);
+    expect(optimised.stops.map((stop) => stop.id)).toEqual([
+      jobIds[0],
+      jobIds[2],
+      jobIds[1],
+      jobIds[3],
+    ]);
+  });
+
+  /*
+   * A job that was never geocoded sits at the CENTRE of its suburb, kilometres
+   * from the site. Google would order those centres and return a route that is
+   * optimal for points no truck is driving to — confident, and wrong in a way
+   * nothing downstream could detect.
+   */
+  it('refuses to route a run whose stops are pinned to suburb centres', async () => {
+    const { run } = await runWithStops(4);
+
+    await dispatchService.optimiseRun(run.id);
+
+    expect(maps.optimiseStopOrder).not.toHaveBeenCalled();
+    expect(runs.calls.resequences.at(-1)?.optimised).toBe(false);
+  });
+
+  it('refuses to route when even one stop is pinned to a suburb centre', async () => {
+    const { run, jobIds } = await runWithStops(4);
+    runs.geocodeStops(run.id);
+    runs.pinToSuburb(jobIds[2]!);
+
+    await dispatchService.optimiseRun(run.id);
+
+    // All-or-nothing: one stop in the wrong place drags the whole sequence
+    // around itself, so a part-geocoded run is not a part-good route.
+    expect(maps.optimiseStopOrder).not.toHaveBeenCalled();
+    expect(runs.calls.resequences.at(-1)?.optimised).toBe(false);
+  });
+
+  it('falls back to a suburb grouping when Google returns nothing', async () => {
+    const { run } = await runWithStops(4);
+    runs.geocodeStops(run.id);
+    maps.optimiseStopOrder.mockResolvedValueOnce(null);
+
+    const optimised = await dispatchService.optimiseRun(run.id);
+
+    expect(optimised.optimisedAt).toBeNull();
+    const suburbs = optimised.stops.map((stop) => stop.suburb);
+    expect(suburbs).toEqual([...suburbs].sort((a, b) => a.localeCompare(b)));
+  });
+
+  /*
+   * `resequence` numbers whatever it is handed. An order that dropped a stop
+   * would leave that job on the run with a stale sequence and the driver's
+   * sheet missing work nobody noticed — so the response is verified as a
+   * permutation rather than trusted.
+   */
+  it('discards an order that does not contain every stop', async () => {
+    const { run, jobIds } = await runWithStops(4);
+    runs.geocodeStops(run.id);
+    maps.optimiseStopOrder.mockResolvedValueOnce([jobIds[0]!, jobIds[1]!, jobIds[2]!]);
+
+    const optimised = await dispatchService.optimiseRun(run.id);
+
+    expect(optimised.optimisedAt).toBeNull();
+    expect(optimised.stops).toHaveLength(4);
+  });
+
+  it('discards an order that names a job twice', async () => {
+    const { run, jobIds } = await runWithStops(4);
+    runs.geocodeStops(run.id);
+    maps.optimiseStopOrder.mockResolvedValueOnce([
+      jobIds[0]!,
+      jobIds[1]!,
+      jobIds[1]!,
+      jobIds[3]!,
+    ]);
+
+    const optimised = await dispatchService.optimiseRun(run.id);
+
+    expect(optimised.optimisedAt).toBeNull();
+    expect(optimised.stops).toHaveLength(4);
   });
 });
 

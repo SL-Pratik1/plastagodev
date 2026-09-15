@@ -1,4 +1,6 @@
 import type {
+  ChangeRequestDecision,
+  ChangeRequestItem,
   AwaitingPoItem,
   ChargeApprovalDetail,
   ChargeApprovalItem,
@@ -14,6 +16,7 @@ import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
 import { jobService } from '../jobs/job.service.js';
+import { notificationService } from '../notifications/notification.service.js';
 import { pricingService } from '../settings/pricing.service.js';
 import { queueRepository, type QueueListQuery } from './queue.repository.js';
 
@@ -43,6 +46,23 @@ export interface Caller {
 }
 
 /** Roles that work these queues. Customers and drivers see none of them. */
+/**
+ * Who may open a worklist at all — the allocator included.
+ *
+ * This contradicts `permissions.ts`, which gives the allocator neither
+ * `pricing:view` ("never what it is worth") nor `queues:action`. The console
+ * therefore draws no queue nav for them, while this set lets them call
+ * `/queues/approvals`, `/queues/futile` and `/queues/awaiting-po` directly and
+ * read every charge amount, futile fee and invoice total.
+ *
+ * ✔ Confirmed 2026-09-11: that is accepted. An allocator is internal staff, and
+ * seeing what a job is worth is not a risk worth another permission tier. The
+ * narrower rule that does matter is still enforced below — APPROVING a charge
+ * is a pricing decision and stays with the office (`APPROVER_ROLES`).
+ *
+ * So the two files disagree on purpose, not by accident. `permissions.ts`
+ * decides which screens are DRAWN; this decides what the server will answer.
+ */
 const OFFICE_ROLES = new Set<Role>(['super-admin', 'operations', 'office-staff', 'allocator']);
 
 /** M2.7 — approving a charge is a pricing decision, so it is narrower. */
@@ -195,8 +215,14 @@ export const queueService = {
    * make the button useless.
    *
    * ── Why a rejection must carry a note ─────────────────────────────────────
-   * The driver is told why. A rejection with no reason reads as the office
-   * disbelieving them, and the next contamination goes unreported.
+   * It is the only record of the decision. The charge leaves the queue the
+   * moment it is decided, so a rejection with no reason leaves a refused charge
+   * on a job with nothing to explain it — and the person who has to answer the
+   * driver, or the customer, is usually not the person who pressed the button.
+   *
+   * ⚠️ It is NOT sent to the driver. There is no driver notification channel
+   * (`notificationService` has `notifyAccount` and `notifyOffice`, and that is
+   * all), so telling them is a conversation somebody has to have.
    */
   async approvalDecide(
     ids: readonly string[],
@@ -210,7 +236,7 @@ export const queueService = {
     const note = decision.note.trim();
     if (decision.decision === 'reject' && !note) {
       throw AppError.validation('Say why the charge is being rejected', [
-        { path: 'note', message: 'The driver is told why — write a short reason' },
+        { path: 'note', message: 'Write a short reason — it is the only record of this decision' },
       ]);
     }
 
@@ -238,6 +264,87 @@ export const queueService = {
     );
 
     return result.changed;
+  },
+
+  /* ── M5.4 · Change requests from the portal ───────────────────────────── */
+
+  /**
+   * The office end of the portal’s only post-allocation channel.
+   *
+   * `assertOffice` rather than `assertApprover`: answering "can we move this to
+   * Thursday" is dispatch work, not a pricing decision, and the allocator is
+   * the person who can actually see whether the run has room.
+   */
+  async changeRequestList(
+    query: QueueListQuery,
+    caller: Caller,
+  ): Promise<{ data: ChangeRequestItem[]; meta: PageMeta }> {
+    assertOffice(caller);
+    return queueRepository.changeRequestList(query);
+  },
+
+  /**
+   * Record the answer. It does NOT move the job.
+   *
+   * Agreeing to a reschedule still goes through the normal reschedule path,
+   * because that is where the business-day window, the SLA clock and the run
+   * are handled. Applying it from here would be a second, quieter way to move
+   * a job — with none of those — and the two would drift.
+   */
+  async changeRequestDecide(
+    id: string,
+    decision: ChangeRequestDecision,
+    caller: Caller,
+  ): Promise<void> {
+    assertOffice(caller);
+
+    const note = decision.note.trim();
+
+    /*
+     * A decline must say why, for the reason a rejected charge must: the
+     * customer asked for something and is being told no. Unlike the charge
+     * case this reason DOES reach them — they can read it on the pickup.
+     */
+    if (decision.outcome === 'declined' && !note) {
+      throw AppError.validation('Say why the change cannot be made', [
+        { path: 'note', message: 'The customer reads this — write a short reason' },
+      ]);
+    }
+
+    const resolved = await queueRepository.decideChangeRequest({
+      id,
+      outcome: decision.outcome,
+      note: note || null,
+      decidedBy: caller.name,
+    });
+
+    if (!resolved) {
+      throw AppError.conflict(
+        'That request has already been answered — reload to see what was decided',
+      );
+    }
+
+    /*
+     * Tell the customer. The portal promised "we will confirm by phone or
+     * text"; this is the in-product half of that, and it is what stops them
+     * ringing to ask whether anyone saw it.
+     */
+    await notificationService.notifyAccount({
+      accountId: resolved.accountId,
+      category: 'queue',
+      severity: 'info',
+      title: `Your change request for #${String(resolved.jobNumber)} was ${decision.outcome === 'actioned' ? 'accepted' : 'declined'}`,
+      body: note || 'The office has actioned your request.',
+      href: `/portal/jobs/${resolved.jobId}`,
+      subjectKey: `change-request-decided:${id}`,
+      jobId: resolved.jobId,
+      jobNumber: resolved.jobNumber,
+    });
+
+    log.info(
+      { changeRequestId: id, outcome: decision.outcome, by: caller.name },
+      'change request decided',
+    );
   },
 
   /* ── M7.3 · Awaiting a purchase order ──────────────────────────────────── */

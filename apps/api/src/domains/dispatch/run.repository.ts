@@ -1,5 +1,6 @@
 import type {
   JobStatus,
+  LocationSource,
   Run,
   RunStatus,
   RunStopSummary,
@@ -8,6 +9,7 @@ import type {
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { JobModel } from '../jobs/job.model.js';
+import { getStorage } from '../../integrations/storage.js';
 import { RunModel, RunTipOffModel } from './run.model.js';
 
 /**
@@ -210,6 +212,46 @@ export const runRepository = {
     });
 
     return result > 0;
+  },
+
+  /**
+   * The stops of a run as POINTS, in the sequence they currently sit in (I3).
+   *
+   * Separate from `stopIds` rather than replacing it: a reorder only needs to
+   * know which ids are on the run, and making it carry coordinates it never
+   * reads would widen the query on the hottest path for nothing.
+   *
+   * `locationSource` rides along because the optimiser has to know whether it
+   * is being handed real addresses or a list of suburb centres — see
+   * `optimiseRun`.
+   */
+  async stopPoints(
+    runId: string,
+  ): Promise<{ id: string; latitude: number; longitude: number; locationSource: LocationSource }[]> {
+    if (!mongoose.isValidObjectId(runId)) return [];
+
+    const rows = await JobModel.find(
+      { runId: new mongoose.Types.ObjectId(runId) },
+      { _id: 1, latitude: 1, longitude: 1, locationSource: 1 },
+    )
+      .sort({ runSequence: 1 })
+      .lean<
+        {
+          _id: mongoose.Types.ObjectId;
+          latitude: number;
+          longitude: number;
+          locationSource?: LocationSource;
+        }[]
+      >();
+
+    return rows.map((row) => ({
+      id: row._id.toHexString(),
+      latitude: row.latitude,
+      longitude: row.longitude,
+      // Absent on every job written before the field existed. Those jobs took
+      // the suburb pin, so that is the truthful reading of a missing value.
+      locationSource: row.locationSource ?? 'suburb',
+    }));
   },
 
   /** The ids currently on a run, in sequence. Used to validate a reorder. */
@@ -418,13 +460,23 @@ function toStop(row: RawStop): RunStopSummary {
   };
 }
 
-function toTipOff(row: RawTipOff): RunTipOff {
+/**
+ * `docketPhotoUrl` is a URL, not the storage key.
+ *
+ * It used to hand back `docketPhotoKey` verbatim — `plastago/runs/…/dockets/x.jpg`
+ * — under a field named "Url", so anything rendering it as an image or a link
+ * would have fetched a path that does not exist. Presigned here, the way lead
+ * attachments and PO documents already are.
+ */
+async function toTipOff(row: RawTipOff): Promise<RunTipOff> {
   return {
     facility: row.facility,
     docketNumber: row.docketNumber,
     netKg: row.netKg,
     tippedOffAt: row.tippedOffAt.toISOString(),
-    docketPhotoUrl: row.docketPhotoKey ?? null,
+    docketPhotoUrl: row.docketPhotoKey
+      ? await getStorage().presignDownload(row.docketPhotoKey)
+      : null,
   };
 }
 
@@ -450,7 +502,7 @@ async function stopsOf(runIds: mongoose.Types.ObjectId[]): Promise<Map<string, S
 
 async function tipOffOf(runId: mongoose.Types.ObjectId): Promise<RunTipOff | null> {
   const row = await RunTipOffModel.findOne({ runId }).lean<RawTipOff>();
-  return row ? toTipOff(row) : null;
+  return row ? await toTipOff(row) : null;
 }
 
 async function tipOffsOf(
@@ -459,7 +511,9 @@ async function tipOffsOf(
   const rows = await RunTipOffModel.find({ runId: { $in: runIds } }).lean<RawTipOff[]>();
 
   const grouped = new Map<string, RunTipOff>();
-  for (const row of rows) grouped.set(row.runId.toHexString(), toTipOff(row));
+  // Sequential rather than `Promise.all`: presigning is local work and a board
+  // holds a handful of runs, so the parallelism would buy nothing measurable.
+  for (const row of rows) grouped.set(row.runId.toHexString(), await toTipOff(row));
   return grouped;
 }
 

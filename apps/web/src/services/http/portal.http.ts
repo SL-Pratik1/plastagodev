@@ -4,6 +4,7 @@ import {
   AwaitingCallUpSchema,
   CallUpOutcomeSchema,
   CertificateSchema,
+  InvoiceDownloadsSchema,
   type CallUpRequest,
   MonthlyVolumeReportSchema,
   OnboardingInviteSchema,
@@ -160,16 +161,15 @@ export function createHttpPortalService(api: ApiClient): CustomerPortalService {
         }),
       ),
 
-    requestInvoicePdf: async (ids: readonly string[]) => {
-      await viaService(() =>
+    requestInvoicePdf: (ids: readonly string[]) =>
+      viaService(() =>
         api.request(`${base}/invoices/pdf`, {
           method: 'POST',
           body: { ids },
-          // 202 — queued, not rendered.
-          schema: AcceptedSchema,
+          // 200 — rendered, with links to the files.
+          schema: InvoiceDownloadsSchema,
         }),
-      );
-    },
+      ),
 
     /* ── M5.11 · F1 · the monthly report ──────────────────────────────────── */
 

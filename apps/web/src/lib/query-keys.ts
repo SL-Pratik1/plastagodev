@@ -135,6 +135,8 @@ export const queryKeys = {
     approvalList: (query: ListQuery) => [...queryKeys.queues.all, 'approvals', query] as const,
     approvalDetail: (id: string) => [...queryKeys.queues.all, 'approvals', 'detail', id] as const,
     awaitingPoList: (query: ListQuery) => [...queryKeys.queues.all, 'awaiting-po', query] as const,
+    changeRequestList: (query: ListQuery) =>
+      [...queryKeys.queues.all, 'change-requests', query] as const,
     /* M2.12b — orders waiting for a date, and the call-ups that arrived. */
     awaitingCallUpList: (query: ListQuery) =>
       [...queryKeys.queues.all, 'call-ups', 'awaiting', query] as const,

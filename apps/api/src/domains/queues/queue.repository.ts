@@ -1,4 +1,5 @@
 import type {
+  ChangeRequestItem,
   AwaitingPoItem,
   ChargeApprovalDetail,
   ChargeApprovalItem,
@@ -15,6 +16,11 @@ import { fromDecimal128 } from '../../lib/money.js';
 import { AccountModel, ContactModel } from '../accounts/account.model.js';
 import { InvoiceLineModel, InvoiceModel } from '../invoices/invoice.model.js';
 import { JobChargeModel, JobModel, JobPhotoModel } from '../jobs/job.model.js';
+/*
+ * Read from the queues domain, written by the portal. The collection is the
+ * seam between the two: the customer raises the request, the office works it.
+ */
+import { ChangeRequestModel } from '../portal/portal.model.js';
 import { CallUpModel } from './call-up.model.js';
 import { FutileReviewModel } from './futile-review.model.js';
 import { LeadModel } from './lead.model.js';
@@ -190,6 +196,8 @@ export const queueRepository = {
             { 'job.accountName': { $regex: term, $options: 'i' } },
             { 'job.siteName': { $regex: term, $options: 'i' } },
             { 'job.suburb': { $regex: term, $options: 'i' } },
+            ...jobNumberMatch(term),
+            { 'job.driverName': { $regex: term, $options: 'i' } },
           ],
         },
       });
@@ -344,6 +352,8 @@ export const queueRepository = {
             { 'job.accountName': { $regex: term, $options: 'i' } },
             { 'job.siteName': { $regex: term, $options: 'i' } },
             { description: { $regex: term, $options: 'i' } },
+            ...jobNumberMatch(term),
+            { raisedBy: { $regex: term, $options: 'i' } },
           ],
         },
       });
@@ -429,15 +439,23 @@ export const queueRepository = {
      * money decision has to say WHICH charge and HOW MUCH. Re-reading them after
      * the update would be a second query returning the same rows.
      */
+    /*
+     * ⚠️ The projected field is `amount`. It used to ask for `amountExGst`,
+     * which the schema does not define — so Mongo returned nothing for it and
+     * the `.toString()` below threw. The throw happened AFTER `updateMany`,
+     * so the charge was approved and the office was shown "Something went
+     * wrong": they pressed Approve again, got "None of those charges could be
+     * decided", and had no way to tell that the money was already live.
+     */
     const affected = await JobChargeModel.find(
       { _id: { $in: ids }, approvalState: 'pending' },
-      { jobId: 1, description: 1, amountExGst: 1 },
+      { jobId: 1, description: 1, amount: 1 },
     ).lean<
       Array<{
         _id: mongoose.Types.ObjectId;
         jobId: mongoose.Types.ObjectId;
         description: string;
-        amountExGst: mongoose.Types.Decimal128;
+        amount: mongoose.Types.Decimal128;
       }>
     >();
 
@@ -446,9 +464,15 @@ export const queueRepository = {
       {
         $set: {
           approvalState: input.to,
-          // Appended to the driver's own note rather than replacing it: the
-          // driver said what they saw, and the office said what they decided.
-          ...(input.note ? { note: input.note } : {}),
+          /*
+           * The office's reason goes in its OWN field. The comment here used to
+           * claim the note was appended to the driver's; the code `$set` it
+           * straight over the top, so a rejection erased the driver’s account of
+           * what was in the load — the evidence the charge rests on.
+           */
+          ...(input.note ? { decisionNote: input.note } : {}),
+          decidedBy: input.decidedBy,
+          decidedAt: new Date(),
         },
       },
     );
@@ -460,9 +484,116 @@ export const queueRepository = {
         id: row._id.toHexString(),
         jobId: row.jobId.toHexString(),
         description: row.description,
-        amountExGst: row.amountExGst.toString(),
+        amountExGst: row.amount.toString(),
       })),
     };
+  },
+
+  /* ── M5.4 · Change requests from the portal ───────────────────────────── */
+
+  /**
+   * Everything still open, oldest first.
+   *
+   * Oldest first for the same reason the futile queue is: a worklist sorted
+   * newest-first is one where the oldest row is never touched — and the oldest
+   * row here is a customer who has been waiting longest for an answer they were
+   * told was coming.
+   */
+  async changeRequestList(
+    query: QueueListQuery,
+  ): Promise<{ data: ChangeRequestItem[]; meta: PageMeta }> {
+    const match: Record<string, unknown> = { state: 'open' };
+
+    if (query.agedOverDays !== undefined) {
+      const cutoff = new Date(Date.now() - query.agedOverDays * 86_400_000);
+      match.requestedAt = { $lte: cutoff };
+    }
+
+    if (query.account && mongoose.isValidObjectId(query.account)) {
+      match.accountId = new mongoose.Types.ObjectId(query.account);
+    }
+
+    const pipeline: mongoose.PipelineStage[] = [
+      { $match: match },
+      { $lookup: { from: 'jobs', localField: 'jobId', foreignField: '_id', as: 'job' } },
+      { $unwind: '$job' },
+    ];
+
+    if (query.q) {
+      const term = escapeRegex(query.q);
+      pipeline.push({
+        $match: {
+          $or: [
+            { 'job.accountName': { $regex: term, $options: 'i' } },
+            { 'job.siteName': { $regex: term, $options: 'i' } },
+            { 'job.suburb': { $regex: term, $options: 'i' } },
+            ...jobNumberMatch(term),
+            { requestedByName: { $regex: term, $options: 'i' } },
+          ],
+        },
+      });
+    }
+
+    const [rows, totals] = await Promise.all([
+      ChangeRequestModel.aggregate<RawChangeRequestRow>([
+        ...pipeline,
+        { $sort: { requestedAt: 1 } },
+        { $skip: (query.page - 1) * query.pageSize },
+        { $limit: query.pageSize },
+      ]),
+      ChangeRequestModel.aggregate<{ total: number }>([...pipeline, { $count: 'total' }]),
+    ]);
+
+    return {
+      data: rows.map(toChangeRequestItem),
+      meta: pageMeta(query, totals[0]?.total ?? 0),
+    };
+  },
+
+  /**
+   * Close one out.
+   *
+   * Guarded on `state: open` so two people working the queue cannot both answer
+   * the same request — the second gets `false` and a conflict, rather than
+   * silently overwriting the first decision and its author.
+   */
+  async decideChangeRequest(input: {
+    id: string;
+    outcome: 'actioned' | 'declined';
+    note: string | null;
+    decidedBy: string;
+  }): Promise<{ jobId: string; jobNumber: number; accountId: string } | null> {
+    if (!mongoose.isValidObjectId(input.id)) return null;
+
+    const row = await ChangeRequestModel.findOneAndUpdate(
+      { _id: new mongoose.Types.ObjectId(input.id), state: 'open' },
+      {
+        $set: {
+          state: input.outcome,
+          resolvedAt: new Date(),
+          resolvedBy: input.decidedBy,
+          resolutionNote: input.note,
+        },
+      },
+      { new: true },
+    ).lean<{ jobId: mongoose.Types.ObjectId; accountId: mongoose.Types.ObjectId }>();
+
+    if (!row) return null;
+
+    const job = await JobModel.findById(row.jobId, { jobNumber: 1 }).lean<{
+      jobNumber: number;
+    }>();
+
+    return {
+      jobId: row.jobId.toHexString(),
+      jobNumber: job?.jobNumber ?? 0,
+      accountId: row.accountId.toHexString(),
+    };
+  },
+
+  /** Drives the nav badge, beside the other queue counts. */
+  async openChangeRequestCount(): Promise<number> {
+    return ChangeRequestModel.countDocuments({ state: 'open' });
   },
 
   /** Whether a job still has anything pending — drives the grid's badge. */
@@ -492,6 +623,41 @@ export const queueRepository = {
 
     if (query.agedOverDays !== undefined) {
       filter.createdAt = { $lte: new Date(Date.now() - query.agedOverDays * 86_400_000) };
+    }
+
+    /*
+     * The search box on this screen did nothing at all.
+     *
+     * It offered "invoice, job, customer or contact" and `query.q` was never
+     * read, so every term — nonsense included — returned the whole queue. On a
+     * chase list twenty-one rows long that is not a small thing: the box is how
+     * somebody finds the invoice a builder has just rung about.
+     *
+     * The contact lives on `contacts`, not on the invoice, so a contact search
+     * resolves to account ids first. One extra query, and only on a real term.
+     */
+    if (query.q) {
+      const term = escapeRegex(query.q);
+      const or: Record<string, unknown>[] = [
+        { accountName: { $regex: term, $options: "i" } },
+      ];
+
+      // `invoiceNumber` and `jobNumber` are numbers; a regex would never match.
+      if (/^\d+$/.test(query.q.trim())) {
+        const asNumber = Number(query.q.trim());
+        or.push({ invoiceNumber: asNumber }, { jobNumber: asNumber });
+      }
+
+      const contactRows = await ContactModel.find(
+        { name: { $regex: term, $options: "i" } },
+        { accountId: 1 },
+      ).lean<Array<{ accountId: mongoose.Types.ObjectId }>>();
+
+      if (contactRows.length > 0) {
+        or.push({ accountId: { $in: contactRows.map((row) => row.accountId) } });
+      }
+
+      filter.$or = or;
     }
 
     const [rows, total] = await Promise.all([
@@ -692,6 +858,46 @@ function toFutileItem(
   };
 }
 
+interface RawChangeRequestRow {
+  _id: mongoose.Types.ObjectId;
+  kind: 'reschedule' | 'cancel' | 'other';
+  requestedDate: string | null;
+  note: string;
+  requestedByName: string;
+  requestedAt: Date;
+  job: {
+    _id: mongoose.Types.ObjectId;
+    jobNumber: number;
+    accountId: mongoose.Types.ObjectId;
+    accountName: string;
+    siteName: string;
+    suburb: string;
+    status: ChangeRequestItem['status'];
+    driverName: string | null;
+    readyDate: string;
+  };
+}
+
+function toChangeRequestItem(row: RawChangeRequestRow): ChangeRequestItem {
+  return {
+    id: row._id.toHexString(),
+    jobId: row.job._id.toHexString(),
+    jobNumber: row.job.jobNumber,
+    accountId: row.job.accountId.toHexString(),
+    accountName: row.job.accountName,
+    siteName: row.job.siteName,
+    suburb: row.job.suburb,
+    status: row.job.status,
+    driverName: row.job.driverName,
+    readyDate: row.job.readyDate,
+    kind: row.kind,
+    requestedDate: row.requestedDate,
+    note: row.note,
+    requestedByName: row.requestedByName,
+    requestedAt: row.requestedAt.toISOString(),
+  };
+}
+
 function toApprovalItem(row: RawApprovalRow, photoCounts: Map<string, number>): ChargeApprovalItem {
   return {
     id: row._id.toHexString(),
@@ -738,6 +944,32 @@ async function countPhotos(jobIds: mongoose.Types.ObjectId[]): Promise<Map<strin
  *
  * Without this a typed `(` is a syntax error and a typed `.*` is a scan.
  */
+/**
+ * Match a job number typed into a search box.
+ *
+ * `jobNumber` is a NUMBER, so the `$regex` clauses beside it could never match
+ * it — which is why every queue whose placeholder said "Search job number…"
+ * returned nothing for the one thing people are most likely to type. Converted
+ * for the comparison, so a partial ("613") works as well as the whole number.
+ *
+ * Only when the term contains a digit: running `$toString` across every row
+ * for a search like "Clarendon" would be work that cannot match anything.
+ */
+function jobNumberMatch(term: string): Record<string, unknown>[] {
+  if (!/\d/.test(term)) return [];
+
+  return [
+    {
+      $expr: {
+        $regexMatch: {
+          input: { $toString: { $ifNull: ['$job.jobNumber', ''] } },
+          regex: term,
+        },
+      },
+    },
+  ];
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

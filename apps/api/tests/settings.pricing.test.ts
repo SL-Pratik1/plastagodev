@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Role } from '@plastago/shared';
+import { AdditionalServiceUpdateSchema } from '@plastago/shared';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
 
 /**
@@ -480,35 +481,48 @@ describe('additional services', () => {
   it('reprices a protected charge — editing is exactly what this screen is for', async () => {
     const updated = await settingsService.updateAdditionalService(
       'futile-pickup',
-      { label: 'Futile pickup', value: '135.00', requiresApproval: true, driverRaisable: true },
+      { label: 'Futile pickup', value: '135.00', requiresApproval: true },
       ADMIN,
     );
 
     expect(updated.value).toBe('135.00');
   });
 
-  it('refuses to make a system-generated charge driver-raisable', async () => {
+  /*
+   * ⚠️ This replaces "refuses to make a system-generated charge
+   * driver-raisable". That rule is gone because what it refused can no longer
+   * be ASKED for: `driverRaisable` left the write contract along with the
+   * checkbox that set it, since the driver app decides what it offers from the
+   * screens it ships and never from that column.
+   *
+   * The test that matters now is that a request carrying the old field changes
+   * nothing — an old browser tab, or a script written against the previous
+   * shape, must not be able to reach through and set it.
+   */
+  it('drops a driverRaisable a stale caller still sends', () => {
     /*
-     * It is derived from what the driver already captured — bag counts,
-     * on-site minutes. Offering it as a button on their phone as well would
-     * let one job be charged twice for the same thing.
+     * ⚠️ Asserted against the SCHEMA, not the service, because the schema is
+     * where the guarantee lives — `validate()` parses every request body, and
+     * Zod strips what the shape does not declare. A service call in a test
+     * skips that parse, so asserting there would prove nothing about a real
+     * request.
      */
-    await expect(
-      settingsService.updateAdditionalService(
-        'extra-bags',
-        { label: 'Extra bags', value: '30.00', requiresApproval: true, driverRaisable: true },
-        ADMIN,
-      ),
-    ).rejects.toMatchObject({ status: 422, issues: [{ path: 'driverRaisable' }] });
+    const parsed = AdditionalServiceUpdateSchema.parse({
+      label: 'Extra bags',
+      value: '30.00',
+      requiresApproval: true,
+      driverRaisable: true,
+    });
 
-    expect(repo.calls.updatedServices).toEqual([]);
+    expect(parsed).toEqual({ label: 'Extra bags', value: '30.00', requiresApproval: true });
+    expect(parsed).not.toHaveProperty('driverRaisable');
   });
 
   it('404s when updating a charge that does not exist', async () => {
     await expect(
       settingsService.updateAdditionalService(
         'no-such-charge',
-        { label: 'x', value: '1.00', requiresApproval: false, driverRaisable: false },
+        { label: 'x', value: '1.00', requiresApproval: false },
         ADMIN,
       ),
     ).rejects.toMatchObject({ status: 404 });
@@ -566,7 +580,7 @@ describe('additional services', () => {
     await expect(
       settingsService.updateAdditionalService(
         'futile-pickup',
-        { label: 'x', value: '1.00', requiresApproval: false, driverRaisable: false },
+        { label: 'x', value: '1.00', requiresApproval: false },
         OFFICE,
       ),
     ).rejects.toMatchObject({ status: 403 });
@@ -580,6 +594,85 @@ describe('additional services', () => {
     await expect(settingsService.get(CUSTOMER)).rejects.toMatchObject({ status: 403 });
     await expect(
       settingsService.createAdditionalService(newCharge, CUSTOMER),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+/* ── M6.2 · undoing a schedule issued with the wrong date ────────────────── */
+
+describe('removing a rate schedule', () => {
+  /** A date comfortably in the future, in Sydney terms. */
+  const future = '2027-06-01';
+  /** Yesterday in Sydney, whenever the suite runs. */
+  const yesterday = new Date(Date.now() - 86_400_000).toLocaleDateString('en-CA', {
+    timeZone: 'Australia/Sydney',
+  });
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+
+  const zones = [
+    { zone: 'sydney' as const, serviceCharge: '220.00', ratePerM2: '0.1600' },
+    { zone: 'wollongong' as const, serviceCharge: '250.00', ratePerM2: '0.1800' },
+    { zone: 'newcastle' as const, serviceCharge: '250.00', ratePerM2: '0.2000' },
+  ];
+
+  it('removes a schedule that has not started yet', async () => {
+    await settingsService.issueSchedule('default', { effectiveFrom: future, zones }, ADMIN);
+
+    await settingsService.deleteSchedule('default', future, ADMIN);
+
+    expect(repo.calls.deletedSchedules).toEqual([{ id: 'default', effectiveFrom: future }]);
+  });
+
+  /*
+   * ⚠️ The refusal that makes this safe at all. A schedule that has started has
+   * priced work, and some of that work has been invoiced — removing it would
+   * move a figure on a document a builder already has.
+   */
+  it('refuses a schedule that has already started', async () => {
+    await settingsService.issueSchedule('default', { effectiveFrom: yesterday, zones }, ADMIN);
+
+    await expect(
+      settingsService.deleteSchedule('default', yesterday, ADMIN),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(repo.calls.deletedSchedules).toEqual([]);
+  });
+
+  /* Today's is what every booking taken this morning was priced on. */
+  it('refuses the schedule in force today', async () => {
+    await settingsService.issueSchedule('default', { effectiveFrom: today, zones }, ADMIN);
+
+    await expect(settingsService.deleteSchedule('default', today, ADMIN)).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
+  /*
+   * A card with no schedule prices nothing, and every quote against it falls
+   * back to the default card silently — a mispricing nobody would see.
+   */
+  it('refuses to remove a card’s only schedule', async () => {
+    const card = await settingsService.createRateCard(
+      { label: 'Solo Homes', effectiveFrom: future, zones },
+      ADMIN,
+    );
+
+    await expect(
+      settingsService.deleteSchedule(card.id, future, ADMIN),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('404s for a date the card has no schedule on', async () => {
+    await expect(
+      settingsService.deleteSchedule('default', '2030-01-01', ADMIN),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('refuses a caller who is not an administrator', async () => {
+    await settingsService.issueSchedule('default', { effectiveFrom: future, zones }, ADMIN);
+
+    await expect(
+      settingsService.deleteSchedule('default', future, OFFICE),
     ).rejects.toMatchObject({ status: 403 });
   });
 });

@@ -14,6 +14,7 @@ import type {
   JobListItem,
   JobPhoto,
   JobStatus,
+  LocationSource,
   PageMeta,
   ServiceLevel,
   WeightBasis,
@@ -100,6 +101,8 @@ export interface CreateJobInput {
   zone: Zone;
   latitude: number;
   longitude: number;
+  /** I3 — whether the pin is the site itself or the middle of the suburb. */
+  locationSource: LocationSource;
   accessNotes: string;
   gateHours: string | null;
   inductionRequired: boolean;
@@ -166,6 +169,7 @@ interface RawJob {
   zone: Zone;
   latitude: number;
   longitude: number;
+  locationSource: LocationSource;
   accessNotes: string;
   gateHours: string | null;
   inductionRequired: boolean;
@@ -369,6 +373,9 @@ export const jobRepository = {
           raisedAt: charge.raisedAt.toISOString(),
           photoCount: charge.photoCount,
           note: charge.note ?? null,
+          decidedBy: charge.decidedBy ?? null,
+          decidedAt: charge.decidedAt ? charge.decidedAt.toISOString() : null,
+          decisionNote: charge.decisionNote ?? null,
         }),
       ),
       events: events.map(
@@ -539,6 +546,7 @@ export const jobRepository = {
       zone: input.zone,
       latitude: input.latitude,
       longitude: input.longitude,
+      locationSource: input.locationSource,
       accessNotes: input.accessNotes,
       gateHours: input.gateHours,
       inductionRequired: input.inductionRequired,

@@ -35,6 +35,8 @@ export interface StoredInvoice extends InvoiceListItem {
   sentAt: string | null;
   xeroState: XeroSyncState;
   xeroMessage: string | null;
+  /** M7.6 — set once a PDF has been drawn. Null means one has never been. */
+  pdfKey: string | null;
 }
 
 export function createFakeInvoiceRepository() {
@@ -67,6 +69,7 @@ export function createFakeInvoiceRepository() {
         paidAt: null,
         lines: [],
         sentAt: null,
+        pdfKey: null,
         xeroState: 'not-synced',
         xeroMessage: null,
         ...invoice,
@@ -102,6 +105,7 @@ export function createFakeInvoiceRepository() {
             raisedBy: line.raisedBy,
           })),
           templateName: 'Standard',
+          pdfKey: invoice.pdfKey,
           xeroLastSyncAt: null,
           paymentTermsDays: 7,
           notes: '',
@@ -131,6 +135,8 @@ export function createFakeInvoiceRepository() {
           sentAt: null,
           xeroState: 'not-synced',
           xeroMessage: null,
+          // A freshly created invoice has never been rendered.
+          pdfKey: null,
         };
         invoices.set(id, row);
         return Promise.resolve(row as InvoiceListItem);

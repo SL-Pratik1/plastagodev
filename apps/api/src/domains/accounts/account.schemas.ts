@@ -4,7 +4,6 @@ import {
   BRAND_IDS,
   CAPTURE_MODES,
   ObjectIdSchema,
-  ONBOARDING_STATES,
   PageQuerySchema,
   PO_POLICIES,
   RateCardIdSchema,
@@ -41,7 +40,8 @@ export const ListAccountsQuerySchema = PageQuerySchema.extend({
   rateCardId: RateCardIdSchema.optional(),
   poPolicy: z.enum(PO_POLICIES).optional(),
   captureMode: z.enum(CAPTURE_MODES).optional(),
-  onboarding: z.enum(ONBOARDING_STATES).optional(),
+  // The `onboarding` facet went with the terms feature — it filtered on whether
+  // an account had accepted, which is no longer a state an account can be in.
 }).meta({ id: 'ListAccountsQuery' });
 
 /**

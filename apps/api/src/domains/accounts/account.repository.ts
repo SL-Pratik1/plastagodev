@@ -7,16 +7,14 @@ import type {
   CaptureMode,
   Contact,
   ContactRole,
-  OnboardingState,
   PageMeta,
   PoPolicy,
   RateCardId,
-  TermsAcceptance,
   Zone,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { withTransaction } from '../../lib/transaction.js';
-import { AccountModel, ContactModel, TermsAcceptanceModel } from './account.model.js';
+import { AccountModel, ContactModel } from './account.model.js';
 
 /**
  * Repository layer — the ONLY file in this domain that touches Mongoose
@@ -72,7 +70,6 @@ export interface ListAccountsQuery {
   rateCardId?: RateCardId | undefined;
   poPolicy?: PoPolicy | undefined;
   captureMode?: CaptureMode | undefined;
-  onboarding?: OnboardingState | undefined;
 }
 
 export interface CreateAccountInput {
@@ -88,8 +85,26 @@ export interface CreateAccountInput {
   primaryZone: Zone;
   notes: string;
   contact: { name: string; email: string | null } | null;
-  /** Terms agreed off-system — written in the same transaction when set. */
-  termsAgreedOffSystem: { termsVersion: string } | null;
+}
+
+/**
+ * What the office may correct afterwards.
+ *
+ * Mirrors `AccountUpdate` in the contract, plus the resolved contact. Held as
+ * its own type rather than reusing `CreateAccountInput` because the two are
+ * genuinely different sets: a create settles the commercial terms, an edit
+ * deliberately cannot touch them.
+ */
+export interface UpdateAccountInput {
+  name: string;
+  tradingName: string | null;
+  abn: string;
+  addressLine: string | null;
+  suburb: string | null;
+  postcode: string | null;
+  certificateEmail: string | null;
+  notes: string;
+  contact: { name: string; email: string | null } | null;
 }
 
 /** Shape of a `.lean()` account document. */
@@ -110,6 +125,11 @@ interface RawAccount {
   riskAssessmentRequired: boolean;
   certificateEmail: string | null;
   preferredPickupWindow: string | null;
+  tradingName: string | null;
+  addressLine: string | null;
+  suburb: string | null;
+  postcode: string | null;
+  detailsCompletedAt: Date | null;
   notes: string;
   /** From `timestamps: true`. Present on every document Mongoose writes. */
   createdAt: Date;
@@ -124,14 +144,6 @@ interface RawContact {
   mobile: string | null;
   notifyBySms: boolean;
   notifyByEmail: boolean;
-}
-
-interface RawTerms {
-  accountId: mongoose.Types.ObjectId;
-  acceptedAt: Date;
-  acceptedByName: string;
-  acceptedByRole: string;
-  termsVersion: string;
 }
 
 /**
@@ -162,7 +174,7 @@ export const accountRepository = {
     query: ListAccountsQuery,
     scope: AccountScope,
   ): Promise<{ data: AccountListItem[]; meta: PageMeta }> {
-    const filter = await buildFilter(query, scope);
+    const filter = buildFilter(query, scope);
 
     const sortKey = query.sort?.replace(/^-/, '') ?? '';
     // Typed as the literal union rather than `number`, so the sort object below
@@ -192,15 +204,8 @@ export const accountRepository = {
       AccountModel.countDocuments(filter),
     ]);
 
-    /*
-     * Onboarding state is derived from the terms collection, fetched in ONE
-     * query for the whole page rather than one per row — the classic N+1 that
-     * makes a 20-row grid issue 21 queries.
-     */
-    const signed = await signedAccountIds(rows.map((row) => row._id));
-
     return {
-      data: rows.map((row) => toListItem(row, signed.has(row._id.toHexString()))),
+      data: rows.map((row) => toListItem(row)),
       meta: {
         page: query.page,
         pageSize: query.pageSize,
@@ -220,18 +225,30 @@ export const accountRepository = {
     const account = await AccountModel.findById(id).lean<RawAccount>();
     if (!account) return null;
 
-    const [contacts, terms] = await Promise.all([
-      ContactModel.find({ accountId: account._id }).sort({ role: 1, name: 1 }).lean<RawContact[]>(),
-      TermsAcceptanceModel.findOne({ accountId: account._id }).lean<RawTerms>(),
-    ]);
+    const contacts = await ContactModel.find({ accountId: account._id })
+      .sort({ role: 1, name: 1 })
+      .lean<RawContact[]>();
 
     return {
-      ...toListItem(account, terms !== null),
+      ...toListItem(account),
       // M7.5 — null means "follow the brand", resolved when the PDF renders.
       invoiceTemplateId: account.invoiceTemplateId ?? null,
       riskAssessmentRequired: account.riskAssessmentRequired,
       certificateEmail: resolveCertificateEmail(account, contacts),
       abn: account.abn,
+      /*
+       * The customer's own registered details.
+       *
+       * ⚠️ Returned at last. The portal onboarding form has always WRITTEN
+       * these, and no endpoint has ever read them back — so a customer's
+       * trading name and registered address were stored where the office that
+       * invoices them could not look.
+       */
+      tradingName: account.tradingName ?? null,
+      addressLine: account.addressLine ?? null,
+      suburb: account.suburb ?? null,
+      postcode: account.postcode ?? null,
+      detailsCompletedAt: account.detailsCompletedAt?.toISOString() ?? null,
       paymentTermsDays: account.paymentTermsDays,
       primaryZone: account.primaryZone,
       contacts: contacts.map(toContact),
@@ -356,22 +373,7 @@ export const accountRepository = {
           );
         }
 
-        if (input.termsAgreedOffSystem) {
-          await TermsAcceptanceModel.create(
-            [
-              {
-                accountId: account._id,
-                acceptedAt: new Date(),
-                acceptedByName: 'Agreed off-system',
-                acceptedByRole: 'Existing contract',
-                termsVersion: input.termsAgreedOffSystem.termsVersion,
-              },
-            ],
-            options,
-          );
-        }
-
-        return toListItem(account.toObject<RawAccount>(), input.termsAgreedOffSystem !== null);
+        return toListItem(account.toObject<RawAccount>());
       },
       {
         label: 'accounts.create',
@@ -382,11 +384,81 @@ export const accountRepository = {
           if (!accountId) return;
           await Promise.all([
             ContactModel.deleteMany({ accountId }),
-            TermsAcceptanceModel.deleteMany({ accountId }),
             AccountModel.deleteOne({ _id: accountId }),
           ]);
         },
       },
+    );
+  },
+
+  /**
+   * Correct an existing account's details.
+   *
+   * ── Two collections again, so a transaction again ─────────────────────────
+   * The accounts contact is its own document, and an edit that renamed the
+   * company but left the contact behind — or the reverse — is a half-applied
+   * save the office has no way to see. Same reasoning as `create` (§6A.3 #3).
+   *
+   * ⚠️ The contact is UPSERTED by role, not inserted. An account created with
+   * both contact fields blank has no accounts contact at all, and the whole
+   * point of this endpoint is that such an account can be completed later.
+   *
+   * ⚠️ `detailsCompletedAt` is deliberately NOT touched. That date means "the
+   * customer confirmed this", and the office typing an address is not the
+   * customer confirming one.
+   *
+   * Returns false when no such account exists, so the caller can 404 rather
+   * than report a success that changed nothing.
+   */
+  async update(id: string, input: UpdateAccountInput): Promise<boolean> {
+    if (!mongoose.isValidObjectId(id)) return false;
+
+    const accountId = new mongoose.Types.ObjectId(id);
+
+    return withTransaction(
+      async (session) => {
+        const options = session ? { session } : {};
+
+        const result = await AccountModel.updateOne(
+          { _id: accountId },
+          {
+            $set: {
+              name: input.name,
+              tradingName: input.tradingName,
+              abn: input.abn,
+              addressLine: input.addressLine,
+              suburb: input.suburb,
+              postcode: input.postcode,
+              certificateEmail: input.certificateEmail,
+              notes: input.notes,
+            },
+          },
+          options,
+        );
+
+        // Checked BEFORE the contact write: an upsert against a missing account
+        // would otherwise mint a contact orphaned from nothing.
+        if (result.matchedCount === 0) return false;
+
+        if (input.contact) {
+          await ContactModel.updateOne(
+            { accountId, role: 'accounts' },
+            {
+              $set: {
+                name: input.contact.name,
+                email: input.contact.email,
+                // Only opt them into email if there is an address to send to.
+                notifyByEmail: input.contact.email !== null,
+              },
+              $setOnInsert: { accountId, role: 'accounts', mobile: null, notifyBySms: false },
+            },
+            { ...options, upsert: true },
+          );
+        }
+
+        return true;
+      },
+      { label: 'accounts.update' },
     );
   },
 
@@ -396,6 +468,19 @@ export const accountRepository = {
    * A targeted `$set`, not a document save: the account is written by more than
    * one flow and a whole-document write would clobber whatever else changed.
    */
+  /**
+   * Point an account at an invoice template, or back at its brand.
+   *
+   * A targeted `$set` like its neighbours: the account document is written by
+   * several flows, and a whole-document save would clobber whatever else
+   * changed in between.
+   */
+  async setInvoiceTemplate(id: string, invoiceTemplateId: string | null): Promise<boolean> {
+    if (!mongoose.isValidObjectId(id)) return false;
+    const result = await AccountModel.updateOne({ _id: id }, { $set: { invoiceTemplateId } });
+    return result.matchedCount > 0;
+  },
+
   async setRiskAssessmentRequired(id: string, required: boolean): Promise<boolean> {
     if (!mongoose.isValidObjectId(id)) return false;
     const result = await AccountModel.updateOne(
@@ -418,62 +503,15 @@ export const accountRepository = {
     return result.matchedCount > 0;
   },
 
-  /** Journey A.4 — the signed record. Null while outstanding. */
-  async findTermsAcceptance(accountId: string): Promise<TermsAcceptance | null> {
-    if (!mongoose.isValidObjectId(accountId)) return null;
-    const terms = await TermsAcceptanceModel.findOne({ accountId }).lean<RawTerms>();
-    if (!terms) return null;
-
-    return {
-      acceptedAt: terms.acceptedAt.toISOString(),
-      acceptedByName: terms.acceptedByName,
-      acceptedByRole: terms.acceptedByRole,
-      termsVersion: terms.termsVersion,
-    };
-  },
-
-  /**
-   * Journey A.4 — records the customer accepting the terms.
-   *
-   * ── Why this is an insert that can fail, not an upsert ────────────────────
-   * The acceptance is the record Matt currently chases as a signed PDF (7:49) —
-   * a director's guarantee, given once by a named individual. Overwriting it
-   * would silently replace who signed and when, which is the one thing the
-   * record exists to prove. The unique index on `accountId` makes a second
-   * acceptance impossible; this returns false so the caller can say so.
+  /*
+   * `findTermsAcceptance` and `recordTermsAcceptance` used to sit here. Removed
+   * with the rest of the terms feature — see the note in `account.model.ts`.
    */
-  async recordTermsAcceptance(input: {
-    accountId: string;
-    acceptedByName: string;
-    acceptedByRole: string;
-    termsVersion: string;
-  }): Promise<boolean> {
-    if (!mongoose.isValidObjectId(input.accountId)) return false;
-
-    const result = await TermsAcceptanceModel.updateOne(
-      { accountId: new mongoose.Types.ObjectId(input.accountId) },
-      {
-        $setOnInsert: {
-          accountId: new mongoose.Types.ObjectId(input.accountId),
-          acceptedAt: new Date(),
-          acceptedByName: input.acceptedByName,
-          acceptedByRole: input.acceptedByRole,
-          termsVersion: input.termsVersion,
-        },
-      },
-      { upsert: true },
-    );
-
-    // `upsertedCount` is 1 only when this call created it. An existing
-    // acceptance matches and changes nothing, which is the correct outcome and
-    // a false return.
-    return result.upsertedCount === 1;
-  },
 };
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
-async function buildFilter(query: ListAccountsQuery, scope: AccountScope): Promise<AccountFilter> {
+function buildFilter(query: ListAccountsQuery, scope: AccountScope): AccountFilter {
   const filter: AccountFilter = {};
 
   /*
@@ -494,45 +532,11 @@ async function buildFilter(query: ListAccountsQuery, scope: AccountScope): Promi
   if (query.q) filter.$text = { $search: query.q };
 
   /*
-   * Onboarding is DERIVED from the terms collection, so filtering on it means
-   * resolving that set first rather than matching a column.
-   *
-   * ⚠️ This filter previously did nothing at all: the facet was accepted by the
-   * schema, passed through, and never applied — so "show me who has not signed"
-   * silently returned everybody. A filter that quietly matches everything is
-   * worse than one that errors, because the office reads the result as an
-   * answer.
-   *
-   * Combined with the scope clause rather than overwriting it: a customer
-   * asking for `awaiting-terms` must still only ever see their own account.
+   * The `onboarding` facet is gone with the terms feature. It filtered on
+   * whether an account had accepted, which no longer exists as a state.
    */
-  if (query.onboarding) {
-    const signed = await TermsAcceptanceModel.find({})
-      .select({ accountId: 1 })
-      .lean<{ accountId: mongoose.Types.ObjectId }[]>();
-    const ids = signed.map((row) => row.accountId);
-
-    /*
-     * `$and` at the top level, not a second `_id` key.
-     *
-     * Assigning `_id` twice would silently drop the scope clause — the later
-     * write wins — and a customer would see every unsigned account on the
-     * platform. Both constraints have to survive, so they are ANDed.
-     */
-    const clause = query.onboarding === 'complete' ? { $in: ids } : { $nin: ids };
-    filter.$and = [...(filter.$and ?? []), { _id: clause }];
-  }
 
   return filter;
-}
-
-/** One query for a whole page's onboarding state. See the note in `list`. */
-async function signedAccountIds(ids: mongoose.Types.ObjectId[]): Promise<Set<string>> {
-  if (ids.length === 0) return new Set();
-  const rows = await TermsAcceptanceModel.find({ accountId: { $in: ids } })
-    .select({ accountId: 1 })
-    .lean<{ accountId: mongoose.Types.ObjectId }[]>();
-  return new Set(rows.map((row) => row.accountId.toHexString()));
 }
 
 /**
@@ -543,7 +547,7 @@ async function signedAccountIds(ids: mongoose.Types.ObjectId[]): Promise<Set<str
  * them and the grid renders them — a missing field would blank the column, and
  * an invented number would be worse.
  */
-function toListItem(account: RawAccount, signed: boolean): AccountListItem {
+function toListItem(account: RawAccount): AccountListItem {
   return {
     id: account._id.toHexString(),
     code: account.code,
@@ -551,8 +555,6 @@ function toListItem(account: RawAccount, signed: boolean): AccountListItem {
     brandId: account.brandId,
     rateCardId: account.rateCardId,
     accountType: account.accountType,
-    // Derived, never stored twice — there is no flag that could disagree.
-    onboardingState: signed ? 'complete' : 'awaiting-terms',
     poPolicy: account.poPolicy,
     captureMode: account.captureMode,
     status: account.status,

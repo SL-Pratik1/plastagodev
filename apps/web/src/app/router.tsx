@@ -39,6 +39,7 @@ import {
   PortalSupervisorsPage,
   QueueApprovalsPage,
   QueueAwaitingPoPage,
+  QueueChangeRequestsPage,
   QueueFutilePage,
   QueueLeadCreatePage,
   QueueLeadDetailPage,
@@ -179,6 +180,12 @@ export const router = createBrowserRouter([
                       { path: 'queues/futile', element: load(<QueueFutilePage />) },
                       { path: 'queues/approvals', element: load(<QueueApprovalsPage />) },
                       { path: 'queues/awaiting-po', element: load(<QueueAwaitingPoPage />) },
+                      {
+                        // M5.4 — the office end of the portal’s only
+                        // post-allocation channel. See the screen.
+                        path: 'queues/change-requests',
+                        element: load(<QueueChangeRequestsPage />),
+                      },
                       { path: 'queues/po-review', element: load(<QueuePoReviewPage />) },
                       { path: 'queues/call-ups', element: load(<QueueCallUpsPage />) },
                       {

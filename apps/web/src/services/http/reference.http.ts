@@ -10,6 +10,9 @@ import {
   NotificationSummarySchema,
   PlaceSchema,
   SettingsSchema,
+  PresignedUploadSchema,
+  type InvoicingSettings,
+  TemplatePreviewSchema,
   UserListItemSchema,
   UserSchema,
   type AdditionalServiceCreate,
@@ -18,7 +21,6 @@ import {
   type RateCardCreate,
   type RateCardUpdate,
   type RateScheduleCreate,
-  type Settings,
   type UserDraft,
   type UserStatus,
 } from '@plastago/shared';
@@ -33,7 +35,7 @@ import type {
   SettingsService,
   UserService,
 } from '../types.js';
-import { listParams, pageOf } from './list-params.js';
+import { NoContentSchema, listParams, pageOf } from './list-params.js';
 import { viaService } from './to-service-error.js';
 
 /**
@@ -213,21 +215,14 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
   const base = `${API_PREFIX}/settings`;
 
   /*
-   * Saves are per SECTION, matching the API. One giant PUT would mean a failure
-   * in one form discards what somebody typed in another — and each section
-   * returns only its own slice, so a save cannot silently overwrite a sibling
-   * with stale values from this tab.
+   * ⚠️ The generic `section` helper that used to sit here is gone.
    *
-   * Invoicing is the only writable section: pricing is read-only because rates
-   * are effective-dated, and the notification-rules, integrations and
-   * credential-type sections were removed.
+   * It typed a save as `(input: Settings[K]) => Promise<Settings[K]>` — the
+   * same shape in and out — which stopped being true once the read and the
+   * write diverged: invoicing now reads back a derived `logoUrl` that must
+   * never be sent. Invoicing was also its only caller, so the abstraction was
+   * one implementation behind a type that had become a lie.
    */
-  const section = <TKey extends keyof Settings>(
-    path: string,
-    schema: z.ZodType<Settings[TKey]>,
-  ) =>
-    (input: Settings[TKey]): Promise<Settings[TKey]> =>
-      viaService(() => api.request(`${base}/${path}`, { method: 'PUT', body: input, schema }));
 
   /*
    * A rate-card write returns the card AS STORED, not the input echoed back.
@@ -241,7 +236,72 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
   return {
     get: () => viaService(() => api.request(base, { schema: SettingsSchema })),
 
-    saveInvoicing: section<'invoicing'>('invoicing', SettingsSchema.shape.invoicing),
+    /*
+     * ⚠️ Sends the WRITE shape and parses the READ shape.
+     *
+     * They differ by one field: `logoUrl` is derived from the stored key and
+     * comes back on every read, but must never be sent — a client echoing back
+     * a URL that expired ten minutes ago would be asking the server to store a
+     * dead link as the logo. The server strips it; this keeps the types honest
+     * about why.
+     */
+    saveInvoicing: (input: InvoicingSettings) =>
+      viaService(() =>
+        api.request(`${base}/invoicing`, {
+          method: 'PUT',
+          body: input,
+          schema: SettingsSchema.shape.invoicing,
+        }),
+      ),
+
+    /* ── The invoice logo (M7.5) ───────────────────────────────────────── */
+
+    /**
+     * Ask, PUT, confirm.
+     *
+     * ⚠️ The bytes go STRAIGHT to storage, not through this API — the second
+     * step below is a bare `fetch` to a presigned URL, deliberately not
+     * `api.request`, which would attach this app's credentials and JSON
+     * handling to somebody else's host.
+     *
+     * The headers are not advisory: they are signed into the URL, so a PUT that
+     * alters one fails at the bucket rather than here.
+     */
+    uploadLogo: async (file: File) => {
+      const ticket = await viaService(() =>
+        api.request(`${base}/invoicing/logo`, {
+          method: 'POST',
+          body: { contentType: file.type, contentLength: file.size },
+          schema: PresignedUploadSchema,
+        }),
+      );
+
+      const response = await fetch(ticket.uploadUrl, {
+        method: 'PUT',
+        headers: ticket.headers,
+        body: file,
+      });
+
+      if (!response.ok) {
+        throw new Error(`The logo could not be uploaded (${String(response.status)})`);
+      }
+
+      const { logoUrl } = await viaService(() =>
+        api.request(`${base}/invoicing/logo`, {
+          method: 'PUT',
+          body: { key: ticket.key },
+          schema: LogoConfirmedSchema,
+        }),
+      );
+
+      return logoUrl;
+    },
+
+    removeLogo: async () => {
+      await viaService(() =>
+        api.request(`${base}/invoicing/logo`, { method: 'DELETE', schema: NoContentSchema }),
+      );
+    },
 
     /* ── Rate cards (M6.1, M6.2) ───────────────────────────────────────── */
 
@@ -267,6 +327,19 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
           body: input,
           schema: cardSchema,
         }),
+      ),
+
+    /*
+     * DELETE on the schedule's own path. The date identifies it, because that
+     * is how a schedule is named everywhere else — the card plus the day it
+     * starts.
+     */
+    deleteSchedule: (id: string, effectiveFrom: string) =>
+      viaService(() =>
+        api.request(
+          `${base}/rate-cards/${encodeURIComponent(id)}/schedules/${encodeURIComponent(effectiveFrom)}`,
+          { method: 'DELETE', schema: cardSchema },
+        ),
       ),
 
     deleteRateCard: async (id: string) => {
@@ -337,7 +410,20 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
         }),
       );
     },
+
+    /* POST, not GET: it draws a PDF and stores it, so it is not something a
+       browser may retry or prefetch on its own. */
+    previewTemplate: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/invoice-templates/${encodeURIComponent(id)}/preview`, {
+          method: 'POST',
+          schema: TemplatePreviewSchema,
+        }),
+      ),
   };
 }
+
+/** What the confirm answers with — the link to the logo now in force. */
+const LogoConfirmedSchema = z.object({ logoUrl: z.string().nullable() });
 
 

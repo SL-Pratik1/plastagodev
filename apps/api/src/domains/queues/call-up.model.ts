@@ -80,7 +80,7 @@ const callUpSchema = new Schema(
      * raised in the portal or over the phone, and a sparse index is what lets
      * many of those coexist.
      */
-    externalId: { type: String, default: null },
+    /**
 
     resolvedAt: { type: Date, default: null },
     resolvedBy: { type: String, default: null, trim: true },
@@ -93,12 +93,29 @@ const callUpSchema = new Schema(
 /**
  * ⚠️ One call-up per extraction, enforced by the database.
  *
- * `sparse` because a portal call-up has no external id, and a plain unique
- * index would then allow exactly one of those in the entire collection.
+ * ── Why PARTIAL and not `sparse` ──────────────────────────────────────────
+ * This was `sparse`, with a comment saying it had to be so that the many
+ * call-ups with no external id could coexist. `sparse` does not do that: it
+ * skips documents where the field is ABSENT, and an explicitly stored `null`
+ * is a value it indexes like any other. The service writes `externalId: null`
+ * for anything keyed in by hand or raised from the portal, so the first one
+ * took the slot and every one after it failed with a raw E11000 — which the
+ * office saw as "Something went wrong" on the second booking they ever made.
+ *
+ * A partial index says what was actually meant: uniqueness applies only where
+ * there IS a vendor id. `default: null` is also gone from the field above, so
+ * nothing writes one by accident.
+ *
+ * ⚙️ Mongoose never alters an index that already exists, so an environment
+ * created before this needs `migrate-call-up-index` run once.
  */
 callUpSchema.index(
   { externalId: 1 },
-  { unique: true, sparse: true, name: 'call_up_external_unique' },
+  {
+    unique: true,
+    partialFilterExpression: { externalId: { $type: 'string' } },
+    name: 'call_up_external_unique',
+  },
 );
 
 /** Matching an arriving call-up to an order. The hot path. */

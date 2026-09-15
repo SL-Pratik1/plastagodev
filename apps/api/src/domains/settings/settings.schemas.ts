@@ -64,3 +64,26 @@ export const QuoteQuerySchema = z
 export const InvoiceTemplateIdParamsSchema = z
   .object({ id: z.string().trim().min(1).max(60) })
   .meta({ id: 'InvoiceTemplateIdParams' });
+
+/**
+ * `:effectiveFrom` on the schedule-removal route.
+ *
+ * A date in the path rather than a database id, because that is how a schedule
+ * is identified everywhere else — the card plus the day it starts. Validated as
+ * a real `YYYY-MM-DD` so a malformed path is a 422 with a readable message
+ * rather than a lookup that quietly matches nothing.
+ */
+export const ScheduleParamsSchema = z
+  .object({ id: RateCardIdSchema, effectiveFrom: IsoDateSchema })
+  .meta({ id: 'ScheduleParams' });
+
+/**
+ * Confirming that the logo bytes landed.
+ *
+ * The key is the one this API minted and handed back with the upload URL; the
+ * service refuses anything outside the logo's own prefix, so a caller cannot
+ * point the invoices at another object in the bucket.
+ */
+export const LogoConfirmSchema = z
+  .object({ key: z.string().trim().min(1).max(512) })
+  .meta({ id: 'LogoConfirm' });

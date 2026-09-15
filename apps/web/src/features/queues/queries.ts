@@ -1,6 +1,7 @@
 import type {
   CallUpRequest,
   CallUpState,
+  ChangeRequestDecision,
   ChargeDecision,
   FutileDecision,
   LeadConversion,
@@ -132,6 +133,24 @@ export function useAwaitingPoList(query: ListQuery) {
 export function useAwaitingPoChase() {
   const { queues } = useServices();
   return useQueueMutation((ids: readonly string[]) => queues.awaitingPoChase(ids));
+}
+
+/* ── M5.4 · Change requests ───────────────────────────────────────────────── */
+
+export function useChangeRequestList(query: ListQuery) {
+  const { queues } = useServices();
+  return useQuery({
+    queryKey: queryKeys.queues.changeRequestList(query),
+    queryFn: () => queues.changeRequestList(query),
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useChangeRequestDecide() {
+  const { queues } = useServices();
+  return useQueueMutation((input: { id: string; decision: ChangeRequestDecision }) =>
+    queues.changeRequestDecide(input.id, input.decision),
+  );
 }
 
 /* ── M2.12 · PO review ────────────────────────────────────────────────────── */

@@ -336,14 +336,25 @@ describe('queue summaries', () => {
     expect(summary.queues.find((queue) => queue.key === 'po-review')?.valueExGst).toBeNull();
   });
 
+  /*
+   * ⚠️ These used to be asserted WITHOUT the `/admin` prefix, which is what
+   * the service sent — and every one of them 404’d. The console lives at
+   * `/admin/*`; `/queues/futile` is not a route in any build. The four tiles
+   * on the office dashboard are its whole point, so all four of the "what
+   * needs doing today" cards led to a Page not found.
+   *
+   * The test passed throughout, because it asserted the same wrong string
+   * the service produced. It now asserts the routes the router actually
+   * registers.
+   */
   it('links each queue to the screen that works it', async () => {
     const summary = await dashboardService.summary(caller('operations'));
 
     expect(summary.queues.map((queue) => queue.href)).toEqual([
-      '/queues/futile',
-      '/queues/approvals',
-      '/queues/awaiting-po',
-      '/queues/po-review',
+      '/admin/queues/futile',
+      '/admin/queues/approvals',
+      '/admin/queues/awaiting-po',
+      '/admin/queues/po-review',
     ]);
   });
 

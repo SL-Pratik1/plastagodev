@@ -15,6 +15,8 @@ import type {
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
+import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
+import { notificationService } from '../notifications/notification.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { jobService, type Caller as JobCaller } from '../jobs/job.service.js';
 import { callUpService, type CallUpOutcome } from '../queues/call-up.service.js';
@@ -177,6 +179,17 @@ export const portalService = {
    */
   async book(draft: PortalBookingDraft, caller: Caller): Promise<PortalJobListItem> {
     const account = await requireAccount(caller);
+
+    /*
+     * The same guard the office paths carry (`jobs`, and the futile reschedule
+     * in `queues`). The portal walked straight past it: a customer could book —
+     * or edit — a pickup ready in 2020 or in 2099, and the API took both. The
+     * browser date input suggests a minimum and nothing enforces one, so a
+     * mistyped year produced a job either permanently overdue at the top of
+     * every at-risk list, or invisible below the fold forever. `targetDate` is
+     * derived from this, so the SLA clock inherits the mistake.
+     */
+    assertPlausibleReadyDate(draft.readyDate);
 
     /*
      * M2.10 — a PO-required account cannot book without a reference. Refused
@@ -390,6 +403,10 @@ export const portalService = {
       );
     }
 
+    // See the note in `book` — an edit moves the ready date too, and restarts
+    // the SLA clock from it.
+    assertPlausibleReadyDate(input.readyDate);
+
     const slaBusinessDays = await settingsRepository.slaBusinessDays();
 
     const changed = await portalRepository.editJob(id, scope, {
@@ -448,13 +465,47 @@ export const portalService = {
       requestedByName: caller.name,
     });
 
+    /*
+     * ⚠️ The customer is told "Request sent to the office". Until this call
+     * existed that was not true of anything: the request was written to
+     * `changerequests` and read by no office screen, no queue and no alert,
+     * so a reschedule or a cancellation asked for after allocation reached
+     * nobody. It is the ONLY channel a customer has once the job is on a run
+     * sheet — `editJob` refuses and points them here.
+     */
+    await notificationService.notifyOffice({
+      category: 'exception',
+      /*
+       * A cancellation is urgent and the others are not: a truck may be about
+       * to be sent to a site that no longer wants it, and that is a wasted run
+       * plus a futile charge argument. A reschedule can wait for the queue.
+       */
+      severity: input.kind === 'cancel' ? 'urgent' : 'action',
+      title: `${describeChangeKind(input.kind)} — #${String(existing.jobNumber)}`,
+      body: `${caller.name} at ${account.name} asked to ${describeChangeAsk(input)}. ${input.note.trim()}`,
+      href: `/admin/queues/change-requests`,
+      /*
+       * One open request per job is all the service allows, so the job is the
+       * subject. A second ask after the first is resolved is genuinely new and
+       * gets its own notification.
+       */
+      subjectKey: `change-request:${id}:${String(Date.now())}`,
+      jobId: id,
+      jobNumber: existing.jobNumber,
+    });
+
     log.info(
       { jobId: id, kind: input.kind, accountId: account.id, by: caller.name },
       'change request raised from the portal',
     );
   },
 
-  /** M5.5 — flag urgent. The office is alerted and the board highlights it. */
+  /**
+   * M5.5 — flag urgent. The office is alerted and the board highlights it.
+   *
+   * The badge was always drawn; the alert is new. This comment described both
+   * from the beginning and only one of them existed.
+   */
   async setUrgency(id: string, urgent: boolean, caller: Caller): Promise<PortalJobListItem> {
     const account = await requireAccount(caller);
 
@@ -464,6 +515,46 @@ export const portalService = {
     }
 
     log.info({ jobId: id, urgent, by: caller.name }, 'urgency changed from the portal');
+
+    /*
+     * ⚠️ The portal tells the customer "The office has been alerted". Nothing
+     * was: this method set the flag and logged. The board does draw an Urgent
+     * badge, so the flag was visible to anyone already looking at it — but a
+     * customer marking a job urgent is precisely the case where nobody is.
+     *
+     * Only on the way IN. Standing a job back down is not news, and a pair of
+     * notifications for somebody toggling a switch twice is how an inbox stops
+     * being read.
+     */
+    if (urgent) {
+      const job = await portalRepository.findJobForEdit(id, scopeFor(caller, account.id));
+
+      /*
+       * `setUrgency` already returned `changed`, so the job is there. Re-read
+       * for its number rather than trusting that: the notification names the
+       * job, and a title reading "Marked urgent — #0" is worse than no
+       * notification at all.
+       */
+      if (job) {
+        await notificationService.notifyOffice({
+          category: 'exception',
+          severity: 'action',
+          title: `Marked urgent — #${String(job.jobNumber)}`,
+          body: `${caller.name} at ${account.name} needs this pickup sooner. Confirm what is possible.`,
+          href: `/admin/jobs/${id}`,
+          /*
+           * Keyed on the job, not the moment: a customer toggling urgent off
+           * and on again is the same ask, and the office does not need it
+           * twice. A change REQUEST is keyed with a timestamp instead, because
+           * a second one genuinely is a new thing to read.
+           */
+          subjectKey: `portal-urgent:${id}`,
+          jobId: id,
+          jobNumber: job.jobNumber,
+        });
+      }
+    }
+
     return this.jobListItem(id, caller);
   },
 
@@ -520,6 +611,24 @@ export const portalService = {
     return job;
   },
 };
+
+/* ── Describing a change request ─────────────────────────────────────────── */
+
+/** The notification title, in the office’s words rather than the enum’s. */
+function describeChangeKind(kind: PortalChangeRequest['kind']): string {
+  if (kind === 'cancel') return 'Cancellation requested';
+  if (kind === 'reschedule') return 'Reschedule requested';
+  return 'Change requested';
+}
+
+/** The body, so the notification says what was actually asked for. */
+function describeChangeAsk(input: PortalChangeRequest): string {
+  if (input.kind === 'cancel') return 'cancel this pickup';
+  if (input.kind === 'reschedule') {
+    return input.requestedDate ? `move it to ${input.requestedDate}` : 'move it';
+  }
+  return 'change something about it';
+}
 
 /* ── Scoping ─────────────────────────────────────────────────────────────── */
 

@@ -49,7 +49,7 @@ export const poReviewController = {
         receivedAt: new Date(body.receivedAt),
         // Decided server-side. The extractor does not get to declare its own
         // output trustworthy — see the service.
-        reason: 'below-threshold',
+        reason: 'awaiting-check',
       },
       callerFrom(req),
     );

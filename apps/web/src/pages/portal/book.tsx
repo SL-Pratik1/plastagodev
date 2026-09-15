@@ -68,17 +68,17 @@ const FormSchema = z.object({
    * ⚠️ The SUBURB is still chosen, because it carries the zone that prices the
    * job and the pin the board plots. Neither survives free text.
    */
-  siteName: z.string().trim().min(1, 'Name the place — our driver navigates by it').max(120),
-  lotNumber: z.string().trim().max(30),
-  addressLine: z.string().trim().min(1, 'Enter the street address').max(160),
+  siteName: z.string().trim().min(1, 'Name the place — our driver navigates by it').max(120, 'Keep the site name under 120 characters'),
+  lotNumber: z.string().trim().max(30, 'A lot number is at most 30 characters'),
+  addressLine: z.string().trim().min(1, 'Enter the street address').max(160, 'Keep the address under 160 characters'),
   placeId: z.string().min(1, 'Choose the suburb from the list'),
-  builderName: z.string().trim().max(120),
-  accessNotes: z.string().trim().max(1000),
-  gateHours: z.string().trim().max(120),
+  builderName: z.string().trim().max(120, 'Keep the builder name under 120 characters'),
+  accessNotes: z.string().trim().max(1000, 'Keep access notes under 1000 characters'),
+  gateHours: z.string().trim().max(120, 'Keep gate hours under 120 characters'),
   inductionRequired: z.boolean(),
   craneAvailable: z.boolean(),
-  siteContactName: z.string().trim().max(80),
-  siteContactMobile: z.string().trim().max(20),
+  siteContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
+  siteContactMobile: z.string().trim().max(20, 'A mobile number is at most 20 characters'),
   siteContactEmail: z
     .string()
     .trim()
@@ -106,8 +106,8 @@ const FormSchema = z.object({
     .min(0, 'Bags cannot be negative')
     .max(200, 'That is more bags than a truck holds — check the figure'),
   serviceLevel: z.enum(['standard', 'urgent']),
-  poNumber: z.string().trim().max(60),
-  notes: z.string().trim().max(1000),
+  poNumber: z.string().trim().max(60, 'A PO or job reference is at most 60 characters'),
+  notes: z.string().trim().max(1000, 'Keep notes under 1000 characters'),
   jobReady: z.literal(true, {
     error: 'Confirm the board will be stacked and ready on this date',
   }),
@@ -363,6 +363,25 @@ export function PortalBookPage() {
                   <Input {...control} placeholder="46 Allambie Circuit" {...register('addressLine')} />
                 )}
               </Field>
+
+              {/*
+                Who the pickup is FOR, when that is not the account itself.
+                A contractor works across several builders’ sites, and the office
+                reads this to know whose job it is on the ground. It sat on the
+                schema and in the booking payload with no input, so every portal
+                booking reached them blank.
+              */}
+              <Field
+                id="book-builder"
+                label="Builder"
+                error={errors.builderName?.message}
+                hint="Who the site belongs to, if it is not your own."
+                className="sm:col-span-2"
+              >
+                {(control) => (
+                  <Input {...control} placeholder="Rawson Homes" {...register('builderName')} />
+                )}
+              </Field>
             </div>
 
             {/*
@@ -474,6 +493,125 @@ export function PortalBookPage() {
                 </span>
               </Alert>
             )}
+          </CardContent>
+        </Card>
+
+        {/*
+          ── Site access and contact ─────────────────────────────────
+          ⚠️ These seven fields were declared on this form’s schema, given
+          defaults, sent in the booking payload and stored on the job — with no
+          inputs anywhere. Every pickup booked from the portal reached the driver
+          with nobody to call, no gate hours, and `craneAvailable` false — which
+          is what sets `freightItem`, so every portal booking was recorded as a
+          hand load whether or not there was a crane.
+
+          The driver app is built around them: a "Call site" button, an Access
+          panel read before getting out of the truck, Induction and Crane badges,
+          and a "No site contact on this job — ring the office" fallback for when
+          they are empty. That fallback was the only path a portal booking could
+          take, which is the phone call the fields exist to prevent. Nor could the
+          office repair it afterwards: a job has no update route at all.
+
+          Asked HERE rather than of the office because the person booking is the
+          one standing on the site. Matt’s "four fields, not seventeen" is about
+          not asking a supervisor for square metres they cannot know (25:19);
+          gate hours and whether an induction is needed are the opposite — they
+          are what only they know. All optional, so the short path through this
+          form is unchanged.
+        */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Site access and contact</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              What the driver needs on arrival. All optional — anything left blank simply does
+              not show on their screen.
+            </p>
+          </CardHeader>
+          <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field id="book-contact-name" label="Site contact" error={errors.siteContactName?.message}>
+              {(control) => (
+                <Input {...control} placeholder="Dave Nguyen" {...register('siteContactName')} />
+              )}
+            </Field>
+
+            <Field
+              id="book-contact-mobile"
+              label="Site contact mobile"
+              hint="The number the driver taps to call from site."
+              error={errors.siteContactMobile?.message}
+            >
+              {(control) => (
+                <Input
+                  {...control}
+                  type="tel"
+                  inputMode="tel"
+                  placeholder="0412 345 678"
+                  {...register('siteContactMobile')}
+                />
+              )}
+            </Field>
+
+            <Field
+              id="book-contact-email"
+              label="Site contact email"
+              error={errors.siteContactEmail?.message}
+            >
+              {(control) => (
+                <Input
+                  {...control}
+                  type="email"
+                  placeholder="dave@example.com.au"
+                  {...register('siteContactEmail')}
+                />
+              )}
+            </Field>
+
+            <Field
+              id="book-gate-hours"
+              label="Gate hours"
+              hint="When the site can actually be entered."
+              error={errors.gateHours?.message}
+            >
+              {(control) => (
+                <Input {...control} placeholder="6:30am – 3:30pm" {...register('gateHours')} />
+              )}
+            </Field>
+
+            <Field
+              id="book-access-notes"
+              label="Access notes"
+              error={errors.accessNotes?.message}
+              className="sm:col-span-2"
+            >
+              {(control) => (
+                <Textarea
+                  {...control}
+                  rows={2}
+                  placeholder="Gate code, where to park, which lot to enter from."
+                  {...register('accessNotes')}
+                />
+              )}
+            </Field>
+
+            <label className="flex items-start gap-2.5 text-sm">
+              <Checkbox className="mt-0.5" {...register('inductionRequired')} />
+              <span>
+                <span className="block font-medium">Induction required</span>
+                <span className="block text-xs text-muted-foreground">
+                  The driver cannot start without one.
+                </span>
+              </span>
+            </label>
+
+            <label className="flex items-start gap-2.5 text-sm">
+              <Checkbox className="mt-0.5" {...register('craneAvailable')} />
+              <span>
+                <span className="block font-medium">Crane on site</span>
+                <span className="block text-xs text-muted-foreground">
+                  Changes how the load comes out.
+                </span>
+              </span>
+            </label>
           </CardContent>
         </Card>
 

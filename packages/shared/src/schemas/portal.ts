@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { isAustralianMobile, looksLikeEmail } from './identity.js';
 import {
   AbnSchema,
   IsoDateSchema,
@@ -7,12 +8,7 @@ import {
   NonEmptyStringSchema,
   ObjectIdSchema,
 } from './primitives.js';
-import {
-  AccountTypeSchema,
-  OnboardingStateSchema,
-  TermsAcceptanceSchema,
-  ZoneSchema,
-} from './party.js';
+import { AccountTypeSchema, ZoneSchema } from './party.js';
 import { JobPhotoSchema, JobStatusSchema, ServiceLevelSchema, type JobStatus } from './jobs.js';
 
 /**
@@ -219,10 +215,7 @@ export const PortalJobSchema = PortalJobListItemSchema.extend({
  * confirmed" returned rows showing a dash and the count did not match the list
  * it linked to. One definition, one behaviour.
  */
-export const PENDING_READINESS_STATUSES: readonly JobStatus[] = [
-  'booked',
-  'assigned',
-];
+export const PENDING_READINESS_STATUSES: readonly JobStatus[] = ['booked', 'assigned'];
 
 /* ── Booking (M5.1 · F9, F21, W88 + M5.2 · W86) ───────────────────────────── */
 
@@ -429,6 +422,36 @@ export const PortalSupervisorInviteSchema = z
     error: 'Give a mobile or an email — a mobile is usually faster on site',
     path: ['mobile'],
   })
+  /*
+   * ⚠️ The SHAPE of each, enforced here and not only in the form.
+   *
+   * The invite dialog already checked both — an Australian mobile, and an `@`
+   * in the email — and the contract checked neither, so the guard was drawn
+   * rather than enforced. Posted directly, `mobile: "hello"` and a landline
+   * both returned 201 and created a real login.
+   *
+   * That login can never be used: Better Auth signs a supervisor in by their
+   * `phoneNumber`, so a landline or a typo means the one-time code goes
+   * nowhere — while the administrator is told "We have texted them a link".
+   * The person is then chased by a builder who believes they have access.
+   */
+  .superRefine((value, ctx) => {
+    if (value.mobile.length > 0 && !isAustralianMobile(value.mobile)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['mobile'],
+        message: 'Enter an Australian mobile, e.g. 0412 345 678 — that is how they sign in',
+      });
+    }
+
+    if (value.email.length > 0 && !looksLikeEmail(value.email)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['email'],
+        message: 'That does not look like an email address',
+      });
+    }
+  })
   .meta({ id: 'PortalSupervisorInvite' });
 
 /* ── Account preferences (M5.15 · F29, W71, W81) ──────────────────────────── */
@@ -475,30 +498,30 @@ export const PortalAccountUpdateSchema = z
   })
   .meta({ id: 'PortalAccountUpdate' });
 
-
 /* ── Account onboarding (Journey A.4 · Matt, 7:32–9:24) ──────────────────── */
 
 /**
- * What the customer fills in for themselves after being invited.
+ * What the customer fills in for themselves.
  *
  * ── Why the customer completes their own account ──────────────────────────
- * Matt has an account application form his customers fill in on paper today. It
- * exists for a legal reason, not an administrative one — 7:49: *"it's a
- * contractual thing where some customers require them to give a **director's
- * guarantee**… it's more of a legal precedent that they have to sign off on
- * those account terms and conditions."*
- *
- * Chirag proposed replacing it with an invite, and Matt agreed twice: *"send them
- * the invite for them to complete this part"* (9:07) and, on the terms checkbox,
- * *"yeah, beautiful"* (9:24).
+ * Because they are the authority on it and the office is not. A registered
+ * address, a trading name, the ABN that prints on every invoice and the mailbox
+ * their diversion certificates should go to are all things the office would
+ * otherwise get by ringing up and asking.
  *
  * ── What the office keeps ─────────────────────────────────────────────────
- * The office still sets the rate card, the PO policy and the payment terms at
+ * The office sets the rate card, the PO policy and the payment terms at
  * conversion — those are a negotiation, not something a customer picks. This
- * form is only the details the customer is the authority on, plus the tick.
+ * form is only the details the customer knows better than we do.
  *
  * ⚠️ Nothing here is a commercial term. If a field on this form could change
  * what a job costs, it is on the wrong form.
+ *
+ * ── The terms tick is GONE ────────────────────────────────────────────────
+ * This form used to end with a scrollable set of terms, the name and role of
+ * the person accepting, and a tick that gated the entire portal. Removed on the
+ * client's instruction — see the note in `party.ts`. Filling this in is now
+ * useful rather than compulsory, and nothing is blocked by leaving it.
  */
 export const AccountOnboardingSchema = z
   .object({
@@ -507,7 +530,10 @@ export const AccountOnboardingSchema = z
     abn: AbnSchema,
     addressLine: z.string().trim().min(1, 'Enter the registered business address').max(160),
     suburb: z.string().trim().min(1, 'Enter the suburb').max(80),
-    postcode: z.string().trim().regex(/^\d{4}$/, 'Four digits'),
+    postcode: z
+      .string()
+      .trim()
+      .regex(/^\d{4}$/, 'Four digits'),
 
     /* ── Who to contact, by department ───────────────────────────────── */
     accountsContactName: z.string().trim().min(2, 'Who handles your invoices?').max(80),
@@ -528,30 +554,19 @@ export const AccountOnboardingSchema = z
         (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
         'Enter a valid email address, or leave it blank',
       ),
-
-    /* ── The legal part ──────────────────────────────────────────────── */
-    /**
-     * The name of the person accepting, typed by them.
-     *
-     * Not taken from the session: a director's guarantee is given by a named
-     * individual, and the person logged in may be an accounts clerk acting on
-     * their behalf. Asking makes who signed an explicit answer rather than an
-     * inference from whose password was used.
-     */
-    acceptedByName: z.string().trim().min(2, 'Type the full name of the person accepting').max(80),
-    acceptedByRole: z.string().trim().min(2, 'Their position — Director, Owner, Accounts Manager').max(80),
-    /**
-     * The tick. Refuses anything but \`true\` — this is the record Matt currently
-     * chases as a signed PDF, and an account without it is not enforceable.
-     */
-    termsAccepted: z
-      .literal(true, { error: 'The terms and conditions must be accepted to activate the account' }),
   })
   .meta({ id: 'AccountOnboarding' });
 
 export type AccountOnboarding = z.infer<typeof AccountOnboardingSchema>;
 
-/** What the welcome screen needs to render before anything is filled in. */
+/**
+ * What the details screen needs to render.
+ *
+ * ⚠️ Carries what is already on file, not just a suggested name. The form is
+ * re-openable now that nothing gates it, so a customer correcting one line of
+ * their address must not be made to retype the other six — a form that arrives
+ * blank on the second visit is how the record ends up half-filled.
+ */
 export const OnboardingInviteSchema = z
   .object({
     accountId: ObjectIdSchema,
@@ -559,10 +574,21 @@ export const OnboardingInviteSchema = z
     /** The name the office typed at conversion — the customer may correct it. */
     suggestedLegalName: NonEmptyStringSchema,
     accountType: AccountTypeSchema,
-    state: OnboardingStateSchema,
-    /** Set once accepted; null while outstanding. */
-    acceptance: TermsAcceptanceSchema.nullable(),
-    termsVersion: NonEmptyStringSchema,
+    /** When they last completed it. Null means they never have. */
+    completedAt: IsoDateTimeSchema.nullable(),
+    /** What is on file now, for the form to open on. Null before it is set. */
+    details: z
+      .object({
+        tradingName: z.string().nullable(),
+        abn: z.string().nullable(),
+        addressLine: z.string().nullable(),
+        suburb: z.string().nullable(),
+        postcode: z.string().nullable(),
+        accountsContactName: z.string().nullable(),
+        accountsContactEmail: z.string().nullable(),
+        certificateEmail: z.string().nullable(),
+      })
+      .nullable(),
   })
   .meta({ id: 'OnboardingInvite' });
 

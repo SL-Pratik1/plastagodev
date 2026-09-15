@@ -8,6 +8,7 @@ import type {
   RunSheet,
   UnallocatedJob,
 } from '@plastago/shared';
+import { getMapsProvider } from '../../integrations/maps.js';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { jobRepository } from '../jobs/job.repository.js';
@@ -196,25 +197,38 @@ export const dispatchService = {
   },
 
   /**
-   * I11 — Google Route Optimization orders the stops (Matt, 42:06).
+   * I11 — Google orders the stops by driving time (Matt, 42:06).
    *
-   * ⚠️ Not wired to Google yet, and it does NOT pretend to be. Until the
-   * integration lands this orders by suburb so stops in the same street are
-   * together, stamps `optimisedAt`, and says as much — a plausible-looking
-   * route that was never computed is worse than an honest grouping, because a
-   * driver would follow it.
+   * ── The two outcomes, and why they are told apart ─────────────────────────
+   * A real route sets `optimisedAt`. Anything else — the integration switched
+   * off, too few stops, Google unreachable, or stops that are only pinned to
+   * their suburb — falls back to grouping by suburb and leaves `optimisedAt`
+   * NULL, because the board renders that field as a "Route optimised" badge and
+   * a grouping is not a route. A plausible-looking route that was never
+   * computed is worse than an honest grouping: a driver follows it.
+   *
+   * ⚠️ The suburb grouping is still applied on the fallback path. It is a real
+   * improvement on an arbitrary order and it is what this method has always
+   * done; the only thing that changes is that it no longer claims to be a route.
    */
   async optimiseRun(runId: string): Promise<Run> {
     await assertPlanning(runId);
 
     const run = await requireRun(runId);
 
-    const ordered = [...run.stops]
+    const routed = await routeStops(runId);
+    if (routed) {
+      await runRepository.resequence(runId, routed, true);
+      log.info({ runId, stops: routed.length }, 'run ordered by Google');
+      return requireRun(runId);
+    }
+
+    const grouped = [...run.stops]
       .sort((a, b) => a.suburb.localeCompare(b.suburb) || a.jobNumber - b.jobNumber)
       .map((stop) => stop.id);
 
-    await runRepository.resequence(runId, ordered, true);
-    log.info({ runId, stops: ordered.length }, 'run ordered by suburb (route optimisation pending)');
+    await runRepository.resequence(runId, grouped, false);
+    log.info({ runId, stops: grouped.length }, 'run grouped by suburb (no route computed)');
 
     return requireRun(runId);
   },
@@ -353,6 +367,59 @@ export const dispatchService = {
     return driverRepository.list();
   },
 };
+
+/* ── Routing ─────────────────────────────────────────────────────────────── */
+
+/**
+ * The run's stops in driving order, or null if no route could be computed (I3).
+ *
+ * ── Why suburb-pinned stops are refused outright ──────────────────────────
+ * A job that was never geocoded sits at the CENTRE of its suburb, which can be
+ * kilometres from the site. Google will happily order those centres and return
+ * a confident, optimal-looking route between points no truck is driving to —
+ * and because it is optimal *for the points it was given*, nothing downstream
+ * could tell it was wrong. That is the one failure worth spending a check on,
+ * so a run is only routed when EVERY stop carries a real address.
+ *
+ * All-or-nothing rather than a majority: a single suburb-pinned stop in the
+ * middle of a route drags the whole sequence around itself, so a part-geocoded
+ * run is not a part-good route.
+ */
+async function routeStops(runId: string): Promise<string[] | null> {
+  const stops = await runRepository.stopPoints(runId);
+  if (stops.length === 0) return null;
+
+  const pinnedToSuburb = stops.filter((stop) => stop.locationSource !== 'geocoded').length;
+  if (pinnedToSuburb > 0) {
+    log.info(
+      { runId, stops: stops.length, pinnedToSuburb },
+      'run has stops pinned to a suburb centre — not routing',
+    );
+    return null;
+  }
+
+  const ordered = await getMapsProvider().optimiseStopOrder(stops);
+  if (!ordered) return null;
+
+  /*
+   * ⚠️ Verified as a PERMUTATION before it is written.
+   *
+   * `resequence` numbers whatever it is handed, so an order that dropped a stop
+   * would leave that job on the run with a stale sequence — most likely a
+   * duplicate of another stop's — and the driver's sheet would then be in an
+   * order nobody chose, missing work nobody noticed. The provider is careful,
+   * but "the sequence of a run is correct" is not a property to delegate to a
+   * third party's response body.
+   */
+  const before = [...stops.map((stop) => stop.id)].sort();
+  const after = [...ordered].sort();
+  if (before.length !== after.length || before.some((id, index) => id !== after[index])) {
+    log.error({ runId }, 'route optimisation did not return the same stops — discarding');
+    return null;
+  }
+
+  return ordered;
+}
 
 /* ── Guards ──────────────────────────────────────────────────────────────── */
 

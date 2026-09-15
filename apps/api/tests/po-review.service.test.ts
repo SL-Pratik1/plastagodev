@@ -242,10 +242,9 @@ function ingestInput(overrides: Record<string, unknown> = {}) {
     suggestedAccountName: 'Domain Homes',
     suggestedJobId: null,
     suggestedJobNumber: null,
-    accountCandidates: [{ id: 'acc1', label: 'Domain Homes', detail: '', confidence: 0.98 }],
+    accountCandidates: [{ id: 'acc1', label: 'Domain Homes', detail: '' }],
     jobCandidates: [],
-    overallConfidence: 0.97,
-    reason: 'below-threshold' as const,
+    reason: 'awaiting-check' as const,
     ...overrides,
   };
 }
@@ -270,11 +269,16 @@ beforeEach(() => {
 
 describe('an extraction is never trusted', () => {
   /*
-   * ⚠️ The central rule. Even a 0.99-confidence extraction with a matched
-   * account goes to a human, because the document authorises invoicing.
+   * ⚠️ The central rule. A cleanly-read extraction with a matched account still
+   * goes to a human, because the document authorises invoicing.
+   *
+   * This used to be phrased around a 0.99 confidence score. The scores are
+   * gone — they described the model rather than the document, and a high one
+   * invited confirming an order without opening the PDF it came from — but the
+   * rule they were testing is unchanged and is now the only behaviour there is.
    */
-  it('sends a high-confidence extraction to review anyway', async () => {
-    await poReviewService.ingest(ingestInput({ overallConfidence: 0.99 }), OFFICE);
+  it('sends a cleanly-read extraction to review anyway', async () => {
+    await poReviewService.ingest(ingestInput({ suggestedJobId: 'job1' }), OFFICE);
 
     expect(ingested).toHaveLength(1);
     // Nothing was written as a purchase order.
@@ -298,34 +302,36 @@ describe('an extraction is never trusted', () => {
   });
 
   /*
-   * The extractor reports its own confidence. Letting it also declare the
-   * review reason would put a vendor in charge of whether a human ever looks.
+   * The reason says what a reviewer should look at first. Letting the vendor
+   * declare it would put them in charge of the triage on their own output.
    */
   it('decides the review reason itself, ignoring what the caller sent', async () => {
     await poReviewService.ingest(
-      ingestInput({ suggestedAccountId: null, reason: 'below-threshold' }),
+      ingestInput({ suggestedAccountId: null, reason: 'awaiting-check' }),
       OFFICE,
     );
 
     expect(ingested[0]?.reason).toBe('no-account-match');
   });
 
-  it('flags a low-confidence read as below threshold', async () => {
-    await poReviewService.ingest(
-      ingestInput({ overallConfidence: 0.6, suggestedJobId: 'job1' }),
-      OFFICE,
-    );
+  /*
+   * Nothing wrong with it, and it still waits for a person. `awaiting-check`
+   * replaced `below-threshold`, which rendered as "Low OCR confidence" — the
+   * one reason on the screen a reviewer could do nothing with.
+   */
+  it('marks an order with nothing wrong with it as simply not checked yet', async () => {
+    await poReviewService.ingest(ingestInput({ suggestedJobId: 'job1' }), OFFICE);
 
-    expect(ingested[0]?.reason).toBe('below-threshold');
+    expect(ingested[0]?.reason).toBe('awaiting-check');
   });
 
-  /* Two candidates within a whisker of each other is ambiguity, not a match. */
+  /* More than one plausible account is ambiguity, not a match. */
   it('flags two near-equal account matches as ambiguous', async () => {
     await poReviewService.ingest(
       ingestInput({
         accountCandidates: [
-          { id: 'acc1', label: 'Domain Homes', detail: '', confidence: 0.9 },
-          { id: 'acc2', label: 'Domaine Homes', detail: '', confidence: 0.87 },
+          { id: 'acc1', label: 'Domain Homes', detail: '' },
+          { id: 'acc2', label: 'Domaine Homes', detail: '' },
         ],
       }),
       OFFICE,

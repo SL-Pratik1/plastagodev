@@ -207,6 +207,38 @@ function createHttpDriverRunService(api: ApiClient): DriverRunService {
 
     /* ── M4.4 · tip-off ───────────────────────────────────────────────────── */
 
+    /*
+     * Direct, not queued — and deliberately so.
+     *
+     * The tip-off itself queues, but its docket photo cannot: the server hands
+     * back the storage key the tip-off has to carry, and a queued write has no
+     * reply to read. A weighbridge has signal in a way a building site does not,
+     * so requiring it here costs the driver nothing and keeps the key honest.
+     *
+     * `photoId` IS the storage key for a docket (there is no photo record to
+     * point at), which is why the ticket shape matches the job one exactly.
+     */
+    uploadDocketPhoto: async (runId: string, blob: Blob): Promise<string> => {
+      const result = await api.request(`${base}/runs/${runId}/docket-photo`, {
+        method: 'POST',
+        body: {
+          contentType: blob.type || 'image/jpeg',
+          contentLength: blob.size,
+        },
+        schema: PresignPhotoResponseSchema,
+      });
+
+      const stored = await fetch(result.upload.uploadUrl, {
+        method: 'PUT',
+        headers: result.upload.headers,
+        body: blob,
+      }).catch(() => null);
+
+      if (!stored?.ok) throw new Error('The docket photo could not be uploaded — try again');
+
+      return result.photoId;
+    },
+
     recordTipOff: (input: TipOffEntry) => queue('/tip-off', input),
 
     /* ── M4.9 · vehicle defects ───────────────────────────────────────────── */
