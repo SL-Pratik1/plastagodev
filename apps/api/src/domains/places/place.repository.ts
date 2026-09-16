@@ -61,6 +61,7 @@ function toPlace(raw: RawPlace): Place {
     latitude: raw.latitude,
     longitude: raw.longitude,
     label: raw.label,
+    archived: raw.archived,
   };
 }
 

@@ -2,6 +2,7 @@ import type { Place, PlaceWrite } from '@plastago/shared';
 import {
   Alert,
   Badge,
+  cn,
   Button,
   Card,
   ConfirmDialog,
@@ -247,11 +248,18 @@ function SuburbRow({ place, onEdit }: { place: Place; onEdit: () => void }) {
   };
 
   return (
-    <tr className="border-b border-border/60 last:border-b-0">
+    <tr className={cn('border-b border-border/60 last:border-b-0', place.archived && 'opacity-60')}>
       <td className="px-4 py-2">
         <span className="font-medium">{place.suburb}</span>
         <span className="block text-xs text-muted-foreground">
           {place.state} {place.postcode}
+          {/*
+            ⚠️ Retired rows are SHOWN, not hidden. A retired suburb is not a
+            different kind of thing — it is the same row with one flag — and
+            hiding it is how somebody ends up re-adding a suburb that already
+            exists and getting a duplicate refusal they cannot explain.
+          */}
+          {place.archived && <span className="ml-1 text-warning">· retired</span>}
         </span>
       </td>
 
@@ -269,36 +277,40 @@ function SuburbRow({ place, onEdit }: { place: Place; onEdit: () => void }) {
 
       <td className="px-4 py-2 text-right">
         <span className="inline-flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={onEdit}>
+          <Button variant="ghost" size="sm" disabled={place.archived} onClick={onEdit}>
             <PencilIcon aria-hidden />
             <span className="sr-only">Edit {place.suburb}</span>
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={remove.isPending || restore.isPending}
-            onClick={() => {
-              setConfirming(true);
-            }}
-          >
-            <Trash2Icon aria-hidden />
-            <span className="sr-only">Remove {place.suburb}</span>
-          </Button>
+
           {/*
-            Restoring is offered from the row itself rather than a separate
-            "retired" view, because a retired suburb is not a different kind of
-            thing — it is the same row with one flag, and hiding it is how
-            somebody ends up re-adding a suburb that already exists.
+            One action or the other, never both. Offering "restore" on a suburb
+            that was never retired is a button that cannot do anything, and the
+            person clicking it has no way to know that in advance.
           */}
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={restore.isPending}
-            onClick={() => void submitRestore()}
-          >
-            <RotateCcwIcon aria-hidden />
-            <span className="sr-only">Restore {place.suburb}</span>
-          </Button>
+          {place.archived ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={restore.isPending}
+              onClick={() => void submitRestore()}
+            >
+              {restore.isPending && <Spinner className="text-current" />}
+              <RotateCcwIcon aria-hidden />
+              Restore
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={remove.isPending}
+              onClick={() => {
+                setConfirming(true);
+              }}
+            >
+              <Trash2Icon aria-hidden />
+              <span className="sr-only">Remove {place.suburb}</span>
+            </Button>
+          )}
         </span>
 
         <ConfirmDialog

@@ -141,6 +141,16 @@ export const PlaceSchema = z
     longitude: z.number(),
     /** What the picker shows — "Kellyville NSW 2155". */
     label: NonEmptyStringSchema,
+    /**
+     * Taken off the picker, but not deleted.
+     *
+     * ⚠️ Always `false` on anything the type-ahead returns — that read excludes
+     * archived rows by design. It is here for the SUBURBS ADMIN screen, which
+     * lists both and has to tell them apart: without it the screen would offer
+     * "restore" on a row that was never retired, and show a retired row exactly
+     * like a live one.
+     */
+    archived: z.boolean(),
   })
   .meta({ id: 'Place' });
 
