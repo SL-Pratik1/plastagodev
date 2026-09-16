@@ -11,12 +11,14 @@ import {
   useToast,
 } from '@plastago/ui';
 import { ArrowLeftIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router';
 import { formatCountdown, useCountdown } from '@/lib/use-countdown';
+import { FullPageLoader } from '@/components/full-page-loader';
+import { leaveForSurface } from '@/config/surfaces';
 import { useAuth } from '@/features/auth/auth-context';
 import { codeSentHint, codeSentMessage, describeAuthError } from '@/features/auth/auth-messages';
-import { signInDestination } from '@/features/auth/route-access';
+import { signInTarget } from '@/features/auth/route-access';
 
 /**
  * Step 2 of 2 — enter the code.
@@ -56,6 +58,18 @@ export function VerifyOtpPage() {
   const from = (location.state as { from?: string } | null)?.from;
 
   /*
+   * Where this session belongs, once there is one — path and, when that is on
+   * another origin, the URL to leave for. Computed unconditionally because it
+   * feeds the effect below, and a hook cannot sit behind the early returns.
+   */
+  const settled = status === 'authenticated' && user ? signInTarget(user.role, from) : null;
+  const leaveFor = settled?.href ?? null;
+
+  useEffect(() => {
+    if (leaveFor !== null) leaveForSurface(leaveFor);
+  }, [leaveFor]);
+
+  /*
    * ── Why this guard checks the SESSION before the challenge ───────────────
    * A successful verification clears the in-flight challenge — it has been
    * spent. So "no challenge" is true in two completely different situations,
@@ -69,8 +83,12 @@ export function VerifyOtpPage() {
    * — they were just looking at the login form, which reads as "the OTP did
    * nothing". Checking `status` first is what separates the two cases.
    */
-  if (status === 'authenticated' && user) {
-    return <Navigate to={signInDestination(user.role, from)} replace />;
+  if (settled) {
+    // A different origin owns this session's landing page — the effect above is
+    // already taking the browser there, so hold the loader rather than flashing
+    // a route this surface should not render.
+    if (settled.href !== null) return <FullPageLoader />;
+    return <Navigate to={settled.path} replace />;
   }
 
   if (!challenge) return <Navigate to="/auth/sign-in" replace />;
@@ -85,14 +103,25 @@ export function VerifyOtpPage() {
 
     try {
       const session = await verifyCode(value);
-      const destination = signInDestination(session.user.role, from);
+      const destination = signInTarget(session.user.role, from);
 
       toast.success(
         `Signed in as ${session.user.name}`,
         `${ROLE_LABELS[session.user.role]} · all times Australia/Sydney`,
       );
 
-      await navigate(destination, { replace: true });
+      /*
+       * The role signed in with belongs on another surface — a driver who used
+       * the console's address. A page load, so the toast above will not survive
+       * it; that is the right trade. Being on the correct origin matters more
+       * than a confirmation they are about to see the run sheet for anyway.
+       */
+      if (destination.href !== null) {
+        leaveForSurface(destination.href);
+        return;
+      }
+
+      await navigate(destination.path, { replace: true });
     } catch (caught) {
       const described = describeAuthError(caught);
       setError(described.message);
@@ -232,7 +261,6 @@ export function VerifyOtpPage() {
           )}
         </CardContent>
       </Card>
-
     </div>
   );
 }

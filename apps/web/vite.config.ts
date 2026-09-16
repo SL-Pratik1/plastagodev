@@ -3,8 +3,104 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+// eslint-disable-next-line import/extensions -- plain .mjs, shared with scripts/
+import { devPorts, surfaceOrigins } from '../../scripts/dev-ports.mjs';
 
-const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:4000';
+/**
+ * WHICH SURFACE THIS SERVER IS.
+ *
+ * One codebase, started up to three times — the office console, the customer
+ * portal and the driver app each get their own port here and their own hostname
+ * in production. `PLASTAGO_SURFACE` is what tells a given process which one it
+ * is; `npm run dev` sets it three times over.
+ *
+ * `all` is the fourth, legacy value: every surface on one port, which is how
+ * this app worked before the split and what `PLASTAGO_SURFACES=all` still does. It
+ * stays supported because three Vite dev servers cost three times the memory
+ * and three dependency pre-bundles, and on a laptop that is sometimes the wrong
+ * trade for a change that touches one screen.
+ */
+const SURFACE = (process.env.PLASTAGO_SURFACE ?? 'all') as 'admin' | 'portal' | 'driver' | 'all';
+
+const VALID_SURFACES = ['admin', 'portal', 'driver', 'all'] as const;
+if (!VALID_SURFACES.includes(SURFACE)) {
+  throw new Error(
+    `PLASTAGO_SURFACE must be one of ${VALID_SURFACES.join(', ')} — got "${SURFACE}".`,
+  );
+}
+
+const PORTS = devPorts();
+const ORIGINS = surfaceOrigins(PORTS);
+
+/** `all` shares the console's port, which is the address everyone already knows. */
+const PORT = SURFACE === 'all' ? PORTS.admin : PORTS[SURFACE];
+
+const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? `http://localhost:${PORTS.api}`;
+
+/**
+ * Hand the split to the browser, through the ordinary `VITE_*` channel.
+ *
+ * Vite folds prefixed variables from `process.env` into `import.meta.env`
+ * alongside the ones it reads from `.env`, so writing them here — before the
+ * config is resolved — is enough for both the dev server and a build.
+ *
+ * ⚠️ NOT `define`. The obvious spelling, `define: { 'import.meta.env.VITE_SURFACE': … }`,
+ * silently does nothing in the dev server: `import.meta.env` is a real object
+ * there, not text to rewrite, and a bare `__SURFACE__` global is left
+ * untouched by this Vite's dev transform as well. Either way the value read
+ * back as undefined, every surface fell through to `all`, and all three ports
+ * served all three surfaces — while `npm run build` was correct. That is the
+ * worst shape a bug can have, so it is written down rather than rediscovered.
+ *
+ * These are derived values, which is why they are not variables in `.env`: the
+ * port map has already resolved any override, and a second copy of the same
+ * numbers is exactly the drift `check:ports` exists to catch.
+ */
+process.env.VITE_SURFACE = SURFACE;
+process.env.VITE_SURFACE_ORIGINS = JSON.stringify(ORIGINS);
+
+/**
+ * The installable app each surface offers.
+ *
+ * ── Why this is per-surface and not one manifest ──────────────────────────
+ * A browser will only ever install the page it is already on, and it installs
+ * it under the name and icon in THAT page's manifest. While all three surfaces
+ * shared one manifest they also shared one name, so a driver installing from
+ * their run sheet got an icon labelled "PlastaGo" that opened the office
+ * console's landing route. Splitting the surfaces by origin is what makes a
+ * per-surface manifest possible, and the manifest is most of the reason the
+ * split is worth having.
+ *
+ * `scope: '/'` still, on each origin — each surface IS the whole of its own
+ * origin now, so the scope that once had to cover three prefixes covers one.
+ */
+const MANIFESTS = {
+  admin: {
+    name: 'PlastaGo Console',
+    short_name: 'PlastaGo',
+    description: 'Jobs, dispatch, invoicing and reporting for the PlastaGo office.',
+    theme_color: '#1b3820',
+  },
+  portal: {
+    name: 'PlastaGo Portal',
+    short_name: 'PlastaGo',
+    description: 'Book pickups, track jobs and manage your sites and invoices.',
+    theme_color: '#1b3820',
+  },
+  driver: {
+    name: 'PlastaGo Driver',
+    short_name: 'PG Driver',
+    description: 'Run sheets, job status, photos and weights — works offline.',
+    theme_color: '#1f7a4d',
+  },
+  all: {
+    name: 'PlastaGo',
+    short_name: 'PlastaGo',
+    description:
+      'Run sheets, job status, photos and weights for drivers — and the office console. Works offline.',
+    theme_color: '#1b3820',
+  },
+}[SURFACE];
 
 /**
  * Chunks the DRIVER never loads.
@@ -13,12 +109,19 @@ const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:4000';
  * below, which puts these libraries in predictably-named files, and the workbox
  * `globIgnores`, which then keeps those files out of the offline precache.
  *
- * That pairing is the whole answer to the standing objection against folding the
- * driver app back into this one — that a driver's phone would end up caching the
- * console. Recharts and React Hook Form are the heavy office-only dependencies
- * in this build; not one of the eleven driver screens imports either, and so
- * neither reaches a phone. Recharts alone is ~384 kB raw, which is the entire
- * argument in one number.
+ * ⚠️ STILL LOAD-BEARING AFTER THE SURFACE SPLIT, which is easy to assume it is
+ * not. Each surface is built separately, but from the same route table — and
+ * `app/lazy-pages.tsx` names every page in one module, so Rollup emits every
+ * lazy chunk into every build whether that surface routes to it or not. The
+ * driver's build therefore still CONTAINS the console's chunks; this list is
+ * what keeps the service worker from precaching them onto a phone.
+ *
+ * Recharts and React Hook Form are the heavy office-only dependencies; not one
+ * of the eleven driver screens imports either. Recharts alone is ~384 kB raw,
+ * which is the entire argument in one number.
+ *
+ * Splitting `lazy-pages.tsx` per surface would let tree-shaking drop them from
+ * the build outright and make this list redundant. Worth doing; not done.
  *
  * ⚠️ `tables` is PREVENTIVE and currently emits no chunk: `@tanstack/react-table`
  * is a declared dependency but nothing imports it yet — `components/data-table`
@@ -35,17 +138,22 @@ export default defineConfig({
     tailwindcss(),
 
     /**
-     * One service worker, one manifest, one installable app (§6A.5).
+     * One service worker and one manifest PER SURFACE (§6A.5).
      *
-     * ── Why the driver PWA is no longer a separate build ──────────────────
-     * It was separate precisely so it could own this plugin. What overturned
-     * that is a browser rule rather than a preference: `beforeinstallprompt` is
-     * only ever delivered to a document whose OWN manifest scope contains it, so
-     * while the driver screens lived on another origin there was no way to put a
-     * working Install button in front of a driver who had signed in here.
-     * Nothing in the platform installs somebody else's app.
+     * ── Why this is per-surface and not per-app ───────────────────────────
+     * `beforeinstallprompt` is only ever delivered to a document whose OWN
+     * manifest scope contains it: nothing in the platform installs somebody
+     * else's app. That rule is why the driver screens were folded into this
+     * codebase, and it is satisfied just as well by the surface split — the
+     * driver's origin serves the driver surface and nothing else, so the page
+     * offering the install and the app being installed are the same thing.
      *
-     * `scope: '/'` is what makes that button work from anywhere in the product.
+     * What the split adds is a manifest that tells the truth. One shared
+     * manifest meant one shared name: a driver installing from their run sheet
+     * got an icon reading "PlastaGo" that opened the console's landing route.
+     * `MANIFESTS` above gives each origin its own name, icon and theme.
+     *
+     * `scope: '/'` still — each surface is now the whole of its own origin.
      *
      * `registerType: 'autoUpdate'` matters operationally — drivers will never be
      * asked to update an app, and a driver stuck on a stale build is a support
@@ -62,15 +170,15 @@ export default defineConfig({
       },
       includeAssets: ['favicon.svg', 'app-icon.svg', 'brand/plastago-mark.png'],
       manifest: {
-        name: 'PlastaGo',
-        short_name: 'PlastaGo',
-        description:
-          'Run sheets, job status, photos and weights for drivers — and the office console. Works offline.',
-        // The console's own deep forest green, so an installed window is framed
-        // in the brand rather than in the browser's default grey.
-        theme_color: '#1b3820',
+        // Name, description and colour come from MANIFESTS above — one per
+        // surface, because each origin installs as its own app.
+        ...MANIFESTS,
         background_color: '#ffffff',
         display: 'standalone',
+        // Portrait only on the driver surface: it is a phone app held one-handed
+        // on a site, and a run sheet that rotates while someone is climbing out
+        // of a truck is a nuisance. The office surfaces are used on a desktop.
+        ...(SURFACE === 'driver' ? ({ orientation: 'portrait' } as const) : {}),
         start_url: '/',
         scope: '/',
         icons: [
@@ -194,12 +302,12 @@ export default defineConfig({
   },
 
   server: {
-    port: 5173,
+    port: PORT,
     strictPort: true,
     /**
-     * Proxying in dev keeps the browser on one origin, so cookie-based auth
-     * behaves exactly as it will in production (§Scope Call 2: one app at
-     * app.plastago.com.au). It also means no CORS preflight in the hot path.
+     * Proxying in dev keeps the browser on one origin PER SURFACE, so
+     * cookie-based auth behaves as it will in production and there is no CORS
+     * preflight in the hot path. Each surface proxies to the same API.
      */
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: true },
@@ -209,7 +317,7 @@ export default defineConfig({
     },
   },
 
-  preview: { port: 5173, strictPort: true },
+  preview: { port: PORT, strictPort: true },
 
   build: {
     outDir: 'dist',

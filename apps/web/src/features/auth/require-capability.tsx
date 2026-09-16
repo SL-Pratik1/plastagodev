@@ -1,4 +1,7 @@
+import { useEffect } from 'react';
 import { Navigate, Outlet } from 'react-router';
+import { FullPageLoader } from '@/components/full-page-loader';
+import { leaveForSurface, roleSurfaceHref } from '@/config/surfaces';
 import { useAuth } from './auth-context';
 import { landingPathFor, type Capability } from './permissions';
 
@@ -22,13 +25,35 @@ export interface RequireCapabilityProps {
 export function RequireCapability({ capability, onDenied = 'deny' }: RequireCapabilityProps) {
   const { user, can } = useAuth();
 
+  /*
+   * "Their own landing page" can now be on another origin, and a router
+   * redirect cannot cross one. Resolved up here rather than at the point of
+   * use because the effect that performs the crossing is a hook, and hooks
+   * cannot sit behind the early returns below.
+   *
+   * `leaveFor` is null in every case that is not a cross-origin bounce —
+   * denied-with-a-403, a surface this build already serves, and single-server
+   * mode — so the paths below are the ones this component always had.
+   */
+  const denied = user !== null && !can(capability);
+  const leaveFor =
+    user !== null && denied && onDenied === 'redirect'
+      ? roleSurfaceHref(user.role, landingPathFor(user.role))
+      : null;
+
+  useEffect(() => {
+    if (leaveFor !== null) leaveForSurface(leaveFor);
+  }, [leaveFor]);
+
   if (!user) return <Navigate to="/auth/sign-in" replace />;
 
-  if (!can(capability)) {
-    return onDenied === 'redirect' ? (
-      <Navigate to={landingPathFor(user.role)} replace />
+  if (denied) {
+    if (onDenied !== 'redirect') return <Navigate to="/forbidden" replace state={{ capability }} />;
+    // Held on the loader while the browser leaves for their own surface.
+    return leaveFor !== null ? (
+      <FullPageLoader />
     ) : (
-      <Navigate to="/forbidden" replace state={{ capability }} />
+      <Navigate to={landingPathFor(user.role)} replace />
     );
   }
 

@@ -4,7 +4,23 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:4000';
+// eslint-disable-next-line import/extensions -- plain .mjs, shared with scripts/
+import { devPorts, legacyDriverAppPort } from '../../scripts/dev-ports.mjs';
+
+/**
+ * ⚠️ SUPERSEDED — see the README. The driver screens live in `apps/web` and are
+ * served on their own origin; this build is kept only until the move has been
+ * reviewed. Nothing imports it and nothing links to it.
+ *
+ * It is excluded from `npm run dev` for a concrete reason rather than tidiness:
+ * `strictPort` plus Turbo means a clash here aborted the ENTIRE dev run, so a
+ * second checkout holding 5174 stopped the whole product from starting over an
+ * app nobody uses. `npm run dev:driver` still starts it, and the port moves
+ * with `PLASTAGO_PORT_LEGACY_DRIVER` in `apps/driver/.env`.
+ */
+const PORT = legacyDriverAppPort();
+
+const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? `http://localhost:${devPorts().api}`;
 
 export default defineConfig({
   plugins: [
@@ -96,7 +112,7 @@ export default defineConfig({
   },
 
   server: {
-    port: 5174,
+    port: PORT,
     strictPort: true,
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: true },
@@ -105,7 +121,7 @@ export default defineConfig({
     },
   },
 
-  preview: { port: 5174, strictPort: true },
+  preview: { port: PORT, strictPort: true },
 
   build: {
     outDir: 'dist',

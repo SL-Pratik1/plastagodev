@@ -1,6 +1,7 @@
-import { ROLE_SURFACE, type Role, type Surface } from '@plastago/shared';
+import { ROLE_SURFACE, type Role } from '@plastago/shared';
 import { ADMIN_NAV } from '@/config/navigation';
 import { PORTAL_NAV } from '@/config/portal-navigation';
+import { SURFACE_PREFIX, roleSurfaceHref } from '@/config/surfaces';
 import { can, landingPathFor, type Capability } from './permissions';
 
 /**
@@ -51,13 +52,6 @@ const PATH_CAPABILITIES: readonly (readonly [string, Capability])[] = [
   ['/driver', 'driver:access'] as const,
 ].sort(([a], [b]) => b.length - a.length);
 
-/** The path prefix that owns each surface. */
-const SURFACE_PREFIX: Record<Surface, string> = {
-  admin: '/admin',
-  portal: '/portal',
-  driver: '/driver',
-};
-
 /** `/portal/sites/abc?x=1` → the `/portal/sites` entry, not the `/portal` one. */
 function capabilityForPath(path: string): Capability | null {
   const pathname = path.split(/[?#]/)[0] ?? path;
@@ -89,4 +83,28 @@ export function signInDestination(role: Role, from?: string | null): string {
 
   const capability = capabilityForPath(from);
   return capability !== null && can(role, capability) ? from : landing;
+}
+
+/**
+ * The same answer, resolved against the surface split.
+ *
+ * ── Why sign-in is the one place that needs this ──────────────────────────
+ * Everywhere else in the app the person is already on their own origin; the
+ * surface was settled before the page rendered. Sign-in is where it is not:
+ * they have just been identified, and the role that came back is what decides
+ * which of the three addresses they belong at. A driver signing in on the
+ * console's origin — a stale bookmark, a shared laptop in the yard — is put
+ * right here or not at all.
+ *
+ * `href` is non-null ONLY when the destination is a different origin, so the
+ * caller's shape never changes: leave if there is somewhere to leave for,
+ * navigate otherwise. In single-server mode it is always null and this behaves
+ * exactly as `signInDestination` alone always did.
+ */
+export function signInTarget(
+  role: Role,
+  from?: string | null,
+): { path: string; href: string | null } {
+  const path = signInDestination(role, from);
+  return { path, href: roleSurfaceHref(role, path) };
 }

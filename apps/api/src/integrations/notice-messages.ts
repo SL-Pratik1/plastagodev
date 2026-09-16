@@ -1,5 +1,5 @@
-import { ROLE_LABELS, type Role } from '@plastago/shared';
-import { env } from '../config/env.js';
+import { ROLE_LABELS, ROLE_SURFACE, type Role, type Surface } from '@plastago/shared';
+import { env, publicUrlFor } from '../config/env.js';
 import { emailButton, emailShell, escapeHtml } from './message-html.js';
 import type { OutboundEmail, OutboundSms } from './messaging.js';
 
@@ -22,9 +22,25 @@ import type { OutboundEmail, OutboundSms } from './messaging.js';
  *     message and is billed once.
  */
 
-/** The sign-in screen — where every invitation points. */
-export function signInUrl(): string {
-  return `${env.PUBLIC_APP_URL}/auth/sign-in`;
+/**
+ * The sign-in screen — where every invitation points.
+ *
+ * ⚠️ Takes the recipient's SURFACE, because the surfaces are separate origins
+ * (§6A.5) and each has its own sign-in screen. A driver sent to the console's
+ * address would be bounced to theirs on arrival, which works but puts an extra
+ * redirect and the wrong brand in front of somebody standing on a building
+ * site; a supervisor sent there sees an office sign-in, which is the exact
+ * thing Matt asked for the split to prevent (29:04).
+ *
+ * `ROLE_SURFACE` is the mapping when what you hold is a role.
+ */
+export function signInUrl(surface: Surface): string {
+  return `${publicUrlFor(surface)}/auth/sign-in`;
+}
+
+/** The customer portal's origin — every `/portal/*` link below is built on it. */
+function portal(): string {
+  return publicUrlFor('portal');
 }
 
 export interface InviteContext {
@@ -49,7 +65,7 @@ export interface InviteContext {
  */
 export function buildInviteEmail(to: string, context: InviteContext): OutboundEmail {
   const brand = env.OTP_SENDER_NAME;
-  const url = signInUrl();
+  const url = signInUrl(ROLE_SURFACE[context.role]);
   const role = ROLE_LABELS[context.role];
 
   const text = [
@@ -103,7 +119,7 @@ export function buildInviteSms(to: string, context: InviteContext): OutboundSms 
     to,
     body:
       `${brand}: ${context.invitedBy} has set up your access. ` +
-      `Sign in at ${signInUrl()} with this mobile — we text you a code. No password.`,
+      `Sign in at ${signInUrl(ROLE_SURFACE[context.role])} with this mobile — we text you a code. No password.`,
   };
 }
 
@@ -170,7 +186,7 @@ export interface WelcomeContext {
  */
 export function buildWelcomeEmail(to: string, context: WelcomeContext): OutboundEmail {
   const brand = env.OTP_SENDER_NAME;
-  const url = signInUrl();
+  const url = signInUrl('portal');
 
   const text = [
     `Hello ${context.contactName},`,
@@ -233,7 +249,7 @@ export interface InvoiceNoticeContext {
  */
 export function buildInvoiceEmail(to: string, context: InvoiceNoticeContext): OutboundEmail {
   const brand = env.OTP_SENDER_NAME;
-  const url = `${env.PUBLIC_APP_URL}/portal/invoices`;
+  const url = `${portal()}/portal/invoices`;
   const number = `INV-${String(context.invoiceNumber)}`;
 
   const terms = context.dueOn
@@ -259,13 +275,20 @@ export function buildInvoiceEmail(to: string, context: InvoiceNoticeContext): Ou
     `<strong>${escapeHtml(number)}</strong> for ${escapeHtml(context.accountName)} is ready — ` +
       `<strong>$${escapeHtml(context.totalIncGst)}</strong> including GST.`,
     escapeHtml(terms) +
-      (context.poNumber ? `. Your purchase order: <strong>${escapeHtml(context.poNumber)}</strong>` : '') +
+      (context.poNumber
+        ? `. Your purchase order: <strong>${escapeHtml(context.poNumber)}</strong>`
+        : '') +
       (context.jobNumber ? `. Pickup: job #${escapeHtml(String(context.jobNumber))}` : ''),
     emailButton(url, 'View the invoice'),
     'Questions about this invoice? Reply to this email or call <strong>1300 395 438</strong>.',
   ]);
 
-  return { to, subject: `${number} — ${context.accountName} — $${context.totalIncGst}`, text, html };
+  return {
+    to,
+    subject: `${number} — ${context.accountName} — $${context.totalIncGst}`,
+    text,
+    html,
+  };
 }
 
 /* ── Job updates (M8.1 · M8.2) ───────────────────────────────────────────── */
@@ -287,7 +310,7 @@ export interface JobNoticeContext {
  * first in both the SMS and the subject line.
  */
 export function buildJobBookedEmail(to: string, context: JobNoticeContext): OutboundEmail {
-  const url = `${env.PUBLIC_APP_URL}/portal/jobs`;
+  const url = `${portal()}/portal/jobs`;
 
   const text = [
     `${context.siteName} — plasterboard pickup booked for ${context.when}.`,
@@ -374,7 +397,7 @@ export interface JobCompletedContext extends JobNoticeContext {
  * will repeat back to you.
  */
 export function buildJobCompletedEmail(to: string, context: JobCompletedContext): OutboundEmail {
-  const url = `${env.PUBLIC_APP_URL}/portal/jobs`;
+  const url = `${portal()}/portal/jobs`;
 
   const recovered = [
     context.areaM2 === null ? null : `${String(context.areaM2)} m²`,
@@ -440,7 +463,7 @@ export interface ReadinessContext extends JobNoticeContext {
  * parse, fully audited, and identical for email and SMS.
  */
 export function buildReadinessEmail(to: string, context: ReadinessContext): OutboundEmail {
-  const url = `${env.PUBLIC_APP_URL}/portal/jobs/${context.jobId}`;
+  const url = `${portal()}/portal/jobs/${context.jobId}`;
 
   const text = [
     `Is ${context.siteName} ready for tomorrow's pickup?`,
@@ -474,6 +497,6 @@ export function buildReadinessSms(to: string, context: ReadinessContext): Outbou
     to,
     body:
       `${brand}: is ${context.siteName} ready for tomorrow's pickup? ` +
-      `If not, move it here: ${env.PUBLIC_APP_URL}/portal/jobs/${context.jobId}`,
+      `If not, move it here: ${portal()}/portal/jobs/${context.jobId}`,
   };
 }

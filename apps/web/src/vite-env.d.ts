@@ -8,7 +8,19 @@
 interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
   readonly VITE_ENABLE_MOCKS?: 'true' | 'false';
-  /** The driver app's own origin. Empty = served from this app at /driver. */
+  /**
+   * Which surface this build serves: `admin`, `portal`, `driver`, or `all` for
+   * the single-server mode. Written into `process.env` by `vite.config.ts` from
+   * `PLASTAGO_SURFACE` — never set by hand in a `.env`.
+   */
+  readonly VITE_SURFACE?: string;
+  /** Each surface's localhost origin as JSON, from the dev port map. */
+  readonly VITE_SURFACE_ORIGINS?: string;
+  /** The office console's origin. Empty = this build serves it too. */
+  readonly VITE_ADMIN_APP_URL?: string;
+  /** The customer portal's origin. Empty = this build serves it too. */
+  readonly VITE_PORTAL_APP_URL?: string;
+  /** The driver app's origin. Empty = this build serves it too. */
   readonly VITE_DRIVER_APP_URL?: string;
   /** Maps Embed API key. Empty = the driver hands off to their maps app. */
   readonly VITE_GOOGLE_MAPS_EMBED_KEY?: string;

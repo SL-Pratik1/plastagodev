@@ -22,20 +22,48 @@ npm install
 npm run dev          # everything, in parallel
 ```
 
-| Surface                                       | URL                                |
-| --------------------------------------------- | ---------------------------------- |
-| API                                           | http://localhost:4000/api/v1       |
-| API contract                                  | http://localhost:4000/openapi.json |
-| Admin console + customer portal + driver app  | http://localhost:5173              |
-| Driver run sheet                              | http://localhost:5173/driver       |
-| _(legacy)_ standalone driver PWA              | http://localhost:5174              |
+| Surface                          | URL                                | Roles                                            |
+| -------------------------------- | ---------------------------------- | ------------------------------------------------ |
+| Office console                   | http://localhost:5173              | super-admin, operations, office-staff, allocator |
+| Customer portal                  | http://localhost:5175              | customer-administrator, customer-site-supervisor |
+| Driver app                       | http://localhost:5176              | driver                                           |
+| API                              | http://localhost:4000/api/v1       | —                                                |
+| API contract                     | http://localhost:4000/openapi.json | —                                                |
+| _(legacy)_ standalone driver PWA | http://localhost:5174              | —                                                |
 
 Or one at a time: `npm run dev:api` · `npm run dev:web` · `npm run dev:driver`.
 
+### Three surfaces, three origins
+
+One codebase, started once per surface. In production they are three hostnames
+(`console.` / `portal.` / `drivers.plastago.com.au`); locally they are three
+ports. A role only ever sees its own address — ask the portal for `/admin` and
+you are redirected to the console, deep link intact.
+
+`apps/web/.env` controls it:
+
+```bash
+PLASTAGO_SURFACES=admin,portal,driver   # default — three servers
+PLASTAGO_SURFACES=all                   # one server, every surface, admin port
+PLASTAGO_SURFACES=admin                 # just the one you are working on
+```
+
+Three dev servers cost three times the memory and three dependency pre-bundles,
+so naming the surface you are working on is noticeably faster.
+
+> ⚠️ **A port is not an origin, for cookies.** Browsers scope cookies by host and
+> ignore the port, so the surfaces share a session locally and will not once the
+> hostnames differ. Everything else — redirects, CORS, the per-surface
+> manifests — behaves as it will in production.
+
+Moving a port means moving it in three files (`PLASTAGO_PORT_*`, `CORS_ORIGINS`,
+`PUBLIC_*_URL`). `npm run check:ports` verifies they agree and runs as part of
+`npm run dev`; `scripts/dev-ports.mjs` documents the whole arrangement.
+
 > ⚠️ **`apps/driver` is superseded.** The driver screens now live in `apps/web`
-> under `/driver/*` and the standalone build is kept only until the change has
-> been reviewed. Nothing imports it and nothing links to it. See
-> _Why the driver app moved_ below.
+> under `/driver/*`, served on their own port. The standalone build is kept only
+> until the change has been reviewed. Nothing imports it and nothing links to it.
+> See _Why the driver app moved_ below.
 
 **MongoDB is required** (or the API boots degraded — see below). Redis is
 optional and off by default.
@@ -52,8 +80,8 @@ curl localhost:4000/readyz
 ```
 plastago-web/
 ├─ apps/
-│  ├─ web/       admin console + customer portal + driver app  (ONE Vite app,
-│  │             role-based routing, one service worker, one manifest)
+│  ├─ web/       admin console + customer portal + driver app  (ONE codebase,
+│  │             started once per surface — own port, own manifest, own SW)
 │  ├─ driver/    SUPERSEDED — the standalone driver PWA, pending deletion
 │  └─ api/       Express 5 + BullMQ workers
 ├─ packages/
@@ -66,28 +94,40 @@ plastago-web/
 plastago-mobile/    SEPARATE repo — Flutter native driver app
 ```
 
-**Why admin and portal are one app:** they share auth, session and most
-components, so one app with role-based routing is simpler than two (§6A.5).
+**Why the three surfaces are one codebase but three addresses:** they share auth,
+session and most components, so one route table with role-based routing is
+simpler than maintaining three apps. They are _served_ separately because an
+address is a promise about who a page is for — a builder's site supervisor and a
+PlastaGo allocator have no business sharing one (§6A.5, and Matt at 29:04 asking
+for exactly this for drivers).
+
+Each server mounts only its own surface. The other two are replaced by a
+redirect that carries the path across, so a link from before the split still
+arrives somewhere useful. `app/router.tsx` explains why the capability guards
+were not enough on their own: they stop the wrong _person_, not the wrong
+_address_, and an office user opening `/admin` on the portal's hostname passes
+every guard there is.
 
 **Why the driver app moved into `apps/web`:** a browser will only ever offer to
 install the page it is already on. `beforeinstallprompt` is delivered to a
 document solely when that document's OWN manifest scope contains it, and there is
 no API anywhere in the platform for installing somebody else's app. While the
-driver screens were a separate build on another origin, an "Install the driver
-app" button could not be made to work from the console — which is what drivers
-signing in there were being asked to use.
+driver screens were a separate _build_, an "Install the driver app" button could
+not be made to work from the console.
 
-One app at `scope: '/'` makes that button ordinary, and a driver now signs in at
-the same address as everyone else, lands on `/driver`, and installs from the
-header or the Me screen.
+The surface split does not undo that, because it splits origins rather than
+codebases: the driver's origin serves the driver surface and nothing else, so the
+page offering the install and the app being installed are the same thing. Each
+origin gets its own manifest, which is the part a shared one got wrong — a driver
+installing from their run sheet used to get an icon reading "PlastaGo" that
+opened the console's landing route.
 
-The separation existed because the service worker and offline shell needed their
-own build configuration. That is recovered rather than abandoned: `vite.config.ts`
-precaches the driver chunks and deliberately does **not** precache the console's
-(`OFFICE_ONLY_CHUNKS` — Recharts and React Hook Form), so a driver's phone never
-caches ~384 kB of charting library it will never run. The offline layer itself —
-Dexie, the outbox, the demo offline switch — moved across intact and is still
-the only write path on that surface.
+`vite.config.ts` still declines to precache the console's chunks onto a phone
+(`OFFICE_ONLY_CHUNKS` — Recharts and React Hook Form, ~384 kB of charting library
+a driver will never run). That is **not** redundant after the split: every
+surface builds from the same `lazy-pages.tsx`, so Rollup emits every lazy chunk
+into every build. Splitting that module per surface would let tree-shaking drop
+them outright — worth doing, not done.
 
 **Why `api-client` exists** (an addition to the documented layout): both browser
 apps need identical request, parse and error semantics. Copying it into two apps
@@ -121,7 +161,9 @@ would guarantee drift.
 
 | Command             | Does                                       |
 | ------------------- | ------------------------------------------ |
-| `npm run dev`       | All three surfaces                         |
+| `npm run dev`       | API + all three surfaces                   |
+| `npm run check:ports` | Verify the three port files agree        |
+| `npm run free-ports` | Kill stale dev servers from this repo     |
 | `npm run build`     | Everything, with typecheck                 |
 | `npm run typecheck` | All 6 packages                             |
 | `npm run lint`      | Type-aware ESLint                          |

@@ -35,7 +35,7 @@ import {
   type BrandSelection,
 } from '@/config/brands';
 import { visibleNav, type NavGroup } from '@/config/navigation';
-import { driverAppHref } from '@/config/driver-origin';
+import { roleSurfaceHref } from '@/config/surfaces';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
 import { landingPathFor } from '@/features/auth/permissions';
 
@@ -304,18 +304,20 @@ export function AdminShell() {
                         onSelect={() => {
                           switchRole(held);
                           /*
-                           * The driver surface may be a different origin
-                           * (Matt, 29:04), so switching to it is a page load
-                           * rather than a route change. `driverAppHref` returns
-                           * null when both surfaces share an origin, which is
-                           * the case in development.
+                           * Each surface has its own origin (Matt, 29:04), so
+                           * a switch that crosses one is a page load rather
+                           * than a route change. `roleSurfaceHref` returns null
+                           * when the target surface is already this one — and
+                           * always, in single-server mode — so the ordinary
+                           * in-app path is unchanged.
                            */
-                          const external = held === 'driver' ? driverAppHref('/') : null;
+                          const home = landingPathFor(held);
+                          const external = roleSurfaceHref(held, home);
                           if (external !== null) {
                             window.location.assign(external);
                             return;
                           }
-                          void navigate(landingPathFor(held));
+                          void navigate(home);
                         }}
                       >
                         Work as {ROLE_LABELS[held].toLowerCase()}

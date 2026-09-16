@@ -12,9 +12,10 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "node scripts/free-ports.mjs && turbo run dev",
+    "dev": "node scripts/free-ports.mjs && node scripts/check-ports.mjs && turbo run dev --filter=!@plastago/driver",
     "dev:clean": "npm run dev",
     "free-ports": "node scripts/free-ports.mjs",
+    "check:ports": "node scripts/check-ports.mjs",
     "dev:api": "turbo run dev --filter=@plastago/api",
     "dev:web": "turbo run dev --filter=@plastago/web",
     "dev:driver": "turbo run dev --filter=@plastago/driver",

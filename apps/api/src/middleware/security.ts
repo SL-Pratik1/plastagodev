@@ -2,7 +2,7 @@ import cors from 'cors';
 import type { Express } from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
-import { env, isProduction } from '../config/env.js';
+import { env, isLocalOrigin, isProduction } from '../config/env.js';
 import { AppError } from '../lib/app-error.js';
 import { logger } from '../lib/logger.js';
 
@@ -32,6 +32,13 @@ export function applySecurity(app: Express): void {
         // Same-origin, curl and server-to-server calls send no Origin header.
         if (!origin) return callback(null, true);
         if (env.CORS_ORIGINS.includes(origin)) return callback(null, true);
+        /*
+         * On a laptop, any localhost origin — see `isLocalOrigin` for why. The
+         * short version: `.env` is gitignored, so each developer's allowlist is
+         * their own, and the surface split moved ports underneath all of them
+         * at once. Production is unaffected; `isProduction` gates this.
+         */
+        if (!isProduction && isLocalOrigin(origin)) return callback(null, true);
         log.warn({ origin }, 'blocked by CORS allowlist');
         callback(AppError.forbidden(`Origin ${origin} is not allowed`));
       },

@@ -2,7 +2,7 @@ import { OTP_CODE_LENGTH, isAustralianMobile } from '@plastago/shared';
 import { betterAuth } from 'better-auth';
 import { mongodbAdapter } from 'better-auth/adapters/mongodb';
 import { emailOTP, phoneNumber } from 'better-auth/plugins';
-import { env, isProduction } from '../config/env.js';
+import { env, isProduction, trustedOrigins } from '../config/env.js';
 import { getMongoClient, getMongoDb, isMongoConnected, supportsTransactions } from '../db/mongo.js';
 import { AppError } from '../lib/app-error.js';
 import { logger } from '../lib/logger.js';
@@ -60,7 +60,9 @@ function buildAuth(transactionsAvailable: boolean) {
     appName: 'PlastaGo',
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.AUTH_BASE_URL,
-    trustedOrigins: env.CORS_ORIGINS,
+    // Widened to any localhost origin in development — see the note on
+    // `trustedOrigins` in config/env.ts. Production is the allowlist, exactly.
+    trustedOrigins,
 
     database: mongodbAdapter(getMongoDb(), {
       // Sharing Mongoose's client, so there is one pool and one shutdown path.

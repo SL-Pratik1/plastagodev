@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import type { Surface } from '@plastago/shared';
 import * as z from 'zod';
 
 /**
@@ -46,10 +47,22 @@ const EnvSchema = z
     PORT: z.coerce.number().int().min(1).max(65535).default(4000),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
-    /** Comma-separated CORS allowlist. Never `*` in production. */
+    /**
+     * Comma-separated browser-origin allowlist. Never `*` in production.
+     *
+     * ⚠️ This list does TWO jobs: the CORS allowlist, and Better Auth's
+     * `trustedOrigins` (see `auth/better-auth.ts`). A surface missing from it is
+     * therefore not merely refused a cross-origin fetch — it cannot sign anybody
+     * in. One entry per surface, always.
+     *
+     * The default covers the three dev surfaces (§6A.5) plus the superseded
+     * standalone driver app on 5174, which is still runnable.
+     */
     CORS_ORIGINS: z
       .string()
-      .default('http://localhost:5173,http://localhost:5174')
+      .default(
+        'http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5176',
+      )
       .transform((value) =>
         value
           .split(',')
@@ -215,6 +228,12 @@ const EnvSchema = z
      * reorders that list — a link in an SMS is the one thing that cannot be
      * corrected after sending.
      *
+     * ⚠️ Now the FALLBACK for the three surface URLs below, not the address
+     * itself. It stays because a deployment that has not split its surfaces is
+     * a valid deployment, and because every message this sends is uncorrectable
+     * once sent — an unset variable must degrade to a working link, never to a
+     * broken one.
+     *
      * No trailing slash: every caller appends a path.
      */
     PUBLIC_APP_URL: z
@@ -222,6 +241,36 @@ const EnvSchema = z
       .url()
       .default('http://localhost:5173')
       .transform((value) => value.replace(/\/+$/, '')),
+
+    /**
+     * The three surfaces, each at its own address (§6A.5).
+     *
+     * ── Why one URL could not stay one URL ────────────────────────────────
+     * Because the paths built from it are not on the same surface. The Xero
+     * callback returns the organisation owner to `/admin/xero` while a pickup
+     * notice points a supervisor at `/portal/jobs/…`, and once the console and
+     * the portal are different hostnames, one variable cannot be right for
+     * both — whichever it names, the other half of the product is sending
+     * people to an address that has no such page.
+     *
+     * Each defaults to `PUBLIC_APP_URL`, so a single-origin deployment needs
+     * none of them and behaves exactly as it did before.
+     */
+    PUBLIC_ADMIN_URL: z
+      .string()
+      .url()
+      .optional()
+      .transform((value) => value?.replace(/\/+$/, '')),
+    PUBLIC_PORTAL_URL: z
+      .string()
+      .url()
+      .optional()
+      .transform((value) => value?.replace(/\/+$/, '')),
+    PUBLIC_DRIVER_URL: z
+      .string()
+      .url()
+      .optional()
+      .transform((value) => value?.replace(/\/+$/, '')),
 
     /**
      * §6A.10 #9 — object storage for photos, dockets and generated PDFs.
@@ -561,13 +610,13 @@ const EnvSchema = z
      * its absence would mean writing a customers refresh token to the database
      * in clear text, which is a thing to refuse rather than to default.
      */
-    if (value.XERO_PROVIDER === "xero") {
-      for (const key of ["XERO_CLIENT_ID", "XERO_CLIENT_SECRET", "XERO_ENCRYPTION_KEY"] as const) {
+    if (value.XERO_PROVIDER === 'xero') {
+      for (const key of ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET', 'XERO_ENCRYPTION_KEY'] as const) {
         if (!value[key]) {
           ctx.addIssue({
-            code: "custom",
+            code: 'custom',
             path: [key],
-            message: "Required when XERO_PROVIDER=xero",
+            message: 'Required when XERO_PROVIDER=xero',
           });
         }
       }
@@ -651,5 +700,72 @@ export const revealOtpCode = !isProduction && env.AUTH_REVEAL_OTP_CODE;
  */
 export const xeroRedirectUri = (): string =>
   env.XERO_REDIRECT_URI ?? `${env.AUTH_BASE_URL}/api/v1/xero/callback`;
+
+/**
+ * Is this a browser on the developer's own machine?
+ *
+ * ── Why development does not use the allowlist strictly ───────────────────
+ * `CORS_ORIGINS` is not in version control — `.env` is gitignored — so every
+ * developer carries their own copy, and the day the surfaces moved to their own
+ * ports (§6A.5) every existing copy became wrong without anybody editing it.
+ * The symptom is not a clear error: the Vite proxy keeps same-origin calls
+ * working, so the console behaves normally while the portal and the driver app
+ * cannot sign anyone in, and the reason is in a file nobody has touched.
+ *
+ * So on a laptop any localhost origin is accepted. It costs nothing there — a
+ * page that can already reach `localhost` can reach the API regardless — and it
+ * means a teammate pulling this branch does not have to edit `.env` before the
+ * app works.
+ *
+ * ⚠️ Development ONLY. `isProduction` gates every use of this, and a deployed
+ * environment still answers exactly the allowlist it was given.
+ */
+export function isLocalOrigin(origin: string): boolean {
+  try {
+    const { hostname, protocol } = new URL(origin);
+    return protocol === 'http:' && (hostname === 'localhost' || hostname === '127.0.0.1');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The origins Better Auth will accept a sign-in from.
+ *
+ * Better Auth matches `*` as a wildcard (see `auth/trusted-origins`), which is
+ * how the development widening above is expressed to it. In production this is
+ * the allowlist and nothing else.
+ *
+ * ⚠️ Keep in step with the CORS callback in `middleware/security.ts`. They are
+ * two enforcement points for one policy, and a surface that passes CORS but is
+ * not trusted here fails at the sign-in POST rather than at the preflight —
+ * which reads as "the code is wrong", not "the config is".
+ */
+export const trustedOrigins: string[] = isProduction
+  ? env.CORS_ORIGINS
+  : [...new Set([...env.CORS_ORIGINS, 'http://localhost:*', 'http://127.0.0.1:*'])];
+
+/**
+ * The public origin of one surface.
+ *
+ * ⚠️ Every caller is building a link into a message that CANNOT BE CORRECTED
+ * ONCE SENT — an SMS to a supervisor, an invitation email, a redirect back from
+ * Xero. That is why an unset surface URL falls back to `PUBLIC_APP_URL` rather
+ * than throwing or returning empty: a deployment mid-way through being split
+ * should send a link that works and is merely on the old origin, not one that
+ * 404s or reads `undefined/portal/jobs`.
+ *
+ * Pair it with `ROLE_SURFACE` when what you hold is a role rather than a
+ * surface — the mapping belongs in one place, and it is already there.
+ */
+export function publicUrlFor(surface: Surface): string {
+  const configured = {
+    admin: env.PUBLIC_ADMIN_URL,
+    portal: env.PUBLIC_PORTAL_URL,
+    driver: env.PUBLIC_DRIVER_URL,
+  }[surface];
+
+  return configured ?? env.PUBLIC_APP_URL;
+}
 
 export type Env = typeof env;

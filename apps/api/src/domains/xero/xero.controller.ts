@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import { env } from '../../config/env.js';
+import { publicUrlFor } from '../../config/env.js';
 import { AppError } from '../../lib/app-error.js';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { type XeroCallbackQuerySchema } from './xero.schemas.js';
@@ -62,7 +62,14 @@ export const xeroController = {
       message: result.message,
     });
 
-    res.redirect(`${env.PUBLIC_APP_URL}${XERO_PAGE}?${params.toString()}`);
+    /*
+     * The CONSOLE's origin, not `PUBLIC_APP_URL`. `/admin/xero` exists on one
+     * surface only, and the person completing this round trip is an office
+     * administrator returning from Xero's consent screen — sending them to the
+     * customer portal's address would end a working OAuth flow on a 404, with
+     * the connection actually established and nothing on screen saying so.
+     */
+    res.redirect(`${publicUrlFor('admin')}${XERO_PAGE}?${params.toString()}`);
   },
 
   disconnect: async (req: Request, res: Response): Promise<void> => {

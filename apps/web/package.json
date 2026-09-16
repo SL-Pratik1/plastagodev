@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Admin console, customer portal and driver PWA \u2014 one Vite app, role-based routing (\u00a76A.5)",
   "scripts": {
-    "dev": "vite",
+    "dev": "node ../../scripts/dev-surfaces.mjs",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",

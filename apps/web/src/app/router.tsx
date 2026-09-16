@@ -1,5 +1,6 @@
 import { Suspense, type ReactNode } from 'react';
-import { createBrowserRouter } from 'react-router';
+import { createBrowserRouter, type RouteObject } from 'react-router';
+import type { Surface } from '@plastago/shared';
 import {
   CustomerCreatePage,
   CustomerDetailPage,
@@ -59,6 +60,7 @@ import {
   VehiclesPage,
 } from './lazy-pages';
 import { PageSkeleton } from '@/components/page-skeleton';
+import { SURFACE_PREFIX, servesSurface } from '@/config/surfaces';
 import { RequireAuth } from '@/features/auth/require-auth';
 import { RequireCapability } from '@/features/auth/require-capability';
 import { RequireBuilderAccount } from '@/features/portal/require-builder-account';
@@ -70,6 +72,7 @@ import { PortalLayout } from '@/layouts/portal-layout';
 import { ForbiddenPage } from '@/pages/auth/forbidden';
 import { RootRedirect } from '@/pages/auth/root-redirect';
 import { SignInPage } from '@/pages/auth/sign-in';
+import { SurfaceElsewhere } from '@/pages/auth/surface-elsewhere';
 import { VerifyOtpPage } from '@/pages/auth/verify-otp';
 import { NotFoundPage } from '@/pages/not-found';
 import { RouteError } from './route-error';
@@ -79,18 +82,23 @@ import { RouteError } from './route-error';
  *
  * Role-based routing (§6A.5): `/admin/*` is the office console (M2, M3, M7, M9),
  * `/portal/*` is the customer portal (M5) and `/driver/*` is the driver app
- * (M4) — one app, one session, three shells.
+ * (M4) — one codebase, three surfaces, three shells.
  *
- * ── Why the driver surface is here and not a separate build ───────────────
- * It was a separate Vite app, for a real reason: the service worker and offline
- * shell needed their own configuration. What overturned that is a browser rule,
- * not a preference — a page can only ever offer to install ITSELF. While the
- * driver screens lived on another origin, no "Install the driver app" button
- * could exist in the console, because `beforeinstallprompt` is never delivered
- * to a page outside the target manifest's scope. One app at `scope: '/'` makes
- * that button ordinary. The offline configuration it cost is recovered in
- * `vite.config.ts`, which precaches the driver chunks and deliberately does not
- * precache the console's.
+ * ── Why this table is not the same on every server ────────────────────────
+ * Each surface has its own origin (`config/surfaces.ts`), and this file is
+ * started once per surface. Only the surface a given server owns has its routes
+ * mounted; the other two are replaced by a redirect to the origin that does own
+ * them. `surfaceRoutes` below is where that happens, and it explains why the
+ * capability guards were not sufficient on their own.
+ *
+ * It once went the other way. The driver screens were a separate Vite app, and
+ * were folded back in because a page can only ever offer to install ITSELF —
+ * `beforeinstallprompt` is never delivered to a page outside the target
+ * manifest's scope, so no "Install the driver app" button could exist in the
+ * console while the two were separate origins. The split restores the separate
+ * origins, but the Install button survives, because the driver's origin now
+ * serves the driver surface and nothing else: it installs itself, under its own
+ * manifest, which is what `vite.config.ts` builds per surface.
  *
  * ── How access is enforced ─────────────────────────────────────────────────
  * Guards wrap each route GROUP, never individual pages, exactly as this file has
@@ -120,6 +128,55 @@ import { RouteError } from './route-error';
  */
 const load = (element: ReactNode) => <Suspense fallback={<PageSkeleton />}>{element}</Suspense>;
 
+/**
+ * Mount a surface's routes, or stand a signpost where they used to be.
+ *
+ * ── Why the guards were not enough on their own ───────────────────────────
+ * Every surface boundary below is already wrapped in a `RequireCapability`, and
+ * for a customer who wanders onto `/admin` that is a complete answer: they lack
+ * `admin:access` and get redirected home.
+ *
+ * It is not an answer for the person who HOLDS the capability. An office user
+ * opening `/admin` on the portal's origin passes the guard and is shown the
+ * console — served from the customer portal's address, under the portal's
+ * manifest and service worker. Nothing was leaked to anyone unauthorised, and
+ * the split was still defeated: the addresses stopped meaning anything.
+ *
+ * So the routes are absent rather than guarded, and being absent is what
+ * `SurfaceElsewhere` turns into a redirect to the origin that does serve them.
+ *
+ * In single-server mode (`PLASTAGO_SURFACES=all`) `servesSurface` is true for all
+ * three and this collapses back to mounting everything, unchanged.
+ */
+function surfaceRoutes(surface: Surface, route: RouteObject): RouteObject[] {
+  return servesSurface(surface) ? [route] : [];
+}
+
+/**
+ * The signposts, for every surface this build does not serve.
+ *
+ * ⚠️ Mounted OUTSIDE `<RequireAuth>`, unlike the routes they replace. A link to
+ * another surface is most often opened in a browser with no session — it came
+ * from an email — and authenticating someone here would sign them in on the
+ * wrong origin and then still have to move them. Send them first; let the
+ * origin that owns the page ask who they are.
+ *
+ * Empty in single-server mode, where there is nowhere else to send anybody.
+ */
+function elsewhereRoutes(): RouteObject[] {
+  return (['admin', 'portal', 'driver'] as const)
+    .filter((surface) => !servesSurface(surface))
+    .flatMap((surface) => {
+      // `/portal` and `/portal/*`: the subtree moves, and the path inside it is
+      // the part worth carrying across.
+      const prefix = SURFACE_PREFIX[surface].slice(1);
+      return [
+        { path: prefix, element: <SurfaceElsewhere surface={surface} /> },
+        { path: `${prefix}/*`, element: <SurfaceElsewhere surface={surface} /> },
+      ];
+    });
+}
+
 export const router = createBrowserRouter([
   {
     path: '/',
@@ -142,7 +199,7 @@ export const router = createBrowserRouter([
       {
         element: <RequireAuth />,
         children: [
-          {
+          ...surfaceRoutes('admin', {
             path: 'admin',
             element: <RequireCapability capability="admin:access" onDenied="redirect" />,
             children: [
@@ -289,7 +346,7 @@ export const router = createBrowserRouter([
                 ],
               },
             ],
-          },
+          }),
 
           /*
            * The customer portal (M5 Part 1).
@@ -305,7 +362,7 @@ export const router = createBrowserRouter([
            * account or site parameter so the browser cannot ask for someone
            * else's.
            */
-          {
+          ...surfaceRoutes('portal', {
             path: 'portal',
             element: <RequireCapability capability="portal:access" onDenied="redirect" />,
             children: [
@@ -392,7 +449,7 @@ export const router = createBrowserRouter([
                 ],
               },
             ],
-          },
+          }),
 
           /*
            * The driver app (M4).
@@ -413,7 +470,7 @@ export const router = createBrowserRouter([
            * suspense fallback in front of the header and its sync badge would
            * mean a driver opening the app offline sees a blank screen first.
            */
-          {
+          ...surfaceRoutes('driver', {
             path: 'driver',
             element: <RequireCapability capability="driver:access" onDenied="redirect" />,
             children: [
@@ -450,9 +507,14 @@ export const router = createBrowserRouter([
                 ],
               },
             ],
-          },
+          }),
         ],
       },
+
+      // ── Surfaces this build does not serve ────────────────────────────
+      // Before the catch-all, or `*` would answer "not found" to a link that
+      // has a perfectly good home on another origin.
+      ...elsewhereRoutes(),
 
       // ── Anything else ─────────────────────────────────────────────────
       {

@@ -1,20 +1,46 @@
 /**
  * Frees the dev ports pinned in vite.config.ts / apps/api/.env.
  *
- * Both Vite apps set `strictPort: true` because the API CORS allowlist and the
- * driver PWA manifest expect exactly these ports — so a stale server has to be
- * killed rather than worked around. Turbo does not always tear down its
- * grandchildren when a terminal is closed without Ctrl+C, which leaves the
+ * Every Vite surface sets `strictPort: true` because the API CORS allowlist and
+ * the per-surface PWA manifests expect exactly these ports — so a stale server
+ * has to be killed rather than worked around. Turbo does not always tear down
+ * its grandchildren when a terminal is closed without Ctrl+C, which leaves the
  * ports held by orphaned vite/tsx processes.
  *
  * Only kills processes whose command line points back into this repo.
  */
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { REPO_ROOT, devPorts, legacyDriverAppPort } from './dev-ports.mjs';
 
-const PORTS = [5173, 5174, 4000];
-const repoRoot = toPosix(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
+const repoRoot = toPosix(REPO_ROOT);
+
+/**
+ * The ports `npm run dev` is about to bind: the API and the three surfaces
+ * (§6A.5). Resolved from the `.env` files by `devPorts()`, so a checkout that
+ * has been repointed is swept where it actually listens rather than where the
+ * defaults say — the difference between sweeping and reporting success.
+ *
+ * A foreign process on one of these is fatal. `strictPort` means the server
+ * will not start, and starting two of three surfaces silently is worse than
+ * not starting at all.
+ */
+const ports = devPorts();
+const REQUIRED_PORTS = [...new Set(Object.values(ports))];
+
+/**
+ * Swept too, but never fatal: the superseded standalone driver app.
+ *
+ * ⚠️ This distinction is the whole point. Two checkouts of this repo commonly
+ * run side by side, and the other one holding 5174 — a port nothing in THIS
+ * checkout binds — used to abort `npm run dev` here with a message about a
+ * port the developer had no reason to care about. A port we are not going to
+ * listen on is somebody else's business.
+ */
+const ADVISORY_PORTS = [legacyDriverAppPort()].filter(
+  (port) => !REQUIRED_PORTS.includes(port),
+);
+
+const PORTS = [...REQUIRED_PORTS, ...ADVISORY_PORTS];
 
 function toPosix(value) {
   return value.split('\\').join('/');
@@ -56,7 +82,9 @@ function listeners(port) {
   const pids = run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'])
     .split(/\s+/)
     .filter(Boolean);
-  return parse(pids.map((pid) => `${pid}|${run('ps', ['-o', 'command=', '-p', pid]).trim()}`).join('\n'));
+  return parse(
+    pids.map((pid) => `${pid}|${run('ps', ['-o', 'command=', '-p', pid]).trim()}`).join('\n'),
+  );
 }
 
 function kill(pid) {
@@ -65,16 +93,19 @@ function kill(pid) {
 }
 
 let killed = 0;
-let skipped = 0;
+let blocked = 0;
 
 for (const port of PORTS) {
+  const required = REQUIRED_PORTS.includes(port);
+
   for (const { pid, command } of listeners(port)) {
     if (pid === process.pid) continue;
 
     if (!toPosix(command).includes(repoRoot)) {
-      console.warn(`port ${port}: PID ${pid} is not from this repo — left alone`);
+      const note = required ? 'not from this repo' : 'not from this repo, and not needed here';
+      console.warn(`port ${port}: PID ${pid} is ${note} — left alone`);
       console.warn(`  ${command.trim()}`);
-      skipped += 1;
+      if (required) blocked += 1;
       continue;
     }
 
@@ -84,10 +115,13 @@ for (const port of PORTS) {
   }
 }
 
-if (killed === 0 && skipped === 0) {
-  console.log(`ports ${PORTS.join(', ')} already free`);
+if (killed === 0 && blocked === 0) {
+  console.log(`ports ${REQUIRED_PORTS.join(', ')} free`);
 }
-if (skipped > 0) {
-  console.error('\nSome ports are held by processes outside this repo. Free them, then retry.');
+if (blocked > 0) {
+  console.error(
+    '\nPorts this checkout needs are held by processes outside this repo. Free them, or move' +
+      '\nthis checkout: PORT in apps/api/.env and PLASTAGO_PORT_* in apps/web/.env.',
+  );
   process.exitCode = 1;
 }
