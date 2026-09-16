@@ -1,11 +1,9 @@
 import {
   SEEDED_RATE_CARD_LABELS,
   SEEDED_RATE_CARDS,
-  ZONES,
   type AdditionalServiceSetting,
   type InvoiceTemplate,
   type RateCardId,
-  type Zone,
 } from '@plastago/shared';
 
 import mongoose from 'mongoose';
@@ -61,16 +59,31 @@ const SEED_EFFECTIVE_FROM = '2026-04-01';
  */
 
 /**
- * The three zones, verbatim (M6.3).
+ * The zones this seed INSTALLS, verbatim (M6.3).
+ *
+ * ⚠️ Not the set of zones that exist. A super-admin adds more at runtime, and
+ * nothing downstream may assume this list is complete — the seed writes these
+ * once and then leaves them alone, so a zone the office has since renamed or
+ * reordered survives a re-run.
+ *
+ * Array ORDER is `displayOrder`: Sydney first because it is most of the work,
+ * which is the office's order and not the alphabet's.
  *
  * Decimal STRINGS, never numbers — these have to match TransVirtual to the cent
  * (Risk 1), and a JSON number is a double.
  */
-const ZONE_RATES: Record<Zone, { serviceCharge: string; ratePerM2: string }> = {
-  sydney: { serviceCharge: '220.00', ratePerM2: '0.16' },
-  wollongong: { serviceCharge: '250.00', ratePerM2: '0.18' },
-  newcastle: { serviceCharge: '250.00', ratePerM2: '0.20' },
-};
+interface SeedZone {
+  slug: string;
+  label: string;
+  serviceCharge: string;
+  ratePerM2: string;
+}
+
+const SEED_ZONES: readonly SeedZone[] = [
+  { slug: 'sydney', label: 'Sydney', serviceCharge: '220.00', ratePerM2: '0.16' },
+  { slug: 'wollongong', label: 'Wollongong', serviceCharge: '250.00', ratePerM2: '0.18' },
+  { slug: 'newcastle', label: 'Newcastle', serviceCharge: '250.00', ratePerM2: '0.20' },
+];
 
 /** M6.5–M6.7 — the chargeable extras, and who may raise each. */
 const ADDITIONAL_SERVICES: SeededService[] = [
@@ -255,21 +268,58 @@ async function main(): Promise<void> {
   }
 
   /*
-   * Every card carries all three zones. A card with a missing zone would fall
-   * back to `default` at quote time, which is a safety net rather than a plan —
-   * the office should never be quoting from a card it did not choose.
+   * ⚠️ Zones are written FIRST, and their ids read back, because every rate row
+   * below REFERENCES one. `settingsRepository.seed` writes them before anything
+   * else for the same reason — parent before children, so a seed that dies
+   * half-way leaves zones with no rates rather than rates pointing nowhere.
+   */
+  await settingsRepository.seed({
+    zones: SEED_ZONES.map((zone, index) => ({
+      slug: zone.slug,
+      label: zone.label,
+      displayOrder: index,
+    })),
+    zoneRates: [],
+    rateCards: [],
+    additionalServices: [],
+    invoiceTemplates: [],
+    /* Matched below, where the real seed sets it. This first pass only installs the zones. */
+    assumedCostPerJob: '100.00',
+  });
+
+  /*
+   * The ids the zones were given. Resolved by SLUG, which is the only handle a
+   * seed has: the `_id` is minted by Mongo on first insert and must survive a
+   * re-run.
+   */
+  const zoneIds = new Map<string, string>();
+  for (const zone of SEED_ZONES) {
+    const stored = await settingsRepository.findZoneBySlug(zone.slug);
+    if (!stored) throw new Error(`zone "${zone.slug}" was not written — cannot seed its rates`);
+    zoneIds.set(zone.slug, stored.id);
+  }
+
+  /*
+   * Every card carries every zone. A card with a missing zone would fall back to
+   * `default` at quote time, which is a safety net rather than a plan — the
+   * office should never be quoting from a card it did not choose.
    */
   const zoneRates = SEEDED_RATE_CARDS.flatMap((rateCardId: RateCardId) =>
-    ZONES.map((zone) => ({
+    SEED_ZONES.map((zone) => ({
       rateCardId,
-      zone,
-      serviceCharge: ZONE_RATES[zone].serviceCharge,
-      ratePerM2: ZONE_RATES[zone].ratePerM2,
+      zoneId: zoneIds.get(zone.slug) ?? '',
+      serviceCharge: zone.serviceCharge,
+      ratePerM2: zone.ratePerM2,
       effectiveFrom: SEED_EFFECTIVE_FROM,
     })),
   );
 
   await settingsRepository.seed({
+    zones: SEED_ZONES.map((zone, index) => ({
+      slug: zone.slug,
+      label: zone.label,
+      displayOrder: index,
+    })),
     rateCards: SEEDED_RATE_CARDS.map((id) => ({
       id,
       label: SEEDED_RATE_CARD_LABELS[id],
@@ -295,14 +345,15 @@ async function main(): Promise<void> {
 Seeded settings into "${mongoose.connection.name}".
 
   Rate cards          ${String(settings.pricing.rateCards.length)}
-  Zone rates          ${String(zoneRates.length)}  (${String(SEEDED_RATE_CARDS.length)} cards × ${String(ZONES.length)} zones)
+  Zones               ${String(SEED_ZONES.length)}
+  Zone rates          ${String(zoneRates.length)}  (${String(SEEDED_RATE_CARDS.length)} cards × ${String(SEED_ZONES.length)} zones)
   Additional services ${String(settings.pricing.additionalServices.length)}
   Invoice templates   ${String(settings.invoicing.templates.length)}
 
   Next job number     ${String(SEQUENCE_STARTS.nextJobNumber)}  (start; advances as jobs are raised)
   Next invoice number ${String(SEQUENCE_STARTS.nextInvoiceNumber)}  (start; advances as invoices are raised)
 
-Sydney is $220.00 + $0.16/m²; Wollongong $250.00 + $0.18; Newcastle $250.00 + $0.20.
+${SEED_ZONES.map((zone) => `${zone.label} is ${zone.serviceCharge} + ${zone.ratePerM2}/m²`).join('; ')}.
 `);
 }
 

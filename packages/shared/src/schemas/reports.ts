@@ -36,7 +36,16 @@ export const ReportFiltersSchema = z
      * much came out of Kellyville last month" rather than "out of lot 214".
      */
     suburb: z.string().nullable(),
-    zoneId: ZoneSchema.nullable(),
+    /**
+     * ⚠️ A plain string, not an id schema.
+     *
+     * It IS a zone id, but report filters live in the URL — and a bookmark
+     * taken before zones became records carries `?zoneId=sydney`. Refusing that
+     * shape would answer a saved report with a 422 about a field nobody typed;
+     * the repository ignores anything that is not an id and returns the
+     * unfiltered report instead.
+     */
+    zoneId: z.string().trim().max(40).nullable(),
     driverId: ObjectIdSchema.nullable(),
   })
   .meta({ id: 'ReportFilters' });

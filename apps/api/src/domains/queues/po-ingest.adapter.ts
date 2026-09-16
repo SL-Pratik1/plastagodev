@@ -234,7 +234,8 @@ export async function adaptExtraction(
     diagnostics: {
       matchedBy: match.matchedBy,
       suburbResolved: place !== null,
-      zone: place?.zone ?? null,
+      /* The zone's NAME: this is a log line somebody reads to diagnose a run. */
+      zone: place?.zoneLabel ?? null,
       storedOriginal: storageKey !== null,
     },
   };
@@ -412,7 +413,7 @@ function nameNeedle(name: string | null): string | null {
 async function resolvePlace(
   suburb: string | null,
   postcode: string | null,
-): Promise<{ id: string; label: string; zone: string } | null> {
+): Promise<{ id: string; label: string; zoneId: string; zoneLabel: string } | null> {
   const digits = postcode?.replace(/\D/g, '') ?? '';
 
   if (digits.length === 4) {
@@ -444,12 +445,18 @@ async function resolvePlace(
   return exact ? pick(exact) : null;
 }
 
-function pick(place: { id: string; label: string; zone: string }): {
+function pick(place: { id: string; label: string; zoneId: string; zoneLabel: string }): {
   id: string;
   label: string;
-  zone: string;
+  zoneId: string;
+  zoneLabel: string;
 } {
-  return { id: place.id, label: place.label, zone: place.zone };
+  return {
+    id: place.id,
+    label: place.label,
+    zoneId: place.zoneId,
+    zoneLabel: place.zoneLabel,
+  };
 }
 
 /* ── The original document ───────────────────────────────────────────────── */

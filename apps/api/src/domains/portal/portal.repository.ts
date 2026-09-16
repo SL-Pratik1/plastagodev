@@ -6,9 +6,9 @@ import type {
   PortalJob,
   PortalJobListItem,
   PortalJobStep,
-  Zone,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { zoneLabelFor } from '../settings/zone-lookup.js';
 import { fromDecimal128 } from '../../lib/money.js';
 import {
   JobCommentModel,
@@ -105,7 +105,7 @@ interface RawJob {
   builderName: string;
   siteName: string;
   suburb: string;
-  zone: Zone;
+  zoneId: mongoose.Types.ObjectId;
   poNumber: string | null;
   bookedByName: string | null;
   bookedByUserId: mongoose.Types.ObjectId | null;
@@ -259,7 +259,13 @@ export const portalRepository = {
     return {
       ...toListItem(row, canSeePricing, photoCounts, certifications),
       builderName: row.builderName,
-      zone: row.zone,
+      zoneId: row.zoneId.toString(),
+      /*
+       * Named here rather than by the portal. A builder may not read the zone
+       * register — which markets PlastaGo operates in is not their business —
+       * so the one zone they are entitled to see arrives already resolved.
+       */
+      zoneLabel: await zoneLabelFor(row.zoneId),
       notes: row.notes,
       driverName: row.driverName,
       arrivedAt: row.arrivedAt ? row.arrivedAt.toISOString() : null,

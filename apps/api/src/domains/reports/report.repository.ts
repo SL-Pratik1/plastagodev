@@ -3,9 +3,9 @@ import type {
   CertificateScope,
   PageMeta,
   ReportFilters,
-  Zone,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { UNKNOWN_ZONE_LABEL, orderedZones, toObjectId } from '../settings/zone-lookup.js';
 import { JobChargeModel, JobModel } from '../jobs/job.model.js';
 import { CertificateModel } from './certificate.model.js';
 
@@ -39,7 +39,8 @@ export interface VolumeAggregate {
 }
 
 export interface ZoneAggregate {
-  zone: Zone;
+  zoneId: string;
+  label: string;
   jobs: number;
   areaM2: number;
   revenueCents: number;
@@ -73,7 +74,9 @@ function matchStage(filters: ReportFilters): Record<string, unknown> {
   if (filters.accountId && mongoose.isValidObjectId(filters.accountId)) {
     match.accountId = new mongoose.Types.ObjectId(filters.accountId);
   }
-  if (filters.zone) match.zone = filters.zone;
+  /* Dropped when it is not an id — a bookmarked report URL may predate zones. */
+  const zoneFilter = filters.zoneId ? toObjectId(filters.zoneId) : null;
+  if (zoneFilter) match.zoneId = zoneFilter;
   if (filters.suburb) match.suburb = filters.suburb;
   if (filters.driverId && mongoose.isValidObjectId(filters.driverId)) {
     match.driverId = new mongoose.Types.ObjectId(filters.driverId);
@@ -194,29 +197,42 @@ export const reportRepository = {
    * source here, same answer, and the three tabs now agree.
    */
   async byZone(filters: ReportFilters): Promise<ZoneAggregate[]> {
-    const rows = await JobModel.aggregate<{
-      _id: Zone;
-      jobs: number;
-      areaM2: number;
-      jobIds: mongoose.Types.ObjectId[];
-    }>([
-      { $match: matchStage(filters) },
-      {
-        $group: {
-          _id: '$zone',
-          jobs: { $sum: 1 },
-          areaM2: { $sum: { $ifNull: ['$expectedAreaM2', 0] } },
-          jobIds: { $push: '$_id' },
+    const [rows, zones] = await Promise.all([
+      JobModel.aggregate<{
+        _id: mongoose.Types.ObjectId;
+        jobs: number;
+        areaM2: number;
+        jobIds: mongoose.Types.ObjectId[];
+      }>([
+        { $match: matchStage(filters) },
+        {
+          $group: {
+            _id: '$zoneId',
+            jobs: { $sum: 1 },
+            areaM2: { $sum: { $ifNull: ['$expectedAreaM2', 0] } },
+            jobIds: { $push: '$_id' },
+          },
         },
-      },
-      { $sort: { _id: 1 } },
+        /*
+         * ⚠️ Deliberately NOT sorted in the pipeline any more.
+         *
+         * It sorted `_id: 1` — alphabetically by slug, which read as a sensible
+         * order only because the three slugs happened to sort the way the office
+         * thinks. On ids it would be meaningless. The rows are put into the
+         * administrator's own `displayOrder` below instead.
+         */
+      ]),
+      orderedZones(),
     ]);
+
+    const order = new Map(zones.map((zone, index) => [zone.id, index]));
+    const names = new Map(zones.map((zone) => [zone.id, zone.label]));
 
     // One read for every job in the report, then bucketed — not a lookup per
     // zone. Same approach as `financial`.
     const chargesByJob = await chargesByJobId(rows.flatMap((row) => row.jobIds));
 
-    return rows.map((row) => {
+    const aggregates = rows.map((row) => {
       let revenueCents = 0;
       for (const jobId of row.jobIds) {
         const split = chargesByJob.get(jobId.toHexString());
@@ -224,12 +240,19 @@ export const reportRepository = {
       }
 
       return {
-        zone: row._id,
+        zoneId: row._id.toString(),
+        label: names.get(row._id.toString()) ?? UNKNOWN_ZONE_LABEL,
         jobs: row.jobs,
         areaM2: row.areaM2,
         revenueCents,
       };
     });
+
+    return aggregates.sort(
+      (a, b) =>
+        (order.get(a.zoneId) ?? Number.MAX_SAFE_INTEGER) -
+        (order.get(b.zoneId) ?? Number.MAX_SAFE_INTEGER),
+    );
   },
 
   /**

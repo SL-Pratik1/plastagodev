@@ -1,6 +1,6 @@
-import type { Place, Zone } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { connectMongo, disconnectMongo, isMongoConnected } from '../db/mongo.js';
+import { orderedZones } from '../domains/settings/zone-lookup.js';
 import { placeRepository } from '../domains/places/place.repository.js';
 import { logger } from '../lib/logger.js';
 
@@ -24,7 +24,8 @@ const log = logger.child({ module: 'seed-places' });
 interface SeedPlace {
   suburb: string;
   postcode: string;
-  zone: Zone;
+  /** The zone's SLUG, resolved to an id below — see the precondition in `main`. */
+  zone: string;
   latitude: number;
   longitude: number;
 }
@@ -121,17 +122,6 @@ const SUBURBS: readonly SeedPlace[] = [
   },
 ];
 
-/**
- * The id a suburb answers to.
- *
- * Slugged rather than numbered, so an id survives the table being reordered or a
- * suburb being inserted in the middle of it — and so a job's stored place id
- * stays readable in the database.
- */
-function slugOf(suburb: string): string {
-  return suburb.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-}
-
 async function main(): Promise<void> {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('seed-places refuses to run with NODE_ENV=production');
@@ -142,12 +132,35 @@ async function main(): Promise<void> {
     throw new Error('Could not reach MongoDB — is it running?');
   }
 
-  const places: Array<Omit<Place, 'label'>> = SUBURBS.map((place) => ({
-    id: slugOf(place.suburb),
+  /*
+   * ⚠️ The zones have to exist first, and every slug named above has to be one
+   * of them.
+   *
+   * `enum: ZONES` on the model used to catch a typo here; nothing does now, and
+   * a suburb pointing at a zone that is not there would seed cleanly and then
+   * price nothing — surfacing weeks later as a 503 on a booking form rather
+   * than as a failure of the script that caused it.
+   */
+  const zones = await orderedZones();
+  if (zones.length === 0) {
+    throw new Error('no zones — run `npm run seed:settings` before this script');
+  }
+
+  const zoneIds = new Map<string, string>();
+  for (const zone of zones) zoneIds.set(zone.slug, zone.id);
+
+  const strays = [...new Set(SUBURBS.map((place) => place.zone))].filter(
+    (slug) => !zoneIds.has(slug),
+  );
+  if (strays.length > 0) {
+    throw new Error(`unknown zone(s) in the suburb table: ${strays.join(', ')}`);
+  }
+
+  const places = SUBURBS.map((place) => ({
     suburb: place.suburb,
     postcode: place.postcode,
     state: 'NSW',
-    zone: place.zone,
+    zoneId: zoneIds.get(place.zone) ?? '',
     latitude: place.latitude,
     longitude: place.longitude,
   }));
@@ -155,16 +168,14 @@ async function main(): Promise<void> {
   await placeRepository.seed(places);
   log.info({ count: places.length }, 'places seeded');
 
-  const byZone = new Map<Zone, number>();
-  for (const place of places) byZone.set(place.zone, (byZone.get(place.zone) ?? 0) + 1);
+  const byZone = new Map<string, number>();
+  for (const place of places) byZone.set(place.zoneId, (byZone.get(place.zoneId) ?? 0) + 1);
 
   // eslint-disable-next-line no-console
   console.log(`
 Seeded ${String(await placeRepository.count())} suburbs into "${mongoose.connection.name}".
 
-  Sydney      ${String(byZone.get('sydney') ?? 0)}
-  Wollongong  ${String(byZone.get('wollongong') ?? 0)}
-  Newcastle   ${String(byZone.get('newcastle') ?? 0)}
+${zones.map((zone: { id: string; label: string }) => `  ${zone.label.padEnd(12)}${String(byZone.get(zone.id) ?? 0)}`).join('\n')}
 
 A suburb that is not in this table means "we do not go there".
 `);

@@ -1,5 +1,6 @@
 import type { AccountType, PageMeta, PortalAccount, PortalSupervisor } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { zoneLabelFor } from '../settings/zone-lookup.js';
 import { AccountModel, ContactModel } from '../accounts/account.model.js';
 import { UserModel } from '../auth/auth.model.js';
 
@@ -220,7 +221,7 @@ interface RawAccount {
   paymentTermsDays: number;
   poPolicy: PortalAccount['poPolicy'];
   captureMode: PortalAccount['captureMode'];
-  primaryZone: PortalAccount['primaryZone'];
+  primaryZoneId: mongoose.Types.ObjectId;
   preferredPickupWindow: string | null;
   approveNewSupervisors?: boolean;
 }
@@ -270,7 +271,13 @@ export const portalAccountRepository = {
       paymentTermsDays: row.paymentTermsDays,
       poPolicy: row.poPolicy,
       captureMode: row.captureMode,
-      primaryZone: row.primaryZone,
+      primaryZoneId: row.primaryZoneId.toString(),
+      /*
+       * Named server-side. A customer's portal may not read the zone register —
+       * the list of markets PlastaGo operates in is not a builder's business —
+       * so the one zone they are entitled to see arrives already resolved.
+       */
+      primaryZoneLabel: await zoneLabelFor(row.primaryZoneId),
       contacts: contacts.map((contact) => ({
         id: contact._id.toHexString(),
         name: contact.name,

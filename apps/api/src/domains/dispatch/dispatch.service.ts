@@ -500,7 +500,8 @@ function groupBySuburb(jobs: UnallocatedJob[]): AllocationBoard['unallocatedBySu
   for (const job of jobs) {
     const bucket = buckets.get(job.suburb) ?? {
       suburb: job.suburb,
-      zone: job.zone,
+      zoneId: job.zoneId,
+      zoneLabel: job.zoneLabel,
       jobs: [],
       totalExpectedAreaM2: 0,
       atRiskCount: 0,
@@ -535,7 +536,8 @@ function toDriverDay(driver: Driver, date: string, runs: Run[]): DriverDay {
       accountName: stop.accountName,
       siteName: stop.siteName,
       suburb: stop.suburb,
-      zone: stop.zone,
+      zoneId: stop.zoneId,
+      zoneLabel: stop.zoneLabel,
       serviceLevel: stop.serviceLevel,
       expectedAreaM2: stop.expectedAreaM2,
       atRisk: stop.atRisk,

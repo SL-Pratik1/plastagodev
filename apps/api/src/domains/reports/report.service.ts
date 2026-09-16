@@ -102,7 +102,8 @@ export const reportService = {
     return {
       filters: scoped,
       rows: rows.map((row) => ({
-        zone: row.zone,
+        zoneId: row.zoneId,
+        label: row.label,
         jobs: row.jobs,
         areaM2: round(row.areaM2),
         revenueExGst: centsToMoney(row.revenueCents),

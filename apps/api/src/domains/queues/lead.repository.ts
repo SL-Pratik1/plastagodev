@@ -9,6 +9,7 @@ import type {
   Zone,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { UNKNOWN_ZONE_LABEL, zoneLabels } from '../settings/zone-lookup.js';
 import { LeadAttachmentModel, LeadModel, LeadNoteModel } from './lead.model.js';
 
 /**
@@ -37,7 +38,7 @@ export interface CreateLeadInput {
   email: string;
   mobile: string | null;
   source: LeadSource;
-  zone: Zone | null;
+  zoneId: Zone | null;
   suburbs: string;
   typicalVolumeM2: number | null;
   expectedFrequency: string;
@@ -53,7 +54,8 @@ interface RawLead {
   mobile: string | null;
   status: LeadStatus;
   source: LeadSource;
-  zone: Zone | null;
+  /** Null when the lead is outside every serviced zone, which is a real answer. */
+  zoneId: mongoose.Types.ObjectId | null;
   suburbs: string;
   typicalVolumeM2: number | null;
   expectedFrequency: string;
@@ -73,7 +75,7 @@ const SORTABLE: Record<string, string> = {
   typicalVolumeM2: 'typicalVolumeM2',
 };
 
-function toListItem(row: RawLead): LeadListItem {
+function toListItem(row: RawLead, zones: ReadonlyMap<string, string>): LeadListItem {
   return {
     id: row._id.toHexString(),
     companyName: row.companyName,
@@ -82,7 +84,8 @@ function toListItem(row: RawLead): LeadListItem {
     mobile: row.mobile,
     status: row.status,
     source: row.source,
-    zone: row.zone,
+    zoneId: row.zoneId ? row.zoneId.toString() : null,
+    zoneLabel: row.zoneId ? (zones.get(row.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL) : null,
     suburbs: row.suburbs,
     typicalVolumeM2: row.typicalVolumeM2,
     expectedFrequency: row.expectedFrequency,
@@ -132,17 +135,18 @@ export const leadRepository = {
 
     const projection = query.q && !sortField ? { score: { $meta: 'textScore' } } : {};
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, zones] = await Promise.all([
       LeadModel.find(filter, projection)
         .sort(sort)
         .skip((query.page - 1) * query.pageSize)
         .limit(query.pageSize)
         .lean<RawLead[]>(),
       LeadModel.countDocuments(filter),
+      zoneLabels(),
     ]);
 
     return {
-      data: rows.map(toListItem),
+      data: rows.map((row) => toListItem(row, zones)),
       meta: {
         page: query.page,
         pageSize: query.pageSize,
@@ -159,13 +163,14 @@ export const leadRepository = {
     const row = await LeadModel.findById(id).lean<RawLead>();
     if (!row) return null;
 
-    const [notes, attachments] = await Promise.all([
+    const [notes, attachments, zones] = await Promise.all([
       LeadNoteModel.find({ leadId: row._id }).sort({ at: 1 }).lean(),
       LeadAttachmentModel.find({ leadId: row._id }).sort({ uploadedAt: 1 }).lean(),
+      zoneLabels(),
     ]);
 
     return {
-      ...toListItem(row),
+      ...toListItem(row, zones),
       heardAbout: row.heardAbout,
       notes: notes.map((note): LeadNote => ({
         id: note._id.toHexString(),
@@ -207,7 +212,8 @@ export const leadRepository = {
       .limit(5)
       .lean<RawLead[]>();
 
-    return rows.map(toListItem);
+    const zones = await zoneLabels();
+    return rows.map((row) => toListItem(row, zones));
   },
 
   /**

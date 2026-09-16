@@ -5,7 +5,6 @@ import {
   ObjectIdSchema,
   PageQuerySchema,
   SERVICE_LEVELS,
-  ZONES,
 } from '@plastago/shared';
 import * as z from 'zod';
 
@@ -53,7 +52,17 @@ export const ListJobsQuerySchema = PageQuerySchema.extend({
    * dispatch board and the question the office asks every morning.
    */
   driver: z.union([z.literal('unallocated'), ObjectIdSchema]).optional(),
-  zone: z.enum(ZONES).optional(),
+  /**
+   * ⚠️ A plain string, not an id schema.
+   *
+   * It IS a zone id, but this is a grid filter read out of the URL — and a
+   * bookmark taken before zones became records carries `?zoneId=sydney`.
+   * Validating the shape here would answer that bookmark with a 422 about a
+   * field nobody typed; the repository drops anything that is not an id and
+   * shows the unfiltered grid instead, which is something the office can see
+   * and act on.
+   */
+  zoneId: z.string().trim().max(40).optional(),
   invoiceStatus: z.enum(['not-invoiced', 'awaiting-po', 'invoiced', 'paid']).optional(),
   serviceLevel: z.enum(SERVICE_LEVELS).optional(),
   readyWindow: z.enum(READY_WINDOWS).optional(),

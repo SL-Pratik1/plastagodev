@@ -21,6 +21,7 @@ import type {
   Zone,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { UNKNOWN_ZONE_LABEL, toObjectId, zoneLabels } from '../settings/zone-lookup.js';
 import { fromDecimal128, toDecimal128 } from '../../lib/money.js';
 import {
   JobChargeModel,
@@ -68,7 +69,7 @@ export interface ListJobsQuery {
   account?: string | undefined;
   builder?: string | undefined;
   driver?: string | undefined;
-  zone?: Zone | undefined;
+  zoneId?: Zone | undefined;
   invoiceStatus?: Job['invoiceStatus'] | undefined;
   serviceLevel?: ServiceLevel | undefined;
   readyWindow?: string | undefined;
@@ -98,7 +99,7 @@ export interface CreateJobInput {
   addressLine: string;
   suburb: string;
   postcode: string;
-  zone: Zone;
+  zoneId: Zone;
   latitude: number;
   longitude: number;
   /** I3 — whether the pin is the site itself or the middle of the suburb. */
@@ -166,7 +167,7 @@ interface RawJob {
   addressLine: string;
   suburb: string;
   postcode: string;
-  zone: Zone;
+  zoneId: mongoose.Types.ObjectId;
   latitude: number;
   longitude: number;
   locationSource: LocationSource;
@@ -239,7 +240,7 @@ interface JobFilter {
   driverId?: mongoose.Types.ObjectId | null;
   status?: JobStatus | { $in: JobStatus[] };
   builderName?: string;
-  zone?: Zone;
+  zoneId?: mongoose.Types.ObjectId;
   invoiceStatus?: Job['invoiceStatus'];
   serviceLevel?: ServiceLevel;
   readyDate?: { $gte?: string; $lte?: string };
@@ -303,10 +304,21 @@ export const jobRepository = {
      * collection. Resolved for the WHOLE PAGE in one query rather than one per
      * row — the classic N+1 that makes a 20-row grid issue 21 queries.
      */
-    const pending = await jobIdsWithPendingCharges(rows.map((row) => row._id));
+    /*
+     * The zone NAMES, for the whole page at once.
+     *
+     * ⚠️ The grid shows the zone's CURRENT name, unlike an invoice line, which
+     * froze its own text when the job was priced. Renaming a zone should move
+     * every row of this grid and no figure on any invoice — which is exactly
+     * the split between this join and `appliedRate.zoneLabel`.
+     */
+    const [pending, zones] = await Promise.all([
+      jobIdsWithPendingCharges(rows.map((row) => row._id)),
+      zoneLabels(),
+    ]);
 
     return {
-      data: rows.map((row) => toListItem(row, pending.has(row._id.toHexString()))),
+      data: rows.map((row) => toListItem(row, pending.has(row._id.toHexString()), zones)),
       meta: {
         page: query.page,
         pageSize: query.pageSize,
@@ -352,6 +364,7 @@ export const jobRepository = {
       ...toListItem(
         row,
         charges.some((charge) => charge.approvalState === 'pending'),
+        await zoneLabels(),
       ),
       freightItem: row.freightItem,
       notes: row.notes,
@@ -543,7 +556,7 @@ export const jobRepository = {
       addressLine: input.addressLine,
       suburb: input.suburb,
       postcode: input.postcode,
-      zone: input.zone,
+      zoneId: new mongoose.Types.ObjectId(input.zoneId),
       latitude: input.latitude,
       longitude: input.longitude,
       locationSource: input.locationSource,
@@ -588,7 +601,8 @@ export const jobRepository = {
       appliedRate: {
         rateCardId: input.appliedRate.rateCardId,
         rateCardLabel: input.appliedRate.rateCardLabel,
-        zone: input.appliedRate.zone,
+        zoneId: new mongoose.Types.ObjectId(input.appliedRate.zoneId),
+        zoneLabel: input.appliedRate.zoneLabel,
         scheduleFrom: input.appliedRate.scheduleFrom,
         serviceCharge: toDecimal128(input.appliedRate.serviceCharge),
         ratePerM2: toDecimal128(input.appliedRate.ratePerM2),
@@ -599,7 +613,7 @@ export const jobRepository = {
     });
 
     const row = created.toObject() as unknown as RawJob;
-    return toListItem(row, false);
+    return toListItem(row, false, await zoneLabels());
   },
 
   /** Removes a job and everything keyed to it. Compensation for a failed create. */
@@ -730,9 +744,12 @@ export const jobRepository = {
   async runSheetStops(runId: string): Promise<RunSheetStop[]> {
     if (!mongoose.isValidObjectId(runId)) return [];
 
-    const rows = await JobModel.find({ runId: new mongoose.Types.ObjectId(runId) })
-      .sort({ runSequence: 1 })
-      .lean<Array<RawJob & { runSequence: number | null }>>();
+    const [rows, zones] = await Promise.all([
+      JobModel.find({ runId: new mongoose.Types.ObjectId(runId) })
+        .sort({ runSequence: 1 })
+        .lean<Array<RawJob & { runSequence: number | null }>>(),
+      zoneLabels(),
+    ]);
 
     return rows.map((row, index) => ({
       id: row._id.toHexString(),
@@ -747,7 +764,8 @@ export const jobRepository = {
       lotNumber: row.lotNumber ?? null,
       addressLine: row.addressLine,
       suburb: row.suburb,
-      zone: row.zone,
+      zoneId: row.zoneId.toString(),
+      zoneLabel: zones.get(row.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
       poNumber: row.poNumber ?? null,
       contactName: row.siteContactName ?? null,
       contactMobile: row.siteContactMobile ?? null,
@@ -780,6 +798,7 @@ export const jobRepository = {
       status: { $in: OPEN_STATUSES },
     }).lean<Array<RawJob & { runId: mongoose.Types.ObjectId | null }>>();
 
+    const zones = await zoneLabels();
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
 
     return rows.map((row) => ({
@@ -791,7 +810,8 @@ export const jobRepository = {
       accountName: row.accountName,
       siteName: row.siteName,
       suburb: row.suburb,
-      zone: row.zone,
+      zoneId: row.zoneId.toString(),
+      zoneLabel: zones.get(row.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
       driverName: row.driverName ?? null,
       runId: row.runId ? row.runId.toHexString() : null,
       runName: null,
@@ -809,7 +829,11 @@ export const jobRepository = {
 
 /* ── Mapping ─────────────────────────────────────────────────────────────── */
 
-function toListItem(row: RawJob, hasPendingCharges: boolean): JobListItem {
+function toListItem(
+  row: RawJob,
+  hasPendingCharges: boolean,
+  zones: ReadonlyMap<string, string>,
+): JobListItem {
   return {
     id: row._id.toHexString(),
     jobNumber: row.jobNumber,
@@ -823,7 +847,8 @@ function toListItem(row: RawJob, hasPendingCharges: boolean): JobListItem {
     addressLine: row.addressLine,
     suburb: row.suburb,
     postcode: row.postcode,
-    zone: row.zone,
+    zoneId: row.zoneId.toString(),
+    zoneLabel: zones.get(row.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
     latitude: row.latitude,
     longitude: row.longitude,
     accessNotes: row.accessNotes,
@@ -929,7 +954,17 @@ function buildFilter(query: ListJobsQuery, scope: JobScope): JobFilter {
   }
   if (query.status) filter.status = query.status;
   if (query.builder) filter.builderName = query.builder;
-  if (query.zone) filter.zone = query.zone;
+  /*
+   * ⚠️ Silently dropped when it is not an id at all, rather than 422'd.
+   *
+   * The grid's zone filter is in the URL, so a bookmark taken before zones
+   * became records carries `?zoneId=sydney`. Refusing it would break the
+   * bookmark with a validation error about a field the person never typed;
+   * ignoring it shows the unfiltered grid, which is what they can see and act
+   * on.
+   */
+  const zoneFilter = query.zoneId ? toObjectId(query.zoneId) : null;
+  if (zoneFilter) filter.zoneId = zoneFilter;
   if (query.invoiceStatus) filter.invoiceStatus = query.invoiceStatus;
   if (query.serviceLevel) filter.serviceLevel = query.serviceLevel;
 

@@ -959,7 +959,8 @@ function toRunStop(row: DriverStopRow): RunStop {
     addressLine: row.addressLine,
     suburb: row.suburb,
     postcode: row.postcode,
-    zone: row.zone,
+    zoneId: row.zoneId,
+    zoneLabel: row.zoneLabel,
     latitude: row.latitude,
     longitude: row.longitude,
     // The contract wants a number here. The distinction between "no area" and

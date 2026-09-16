@@ -126,7 +126,7 @@ export const leadService = {
       email: input.email,
       mobile: input.mobile.trim() || null,
       source: input.source,
-      zone: input.zone,
+      zoneId: input.zoneId,
       suburbs: input.suburbs,
       typicalVolumeM2: input.typicalVolumeM2,
       expectedFrequency: input.expectedFrequency,
@@ -178,7 +178,15 @@ export const leadService = {
         category: 'queue',
         severity: 'action',
         title: `New website enquiry — ${input.companyName}`,
-        body: `${input.contactName} asked about ${String(input.typicalVolumeM2)} m² in ${input.zone}. They have been sent an acknowledgement; somebody owes them a call.`,
+        /*
+         * ⚠️ The SUBURBS they typed, not the zone id.
+         *
+         * This is an alert somebody reads on a phone. It used to interpolate
+         * the zone, which read as "Sydney" only because the slug happened to
+         * look like a name — an ObjectId there would be noise, and the free-text
+         * suburbs are what the enquirer actually said anyway.
+         */
+        body: `${input.contactName} asked about ${String(input.typicalVolumeM2)} m² in ${input.suburbs}. They have been sent an acknowledgement; somebody owes them a call.`,
         href: `/admin/queues/leads/${id}`,
         subjectKey: `lead-new:${id}`,
       });
@@ -350,7 +358,7 @@ export const leadService = {
       poPolicy: input.poPolicy,
       captureMode: input.captureMode,
       paymentTermsDays: input.paymentTermsDays,
-      primaryZone: input.primaryZone,
+      primaryZoneId: input.primaryZoneId,
       /*
        * The lead's own contact carries across when the office did not correct
        * it — otherwise the first thing they do with a brand-new account is
