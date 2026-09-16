@@ -5,6 +5,7 @@ import type {
   InvoicingSettings,
   RateCardCreate,
   RateScheduleCreate,
+  ZoneCreate,
 } from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
@@ -112,6 +113,41 @@ function usePricingMutation<TInput, TResult>(mutationFn: (input: TInput) => Prom
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs.all });
     },
   });
+}
+
+/* ── Zones (M6.3) ────────────────────────────────────────────────────────── */
+
+/**
+ * ⚠️ All four use `usePricingMutation`, which invalidates `lookups.all` as well
+ * as settings. The zone register is cached for an HOUR, so without it a zone
+ * added here would be missing from every picker and filter for the rest of the
+ * session — which reads as the save having silently failed.
+ */
+export function useCreateZone() {
+  const { settings } = useServices();
+  return usePricingMutation((input: ZoneCreate) => settings.createZone(input));
+}
+
+export function useRenameZone() {
+  const { settings } = useServices();
+  return usePricingMutation((input: { id: string; label: string }) =>
+    settings.renameZone(input.id, { label: input.label }),
+  );
+}
+
+export function useReorderZones() {
+  const { settings } = useServices();
+  return usePricingMutation((zoneIds: readonly string[]) => settings.reorderZones(zoneIds));
+}
+
+export function useArchiveZone() {
+  const { settings } = useServices();
+  return usePricingMutation((id: string) => settings.archiveZone(id));
+}
+
+export function useRestoreZone() {
+  const { settings } = useServices();
+  return usePricingMutation((id: string) => settings.restoreZone(id));
 }
 
 export function useCreateRateCard() {

@@ -101,6 +101,9 @@ import type {
   UserDraft,
   UserListItem,
   UserStatus,
+  ZoneCreate,
+  ZoneSummary,
+  ZoneUpdate,
 } from '@plastago/shared';
 
 /**
@@ -552,6 +555,29 @@ export interface SettingsService {
   uploadLogo: (file: File) => Promise<string | null>;
   /** Take the logo off. Invoices fall back to the company name in text. */
   removeLogo: () => Promise<void>;
+
+  /* ── Zones (M6.3) ────────────────────────────────────────────────────── */
+
+  /**
+   * A new service area, priced by copying one that already exists.
+   *
+   * ⚠️ `copyRatesFromZoneId` is required. A zone with no rates prices nothing on
+   * any card, and the first sign of it is a booking form refusing to quote —
+   * weeks later, on somebody else's screen.
+   */
+  createZone: (input: ZoneCreate) => Promise<ZoneSummary>;
+  /** Renames the label. The id and slug are deliberately not reachable. */
+  renameZone: (id: string, input: ZoneUpdate) => Promise<ZoneSummary>;
+  /**
+   * The whole list, in the order it should read.
+   *
+   * ⚠️ Whole-list, not one zone's position: two moves landing together would
+   * otherwise leave two zones claiming the same slot.
+   */
+  reorderZones: (zoneIds: readonly string[]) => Promise<ZoneSummary[]>;
+  /** ⚠️ RETIRES the zone. It is never deleted — historical records still need it. */
+  archiveZone: (id: string) => Promise<ZoneSummary>;
+  restoreZone: (id: string) => Promise<ZoneSummary>;
 
   /* ── Rate cards (M6.1, M6.2) ─────────────────────────────────────────── */
 

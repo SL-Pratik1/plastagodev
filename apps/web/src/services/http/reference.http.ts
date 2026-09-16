@@ -23,6 +23,9 @@ import {
   type RateScheduleCreate,
   type UserDraft,
   type UserStatus,
+  type ZoneCreate,
+  ZoneSummarySchema,
+  type ZoneUpdate,
 } from '@plastago/shared';
 import * as z from 'zod';
 import type {
@@ -316,6 +319,46 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
     },
 
     /* ── Rate cards (M6.1, M6.2) ───────────────────────────────────────── */
+
+    createZone: (input: ZoneCreate) =>
+      viaService(() =>
+        api.request(`${base}/zones`, { method: 'POST', body: input, schema: ZoneSummarySchema }),
+      ),
+
+    renameZone: (id: string, input: ZoneUpdate) =>
+      viaService(() =>
+        api.request(`${base}/zones/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          body: input,
+          schema: ZoneSummarySchema,
+        }),
+      ),
+
+    reorderZones: (zoneIds: readonly string[]) =>
+      viaService(() =>
+        api.request(`${base}/zones/order`, {
+          method: 'PUT',
+          body: { zoneIds },
+          schema: z.array(ZoneSummarySchema),
+        }),
+      ),
+
+    /* ⚠️ Returns the RETIRED zone, not 204 — the screen shows what happened. */
+    archiveZone: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/zones/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          schema: ZoneSummarySchema,
+        }),
+      ),
+
+    restoreZone: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/zones/${encodeURIComponent(id)}/restore`, {
+          method: 'POST',
+          schema: ZoneSummarySchema,
+        }),
+      ),
 
     createRateCard: (input: RateCardCreate) =>
       viaService(() =>

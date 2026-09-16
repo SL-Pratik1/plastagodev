@@ -15,6 +15,7 @@ import {
   type RateCardSummary,
   type RateSchedule,
   type Settings,
+  type ZoneSummary,
   type ZoneRateInput,
 } from '@plastago/shared';
 import {
@@ -41,9 +42,18 @@ import {
   TabsPanel,
   TabsTrigger,
   Textarea,
+  cn,
   useToast,
 } from '@plastago/ui';
-import { ChevronDownIcon, EyeIcon, ImageIcon, PlusIcon, Trash2Icon, UploadIcon } from 'lucide-react';
+import {
+  ChevronDownIcon,
+  ChevronUpIcon,
+  EyeIcon,
+  ImageIcon,
+  PlusIcon,
+  Trash2Icon,
+  UploadIcon,
+} from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { useZoneOptions } from '@/features/lookups/queries';
@@ -68,6 +78,11 @@ import {
   useSettings,
   useUpdateAdditionalService,
   useUpdateInvoiceTemplate,
+  useArchiveZone,
+  useCreateZone,
+  useRenameZone,
+  useReorderZones,
+  useRestoreZone,
 } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
@@ -444,6 +459,12 @@ function PricingSection({ settings }: { settings: Settings }) {
         closed the day before; nothing already priced moves.
       </Alert>
 
+      {/*
+        Zones FIRST, because they are the columns of everything below: a rate
+        schedule prices one row per zone and the server refuses a partial one.
+      */}
+      <ZonesCard zones={settings.pricing.zones} />
+
       <Card>
         <CardHeader className="flex flex-wrap items-start justify-between gap-3">
           <span>
@@ -524,6 +545,416 @@ function PricingSection({ settings }: { settings: Settings }) {
  * no other home in the product. Collapsed keeps the common case clean without
  * making the rare one a database query.
  */
+/**
+ * The service zones (M6.3).
+ *
+ * ── Why zones sit above rate cards, and not on a tab of their own ─────────
+ * Because they are the COLUMNS of everything below. Every rate schedule prices
+ * one row per zone and the server refuses a partial one, so adding a zone here
+ * changes the shape of every form underneath — and that is a cause and effect
+ * somebody should be able to see without navigating.
+ *
+ * ── Why a new zone is not usable the moment it is created ─────────────────
+ * A job is zoned by its SUBURB. Until a suburb points at a new zone nothing can
+ * be booked in it and no quote will ever name it, so each row says how many
+ * suburbs it has and links to where that is fixed.
+ *
+ * ── Why there is no capability check in here ──────────────────────────────
+ * The whole screen is behind `settings:manage`, and that capability belongs to
+ * the administrator alone — `operations` is not granted it. A second check on
+ * this card could never fail, which is worse than none: it reads as though the
+ * gate were here, so the day somebody widens it they widen the wrong file.
+ */
+function ZonesCard({ zones }: { zones: readonly ZoneSummary[] }) {
+  const [adding, setAdding] = useState(false);
+  const order = zones.filter((zone) => !zone.archived).map((zone) => zone.id);
+
+  return (
+    <>
+      <Card>
+        <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+          <span>
+            <CardTitle>Service zones</CardTitle>
+            <CardDescription>
+              Every rate schedule prices one row per zone, and a job is zoned by its suburb. The
+              order here is the order they appear in on every rate grid and filter.
+            </CardDescription>
+          </span>
+          <Button
+            size="sm"
+            disabled={zones.length === 0}
+            title={zones.length === 0 ? 'A new zone copies its prices from an existing one' : undefined}
+            onClick={() => {
+              setAdding(true);
+            }}
+          >
+            <PlusIcon aria-hidden />
+            New zone
+          </Button>
+        </CardHeader>
+
+        <CardContent className="space-y-2">
+          {zones.map((zone, index) => (
+            <ZoneRow
+              key={zone.id}
+              zone={zone}
+              order={order}
+              isFirst={index === 0}
+              isLast={index === zones.length - 1}
+            />
+          ))}
+
+          {zones.length === 0 && (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              No zones yet. Nothing can be priced until there is at least one.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <AddZoneDialog
+        zones={zones}
+        open={adding}
+        onClose={() => {
+          setAdding(false);
+        }}
+      />
+    </>
+  );
+}
+
+function ZoneRow({
+  zone,
+  order,
+  isFirst,
+  isLast,
+}: {
+  zone: ZoneSummary;
+  order: readonly string[];
+  isFirst: boolean;
+  isLast: boolean;
+}) {
+  const toast = useToast();
+  const rename = useRenameZone();
+  const reorder = useReorderZones();
+  const archive = useArchiveZone();
+  const restore = useRestoreZone();
+
+  const [label, setLabel] = useState(zone.label);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+
+  const dirty = label.trim() !== zone.label && label.trim() !== '';
+
+  /*
+   * ── Up and down, not drag ─────────────────────────────────────────────
+   * There are three zones today and there will not be thirty. A drag handle
+   * costs a dependency this app does not carry and needs a keyboard equivalent
+   * to be usable at all — two buttons ARE that equivalent, so they are the whole
+   * control.
+   *
+   * ⚠️ Each press sends the WHOLE new order, never this row's new number. The
+   * server then assigns 0..n with no ties, so two people reordering at once
+   * cannot interleave into an order neither of them chose.
+   */
+  const submitMove = async (direction: -1 | 1) => {
+    const from = order.indexOf(zone.id);
+    const next = [...order];
+    const [moved] = next.splice(from, 1);
+    if (moved === undefined) return;
+    next.splice(from + direction, 0, moved);
+
+    try {
+      await reorder.mutateAsync(next);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  const submitRename = async () => {
+    try {
+      await rename.mutateAsync({ id: zone.id, label: label.trim() });
+      toast.success(`Renamed to ${label.trim()}`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  const submitArchive = async () => {
+    try {
+      await archive.mutateAsync(zone.id);
+      setConfirmArchive(false);
+      toast.success(
+        `${zone.label} retired`,
+        'Jobs already booked in it keep their zone and their prices.',
+      );
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  const submitRestore = async () => {
+    try {
+      await restore.mutateAsync(zone.id);
+      toast.success(`${zone.label} is back in service`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <div className={cn('rounded-lg border border-border p-3', zone.archived && 'opacity-70')}>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end">
+        <label className="text-xs text-muted-foreground">
+          Zone
+          <Input
+            value={label}
+            className="mt-1"
+            disabled={zone.archived}
+            aria-label={`Name for ${zone.slug}`}
+            onChange={(event) => {
+              setLabel(event.target.value);
+            }}
+          />
+          {/* Permanent, and shown for the same reason a charge code is. */}
+          <span className="mt-1 block font-mono text-[11px]">{zone.slug}</span>
+        </label>
+
+        <span className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={isFirst || zone.archived || reorder.isPending}
+            onClick={() => void submitMove(-1)}
+          >
+            <ChevronUpIcon aria-hidden />
+            <span className="sr-only">Move {zone.label} up</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={isLast || zone.archived || reorder.isPending}
+            onClick={() => void submitMove(1)}
+          >
+            <ChevronDownIcon aria-hidden />
+            <span className="sr-only">Move {zone.label} down</span>
+          </Button>
+        </span>
+
+        <span className="flex items-center gap-1">
+          {zone.archived ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={restore.isPending}
+              onClick={() => void submitRestore()}
+            >
+              {restore.isPending && <Spinner className="text-current" />}
+              Restore
+            </Button>
+          ) : (
+            <>
+              <Button
+                size="sm"
+                variant={dirty ? 'default' : 'outline'}
+                disabled={!dirty || rename.isPending}
+                onClick={() => void submitRename()}
+              >
+                {rename.isPending && <Spinner className="text-current" />}
+                Save
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                /*
+                  From the SERVER's answer, not a rule re-derived here. A zone
+                  with suburbs or customers still pointing at it cannot be
+                  retired, and the counts below say which.
+                */
+                disabled={!zone.archivable}
+                title={
+                  zone.archivable
+                    ? undefined
+                    : zone.placeCount > 0
+                      ? `${String(zone.placeCount)} suburb${zone.placeCount === 1 ? '' : 's'} still in this zone — move them first`
+                      : `${String(zone.accountCount)} customer${zone.accountCount === 1 ? ' has' : 's have'} this as their primary zone`
+                }
+                onClick={() => {
+                  setConfirmArchive(true);
+                }}
+              >
+                <Trash2Icon aria-hidden />
+                <span className="sr-only">Retire {zone.label}</span>
+              </Button>
+            </>
+          )}
+        </span>
+      </div>
+
+      <p className="mt-2 text-xs text-muted-foreground">
+        {zone.archived ? (
+          <span className="text-warning">Retired — not offered on new work.</span>
+        ) : zone.placeCount === 0 ? (
+          <span className="text-warning">
+            No suburbs yet — nothing can be booked in this zone until one points at it.
+          </span>
+        ) : (
+          <>
+            {zone.placeCount} suburb{zone.placeCount === 1 ? '' : 's'} · {zone.jobCount} job
+            {zone.jobCount === 1 ? '' : 's'}
+          </>
+        )}{' '}
+        <Link className="underline underline-offset-2" to={`/admin/suburbs?zoneId=${zone.id}`}>
+          Manage suburbs
+        </Link>
+      </p>
+
+      <ConfirmDialog
+        open={confirmArchive}
+        title={`Retire ${zone.label}?`}
+        description={`It stops being offered on new bookings and on new rate schedules. Everything already priced in it — ${String(zone.jobCount)} job${zone.jobCount === 1 ? '' : 's'} — keeps its zone and its figures, and you can put it back at any time.`}
+        confirmLabel="Retire zone"
+        tone="destructive"
+        pending={archive.isPending}
+        onCancel={() => {
+          setConfirmArchive(false);
+        }}
+        onConfirm={() => void submitArchive()}
+      />
+    </div>
+  );
+}
+
+/**
+ * Open a new service area.
+ *
+ * ── Why it asks which zone to copy ────────────────────────────────────────
+ * A zone with no prices prices NOTHING on any card, so the first booking into
+ * it is refused with an error the office cannot act on. Copying happens per
+ * card, so each customer's negotiated discount comes across — Clarendon's new
+ * row from Clarendon's, not one flat number applied to everybody.
+ */
+function AddZoneDialog({
+  zones,
+  open,
+  onClose,
+}: {
+  zones: readonly ZoneSummary[];
+  open: boolean;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const create = useCreateZone();
+
+  const live = zones.filter((zone) => !zone.archived);
+
+  const [label, setLabel] = useState('');
+  const [copyFrom, setCopyFrom] = useState(live[0]?.id ?? '');
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = () => {
+    setLabel('');
+    setCopyFrom(live[0]?.id ?? '');
+    setError(null);
+  };
+
+  const submit = async () => {
+    if (label.trim() === '') {
+      setError('Name the zone — it appears on every rate card and every quote');
+      return;
+    }
+    if (copyFrom === '') {
+      setError('Choose a zone to copy prices from');
+      return;
+    }
+    setError(null);
+
+    try {
+      const zone = await create.mutateAsync({
+        label: label.trim(),
+        copyRatesFromZoneId: copyFrom,
+      });
+      reset();
+      onClose();
+      toast.success(
+        `${zone.label} added`,
+        'Every rate card now prices it. Point a suburb at it before booking.',
+      );
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="New zone"
+      description="A service area with its own service charge and rate per m²."
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={create.isPending} onClick={() => void submit()}>
+            {create.isPending && <Spinner className="text-current" />}
+            Add zone
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error && <Alert variant="destructive" title={error} />}
+
+        <Field id="zone-label" label="Name" required hint="How it reads on every quote and grid.">
+          {(aria) => (
+            <Input
+              {...aria}
+              value={label}
+              placeholder="Central Coast"
+              onChange={(event) => {
+                setLabel(event.target.value);
+              }}
+            />
+          )}
+        </Field>
+
+        <Field
+          id="zone-copy"
+          label="Copy prices from"
+          required
+          hint="Each rate card copies its own figures for that zone, so per-customer discounts carry across."
+        >
+          {(aria) => (
+            <Select
+              {...aria}
+              value={copyFrom}
+              onChange={(event) => {
+                setCopyFrom(event.target.value);
+              }}
+            >
+              {live.map((zone) => (
+                <option key={zone.id} value={zone.id}>
+                  {zone.label}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+
+        <Alert variant="neutral" title="Nothing can be booked here yet">
+          A job is zoned by its suburb, so this zone stays empty until a suburb points at it. Add
+          or re-zone one on the Suburbs screen straight after.
+        </Alert>
+      </div>
+    </Dialog>
+  );
+}
+
 function RateCardRow({
   card,
   zoneOptions,
