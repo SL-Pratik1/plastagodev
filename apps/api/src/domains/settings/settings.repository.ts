@@ -155,22 +155,51 @@ export const settingsRepository = {
       templates,
       accountCounts,
       templateCounts,
-    ] =
-      await Promise.all([
-        SettingsModel.findById(SETTINGS_SINGLETON_ID).lean<RawSettings>(),
-        RateCardModel.find().sort({ _id: 1 }).lean<RawRateCard[]>(),
-        ZoneRateModel.find().lean<RawZoneRate[]>(),
-        AdditionalServiceModel.find().sort({ _id: 1 }).lean(),
-        InvoiceTemplateModel.find().sort({ _id: 1 }).lean(),
-        countAccountsPerRateCard(),
-        countAccountsPerTemplate(),
-      ]);
+    ] = await Promise.all([
+      SettingsModel.findById(SETTINGS_SINGLETON_ID).lean<RawSettings>(),
+      RateCardModel.find().sort({ _id: 1 }).lean<RawRateCard[]>(),
+      ZoneRateModel.find().lean<RawZoneRate[]>(),
+      AdditionalServiceModel.find().sort({ _id: 1 }).lean(),
+      InvoiceTemplateModel.find().sort({ _id: 1 }).lean(),
+      countAccountsPerRateCard(),
+      countAccountsPerTemplate(),
+    ]);
 
-    if (!scalars) {
-      // Seeding is a deployment step, not a request-time fallback: inventing
-      // defaults here would let a misconfigured environment price real jobs.
-      throw new Error('Settings have not been seeded — run `npm run seed:settings`');
-    }
+    /*
+     * A settings document that does not exist yet — a brand-new install, before
+     * the super-admin has configured anything.
+     *
+     * ── Why this no longer throws ────────────────────────────────────────
+     * It used to, on the reasoning that inventing defaults would let a
+     * misconfigured environment price real jobs. The instinct was right; the
+     * blast radius was wrong. This is the read behind the SETTINGS SCREEN — the
+     * one place the super-admin goes to fix exactly this — so throwing here
+     * rendered a blank page with no explanation and no way forward. The first
+     * thing a new operator does is the one thing that did not work.
+     *
+     * ⚠️ WHAT THIS DOES NOT RELAX: nothing here can price a job. Money comes
+     * from `resolveRate`, which reads the rate-card collections and returns
+     * null when they are empty, and the booking is refused with "no rate"
+     * rather than priced at zero. The guard that matters is untouched.
+     *
+     * The screen knows it is looking at an unconfigured install from `rateCards`
+     * being empty — no extra flag on the contract to keep in step.
+     *
+     * The numbers are the SCHEMA's own declared defaults, not new ones — the
+     * same values Mongoose would write the moment the document is created, so
+     * reading before the first save and reading after it agree.
+     */
+    const resolved: RawSettings = scalars ?? {
+      slaBusinessDays: 5,
+      nextJobNumber: SEQUENCE_STARTS.nextJobNumber,
+      nextInvoiceNumber: SEQUENCE_STARTS.nextInvoiceNumber,
+      splitAdditionalCharges: true,
+      defaultPaymentTermsDays: 7,
+      // No default in the schema either: a cost per job is a real figure
+      // somebody has to supply, and zero reads as "not set yet" rather than
+      // as a claim that jobs are free.
+      assumedCostPerJob: toDecimal128('0'),
+    };
 
     /*
      * Rates grouped first by card, then by the date their schedule starts.
@@ -271,7 +300,7 @@ export const settingsRepository = {
         additionalServices: additionalServices
           .filter((service) => (service._id as string) !== UNBILLED_SERVICE_CODE)
           .map((service): AdditionalServiceSetting => toService(service)),
-        assumedCostPerJob: fromDecimal128(scalars.assumedCostPerJob),
+        assumedCostPerJob: fromDecimal128(resolved.assumedCostPerJob),
       },
       invoicing: {
         templates: templates.map((template): InvoiceTemplate => {
@@ -307,9 +336,9 @@ export const settingsRepository = {
             deletable: assignedAccountCount === 0,
           };
         }),
-        invoiceNumberPrefix: scalars.invoiceNumberPrefix ?? '',
-        splitAdditionalCharges: scalars.splitAdditionalCharges,
-        defaultPaymentTermsDays: scalars.defaultPaymentTermsDays,
+        invoiceNumberPrefix: resolved.invoiceNumberPrefix ?? '',
+        splitAdditionalCharges: resolved.splitAdditionalCharges,
+        defaultPaymentTermsDays: resolved.defaultPaymentTermsDays,
         /*
          * ⚠️ Every optional presentation field is coalesced, for the same
          * reason as `layout` above: `.lean()` returns the stored document, and
@@ -322,25 +351,25 @@ export const settingsRepository = {
          * placeholder, so an unmigrated database produces a plainer invoice
          * instead of a broken one.
          */
-        logoKey: scalars.logoKey ?? '',
-        companyName: scalars.companyName ?? '',
-        companyAbn: scalars.companyAbn ?? '',
-        companyAddress: scalars.companyAddress ?? '',
-        companyPhone: scalars.companyPhone ?? '',
-        companyEmail: scalars.companyEmail ?? '',
-        termsText: scalars.termsText ?? '',
-        footerText: scalars.footerText ?? '',
-        bankBsb: scalars.bankBsb ?? '',
-        bankAccount: scalars.bankAccount ?? '',
-        bankAccountName: scalars.bankAccountName ?? '',
-        showGbcaBadge: scalars.showGbcaBadge ?? false,
+        logoKey: resolved.logoKey ?? '',
+        companyName: resolved.companyName ?? '',
+        companyAbn: resolved.companyAbn ?? '',
+        companyAddress: resolved.companyAddress ?? '',
+        companyPhone: resolved.companyPhone ?? '',
+        companyEmail: resolved.companyEmail ?? '',
+        termsText: resolved.termsText ?? '',
+        footerText: resolved.footerText ?? '',
+        bankBsb: resolved.bankBsb ?? '',
+        bankAccount: resolved.bankAccount ?? '',
+        bankAccountName: resolved.bankAccountName ?? '',
+        showGbcaBadge: resolved.showGbcaBadge ?? false,
         /*
          * A link to the stored mark, so the screen can show what the invoices
          * actually print rather than the storage key, which tells a person
          * nothing. Derived on read and never written back — see the note on
          * `InvoicingSettingsReadSchema`.
          */
-        logoUrl: await logoUrlFor(scalars.logoKey ?? ''),
+        logoUrl: await logoUrlFor(resolved.logoKey ?? ''),
       },
     };
   },
@@ -746,13 +775,16 @@ export const settingsRepository = {
       .select({ slaBusinessDays: 1 })
       .lean<{ slaBusinessDays: number }>();
 
-    if (!scalars) {
-      // Same reasoning as `get()`: a default invented here would silently give
-      // every job in a misconfigured environment the wrong promised date.
-      throw new Error('Settings have not been seeded — run `npm run seed:settings`');
-    }
-
-    return scalars.slaBusinessDays;
+    /*
+     * Same fallback as `get()`, and the same reasoning: this is a PROMISED DATE,
+     * not a price. A brand-new install has no settings document yet, and
+     * refusing to say when a pickup is due — on the very first booking, before
+     * anyone has had a chance to set the number — is a worse answer than the
+     * schema default that document would be created with anyway.
+     *
+     * Five business days is that schema default, not a figure invented here.
+     */
+    return scalars?.slaBusinessDays ?? 5;
   },
 
   /**
@@ -1009,7 +1041,8 @@ async function countAccountsPerTemplate(): Promise<Map<string, number>> {
   ]);
 
   return new Map(
-    rows.filter((row): row is { _id: string; count: number } => row._id !== null)
+    rows
+      .filter((row): row is { _id: string; count: number } => row._id !== null)
       .map((row) => [row._id, row.count]),
   );
 }

@@ -27,12 +27,16 @@ import {
 import { CircleDollarSignIcon } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Controller, useForm, useWatch } from 'react-hook-form';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import * as z from 'zod';
 import { PageHeader } from '@/components/page-header';
 import { PlacePicker } from '@/components/place-picker';
 import { useAccountOptions } from '@/features/lookups/queries';
-import { useBookablePurchaseOrders, useCreateJob, useJobPricePreview } from '@/features/jobs/queries';
+import {
+  useBookablePurchaseOrders,
+  useCreateJob,
+  useJobPricePreview,
+} from '@/features/jobs/queries';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
 import { isServiceError } from '@/services/service-error';
@@ -60,9 +64,17 @@ import { isServiceError } from '@/services/service-error';
 const FormSchema = z.object({
   accountId: z.string().min(1, 'Choose the account being invoiced'),
   /* ── The address, typed on the job (Matt, 0:29) ───────────────────── */
-  siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120, 'Keep the site name under 120 characters'),
+  siteName: z
+    .string()
+    .trim()
+    .min(1, 'Name the place — drivers navigate by it')
+    .max(120, 'Keep the site name under 120 characters'),
   lotNumber: z.string().trim().max(30, 'A lot number is at most 30 characters'),
-  addressLine: z.string().trim().min(1, 'Enter the street address').max(160, 'Keep the address under 160 characters'),
+  addressLine: z
+    .string()
+    .trim()
+    .min(1, 'Enter the street address')
+    .max(160, 'Keep the address under 160 characters'),
   /** Picked, not typed — carries the zone that prices the job and the map pin. */
   placeId: z.string().min(1, 'Choose the suburb from the list'),
   builderName: z.string().trim().max(120, 'Keep the builder name under 120 characters'),
@@ -166,8 +178,7 @@ export function AdminJobCreatePage() {
    */
   const purchaseOrders = useBookablePurchaseOrders(accountId || undefined);
 
-  const chosenOrder =
-    purchaseOrders.data?.find((order) => order.id === purchaseOrderId) ?? null;
+  const chosenOrder = purchaseOrders.data?.find((order) => order.id === purchaseOrderId) ?? null;
 
   /*
    * ⚠️ The order OWNS the area, the bags and the PO number.
@@ -274,6 +285,32 @@ export function AdminJobCreatePage() {
         description="Raise a pickup on behalf of a customer. The estimate updates as you type."
       />
 
+      {/*
+        A job is raised ON BEHALF OF an account, so with none on the system this
+        form cannot be completed — the Account field is required and its only
+        options are accounts.
+
+        ── Why an Alert and not a toast ──────────────────────────────────
+        The Alert component's own note puts it well: an alert is about the
+        content on screen and stays until the situation changes, a toast
+        confirms something and leaves. This is a standing condition, not an
+        event. A message that vanishes after three seconds would leave someone
+        staring at an empty dropdown with no idea why.
+
+        Only once the query has RESOLVED. Rendering it while accounts are still
+        loading tells a fully-configured office it has no customers, which is a
+        worse lie than saying nothing.
+      */}
+      {accounts.isSuccess && (accounts.data ?? []).length === 0 && (
+        <Alert variant="warning" title="No customers yet">
+          A job is raised against a customer account, and there are none on the system. Add the
+          first customer and this form is ready to use.{' '}
+          <Link to="/admin/customers" className="font-medium underline underline-offset-4">
+            Go to Customers
+          </Link>
+        </Alert>
+      )}
+
       <form onSubmit={(event) => void handleSubmit(onSubmit)(event)} noValidate>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="space-y-4 lg:col-span-2">
@@ -314,7 +351,11 @@ export function AdminJobCreatePage() {
                   hint="What the office and the driver will call it."
                 >
                   {(aria) => (
-                    <Input {...aria} placeholder="Lot 214 Allambie Circuit" {...register('siteName')} />
+                    <Input
+                      {...aria}
+                      placeholder="Lot 214 Allambie Circuit"
+                      {...register('siteName')}
+                    />
                   )}
                 </Field>
 
@@ -329,7 +370,11 @@ export function AdminJobCreatePage() {
                   error={errors.addressLine?.message}
                 >
                   {(aria) => (
-                    <Input {...aria} placeholder="46 Allambie Circuit" {...register('addressLine')} />
+                    <Input
+                      {...aria}
+                      placeholder="46 Allambie Circuit"
+                      {...register('addressLine')}
+                    />
                   )}
                 </Field>
 
@@ -430,10 +475,7 @@ export function AdminJobCreatePage() {
                 </Field>
 
                 {chosenOrder !== null && (
-                  <Alert
-                    variant="info"
-                    title={`Booking against ${chosenOrder.poNumber}`}
-                  >
+                  <Alert variant="info" title={`Booking against ${chosenOrder.poNumber}`}>
                     {chosenOrder.expectedAreaM2 === null
                       ? 'This order states a fixed price and no square metres, so the job prices on the call-out fee. That is correct — do not guess an area.'
                       : `The job will be priced on ${String(chosenOrder.expectedAreaM2)} m² and ${String(chosenOrder.bagAllowance ?? 0)} bag(s) from the order.`}
@@ -597,8 +639,8 @@ export function AdminJobCreatePage() {
               <CardHeader>
                 <CardTitle>Site access and contact</CardTitle>
                 <CardDescription>
-                  What the driver needs on arrival. All optional — anything left
-                  blank simply does not show on their screen.
+                  What the driver needs on arrival. All optional — anything left blank simply does
+                  not show on their screen.
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
