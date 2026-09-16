@@ -40,3 +40,10 @@ Thumbs.db
 
 # Local-only docs
 docs/driver-handover/
+
+# Throwaway probes. A script written to answer one question on one machine —
+# "is the webhook registered", "what did the extractor return" — is not part of
+# the product, and committing one leaves the next person guessing whether it is
+# still needed. Name them `tmp-*` and they stay local.
+apps/*/src/scripts/tmp-*.ts
+scripts/tmp-*.mjs
