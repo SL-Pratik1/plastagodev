@@ -1,4 +1,4 @@
-import { DEFAULT_RATE_CARD_ID, PROTECTED_SERVICE_CODES, ZONES } from '@plastago/shared';
+import { DEFAULT_RATE_CARD_ID, PROTECTED_SERVICE_CODES } from '@plastago/shared';
 import type {
   InvoicingSettings,
   AdditionalServiceCreate,
@@ -13,14 +13,18 @@ import type {
   Settings,
   Zone,
   ZoneRateInput,
+  ZoneSummary,
 } from '@plastago/shared';
-import type { Types } from 'mongoose';
+import { Types } from 'mongoose';
 import { startOfSydneyDay, todayInSydney } from '../../lib/business-day.js';
 import { getStorage } from '../../integrations/storage.js';
 import { fromDecimal128, toDecimal128 } from '../../lib/money.js';
+import { withTransaction } from '../../lib/transaction.js';
 import { AccountModel } from '../accounts/account.model.js';
+import { PlaceModel } from '../places/place.model.js';
+import { LeadModel } from '../queues/lead.model.js';
 /*
- * Two collections from other domains are READ here, never written.
+ * Four collections from other domains are READ here, never written.
  *
  * That is the same latitude `AccountModel` above already takes for the
  * accounts-per-card count, and the alternative is worse: routing "has this card
@@ -35,6 +39,7 @@ import {
   SEQUENCE_STARTS,
   SETTINGS_SINGLETON_ID,
   SettingsModel,
+  ZoneModel,
   ZoneRateModel,
 } from './settings.model.js';
 import type { SequenceField } from './settings.model.js';
@@ -98,11 +103,99 @@ interface RawRateCard {
 
 interface RawZoneRate {
   rateCardId: RateCardId;
-  zone: Zone;
+  zoneId: Types.ObjectId;
   serviceCharge: Types.Decimal128;
   ratePerM2: Types.Decimal128;
   effectiveFrom: Date;
   effectiveTo: Date | null;
+}
+
+/**
+ * Is this string shaped like an ObjectId at all?
+ *
+ * ⚠️ Guards every zone lookup that takes a value off the wire. `new
+ * Types.ObjectId('sydney')` THROWS rather than returning null, so without this
+ * a stale bookmark carrying the old slug would surface as a 500 instead of the
+ * 404 it actually is.
+ */
+function isObjectId(value: string): boolean {
+  return /^[0-9a-fA-F]{24}$/.test(value);
+}
+
+/**
+ * The zone register, with everything the settings screen shows about each one.
+ *
+ * ── Why the counts are here and not on the screen ─────────────────────────
+ * `archivable` is COMPUTED on read, never stored — the same split as
+ * `RateCardSummary.deletable`, and for the same reason: a UI that re-derived the
+ * rule would offer a retire that comes back 409. The counts it is derived from
+ * are returned too, so the screen can say WHY rather than just disabling a
+ * button.
+ *
+ * ⚠️ Jobs and leads are counted but deliberately do NOT block archiving. Both
+ * are history: a job carries its own frozen `appliedRate` and never reads the
+ * zone table again. Guarding on them would mean a zone with any past work could
+ * never be retired — which is every zone anybody would want to retire.
+ */
+async function zoneSummaries(filter: Record<string, unknown> = {}): Promise<ZoneSummary[]> {
+  const zones = await ZoneModel.find(filter)
+    .sort({ displayOrder: 1 })
+    .lean<Array<{ _id: Types.ObjectId; slug: string; label: string; displayOrder: number; archived: boolean }>>();
+
+  if (zones.length === 0) return [];
+
+  const ids = zones.map((zone) => zone._id);
+
+  /*
+   * Three grouped counts rather than three-per-zone: a handful of zones today,
+   * but the settings screen already makes seven parallel reads and this is not
+   * the place to add N more.
+   */
+  const [places, accounts, jobs] = await Promise.all([
+    PlaceModel.aggregate<{ _id: Types.ObjectId; count: number }>([
+      { $match: { zoneId: { $in: ids }, archived: false } },
+      { $group: { _id: '$zoneId', count: { $sum: 1 } } },
+    ]),
+    AccountModel.aggregate<{ _id: Types.ObjectId; count: number }>([
+      { $match: { primaryZoneId: { $in: ids } } },
+      { $group: { _id: '$primaryZoneId', count: { $sum: 1 } } },
+    ]),
+    JobModel.aggregate<{ _id: Types.ObjectId; count: number }>([
+      { $match: { zoneId: { $in: ids } } },
+      { $group: { _id: '$zoneId', count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const tally = (rows: Array<{ _id: Types.ObjectId; count: number }>) =>
+    new Map(rows.map((row) => [row._id.toString(), row.count]));
+
+  const placeCounts = tally(places);
+  const accountCounts = tally(accounts);
+  const jobCounts = tally(jobs);
+
+  return zones.map((zone) => {
+    const id = zone._id.toString();
+    const placeCount = placeCounts.get(id) ?? 0;
+    const accountCount = accountCounts.get(id) ?? 0;
+
+    return {
+      id,
+      slug: zone.slug,
+      label: zone.label,
+      displayOrder: zone.displayOrder,
+      archived: zone.archived,
+      placeCount,
+      accountCount,
+      jobCount: jobCounts.get(id) ?? 0,
+      /*
+       * Already archived reads as not-archivable, so the screen offers Restore
+       * instead. The "last zone standing" rule is NOT re-derived here — it needs
+       * a count across the whole collection, and the service refuses it with a
+       * sentence that explains itself.
+       */
+      archivable: !zone.archived && placeCount === 0 && accountCount === 0,
+    };
+  });
 }
 
 /** `YYYY-MM-DD` from a stored date, read in Sydney rather than UTC. */
@@ -124,7 +217,15 @@ export interface ResolvedRate {
    * the caller so a preview never has to show a slug to a customer.
    */
   label: string;
-  zone: Zone;
+  zoneId: Zone;
+  /**
+   * The zone's human name, for the charge-line description.
+   *
+   * ⚠️ Resolved HERE and then frozen by the caller onto the job. It is not a
+   * live join: renaming a zone must never rewrite a description on an invoice
+   * that has already been raised.
+   */
+  zoneLabel: string;
   /** Charged once per job, regardless of size. */
   serviceCharge: string;
   /** Per square metre, at rate precision. */
@@ -151,6 +252,7 @@ export const settingsRepository = {
       scalars,
       rateCards,
       zoneRates,
+      zones,
       additionalServices,
       templates,
       accountCounts,
@@ -159,6 +261,7 @@ export const settingsRepository = {
       SettingsModel.findById(SETTINGS_SINGLETON_ID).lean<RawSettings>(),
       RateCardModel.find().sort({ _id: 1 }).lean<RawRateCard[]>(),
       ZoneRateModel.find().lean<RawZoneRate[]>(),
+      zoneSummaries(),
       AdditionalServiceModel.find().sort({ _id: 1 }).lean(),
       InvoiceTemplateModel.find().sort({ _id: 1 }).lean(),
       countAccountsPerRateCard(),
@@ -209,6 +312,18 @@ export const settingsRepository = {
      * underneath, and both come out of this one query rather than one query per
      * card.
      */
+    /*
+     * Zone id → name and position, built once for the whole tree.
+     *
+     * ⚠️ Replaces `ZONES.indexOf`, which returned -1 for an unrecognised zone and
+     * so sorted it to the TOP of every rate table. The fallback below sorts an
+     * unknown zone LAST, which is what "I do not recognise this" should look
+     * like.
+     */
+    const zoneNames = new Map(zones.map((zone) => [zone.id, zone.label]));
+    const zoneOrder = new Map(zones.map((zone) => [zone.id, zone.displayOrder]));
+    const orderOf = (id: string) => zoneOrder.get(id) ?? Number.MAX_SAFE_INTEGER;
+
     const schedulesByCard = new Map<string, Map<string, RateSchedule>>();
     for (const rate of zoneRates) {
       const byDate = schedulesByCard.get(rate.rateCardId) ?? new Map<string, RateSchedule>();
@@ -221,7 +336,15 @@ export const settingsRepository = {
         zones: [],
       };
       schedule.zones.push({
-        zone: rate.zone,
+        zoneId: rate.zoneId.toString(),
+        /*
+         * Named from the zone register rather than left as an id.
+         *
+         * A zone deleted out from under a rate row cannot happen — zones are
+         * archived, never removed — so the fallback is for a database somebody
+         * has edited by hand, and it says so rather than rendering a bare id.
+         */
+        zoneLabel: zoneNames.get(rate.zoneId.toString()) ?? 'Unknown zone',
         serviceCharge: fromDecimal128(rate.serviceCharge),
         ratePerM2: fromDecimal128(rate.ratePerM2),
       });
@@ -234,6 +357,7 @@ export const settingsRepository = {
 
     return {
       pricing: {
+        zones,
         rateCards: rateCards.map((card): RateCardSummary => {
           const schedules = [...(schedulesByCard.get(card._id)?.values() ?? [])]
             /*
@@ -245,7 +369,7 @@ export const settingsRepository = {
             .map((schedule) => ({
               ...schedule,
               zones: [...schedule.zones].sort(
-                (a, b) => ZONES.indexOf(a.zone) - ZONES.indexOf(b.zone),
+                (a, b) => orderOf(a.zoneId) - orderOf(b.zoneId),
               ),
             }))
             // Newest first: the schedule somebody needs to see is the current
@@ -390,10 +514,10 @@ export const settingsRepository = {
    */
   async resolveRate(
     rateCardId: RateCardId,
-    zone: Zone,
+    zoneId: Zone,
     onDate: string,
   ): Promise<ResolvedRate | null> {
-    const rate = await findRateOn(rateCardId, zone, onDate);
+    const rate = await findRateOn(rateCardId, zoneId, onDate);
 
     /*
      * Falling back to the default card is deliberate and narrow: a card that
@@ -408,18 +532,29 @@ export const settingsRepository = {
       rate ??
       (rateCardId === DEFAULT_RATE_CARD_ID
         ? null
-        : await findRateOn(DEFAULT_RATE_CARD_ID, zone, onDate));
+        : await findRateOn(DEFAULT_RATE_CARD_ID, zoneId, onDate));
 
     if (!resolved) return null;
 
-    // A second `_id` read on a collection with a handful of rows. Cheap, and it
-    // keeps the slug out of anything a customer sees.
-    const card = await RateCardModel.findById(resolved.rateCardId).lean<{ label: string }>();
+    // Two `_id` reads on collections with a handful of rows each. Cheap, and
+    // they keep ids out of anything a customer sees.
+    const [card, zone] = await Promise.all([
+      RateCardModel.findById(resolved.rateCardId).lean<{ label: string }>(),
+      ZoneModel.findById(resolved.zoneId).lean<{ label: string }>(),
+    ]);
 
     return {
       rateCardId: resolved.rateCardId,
       label: card?.label ?? resolved.rateCardId,
-      zone: resolved.zone,
+      zoneId: resolved.zoneId.toString(),
+      /*
+       * ⚠️ The fallback is not cosmetic. This string is written into the
+       * charge-line description and onto the invoice, so an id leaking here
+       * would be printed and sent to a builder. A zone cannot actually vanish —
+       * they are archived, never deleted — so this only fires on a database
+       * edited by hand, and it says something a person can act on.
+       */
+      zoneLabel: zone?.label ?? 'Unknown zone',
       serviceCharge: fromDecimal128(resolved.serviceCharge),
       ratePerM2: fromDecimal128(resolved.ratePerM2),
       scheduleFrom: isoDay(resolved.effectiveFrom),
@@ -430,6 +565,219 @@ export const settingsRepository = {
   async findAdditionalService(code: string): Promise<AdditionalServiceSetting | null> {
     const service = await AdditionalServiceModel.findById(code).lean();
     return service ? toService(service) : null;
+  },
+
+  /* ── Zones (M6.3) ──────────────────────────────────────────────────────── */
+
+  /** Every zone, archived included — historical records still need their names. */
+  async allZones(): Promise<ZoneSummary[]> {
+    return zoneSummaries();
+  },
+
+  /**
+   * The zones a new booking or a new schedule may use.
+   *
+   * ⚠️ Archived zones are excluded HERE and nowhere else. This is what
+   * `assertPricesEveryZone` counts against, so retiring a zone stops it blocking
+   * every future rate change while its historical rows keep resolving.
+   */
+  async activeZones(): Promise<ZoneSummary[]> {
+    return zoneSummaries({ archived: false });
+  },
+
+  /**
+   * One zone by id, ARCHIVED INCLUDED.
+   *
+   * ⚠️ The inclusion is load-bearing, not incidental. This is the existence
+   * check behind the slug-duplicate refusal, and a retired zone still owns rate
+   * rows in `zonerates` — reissuing its slug would hand a brand-new zone prices
+   * nobody set. Do not "tidy" this into an active-only lookup.
+   */
+  async findZone(id: string): Promise<ZoneSummary | null> {
+    if (!isObjectId(id)) return null;
+    const [zone] = await zoneSummaries({ _id: new Types.ObjectId(id) });
+    return zone ?? null;
+  },
+
+  /**
+   * Just the name.
+   *
+   * Exists because the "no rate configured" refusal has to NAME the zone and is
+   * otherwise holding only an id — and `findZone` above runs three grouped
+   * counts nobody needs in order to write an error message.
+   */
+  async findZoneLabel(id: string): Promise<string | null> {
+    if (!isObjectId(id)) return null;
+    const zone = await ZoneModel.findById(new Types.ObjectId(id), { label: 1 }).lean<{
+      label: string;
+    }>();
+    return zone?.label ?? null;
+  },
+
+  /** By slug, for the seeds and for the duplicate check on create. */
+  async findZoneBySlug(slug: string): Promise<ZoneSummary | null> {
+    const [zone] = await zoneSummaries({ slug });
+    return zone ?? null;
+  },
+
+  /** The live zone ids, for the existence guards that replaced `enum: ZONES`. */
+  async activeZoneIds(): Promise<string[]> {
+    const rows = await ZoneModel.find({ archived: false }, { _id: 1 }).lean<
+      Array<{ _id: Types.ObjectId }>
+    >();
+    return rows.map((row) => row._id.toString());
+  },
+
+  /** One past the highest, so a new zone lands at the end of every list. */
+  async nextZoneDisplayOrder(): Promise<number> {
+    const last = await ZoneModel.findOne({}, { displayOrder: 1 })
+      .sort({ displayOrder: -1 })
+      .lean<{ displayOrder: number }>();
+    return (last?.displayOrder ?? -1) + 1;
+  },
+
+  /**
+   * A new zone, with every rate row copied from an existing one (M6.3).
+   *
+   * ── Why the rates are copied rather than typed ────────────────────────────
+   * A zone with no rates prices nothing on any card, so every job in it falls
+   * back to `default` — which has no rates for it either — and the booking is
+   * refused with a 503 the office cannot act on. Asking an administrator to type
+   * seven cards × N schedules of figures before the zone works is not a form
+   * anybody completes correctly. So they nominate a zone to copy, and the
+   * per-card discounts come with it: Clarendon's Sydney row becomes Clarendon's
+   * new-zone row, Tier 4's becomes Tier 4's, and the commercial shape of the
+   * price list survives.
+   *
+   * ── Why EVERY schedule and not just the open one ──────────────────────────
+   * ⚠️ `resolveRate` reads the row whose window contains the JOB'S date, not
+   * today's. Copying only the open row leaves every earlier date unpriced in the
+   * new zone — so a back-dated booking, or an invoice reissued for March, fails
+   * with "no rate is configured" on a zone the screen shows as fully priced.
+   * Copying the whole history makes the new zone's windows tile the calendar
+   * exactly as the source zone's do.
+   *
+   * ── Index safety ─────────────────────────────────────────────────────────
+   * `card_zone_open_unique` holds because the SOURCE obeys it: at most one open
+   * row per card, so at most one copy per card is open. `card_zone_from_unique`
+   * holds because the zone id is brand new by construction — which is exactly
+   * why the caller's duplicate check must see archived zones too.
+   *
+   * ── Parent first, and what `compensate` undoes ────────────────────────────
+   * The zone is written BEFORE its rates, per the house rule in
+   * `lib/transaction.ts`: on a standalone mongod a failure between the two
+   * leaves a zone with no rates — visible on the settings screen and fixable —
+   * rather than rate rows pointing at a zone nobody can see. The compensation
+   * removes both, because a HALF-copied zone is the one state worse than
+   * either: it would price correctly on some cards and 503 on others.
+   *
+   * ⚠️ `Decimal128` values are carried across verbatim, never through a string.
+   * These figures must match TransVirtual to the cent (Risk 1), and `0.1625` is
+   * a rate a round trip can round.
+   */
+  async createZoneCopyingRates(input: {
+    slug: string;
+    label: string;
+    displayOrder: number;
+    copyRatesFromZoneId: string;
+  }): Promise<{ id: string; rowsCopied: number }> {
+    const id = new Types.ObjectId();
+
+    return withTransaction(
+      async (session) => {
+        await ZoneModel.create(
+          [
+            {
+              _id: id,
+              slug: input.slug,
+              label: input.label,
+              displayOrder: input.displayOrder,
+              archived: false,
+            },
+          ],
+          session ? { session } : {},
+        );
+
+        const source = await ZoneRateModel.find({
+          zoneId: new Types.ObjectId(input.copyRatesFromZoneId),
+        })
+          .session(session ?? null)
+          .lean<RawZoneRate[]>();
+
+        if (source.length > 0) {
+          await ZoneRateModel.insertMany(
+            source.map((row) => ({
+              rateCardId: row.rateCardId,
+              zoneId: id,
+              // Verbatim Decimal128 — see the warning above.
+              serviceCharge: row.serviceCharge,
+              ratePerM2: row.ratePerM2,
+              // The window, unchanged. This is what makes the new zone's history
+              // tile exactly as the source's does.
+              effectiveFrom: row.effectiveFrom,
+              effectiveTo: row.effectiveTo,
+            })),
+            session ? { session, ordered: true } : { ordered: true },
+          );
+        }
+
+        return { id: id.toString(), rowsCopied: source.length };
+      },
+      {
+        label: 'settings.createZone',
+        compensate: async () => {
+          await ZoneRateModel.deleteMany({ zoneId: id });
+          await ZoneModel.deleteOne({ _id: id });
+        },
+      },
+    );
+  },
+
+  async renameZone(id: string, label: string): Promise<void> {
+    await ZoneModel.updateOne({ _id: new Types.ObjectId(id) }, { $set: { label } });
+  },
+
+  /**
+   * The whole list, renumbered 0..n.
+   *
+   * One `bulkWrite` rather than n updates: the intermediate states of a reorder
+   * are not states anybody should be able to read, and `displayOrder` carries no
+   * unique index precisely so this rewrite is representable.
+   */
+  async reorderZones(orderedIds: readonly string[]): Promise<void> {
+    await ZoneModel.bulkWrite(
+      orderedIds.map((id, index) => ({
+        updateOne: {
+          filter: { _id: new Types.ObjectId(id) },
+          update: { $set: { displayOrder: index } },
+        },
+      })),
+    );
+  },
+
+  async setZoneArchived(id: string, archived: boolean): Promise<void> {
+    await ZoneModel.updateOne({ _id: new Types.ObjectId(id) }, { $set: { archived } });
+  },
+
+  async countActiveZones(): Promise<number> {
+    return ZoneModel.countDocuments({ archived: false });
+  },
+
+  /* What stands behind a zone. All four are read for the settings screen. */
+  async countPlacesInZone(id: string): Promise<number> {
+    return PlaceModel.countDocuments({ zoneId: new Types.ObjectId(id), archived: false });
+  },
+
+  async countAccountsInZone(id: string): Promise<number> {
+    return AccountModel.countDocuments({ primaryZoneId: new Types.ObjectId(id) });
+  },
+
+  async countJobsInZone(id: string): Promise<number> {
+    return JobModel.countDocuments({ zoneId: new Types.ObjectId(id) });
+  },
+
+  async countLeadsInZone(id: string): Promise<number> {
+    return LeadModel.countDocuments({ zoneId: new Types.ObjectId(id) });
   },
 
   /* ── Invoice templates (M7.5) ──────────────────────────────────────────── */
@@ -911,9 +1259,16 @@ export const settingsRepository = {
   /** Seeds the platform. Idempotent, so it is safe to run on every deploy. */
   async seed(data: {
     rateCards: Array<{ id: RateCardId; label: string; effectiveFrom: Date }>;
+    /**
+     * The zones themselves, written BEFORE the rates below.
+     *
+     * Keyed on `slug`, because that is the only stable handle a seed has — the
+     * `_id` is minted by Mongo on first insert and must survive a re-run.
+     */
+    zones: Array<{ slug: string; label: string; displayOrder: number }>;
     zoneRates: Array<{
       rateCardId: RateCardId;
-      zone: Zone;
+      zoneId: Zone;
       serviceCharge: string;
       ratePerM2: string;
       /** Which schedule these figures open. `YYYY-MM-DD`. */
@@ -932,6 +1287,34 @@ export const settingsRepository = {
     invoiceTemplates: Array<Omit<InvoiceTemplate, 'assignedAccountCount' | 'deletable'>>;
     assumedCostPerJob: string;
   }): Promise<void> {
+    /*
+     * Zones first, and awaited on their own before anything below runs.
+     *
+     * ⚠️ Parent before children, the same rule `lib/transaction.ts` states: a
+     * seed that died between the two leaves zones with no rates — visible on
+     * the settings screen and fixable there — rather than rate rows referencing
+     * a zone nobody can see.
+     *
+     * `$setOnInsert` on every field: the seed INSTALLS a zone, it does not own
+     * one. Re-running must not rename a zone the office has since renamed, or
+     * drag it back to the position it was seeded in.
+     */
+    await Promise.all(
+      data.zones.map((zone) =>
+        ZoneModel.updateOne(
+          { slug: zone.slug },
+          {
+            $setOnInsert: {
+              label: zone.label,
+              displayOrder: zone.displayOrder,
+              archived: false,
+            },
+          },
+          { upsert: true },
+        ),
+      ),
+    );
+
     // `$setOnInsert` so re-running never resets a sequence that has already
     // issued numbers, or overwrites a setting the office has since changed.
     await SettingsModel.updateOne(
@@ -962,7 +1345,7 @@ export const settingsRepository = {
         ZoneRateModel.updateOne(
           {
             rateCardId: rate.rateCardId,
-            zone: rate.zone,
+            zoneId: rate.zoneId,
             effectiveFrom: startOfSydneyDay(rate.effectiveFrom),
           },
           {
@@ -1066,14 +1449,14 @@ async function countAccountsPerTemplate(): Promise<Map<string, number>> {
  */
 async function findRateOn(
   rateCardId: RateCardId,
-  zone: Zone,
+  zoneId: Zone,
   onDate: string,
 ): Promise<RawZoneRate | null> {
   const at = startOfSydneyDay(onDate);
 
   return ZoneRateModel.findOne({
     rateCardId,
-    zone,
+    zoneId,
     effectiveFrom: { $lte: at },
     $or: [{ effectiveTo: null }, { effectiveTo: { $gte: at } }],
   })
@@ -1099,7 +1482,7 @@ async function insertSchedule(
   await ZoneRateModel.insertMany(
     zones.map((rate) => ({
       rateCardId,
-      zone: rate.zone,
+      zoneId: rate.zoneId,
       serviceCharge: toDecimal128(rate.serviceCharge),
       ratePerM2: toDecimal128(rate.ratePerM2),
       effectiveFrom: from,

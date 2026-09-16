@@ -29,7 +29,7 @@ const log = logger.child({ module: 'pricing' });
 
 export interface QuoteInput {
   rateCardId: RateCardId;
-  zone: Zone;
+  zoneId: Zone;
   /**
    * Null on a fixed-price builder's job — the PO carries no area (Matt, 31:04).
    * Priced at the call-out fee alone, with a caveat saying so.
@@ -88,7 +88,11 @@ export const pricingService = {
    * other caller wants `quote` above.
    */
   async quoteWithAppliedRate(input: QuoteInput): Promise<QuoteResult> {
-    const rate = await settingsRepository.resolveRate(input.rateCardId, input.zone, input.onDate);
+    const rate = await settingsRepository.resolveRate(
+      input.rateCardId,
+      input.zoneId,
+      input.onDate,
+    );
 
     if (!rate) {
       /*
@@ -101,14 +105,22 @@ export const pricingService = {
        * Same refusal, and the message names the date so the office can see
        * which schedule is missing rather than doubting the zone.
        */
+      /*
+       * ⚠️ The zone is NAMED, not identified. This message reaches an office
+       * screen and, through the booking form, a builder's site supervisor —
+       * "No rate is configured for 68f3a1c2b4e5d6f708192a3b" tells neither of
+       * them anything they can act on. One extra read, on a failure path only.
+       */
+      const zoneLabel = (await settingsRepository.findZoneLabel(input.zoneId)) ?? 'that zone';
+
       throw AppError.dependencyUnavailable(
-        `No rate is configured for ${input.zone} on ${input.onDate}. The office needs to set one before this can be priced.`,
+        `No rate is configured for ${zoneLabel} on ${input.onDate}. The office needs to set one before this can be priced.`,
       );
     }
 
     if (rate.rateCardId !== input.rateCardId) {
       log.warn(
-        { requested: input.rateCardId, used: rate.rateCardId, zone: input.zone },
+        { requested: input.rateCardId, used: rate.rateCardId, zone: rate.zoneLabel },
         'rate card has no entry for this zone — fell back to the default card',
       );
     }
@@ -119,7 +131,16 @@ export const pricingService = {
     const serviceCents = moneyToCents(rate.serviceCharge);
     lines.push({
       code: 'service-fee',
-      description: `Service fee — ${ZONE_NAMES[input.zone]}`,
+      /*
+       * ⚠️ The zone's name is FROZEN into this string here, at quote time, and
+       * this string is persisted onto the charge line and printed on the
+       * invoice. Renaming a zone therefore never rewrites a line on an invoice
+       * already raised — a reprint of a paid invoice stays byte-identical to
+       * the document in the builder's AP system. That is the same freeze
+       * `rateCardLabel` gets two fields below, and it is intended: nothing
+       * backfills these, and no endpoint offers to.
+       */
+      description: `Service fee — ${rate.zoneLabel}`,
       quantity: 1,
       unitRate: rate.serviceCharge,
       amount: centsToMoney(serviceCents),
@@ -163,7 +184,8 @@ export const pricingService = {
 
     return {
       preview: {
-        zone: input.zone,
+        zoneId: input.zoneId,
+        zoneLabel: rate.zoneLabel,
         rateCardLabel: rate.label,
         lines,
         subtotalExGst: centsToMoney(subtotalCents),
@@ -183,7 +205,9 @@ export const pricingService = {
       appliedRate: {
         rateCardId: rate.rateCardId,
         rateCardLabel: rate.label,
-        zone: rate.zone,
+        zoneId: rate.zoneId,
+        /** Frozen, like `rateCardLabel` — see the note on the service-fee line. */
+        zoneLabel: rate.zoneLabel,
         scheduleFrom: rate.scheduleFrom,
         serviceCharge: rate.serviceCharge,
         ratePerM2: rate.ratePerM2,
@@ -219,12 +243,6 @@ export const pricingService = {
       requiresApproval: service.requiresApproval,
     };
   },
-};
-
-const ZONE_NAMES: Record<Zone, string> = {
-  sydney: 'Sydney',
-  wollongong: 'Wollongong',
-  newcastle: 'Newcastle',
 };
 
 function applyPercentage(percentage: Money, base: Money | undefined, code: string): number {

@@ -504,7 +504,9 @@ export const JobListItemSchema = z
      * With no site to carry it, this comes off the suburb picker at booking. See
      * `PlaceSchema`.
      */
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, resolved server-side. */
+    zoneLabel: NonEmptyStringSchema,
     /** The pin. Drives the dispatch map, route optimisation and navigation. */
     latitude: z.number(),
     longitude: z.number(),
@@ -791,7 +793,9 @@ export const PricePreviewLineSchema = z
 
 export const PricePreviewSchema = z
   .object({
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, resolved server-side. */
+    zoneLabel: NonEmptyStringSchema,
     rateCardLabel: NonEmptyStringSchema,
     lines: z.array(PricePreviewLineSchema),
     subtotalExGst: MoneySchema,

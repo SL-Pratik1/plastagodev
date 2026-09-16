@@ -1,4 +1,4 @@
-import { INVOICE_LAYOUTS, ZONES } from '@plastago/shared';
+import { INVOICE_LAYOUTS } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
 export const SETTINGS_COLLECTION = 'settings';
@@ -181,12 +181,85 @@ const rateCardSchema = new Schema(
 
 export const RateCardModel = model('RateCard', rateCardSchema);
 
+export const ZONES_COLLECTION = 'zones';
+
+/**
+ * A service area (M6.3) — its own collection, referenced by `places.zoneId`,
+ * `accounts.primaryZoneId`, `leads.zoneId`, `jobs.zoneId` and every row in
+ * `zonerates`.
+ *
+ * ── Why this is a collection and not an enum ──────────────────────────────
+ * It was three literals in `@plastago/shared`, which made "open the Central
+ * Coast" a deploy across six Mongoose models, seven rate cards and a schema
+ * whose completeness check counted to three. Where the business goes is a
+ * commercial decision, so it is data.
+ *
+ * ── Why an ObjectId key, when a rate card uses a slug ─────────────────────
+ * A rate card id is named in code (`DEFAULT_RATE_CARD_ID`) and picked by hand,
+ * so it earns a readable key. A zone is pure relational data — five collections
+ * point at it and nothing names one in code — so it takes the ordinary Mongo
+ * key. Two conventions on purpose; do not "tidy" one to match the other.
+ *
+ * ⚠️ A job's charge-line text bakes the LABEL in at quote time
+ * (`pricing.service.ts`), so renaming a zone never moves a description on an
+ * invoice already raised. That is intended, and is why renaming is safe at all.
+ */
+const zoneSchema = new Schema(
+  {
+    /**
+     * The human handle — `sydney`, `central-coast`. Unique, and NEVER a foreign
+     * key: joins use `_id`. It exists so the seeds have something stable to
+     * upsert on, so a log line reads, and so the settings screen can show
+     * something permanent under the editable name.
+     */
+    slug: { type: String, required: true, trim: true },
+    label: { type: String, required: true, trim: true },
+
+    /**
+     * Where this zone sits in every list that shows all of them.
+     *
+     * ⚠️ Replaces `ZONES.indexOf(zone)`, which returned -1 for anything outside
+     * the compile-time array and so sorted a newly added zone to the TOP of
+     * every rate table. Stored rather than derived from the label, because the
+     * office's order is commercial (Sydney first — it is most of the work), not
+     * alphabetical.
+     *
+     * Not unique: a reorder rewrites every row, and a unique index would make
+     * the intermediate states of that rewrite unrepresentable.
+     */
+    displayOrder: { type: Number, required: true, default: 0 },
+
+    /**
+     * Retired, but not gone.
+     *
+     * ⚠️ A zone is never hard-deleted. Jobs, invoices and rate schedules all
+     * reference it and are never deleted themselves, so removing the row would
+     * dangle a `zoneId` on five collections and leave a financial report unable
+     * to name its own rows. Archiving says the one thing the office actually
+     * means — stop offering it on new work — while every historical record
+     * stays readable.
+     */
+    archived: { type: Boolean, required: true, default: false },
+  },
+  { collection: ZONES_COLLECTION, timestamps: true, versionKey: false },
+);
+
+/** The slug is the handle, so it has to be unique — including against archived zones. */
+zoneSchema.index({ slug: 1 }, { unique: true, name: 'zone_slug_unique' });
+
+/** Every list of zones reads in this order. A handful of rows, but it is the sort. */
+zoneSchema.index({ displayOrder: 1 }, { name: 'zone_order' });
+
+/** The pickers and the completeness check both ask for the live ones only. */
+zoneSchema.index({ archived: 1, displayOrder: 1 }, { name: 'zone_active_order' });
+
+export const ZoneModel = model('Zone', zoneSchema);
+
 /**
  * What one rate card charges in one zone, for one effective period (M6.2/M6.3).
  *
- * ⚠️ Both amounts are `Decimal128`, never `Number` (§6A.10 #1). Sydney is
- * $220 + $0.16/m²; Wollongong $250 + $0.18; Newcastle $250 + $0.20. These
- * figures must match TransVirtual to the cent (Risk 1), which a double cannot
+ * ⚠️ Both amounts are `Decimal128`, never `Number` (§6A.10 #1). These figures
+ * must match TransVirtual to the cent (Risk 1), which a double cannot
  * guarantee.
  *
  * ── Why a row is a VERSION and not a rate ─────────────────────────────────
@@ -203,7 +276,14 @@ const zoneRateSchema = new Schema(
   {
     /** REFERENCE → `ratecards._id`. */
     rateCardId: { type: String, required: true, ref: 'RateCard' },
-    zone: { type: String, required: true, enum: ZONES },
+    /**
+     * REFERENCE → `zones._id`.
+     *
+     * ⚠️ No `enum`, for the same reason `rateCardSchema._id` has none: zones are
+     * records an administrator creates. The service checks the id names a zone
+     * that EXISTS, because Mongo no longer will.
+     */
+    zoneId: { type: Schema.Types.ObjectId, required: true, ref: 'Zone' },
     /** The call-out fee, charged once per job regardless of size. */
     serviceCharge: { type: Schema.Types.Decimal128, required: true },
     /**
@@ -236,7 +316,7 @@ const zoneRateSchema = new Schema(
  * every new schedule with a duplicate-key error.
  */
 zoneRateSchema.index(
-  { rateCardId: 1, zone: 1, effectiveFrom: 1 },
+  { rateCardId: 1, zoneId: 1, effectiveFrom: 1 },
   { unique: true, name: 'card_zone_from_unique' },
 );
 
@@ -249,7 +329,7 @@ zoneRateSchema.index(
  * unique index makes that state unrepresentable.
  */
 zoneRateSchema.index(
-  { rateCardId: 1, zone: 1 },
+  { rateCardId: 1, zoneId: 1 },
   {
     unique: true,
     name: 'card_zone_open_unique',
@@ -259,7 +339,7 @@ zoneRateSchema.index(
 
 /** The hot path: the row pricing one card + zone on one date. */
 zoneRateSchema.index(
-  { rateCardId: 1, zone: 1, effectiveFrom: -1 },
+  { rateCardId: 1, zoneId: 1, effectiveFrom: -1 },
   { name: 'card_zone_resolve' },
 );
 

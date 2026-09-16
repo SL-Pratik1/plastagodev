@@ -10,7 +10,6 @@ import {
   SERVICE_LEVELS,
   SRA_STEP_STATES,
   WEIGHT_BASES,
-  ZONES,
 } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
@@ -107,8 +106,13 @@ const jobSchema = new Schema(
      *
      * Frozen here so a job priced in March keeps March's zone even if the
      * suburb is later re-zoned.
+     *
+     * ⚠️ A REFERENCE → `zones._id`, but a stored one. Re-zoning a suburb on the
+     * Suburbs screen moves the next booking and never this one — which is what
+     * makes that screen safe to expose. Never `populate()` it to re-derive the
+     * zone; the whole point is that it does not follow.
      */
-    zone: { type: String, required: true, enum: ZONES },
+    zoneId: { type: Schema.Types.ObjectId, required: true, ref: 'Zone' },
     latitude: { type: Number, required: true, min: -90, max: 90 },
     longitude: { type: Number, required: true, min: -180, max: 180 },
 
@@ -310,7 +314,14 @@ const jobSchema = new Schema(
           rateCardId: { type: String, required: true },
           /** The card's name as it read then, so a reprint is not a slug. */
           rateCardLabel: { type: String, required: true },
-          zone: { type: String, required: true, enum: ZONES },
+          zoneId: { type: Schema.Types.ObjectId, required: true, ref: 'Zone' },
+          /**
+           * The zone's name as it read then, so a reprint is not a lookup.
+           *
+           * ⚠️ Frozen text, exactly like `rateCardLabel`. Renaming a zone must
+           * never rewrite a line on an invoice the customer has already paid.
+           */
+          zoneLabel: { type: String, required: true },
           /** Which dated schedule priced it. Traces a figure to a decision. */
           scheduleFrom: { type: String, required: true },
           serviceCharge: { type: Schema.Types.Decimal128, required: true },
@@ -422,7 +433,7 @@ jobSchema.index(
   },
 );
 
-jobSchema.index({ zone: 1, readyDate: 1 }, { name: 'zone_ready' });
+jobSchema.index({ zoneId: 1, readyDate: 1 }, { name: 'zone_ready' });
 
 /**
  * Free-text search across the fields the office actually types into the box:

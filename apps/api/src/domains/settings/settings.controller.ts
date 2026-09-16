@@ -95,11 +95,11 @@ export const settingsController = {
     req: ValidatedRequest<{ query: typeof QuoteQuerySchema }>,
     res: Response,
   ): Promise<void> => {
-    const { rateCardId, zone, expectedAreaM2, bagCount, onDate } = req.validated.query;
+    const { rateCardId, zoneId, expectedAreaM2, bagCount, onDate } = req.validated.query;
 
     const preview = await pricingService.quote({
       rateCardId,
-      zone,
+      zoneId,
       expectedAreaM2: expectedAreaM2 ?? null,
       bagCount: bagCount ?? 0,
       /*

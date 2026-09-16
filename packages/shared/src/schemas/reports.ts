@@ -36,7 +36,7 @@ export const ReportFiltersSchema = z
      * much came out of Kellyville last month" rather than "out of lot 214".
      */
     suburb: z.string().nullable(),
-    zone: ZoneSchema.nullable(),
+    zoneId: ZoneSchema.nullable(),
     driverId: ObjectIdSchema.nullable(),
   })
   .meta({ id: 'ReportFilters' });
@@ -77,7 +77,9 @@ export const MonthlyVolumeReportSchema = z
 /** M9.3 — the Sydney / Wollongong / Newcastle split. */
 export const ZoneVolumeRowSchema = z
   .object({
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name. Was the raw slug, which read as a name only by luck. */
+    label: NonEmptyStringSchema,
     jobs: z.number().int().nonnegative(),
     areaM2: z.number().nonnegative(),
     revenueExGst: MoneySchema,

@@ -28,16 +28,67 @@ export const BRAND_LABELS: Record<BrandId, string> = {
   brickgo: 'BrickGo',
 };
 
-/** M6.3 — service charge and per-m² rate both vary by zone. */
-export const ZONES = ['sydney', 'wollongong', 'newcastle'] as const;
-export const ZoneSchema = z.enum(ZONES).meta({ id: 'Zone' });
+/**
+ * M6.3 — service charge and per-m² rate both vary by zone.
+ *
+ * ── Why this is an id and not an enum ─────────────────────────────────────
+ * It WAS `z.enum(['sydney','wollongong','newcastle'])`, which fixed the three
+ * at compile time: PlastaGo could not open the Central Coast without a deploy,
+ * and every Mongoose model carried `enum: ZONES` so Mongo would have refused
+ * the value even once a screen offered it.
+ *
+ * A zone is a service area with its own prices — business data, not a type — so
+ * zones are documents in the `zones` collection and everything that has a zone
+ * REFERENCES one by `_id`. Rate cards made the same move already; see
+ * `RateCardIdSchema` below for the reasoning at length.
+ *
+ * ⚠️ Why an ObjectId here and a slug on a rate card. A rate card id is picked by
+ * hand and appears in config (`DEFAULT_RATE_CARD_ID`), so it earns a readable
+ * key. A zone is pure relational data — five collections point at it and
+ * nothing names one in code — so it takes the ordinary Mongo key. The two
+ * conventions are a deliberate split, not drift: do not "tidy" one to match.
+ *
+ * ⚠️ This schema parses RESPONSES on both sides. An enum here meant a zone an
+ * administrator added would fail `safeParse` and blank the screen that was meant
+ * to show it. That is the single reason this change could not be server-only.
+ *
+ * ⚠️ Consequence: a zone's name is NO LONGER derivable from its id. Read it off
+ * the record — `ZoneSummary.label`, `Place.zoneLabel`, `GET /lookups/zones` —
+ * never a lookup table. `SEEDED_ZONE_LABELS` below is for the seed script alone.
+ */
+export const ZoneSchema = ObjectIdSchema.meta({ id: 'Zone' });
 export type Zone = z.infer<typeof ZoneSchema>;
 
-export const ZONE_LABELS: Record<Zone, string> = {
+/**
+ * The zones the seed installs, by slug.
+ *
+ * ⚠️ NOT the set of zones that exist — an administrator adds more at runtime and
+ * nothing may assume this list is complete. It exists so `seed-settings` has
+ * something to write, and so tests have a stable name to reach for.
+ */
+export const SEEDED_ZONES = ['sydney', 'wollongong', 'newcastle'] as const;
+export type SeededZoneSlug = (typeof SEEDED_ZONES)[number];
+
+export const SEEDED_ZONE_LABELS: Record<SeededZoneSlug, string> = {
   sydney: 'Sydney',
   wollongong: 'Wollongong',
   newcastle: 'Newcastle',
 };
+
+/**
+ * A zone's slug — its human handle, and never a foreign key.
+ *
+ * Stable across reseeds, readable in a log line or a Mongo shell, and what the
+ * settings screen shows under the editable name. Joins use `_id`; nothing joins
+ * on this.
+ */
+export const ZoneSlugSchema = z
+  .string()
+  .trim()
+  .min(1, 'A zone needs a slug')
+  .max(40, 'Keep the slug short')
+  .regex(/^[a-z0-9][a-z0-9-]*$/, 'Lowercase letters, digits and hyphens only')
+  .meta({ id: 'ZoneSlug' });
 
 /**
  * One resolved place — a suburb with everything derived from it.
@@ -53,8 +104,8 @@ export const ZONE_LABELS: Record<Zone, string> = {
  * come from instead — one click supplies the suburb, the postcode, the zone
  * that decides the rate, and the pin the dispatch map draws.
  *
- * ⚠️ `zone` is not cosmetic. Sydney is $220 + $0.16/m², Wollongong $250 +
- * $0.18, Newcastle $250 + $0.20 (M6.3). A wrongly-zoned job is a wrongly-priced
+ * ⚠️ `zone` is not cosmetic. Every zone carries its own service charge and its
+ * own rate per m² (M6.3). A wrongly-zoned job is a wrongly-priced
  * invoice, and nobody notices until the customer does — which is why the zone
  * is *resolved from a chosen place* rather than typed or guessed from free text.
  *
@@ -65,13 +116,27 @@ export const ZONE_LABELS: Record<Zone, string> = {
  */
 export const PlaceSchema = z
   .object({
-    /** Stable id for the place. The suburb slug today, a Google place id later. */
-    id: NonEmptyStringSchema,
+    /**
+     * The place's own `_id`.
+     *
+     * ⚠️ Was a slug of the suburb alone, which collides: suburb names repeat
+     * across postcodes, so "Richmond" could only ever be one of them. The row
+     * is identified by `{suburb, postcode}` and keyed by an ObjectId.
+     */
+    id: ObjectIdSchema,
     suburb: NonEmptyStringSchema,
     postcode: NonEmptyStringSchema,
     state: NonEmptyStringSchema,
-    /** Decides the rate. See the warning above. */
-    zone: ZoneSchema,
+    /** Decides the rate — a reference into `zones`. See the warning above. */
+    zoneId: ZoneSchema,
+    /**
+     * The zone's name, resolved server-side.
+     *
+     * Carried on the place so the picker can say "Wollongong" without holding a
+     * zone map of its own — and so the customer portal, which is not allowed to
+     * read the zone register, can still name the zone it is booking into.
+     */
+    zoneLabel: NonEmptyStringSchema,
     latitude: z.number(),
     longitude: z.number(),
     /** What the picker shows — "Kellyville NSW 2155". */
@@ -80,6 +145,45 @@ export const PlaceSchema = z
   .meta({ id: 'Place' });
 
 export type Place = z.infer<typeof PlaceSchema>;
+
+/**
+ * A suburb as an administrator types it (M6.3).
+ *
+ * The label is not here: it is built from the other fields on the way in, so two
+ * rows cannot disagree about how a suburb reads.
+ */
+export const PlaceWriteSchema = z
+  .object({
+    suburb: z.string().trim().min(1, 'Name the suburb').max(80, 'Keep the suburb under 80 characters'),
+    postcode: z.string().trim().regex(/^\d{4}$/, 'Four digits, e.g. 2155'),
+    state: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .regex(/^[A-Z]{2,3}$/, 'A state code — NSW, VIC, QLD'),
+    /** Checked against the zones that exist, in the service. Mongo will not. */
+    zoneId: ZoneSchema,
+    /*
+     * ⚠️ Bounded to Australia, not to the globe.
+     *
+     * `latitude: 33.7118` instead of `-33.7118` is one keystroke and it is a
+     * valid coordinate — in Lebanon. The dispatch map would draw the day's run
+     * across the Mediterranean and the only symptom would be an allocator
+     * saying the board looked strange. Generous enough for every state, tight
+     * enough to catch a dropped minus sign.
+     */
+    latitude: z
+      .number()
+      .min(-44, 'That latitude is not in Australia — check the sign')
+      .max(-9, 'That latitude is not in Australia — check the sign'),
+    longitude: z
+      .number()
+      .min(112, 'That longitude is not in Australia')
+      .max(154, 'That longitude is not in Australia'),
+  })
+  .meta({ id: 'PlaceWrite' });
+
+export type PlaceWrite = z.infer<typeof PlaceWriteSchema>;
 
 /**
  * M2.3 / M4.3 — per-account capture configuration.
@@ -335,7 +439,8 @@ export const AccountDraftSchema = z
       .int()
       .min(0, 'Payment terms cannot be negative')
       .max(90, 'Payment terms are at most 90 days'),
-    primaryZone: ZoneSchema,
+    /** Which zone most of their work is in. Each job is still zoned by its own address. */
+    primaryZoneId: ZoneSchema,
     /** Where their invoices go. The one contact an account cannot trade without. */
     accountsContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
     accountsContactEmail: z
@@ -433,7 +538,9 @@ export const AccountSchema = AccountListItemSchema.extend({
    */
   detailsCompletedAt: IsoDateTimeSchema.nullable(),
   paymentTermsDays: z.number().int().positive(),
-  primaryZone: ZoneSchema,
+  primaryZoneId: ZoneSchema,
+  /** Resolved server-side — a screen showing an account must not have to hold a zone map. */
+  primaryZoneLabel: NonEmptyStringSchema,
   contacts: z.array(ContactSchema),
   /** M5.6 / F46 — preferred windows and blackout times per account. */
   preferredPickupWindow: z.string().nullable(),

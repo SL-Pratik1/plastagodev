@@ -1,4 +1,10 @@
-import { IsoDateSchema, RateCardIdSchema, ServiceCodeSchema, ZONES } from '@plastago/shared';
+import {
+  IsoDateSchema,
+  ObjectIdSchema,
+  RateCardIdSchema,
+  ServiceCodeSchema,
+  ZoneSchema,
+} from '@plastago/shared';
 import * as z from 'zod';
 
 /**
@@ -37,7 +43,7 @@ export const ServiceCodeParamsSchema = z
 export const QuoteQuerySchema = z
   .object({
     rateCardId: RateCardIdSchema,
-    zone: z.enum(ZONES),
+    zoneId: ZoneSchema,
     /**
      * Nullable, not optional-and-defaulted-to-zero. A fixed-price builder's job
      * genuinely has no area (Matt, 31:04), and a zero would price it as if the
