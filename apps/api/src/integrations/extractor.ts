@@ -382,10 +382,16 @@ export const extractorClient = {
     // rotated secret must update the row rather than add a second one.
     const match = rows.find((row) => stripQuery(row.url) === stripQuery(input.url));
 
+    /*
+     * ⚠️ `selected`, not `specific`. The vendor rejects anything else with
+     * "Invalid scope. Must be 'all' or 'selected'" — a 400 that only appears
+     * the first time a webhook is registered against a real public URL, which
+     * is long after the rest of the integration looks healthy.
+     */
     const body = {
       name: input.name,
       url: input.url,
-      scope: input.documentId ? 'specific' : 'all',
+      scope: input.documentId ? 'selected' : 'all',
       documentIds: input.documentId ? [input.documentId] : [],
     };
 

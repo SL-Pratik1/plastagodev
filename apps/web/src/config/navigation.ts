@@ -34,6 +34,12 @@ export interface NavItem {
   end?: boolean;
   /** Tooltip on the collapsed rail, and the scope reference for developers. */
   scope?: string;
+  /**
+   * Kept out of the menu without being deleted. The route, its guard and its
+   * capability mapping all stay live, so a typed URL or a saved link still
+   * reaches the screen — this only stops the link being offered.
+   */
+  hidden?: boolean;
 }
 
 export interface NavGroup {
@@ -152,6 +158,7 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         icon: CalendarSyncIcon,
         capability: 'queues:action',
         scope: 'M5.4 — reschedules and cancellations asked for from the portal',
+        hidden: true,
       },
       {
         to: '/admin/queues/call-up-review',
@@ -291,6 +298,9 @@ export function visibleNav(
   groups: readonly NavGroup[] = ADMIN_NAV,
 ): NavGroup[] {
   return groups
-    .map((group) => ({ ...group, items: group.items.filter((item) => can(item.capability)) }))
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => !item.hidden && can(item.capability)),
+    }))
     .filter((group) => group.items.length > 0);
 }
