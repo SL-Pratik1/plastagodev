@@ -22,6 +22,9 @@ import * as z from 'zod';
  * that could never name a real card is refused as a 422 before it reaches a
  * database lookup that would 404.
  */
+/** One zone, by id. */
+export const ZoneIdParamsSchema = z.object({ id: ZoneSchema }).meta({ id: 'ZoneIdParams' });
+
 export const RateCardIdParamsSchema = z
   .object({ id: RateCardIdSchema })
   .meta({ id: 'RateCardIdParams' });

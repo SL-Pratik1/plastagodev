@@ -7,6 +7,9 @@ import type {
   RateCardCreateSchema,
   RateCardUpdateSchema,
   RateScheduleCreateSchema,
+  ZoneCreateSchema,
+  ZoneOrderSchema,
+  ZoneUpdateSchema,
 } from '@plastago/shared';
 import type { Response } from 'express';
 import { AppError } from '../../lib/app-error.js';
@@ -21,6 +24,7 @@ import type {
   RateCardIdParamsSchema,
   ScheduleParamsSchema,
   ServiceCodeParamsSchema,
+  ZoneIdParamsSchema,
 } from './settings.schemas.js';
 import { settingsService, type Caller } from './settings.service.js';
 
@@ -153,6 +157,56 @@ export const settingsController = {
   },
 
   /* ── Rate cards (M6.1, M6.2) ───────────────────────────────────────────── */
+
+  /* ── Zones (M6.3) ──────────────────────────────────────────────────────── */
+
+  createZone: async (
+    req: ValidatedRequest<{ body: typeof ZoneCreateSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const zone = await settingsService.createZone(req.validated.body, callerOf(req));
+    res.status(201).json(zone);
+  },
+
+  renameZone: async (
+    req: ValidatedRequest<{ params: typeof ZoneIdParamsSchema; body: typeof ZoneUpdateSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const zone = await settingsService.renameZone(
+      req.validated.params.id,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.json(zone);
+  },
+
+  reorderZones: async (
+    req: ValidatedRequest<{ body: typeof ZoneOrderSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await settingsService.reorderZones(req.validated.body, callerOf(req)));
+  },
+
+  /**
+   * ⚠️ 200 with the RETIRED zone, not 204.
+   *
+   * A zone is archived rather than removed, so the response carries what
+   * actually happened — the screen shows a retired row it can restore, instead
+   * of assuming a delete it never performed.
+   */
+  archiveZone: async (
+    req: ValidatedRequest<{ params: typeof ZoneIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await settingsService.archiveZone(req.validated.params.id, callerOf(req)));
+  },
+
+  restoreZone: async (
+    req: ValidatedRequest<{ params: typeof ZoneIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await settingsService.restoreZone(req.validated.params.id, callerOf(req)));
+  },
 
   createRateCard: async (
     req: ValidatedRequest<{ body: typeof RateCardCreateSchema }>,

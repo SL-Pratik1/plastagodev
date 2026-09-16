@@ -7,6 +7,9 @@ import {
   RateCardCreateSchema,
   RateCardUpdateSchema,
   RateScheduleCreateSchema,
+  ZoneCreateSchema,
+  ZoneOrderSchema,
+  ZoneUpdateSchema,
 } from '@plastago/shared';
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
@@ -20,6 +23,7 @@ import {
   RateCardIdParamsSchema,
   ScheduleParamsSchema,
   ServiceCodeParamsSchema,
+  ZoneIdParamsSchema,
 } from './settings.schemas.js';
 
 /**
@@ -145,6 +149,63 @@ settingsRouter.post(
 );
 
 /* ── Rate cards (M6.1, M6.2) ─────────────────────────────────────────────── */
+
+/* ── Zones (M6.3) ─────────────────────────────────────────────────────────── */
+
+/**
+ * ⚠️ Stricter than every other write on this router.
+ *
+ * `ADMIN` above admits operations, because repricing a card or renaming a
+ * template is day-to-day office work. A zone is not: adding one writes a rate
+ * row on every card for every schedule they have ever had, and retiring one
+ * decides where the business goes. The service refuses independently — same
+ * double-gate as the rest of this file, at a tighter setting.
+ */
+const ZONE_ADMIN = requireRole('super-admin');
+
+settingsRouter.post(
+  '/zones',
+  ZONE_ADMIN,
+  validate({ body: ZoneCreateSchema }),
+  asyncHandler(settingsController.createZone),
+);
+
+/**
+ * ⚠️ Declared BEFORE anything matching `/zones/:id`.
+ *
+ * Express matches in declaration order, and while a PUT does not collide with
+ * the PATCH and DELETE below today, putting the literal path first is the habit
+ * that survives somebody adding `PUT /zones/:id` later.
+ */
+settingsRouter.put(
+  '/zones/order',
+  ZONE_ADMIN,
+  validate({ body: ZoneOrderSchema }),
+  asyncHandler(settingsController.reorderZones),
+);
+
+/** Renames the label. The id and slug are deliberately not reachable. */
+settingsRouter.patch(
+  '/zones/:id',
+  ZONE_ADMIN,
+  validate({ params: ZoneIdParamsSchema, body: ZoneUpdateSchema }),
+  asyncHandler(settingsController.renameZone),
+);
+
+settingsRouter.post(
+  '/zones/:id/restore',
+  ZONE_ADMIN,
+  validate({ params: ZoneIdParamsSchema }),
+  asyncHandler(settingsController.restoreZone),
+);
+
+/** ⚠️ RETIRES the zone. It is never removed — see `zoneSchema.archived`. */
+settingsRouter.delete(
+  '/zones/:id',
+  ZONE_ADMIN,
+  validate({ params: ZoneIdParamsSchema }),
+  asyncHandler(settingsController.archiveZone),
+);
 
 settingsRouter.post(
   '/rate-cards',

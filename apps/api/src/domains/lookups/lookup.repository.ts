@@ -1,8 +1,9 @@
 import type mongoose from 'mongoose';
+import type { Types } from 'mongoose';
 import { AccountModel } from '../accounts/account.model.js';
 import { UserModel } from '../auth/auth.model.js';
 import { JobModel } from '../jobs/job.model.js';
-import { RateCardModel } from '../settings/settings.model.js';
+import { RateCardModel, ZoneModel } from '../settings/settings.model.js';
 
 /**
  * Repository layer — the ONLY file in this domain that touches Mongoose
@@ -90,6 +91,35 @@ export const lookupRepository = {
    * Sorted by label rather than by id so the list reads alphabetically to a
    * human, not `clarendon-domaine, default, tier-1`.
    */
+  /**
+   * M6.3 — the zones, for every picker and filter that used `ZONE_LABELS`.
+   *
+   * ── Why archived zones are INCLUDED ──────────────────────────────────────
+   * ⚠️ Because this list does two jobs. A PICKER must offer only the zones the
+   * office still services — the caller filters on `archived` for that. A LABEL
+   * MAP has to name every zone that has ever priced a job, or the jobs grid
+   * renders a dash where a retired zone belongs. Returning the whole register
+   * with a flag lets one cached request answer both; filtering here would make
+   * the second job impossible and the bug invisible until somebody retired
+   * something.
+   *
+   * ── Why `displayOrder` and not alphabetical ──────────────────────────────
+   * Unlike `rateCards` below, which sorts by label. Zones have an order the
+   * office chose — Sydney first, because it is most of the work — and storing
+   * one is the entire point of the field.
+   */
+  async zones(): Promise<Array<LookupRow & { archived: boolean }>> {
+    const rows = await ZoneModel.find({}, { label: 1, displayOrder: 1, archived: 1 })
+      .sort({ displayOrder: 1 })
+      .lean<Array<{ _id: Types.ObjectId; label: string; archived: boolean }>>();
+
+    return rows.map((row) => ({
+      value: row._id.toString(),
+      label: row.label,
+      archived: row.archived,
+    }));
+  },
+
   async rateCards(): Promise<LookupRow[]> {
     const rows = await RateCardModel.find({}, { label: 1 })
       .sort({ label: 1 })
