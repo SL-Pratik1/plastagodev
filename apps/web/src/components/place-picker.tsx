@@ -79,7 +79,8 @@ export function PlacePicker({
               (M6.3), and the person booking should be able to see that a
               Wollongong job priced as Wollongong.
             */}
-            <span className="block text-xs text-muted-foreground">Zone: {value.zone}</span>
+            {/* The zone NAME, resolved server-side. This used to render the raw slug. */}
+          <span className="block text-xs text-muted-foreground">Zone: {value.zoneLabel}</span>
           </span>
         </span>
         <button
@@ -201,7 +202,7 @@ export function PlacePicker({
                     <MapPinIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
                     <span className="truncate">{place.label}</span>
                   </span>
-                  <Badge variant="secondary">{place.zone}</Badge>
+                  <Badge variant="secondary">{place.zoneLabel}</Badge>
                 </button>
               </li>
             ))

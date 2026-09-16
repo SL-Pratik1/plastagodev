@@ -1,6 +1,5 @@
 import {
   RUN_STATUS_LABELS,
-  ZONE_LABELS,
   type AllocationBoard,
   type MapPin,
   type Run,
@@ -1112,7 +1111,14 @@ function MapView({ date }: { date: string }) {
 
   const byZone = new Map<string, MapPin[]>();
   for (const pin of data) {
-    byZone.set(pin.zone, [...(byZone.get(pin.zone) ?? []), pin]);
+    /*
+         * Grouped by the zone NAME, which the pin now carries.
+         *
+         * It grouped by id-and-then-looked-the-name-up, which needed a cast
+         * because the map was keyed on a string the label table did not
+         * promise to have. One field, no cast, no lookup.
+         */
+        byZone.set(pin.zoneLabel, [...(byZone.get(pin.zoneLabel) ?? []), pin]);
   }
 
   return (
@@ -1141,7 +1147,8 @@ function MapView({ date }: { date: string }) {
             {[...byZone.entries()].map(([zone, pins]) => (
               <div key={zone}>
                 <p className="mb-1.5 flex items-center justify-between text-sm font-medium">
-                  {ZONE_LABELS[zone as keyof typeof ZONE_LABELS]}
+                  {/* The key IS the zone's name now — see where byZone is built. */}
+                  {zone}
                   <Badge variant="secondary">{pins.length}</Badge>
                 </p>
                 <ul className="space-y-1">

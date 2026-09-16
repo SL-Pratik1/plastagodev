@@ -26,6 +26,7 @@ export const queryKeys = {
     builders: () => [...queryKeys.lookups.all, 'builders'] as const,
     drivers: () => [...queryKeys.lookups.all, 'drivers'] as const,
     rateCards: () => [...queryKeys.lookups.all, 'rate-cards'] as const,
+    zones: () => [...queryKeys.lookups.all, 'zones'] as const,
     places: (query: string) => [...queryKeys.lookups.all, 'places', query] as const,
   },
 

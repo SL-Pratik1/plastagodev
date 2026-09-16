@@ -2,8 +2,6 @@ import {
   EXCEPTION_REASONS,
   EXCEPTION_REASON_LABELS,
   FUTILE_OUTCOME_LABELS,
-  ZONES,
-  ZONE_LABELS,
   type ExceptionReason,
   type FutileReviewItem,
 } from '@plastago/shared';
@@ -24,6 +22,7 @@ import {
 import { CalendarClockIcon, CheckCircle2Icon, MapPinIcon, TriangleAlertIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
+import type { ZoneOption } from '@/services/types';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
@@ -32,7 +31,7 @@ import { DetailList } from '@/components/detail-list';
 import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
 import { EvidenceGrid } from '@/components/queues/evidence-grid';
-import { useAccountOptions, useDriverOptions } from '@/features/lookups/queries';
+import { useAccountOptions, useDriverOptions, useZoneOptions } from '@/features/lookups/queries';
 import { useFutileDecide, useFutileList, useFutileReview } from '@/features/queues/queries';
 import { describeError } from '@/lib/error-message';
 import { formatDate, formatDateTime, formatMoney } from '@/lib/format';
@@ -56,6 +55,27 @@ import { useNow } from '@/lib/use-now';
  */
 const FILTER_KEYS = ['outcome', 'reason', 'account', 'driver', 'zone', 'age'] as const;
 
+/**
+ * The filter bar, with the loaded zones spliced back where they were.
+ *
+ * See `jobs.tsx:filtersWithZones` for why the position is fixed rather than
+ * appended.
+ */
+function filtersWithZones(zones: readonly ZoneOption[]): FilterDefinition[] {
+  const zoneFilter: FilterDefinition = {
+    key: 'zoneId',
+    label: 'Zone',
+    allLabel: 'All zones',
+    options: zones.map((zone) => ({
+      value: zone.value,
+      label: zone.archived ? `${zone.label} (retired)` : zone.label,
+    })),
+  };
+
+  const index = STATIC_FILTERS.findIndex((filter) => filter.key === 'age');
+  return [...STATIC_FILTERS.slice(0, index), zoneFilter, ...STATIC_FILTERS.slice(index)];
+}
+
 const STATIC_FILTERS: readonly FilterDefinition[] = [
   {
     key: 'outcome',
@@ -77,12 +97,6 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
     })),
   },
   {
-    key: 'zone',
-    label: 'Zone',
-    allLabel: 'All zones',
-    options: ZONES.map((zone) => ({ value: zone, label: ZONE_LABELS[zone] })),
-  },
-  {
     key: 'age',
     label: 'Waiting',
     allLabel: 'Any age',
@@ -102,10 +116,21 @@ export function AdminQueueFutilePage() {
   const accounts = useAccountOptions();
   const drivers = useDriverOptions();
 
+  /*
+   * ⚠️ Falls back to an empty list rather than gating the grid on a spinner.
+   *
+   * The zone filter renders with only "All zones" until the register lands,
+   * exactly as the Account and Driver filters beside it already do. One request
+   * per session — the reference cache holds it for an hour — so this is a
+   * first-paint concern on one screen, not a recurring one.
+   */
+  const zones = useZoneOptions().data ?? [];
+
+
   const [reviewingId, setReviewingId] = useState<string | null>(null);
 
   const filters: readonly FilterDefinition[] = [
-    ...STATIC_FILTERS,
+    ...filtersWithZones(zones),
     { key: 'account', label: 'Customer', allLabel: 'All customers', options: accounts.data ?? [] },
     { key: 'driver', label: 'Driver', allLabel: 'All drivers', options: drivers.data ?? [] },
   ];

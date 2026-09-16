@@ -3,7 +3,6 @@ import {
   LEAD_SOURCE_LABELS,
   LEAD_STATUS_LABELS,
   LEAD_WORKABLE_STATUSES,
-  ZONE_LABELS,
   type Lead,
   type LeadWorkableStatus,
 } from '@plastago/shared';
@@ -180,10 +179,17 @@ function LeadDetail({ lead }: { lead: Lead }) {
         </Alert>
       )}
 
-      {lead.zone === null && !converted && (
-        <Alert variant="warning" title="Outside the three service zones">
-          {lead.suburbs} is not in Sydney, Wollongong or Newcastle. Confirm we can actually service
-          it before quoting — an account we cannot reach is worse than a lost lead.
+      {/*
+        ⚠️ The zones are no longer named in this sentence.
+
+        It read "not in Sydney, Wollongong or Newcastle" — a hardcoded list in
+        prose, wrong the first time an administrator opens a fourth zone, and
+        wrong in a string where no typecheck would ever find it.
+      */}
+      {lead.zoneId === null && !converted && (
+        <Alert variant="warning" title="Outside the service zones">
+          {lead.suburbs} is not in any zone we service. Confirm we can actually reach it before
+          quoting — an account we cannot service is worse than a lost lead.
         </Alert>
       )}
 
@@ -230,10 +236,10 @@ function LeadDetail({ lead }: { lead: Lead }) {
                   {
                     label: 'Inferred zone',
                     value:
-                      lead.zone === null ? (
+                      lead.zoneLabel === null ? (
                         <span className="text-warning">Outside service area</span>
                       ) : (
-                        ZONE_LABELS[lead.zone]
+                        lead.zoneLabel
                       ),
                   },
                   { label: 'Suburbs', value: lead.suburbs, wide: true },

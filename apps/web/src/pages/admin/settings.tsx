@@ -6,8 +6,6 @@ import {
   INVOICE_LAYOUTS,
   ROLE_LABELS,
   ROLES,
-  ZONE_LABELS,
-  ZONES,
   type AdditionalServiceSetting,
   type BrandId,
   type InvoiceLayout,
@@ -48,6 +46,8 @@ import {
 import { ChevronDownIcon, EyeIcon, ImageIcon, PlusIcon, Trash2Icon, UploadIcon } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
+import { useZoneOptions } from '@/features/lookups/queries';
+import type { ZoneOption } from '@/services/types';
 import { PageHeader } from '@/components/page-header';
 import { UnsavedBar } from '@/components/unsaved-bar';
 import { CAPABILITY_GROUPS, ROLE_CAPABILITIES, can } from '@/features/auth/permissions';
@@ -408,6 +408,24 @@ function RolesSection() {
 function PricingSection({ settings }: { settings: Settings }) {
   const [newCardOpen, setNewCardOpen] = useState(false);
 
+  /*
+   * The zone register, read once for the whole tab.
+   *
+   * ⚠️ Two different lists, deliberately. `zoneOptions` is what a NEW schedule
+   * may price — live zones only, because a retired zone must not acquire a
+   * future price. `zoneLabels` names every zone ever, including retired ones,
+   * because an existing card may still carry a row for one.
+   */
+  const allZones = useZoneOptions().data ?? [];
+  const zoneOptions = allZones.filter((zone) => !zone.archived);
+  const zoneLabels = new Map(allZones.map((zone) => [zone.value, zone.label]));
+
+  /*
+   * Remounts both dialogs when the register changes, so a grid seeded on mount
+   * cannot be left showing a stale set of zones — see the note on the seed.
+   */
+  const zoneKey = zoneOptions.map((zone) => zone.value).join(',');
+
   return (
     <div className="space-y-4">
       {/*
@@ -444,7 +462,13 @@ function PricingSection({ settings }: { settings: Settings }) {
         </CardHeader>
         <CardContent className="space-y-2">
           {settings.pricing.rateCards.map((card) => (
-            <RateCardRow key={card.id} card={card} />
+            <RateCardRow
+              key={card.id}
+              card={card}
+              zoneOptions={zoneOptions}
+              zoneLabels={zoneLabels}
+              zoneKey={zoneKey}
+            />
           ))}
 
           {settings.pricing.rateCards.length === 0 && (
@@ -456,6 +480,19 @@ function PricingSection({ settings }: { settings: Settings }) {
       </Card>
 
       <NewRateCardDialog
+        /*
+          ⚠️ Keyed on the zone ids, because the grid inside is seeded ONCE.
+
+          `useState` runs its initialiser on mount and never again. Open this
+          before the register lands and the grid seeds empty, then sits empty
+          while the rest of the screen fills in — and the only clue is a Create
+          button complaining about zones it is not showing. Remounting on a
+          changed key is React's own answer; the alternative is an effect that
+          calls setState and cascades a render.
+        */
+        key={zoneKey}
+        zoneOptions={zoneOptions}
+        zoneLabels={zoneLabels}
         open={newCardOpen}
         onClose={() => {
           setNewCardOpen(false);
@@ -487,7 +524,17 @@ function PricingSection({ settings }: { settings: Settings }) {
  * no other home in the product. Collapsed keeps the common case clean without
  * making the rare one a database query.
  */
-function RateCardRow({ card }: { card: RateCardSummary }) {
+function RateCardRow({
+  card,
+  zoneOptions,
+  zoneLabels,
+  zoneKey,
+}: {
+  card: RateCardSummary;
+  zoneOptions: readonly ZoneOption[];
+  zoneLabels: ReadonlyMap<string, string>;
+  zoneKey: string;
+}) {
   const toast = useToast();
   const [expanded, setExpanded] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
@@ -555,8 +602,8 @@ function RateCardRow({ card }: { card: RateCardSummary }) {
         {current ? (
           <span className="hidden gap-4 text-xs tabular-nums text-muted-foreground md:flex">
             {current.zones.map((zone) => (
-              <span key={zone.zone}>
-                <span className="block">{ZONE_LABELS[zone.zone]}</span>
+              <span key={zone.zoneId}>
+                <span className="block">{zone.zoneLabel}</span>
                 <span className="block font-medium text-foreground">
                   {formatMoney(zone.serviceCharge)} + ${zone.ratePerM2}/m²
                 </span>
@@ -680,7 +727,11 @@ function RateCardRow({ card }: { card: RateCardSummary }) {
       )}
 
       <IssueScheduleDialog
+        /* Seeded once on mount — see the note on the other dialog. */
+        key={zoneKey}
         card={card}
+        zoneOptions={zoneOptions}
+        zoneLabels={zoneLabels}
         open={scheduleOpen}
         onClose={() => {
           setScheduleOpen(false);
@@ -809,8 +860,8 @@ function ScheduleTable({
           </thead>
           <tbody>
             {schedule.zones.map((zone) => (
-              <tr key={zone.zone} className="border-b border-border/60 last:border-b-0">
-                <td className="py-1.5">{ZONE_LABELS[zone.zone]}</td>
+              <tr key={zone.zoneId} className="border-b border-border/60 last:border-b-0">
+                <td className="py-1.5">{zone.zoneLabel}</td>
                 <td className="py-1.5 text-right tabular-nums">
                   {formatMoney(zone.serviceCharge)}
                 </td>
@@ -839,24 +890,36 @@ function todayInSydney(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
 }
 
-/** A blank set of zone rates — one row per zone, every one required. */
-function emptyZoneRates(): ZoneRateInput[] {
-  return ZONES.map((zone) => ({ zone, serviceCharge: '', ratePerM2: '' }));
+/**
+ * A blank set of zone rates — one row per LIVE zone, every one required.
+ *
+ * ⚠️ Takes the list rather than reading a constant. The grid used to be built
+ * from `ZONES`, so it could not be empty; it can be now, and `zoneRateErrors`
+ * below has a check for exactly that.
+ */
+function emptyZoneRates(zones: readonly ZoneOption[]): ZoneRateInput[] {
+  return zones.map((zone) => ({ zoneId: zone.value, serviceCharge: '', ratePerM2: '' }));
 }
 
 /**
- * The three-zone rate grid, shared by "new card" and "new schedule".
+ * The zone rate grid, shared by "new card" and "new schedule".
  *
  * One component because the two forms ask for exactly the same thing, and a
  * second copy is how the create form ends up accepting a precision the issue
  * form rejects.
+ *
+ * ⚠️ `labels` is threaded in rather than looked up here. The rows are
+ * `ZoneRateInput`, which carries only the id — it is a WRITE shape, and the
+ * server does not want a name it would have to ignore.
  */
 function ZoneRateFields({
   zones,
+  labels,
   onChange,
   disabled,
 }: {
   zones: readonly ZoneRateInput[];
+  labels: ReadonlyMap<string, string>;
   onChange: (next: ZoneRateInput[]) => void;
   disabled?: boolean;
 }) {
@@ -867,8 +930,11 @@ function ZoneRateFields({
   return (
     <div className="space-y-3">
       {zones.map((zone, index) => (
-        <div key={zone.zone} className="grid grid-cols-1 gap-2 sm:grid-cols-[8rem_1fr_1fr] sm:items-center">
-          <span className="text-sm font-medium">{ZONE_LABELS[zone.zone]}</span>
+        <div
+          key={zone.zoneId}
+          className="grid grid-cols-1 gap-2 sm:grid-cols-[8rem_1fr_1fr] sm:items-center"
+        >
+          <span className="text-sm font-medium">{labels.get(zone.zoneId) ?? 'Unknown zone'}</span>
 
           <label className="text-xs text-muted-foreground">
             Service charge
@@ -878,7 +944,7 @@ function ZoneRateFields({
               inputMode="decimal"
               placeholder="220.00"
               className="mt-1 font-mono"
-              aria-label={`Service charge for ${ZONE_LABELS[zone.zone]}`}
+              aria-label={`Service charge for ${labels.get(zone.zoneId) ?? 'this zone'}`}
               onChange={(event) => {
                 setZone(index, { serviceCharge: event.target.value });
               }}
@@ -893,7 +959,7 @@ function ZoneRateFields({
               inputMode="decimal"
               placeholder="0.1600"
               className="mt-1 font-mono"
-              aria-label={`Rate per square metre for ${ZONE_LABELS[zone.zone]}`}
+              aria-label={`Rate per square metre for ${labels.get(zone.zoneId) ?? 'this zone'}`}
               onChange={(event) => {
                 setZone(index, { ratePerM2: event.target.value });
               }}
@@ -921,34 +987,71 @@ function ZoneRateFields({
  * exists so the person typing gets told at the field rather than after a round
  * trip that clears nothing.
  */
-function zoneRateErrors(zones: readonly ZoneRateInput[]): string | null {
+function zoneRateErrors(
+  zones: readonly ZoneRateInput[],
+  labels: ReadonlyMap<string, string>,
+): string | null {
+  /*
+   * ⚠️ A new check, and it only became possible to fail once zones were data.
+   *
+   * The grid used to be built from `ZONES`, so it could not be empty. It can be
+   * now — a dialog opened before the register answered, or a deployment with no
+   * zones at all — and an empty array passes every loop below, so the form would
+   * happily post a schedule that prices nothing.
+   */
+  if (zones.length === 0) {
+    return 'There are no zones to price — add one on this tab before issuing rates';
+  }
+
+  const nameOf = (zoneId: string) => labels.get(zoneId) ?? 'That zone';
+
   for (const zone of zones) {
     if (zone.serviceCharge.trim() === '' || zone.ratePerM2.trim() === '') {
-      return `Every zone needs both figures — ${ZONE_LABELS[zone.zone]} is incomplete`;
+      return `Every zone needs both figures — ${nameOf(zone.zoneId)} is incomplete`;
     }
     if (!/^\d+(\.\d{1,4})?$/.test(zone.serviceCharge.trim())) {
-      return `${ZONE_LABELS[zone.zone]}'s service charge is not a valid amount`;
+      return `${nameOf(zone.zoneId)}'s service charge is not a valid amount`;
     }
     if (!/^\d+(\.\d{1,4})?$/.test(zone.ratePerM2.trim())) {
-      return `${ZONE_LABELS[zone.zone]}'s rate per m² is not a valid amount`;
+      return `${nameOf(zone.zoneId)}'s rate per m² is not a valid amount`;
     }
   }
   return null;
 }
 
-function NewRateCardDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+function NewRateCardDialog({
+  open,
+  onClose,
+  zoneOptions,
+  zoneLabels,
+}: {
+  open: boolean;
+  onClose: () => void;
+  /** Live zones only: a new schedule never prices a retired one. */
+  zoneOptions: readonly ZoneOption[];
+  zoneLabels: ReadonlyMap<string, string>;
+}) {
   const toast = useToast();
   const create = useCreateRateCard();
 
   const [label, setLabel] = useState('');
   const [effectiveFrom, setEffectiveFrom] = useState(todayInSydney);
-  const [zones, setZones] = useState<ZoneRateInput[]>(emptyZoneRates);
+  /*
+   * ⚠️ Seeded ONCE, on mount — `useState` never re-runs its initialiser.
+   *
+   * That was safe while zones were a constant and is not now. Two things guard
+   * it: the button that opens this dialog is disabled until the register lands,
+   * and the dialog is keyed on the zone ids so it remounts if the list changes
+   * underneath — which is what happens when somebody adds a zone in a second
+   * tab.
+   */
+  const [zones, setZones] = useState<ZoneRateInput[]>(() => emptyZoneRates(zoneOptions));
   const [error, setError] = useState<string | null>(null);
 
   const reset = () => {
     setLabel('');
     setEffectiveFrom(todayInSydney());
-    setZones(emptyZoneRates());
+    setZones(emptyZoneRates(zoneOptions));
     setError(null);
   };
 
@@ -957,7 +1060,7 @@ function NewRateCardDialog({ open, onClose }: { open: boolean; onClose: () => vo
       setError('Give the card a name — it appears wherever an account is assigned one');
       return;
     }
-    const zoneError = zoneRateErrors(zones);
+    const zoneError = zoneRateErrors(zones, zoneLabels);
     if (zoneError) {
       setError(zoneError);
       return;
@@ -969,7 +1072,7 @@ function NewRateCardDialog({ open, onClose }: { open: boolean; onClose: () => vo
         label: label.trim(),
         effectiveFrom,
         zones: zones.map((zone) => ({
-          zone: zone.zone,
+          zoneId: zone.zoneId,
           serviceCharge: zone.serviceCharge.trim(),
           ratePerM2: zone.ratePerM2.trim(),
         })),
@@ -1056,7 +1159,7 @@ function NewRateCardDialog({ open, onClose }: { open: boolean; onClose: () => vo
 
         <div>
           <p className="mb-2 text-sm font-medium">Zone rates</p>
-          <ZoneRateFields zones={zones} onChange={setZones} disabled={create.isPending} />
+          <ZoneRateFields zones={zones} labels={zoneLabels} onChange={setZones} disabled={create.isPending} />
         </div>
       </div>
     </Dialog>
@@ -1075,32 +1178,42 @@ function IssueScheduleDialog({
   card,
   open,
   onClose,
+  zoneOptions,
+  zoneLabels,
 }: {
   card: RateCardSummary;
   open: boolean;
   onClose: () => void;
+  /** Live zones only: a new schedule never prices a retired one. */
+  zoneOptions: readonly ZoneOption[];
+  zoneLabels: ReadonlyMap<string, string>;
 }) {
   const toast = useToast();
   const issue = useIssueSchedule();
 
+  /*
+   * One row per LIVE zone, pre-filled from what the card charges today.
+   *
+   * ⚠️ Matched by id against the card's current rates, so a zone added AFTER
+   * this card was written seeds blank rather than inheriting a neighbour's
+   * price. The office is asked to fill it in; it is never guessed at.
+   */
   const seed = (): ZoneRateInput[] =>
-    card.zones.length > 0
-      ? ZONES.map((zone) => {
-          const existing = card.zones.find((rate) => rate.zone === zone);
-          return {
-            zone,
-            serviceCharge: existing?.serviceCharge ?? '',
-            ratePerM2: existing?.ratePerM2 ?? '',
-          };
-        })
-      : emptyZoneRates();
+    zoneOptions.map((zone) => {
+      const existing = card.zones.find((rate) => rate.zoneId === zone.value);
+      return {
+        zoneId: zone.value,
+        serviceCharge: existing?.serviceCharge ?? '',
+        ratePerM2: existing?.ratePerM2 ?? '',
+      };
+    });
 
   const [effectiveFrom, setEffectiveFrom] = useState(todayInSydney);
   const [zones, setZones] = useState<ZoneRateInput[]>(seed);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
-    const zoneError = zoneRateErrors(zones);
+    const zoneError = zoneRateErrors(zones, zoneLabels);
     if (zoneError) {
       setError(zoneError);
       return;
@@ -1113,7 +1226,7 @@ function IssueScheduleDialog({
         schedule: {
           effectiveFrom,
           zones: zones.map((zone) => ({
-            zone: zone.zone,
+            zoneId: zone.zoneId,
             serviceCharge: zone.serviceCharge.trim(),
             ratePerM2: zone.ratePerM2.trim(),
           })),
@@ -1176,7 +1289,7 @@ function IssueScheduleDialog({
 
         <div>
           <p className="mb-2 text-sm font-medium">Zone rates</p>
-          <ZoneRateFields zones={zones} onChange={setZones} disabled={issue.isPending} />
+          <ZoneRateFields zones={zones} labels={zoneLabels} onChange={setZones} disabled={issue.isPending} />
         </div>
 
         <Alert variant="neutral" title="Pre-filled with today’s rates">

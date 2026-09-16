@@ -56,6 +56,13 @@ const LookupOptionSchema = z.object({
   group: z.string().optional(),
 });
 
+/** A zone carries one thing a lookup option does not: whether it is retired. */
+const ZoneOptionSchema = z.object({
+  value: z.string(),
+  label: z.string(),
+  archived: z.boolean(),
+});
+
 /* ── Reference lists ─────────────────────────────────────────────────────── */
 
 export function createHttpLookupService(api: ApiClient): LookupService {
@@ -69,6 +76,11 @@ export function createHttpLookupService(api: ApiClient): LookupService {
     builders: () => list('builders'),
     drivers: () => list('drivers'),
     rateCards: () => list('rate-cards'),
+
+    zones: () =>
+      viaService(() =>
+        api.request(`${base}/zones`, { schema: z.array(ZoneOptionSchema) }),
+      ),
 
     places: (query: string) =>
       viaService(() =>

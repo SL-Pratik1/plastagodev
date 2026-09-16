@@ -5,7 +5,6 @@ import {
   FREIGHT_ITEM_LABELS,
   WEIGHT_BASIS_HINTS,
   WEIGHT_BASIS_LABELS,
-  ZONE_LABELS,
   type ExceptionReason,
 } from '@plastago/shared';
 import {
@@ -417,7 +416,7 @@ export function AdminJobDetailPage() {
                         .filter(Boolean)
                         .join(', '),
                     },
-                    { label: 'Zone', value: ZONE_LABELS[job.zone] },
+                    { label: 'Zone', value: job.zoneLabel },
                     { label: 'Customer reference', value: job.poNumber ?? '—' },
                     { label: 'Purchase order', value: job.poNumber ?? 'Not supplied' },
                     { label: 'Ready date', value: formatDate(job.readyDate) },

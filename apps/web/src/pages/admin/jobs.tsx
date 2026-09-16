@@ -1,14 +1,20 @@
-import { JOB_STATUS_LABELS, JOB_STATUSES, ZONE_LABELS, type JobListItem } from '@plastago/shared';
+import { JOB_STATUS_LABELS, JOB_STATUSES, type JobListItem } from '@plastago/shared';
 import { Badge, Card, Pagination, buttonVariants } from '@plastago/ui';
 import { BriefcaseIcon, PlusIcon } from 'lucide-react';
 import { Link } from 'react-router';
+import type { ZoneOption } from '@/services/types';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { JobInvoiceBadge, JobStatusBadge, UrgentBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
-import { useAccountOptions, useBuilderOptions, useDriverOptions } from '@/features/lookups/queries';
+import {
+  useAccountOptions,
+  useBuilderOptions,
+  useDriverOptions,
+  useZoneOptions,
+} from '@/features/lookups/queries';
 import { useJobList } from '@/features/jobs/queries';
 import { useAuth } from '@/features/auth/auth-context';
 import { formatDate, formatMoney } from '@/lib/format';
@@ -37,6 +43,34 @@ const FILTER_KEYS = [
   'risk',
 ] as const;
 
+/**
+ * The filter bar, with the loaded zones spliced into position.
+ *
+ * Inserted where the constant used to declare it — after Ready date, before
+ * Invoice — rather than appended to the end. The order of a filter bar is a
+ * design decision, and letting it depend on which lists happen to be loaded
+ * would move controls around under somebody's cursor. Same reasoning, same
+ * shape, as `customers.tsx:filtersWith`.
+ *
+ * ⚠️ Archived zones are OFFERED here, unlike on a form. This grid is mostly
+ * history: work booked in a zone the office has since retired is exactly what
+ * somebody filtering by zone is looking for.
+ */
+function filtersWithZones(zones: readonly ZoneOption[]): FilterDefinition[] {
+  const zoneFilter: FilterDefinition = {
+    key: 'zoneId',
+    label: 'Zone',
+    allLabel: 'All zones',
+    options: zones.map((zone) => ({
+      value: zone.value,
+      label: zone.archived ? `${zone.label} (retired)` : zone.label,
+    })),
+  };
+
+  const index = STATIC_FILTERS.findIndex((filter) => filter.key === 'invoiceStatus');
+  return [...STATIC_FILTERS.slice(0, index), zoneFilter, ...STATIC_FILTERS.slice(index)];
+}
+
 const STATIC_FILTERS: readonly FilterDefinition[] = [
   {
     key: 'status',
@@ -56,12 +90,6 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
       { value: 'last-7', label: 'Last 7 days' },
       { value: 'last-30', label: 'Last 30 days' },
     ],
-  },
-  {
-    key: 'zone',
-    label: 'Zone',
-    allLabel: 'All zones',
-    options: Object.entries(ZONE_LABELS).map(([value, label]) => ({ value, label })),
   },
   {
     key: 'invoiceStatus',
@@ -146,7 +174,7 @@ const COLUMNS: readonly DataTableColumn<JobListItem>[] = [
       <span className="block">
         <span>{row.siteName}</span>
         <span className="block text-xs text-muted-foreground">
-          {row.suburb} · {ZONE_LABELS[row.zone]}
+          {row.suburb} · {row.zoneLabel}
         </span>
       </span>
     ),
@@ -237,8 +265,19 @@ export function AdminJobsPage() {
   const builders = useBuilderOptions();
   const drivers = useDriverOptions();
 
+  /*
+   * ⚠️ Falls back to an empty list rather than gating the grid on a spinner.
+   *
+   * The zone filter renders with only "All zones" until the register lands,
+   * exactly as the Account and Driver filters beside it already do. One request
+   * per session — the reference cache holds it for an hour — so this is a
+   * first-paint concern on one screen, not a recurring one.
+   */
+  const zones = useZoneOptions().data ?? [];
+
+
   const filters: readonly FilterDefinition[] = [
-    ...STATIC_FILTERS,
+    ...filtersWithZones(zones),
     {
       key: 'account',
       label: 'Account',

@@ -167,6 +167,26 @@ export interface LookupOption {
  * page through an entire domain to populate itself. These are small, cached
  * hard, and read by many screens.
  */
+/**
+ * One zone, shaped for a picker or a filter.
+ *
+ * ── Why this is not a plain `LookupOption` ────────────────────────────────
+ * Because a zone has to answer two questions a rate card never did. A PICKER
+ * must offer only the zones the office still services. A FILTER over historical
+ * work must be able to name a zone that has since been retired, or the jobs grid
+ * grows a filter option that matches rows it cannot label.
+ *
+ * One request carrying the whole register with a flag answers both; two
+ * endpoints would be two caches to keep in step.
+ */
+export interface ZoneOption {
+  /** The zone's id. What every record stores and every filter sends. */
+  value: string;
+  label: string;
+  /** Retired: still nameable, no longer offered on new work. */
+  archived: boolean;
+}
+
 export interface LookupService {
   accounts: () => Promise<LookupOption[]>;
   builders: () => Promise<LookupOption[]>;
@@ -180,6 +200,15 @@ export interface LookupService {
    * missing every card added since the last deploy.
    */
   rateCards: () => Promise<LookupOption[]>;
+  /**
+   * M6.3 — the service zones.
+   *
+   * ⚠️ Read from here, never from a constant. Zones used to be a compile-time
+   * enum with a matching label map; they are records an administrator creates
+   * now, so a screen holding its own list would be missing every zone added
+   * since the last deploy — and naming one would be impossible.
+   */
+  zones: () => Promise<ZoneOption[]>;
   /**
    * Address lookup (Matt, 7:25) — matches on suburb name or postcode.
    *

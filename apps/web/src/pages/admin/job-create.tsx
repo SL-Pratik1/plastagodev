@@ -2,7 +2,6 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import {
   FREIGHT_ITEM_LABELS,
   FREIGHT_ITEMS,
-  ZONE_LABELS,
   type JobDraft,
   type Place,
 } from '@plastago/shared';
@@ -764,7 +763,7 @@ export function AdminJobCreatePage() {
                 ) : preview.data ? (
                   <>
                     <p className="text-xs text-muted-foreground">
-                      {ZONE_LABELS[preview.data.zone]} zone
+                      {preview.data.zoneLabel} zone
                     </p>
 
                     <ul className="space-y-2 border-y border-border py-3 text-sm">

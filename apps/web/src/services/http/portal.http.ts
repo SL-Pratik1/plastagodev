@@ -185,7 +185,7 @@ export function createHttpPortalService(api: ApiClient): CustomerPortalService {
             from: filters.from,
             to: filters.to,
             ...(filters.suburb ? { suburb: filters.suburb } : {}),
-            ...(filters.zone ? { zone: filters.zone } : {}),
+            ...(filters.zoneId ? { zoneId: filters.zoneId } : {}),
           },
           schema: MonthlyVolumeReportSchema,
         }),
