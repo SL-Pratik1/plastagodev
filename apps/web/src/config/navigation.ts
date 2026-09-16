@@ -21,6 +21,7 @@ import {
   WalletIcon,
   WrenchIcon,
   type LucideIcon,
+  MapPinIcon,
 } from 'lucide-react';
 import type { Capability } from '@/features/auth/permissions';
 
@@ -275,6 +276,13 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         capability: 'integrations:manage',
         scope:
           'I1 · M7.8 — connect the accounting books, then invoices and payment status sync on their own',
+      },
+      {
+        to: '/admin/suburbs',
+        label: 'Suburbs',
+        icon: MapPinIcon,
+        capability: 'settings:manage',
+        scope: 'M6.3 — the suburbs the picker offers, and the zone each one prices in',
       },
       {
         to: '/admin/settings',

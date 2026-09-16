@@ -20,6 +20,7 @@ import {
   createHttpLookupService,
   createHttpNotificationService,
   createHttpSettingsService,
+  createHttpSuburbService,
   createHttpUserService,
 } from './reference.http.js';
 
@@ -41,6 +42,7 @@ export function createHttpServices(api: ApiClient): Services {
   return {
     auth: createHttpAuthService(api),
     lookups: createHttpLookupService(api),
+    suburbs: createHttpSuburbService(api),
     users: createHttpUserService(api),
     customers: createHttpCustomerService(api),
     jobs: createHttpJobService(api),

@@ -81,6 +81,7 @@ import type {
   PortalSupervisor,
   PortalSupervisorInvite,
   Place,
+  PlaceWrite,
   PricePreview,
   RateCardCreate,
   RateCardSummary,
@@ -923,9 +924,40 @@ export interface XeroConnectionStatus {
   invoiceStatus: 'DRAFT' | 'AUTHORISED';
 }
 
+/**
+ * M6.3 — the suburbs PlastaGo services.
+ *
+ * ── Why its own service and not a slice of `SettingsService` ──────────────
+ * A settings section is part of the one `Settings` document that screen reads
+ * whole, and folding this in would carry the whole suburb table on every
+ * settings read, on every tab, for one screen.
+ *
+ * ⚠️ These rows ARE the place type-ahead behind every booking form
+ * (`LookupService.places`). That lookup stays read-and-search-only; this is the
+ * write side, and a write here has to invalidate it — see
+ * `features/suburbs/queries.ts`.
+ */
+export interface SuburbService {
+  /** Every suburb, archived included. The admin screen has to show both. */
+  list: () => Promise<Place[]>;
+  create: (draft: PlaceWrite) => Promise<Place>;
+  update: (id: string, draft: PlaceWrite) => Promise<Place>;
+  /**
+   * ⚠️ Two outcomes behind one verb.
+   *
+   * A suburb nothing has ever been collected from is a typo and is REMOVED. One
+   * with jobs behind it is a place the business has left, and is archived — the
+   * jobs still name it, and rebooking a futile pickup there has to keep working.
+   * Resolves to the archived row, or null when it was really deleted.
+   */
+  remove: (id: string) => Promise<Place | null>;
+  restore: (id: string) => Promise<Place>;
+}
+
 export interface Services {
   readonly auth: AuthService;
   readonly lookups: LookupService;
+  readonly suburbs: SuburbService;
   readonly users: UserService;
   readonly customers: CustomerService;
   readonly jobs: JobService;

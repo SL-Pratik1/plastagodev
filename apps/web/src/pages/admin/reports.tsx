@@ -1,10 +1,4 @@
-import {
-  type Certificate,
-  type FinancialRow,
-  type ReportFilters,
-  type VolumeRow,
-  type Zone,
-} from '@plastago/shared';
+import type { Certificate, FinancialRow, ReportFilters, VolumeRow } from '@plastago/shared';
 import {
   Alert,
   Badge,
@@ -26,7 +20,6 @@ import {
 import { AwardIcon, LayoutDashboardIcon } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { useZoneOptions } from '@/features/lookups/queries';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn } from '@/components/data-table/types';
@@ -40,7 +33,7 @@ import {
   useMonthlyVolumeReport,
   useZoneVolumeReport,
 } from '@/features/reports/queries';
-import { useAccountOptions, useDriverOptions } from '@/features/lookups/queries';
+import { useAccountOptions, useDriverOptions, useZoneOptions } from '@/features/lookups/queries';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatMoney, formatWeight } from '@/lib/format';
 
@@ -103,7 +96,6 @@ export function AdminReportsPage() {
       accountId: params.get('account'),
       // Narrowed by suburb now — there is no site record to key on (Matt, 0:29).
       suburb: params.get('suburb'),
-      zone: (params.get('zone') as Zone | null) ?? null,
       driverId: params.get('driver'),
     }),
     [params],

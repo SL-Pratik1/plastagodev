@@ -30,6 +30,11 @@ export const queryKeys = {
     places: (query: string) => [...queryKeys.lookups.all, 'places', query] as const,
   },
 
+  suburbs: {
+    all: ['suburbs'] as const,
+    list: () => [...queryKeys.suburbs.all, 'list'] as const,
+  },
+
   dashboard: {
     all: ['dashboard'] as const,
     summary: () => [...queryKeys.dashboard.all, 'summary'] as const,
