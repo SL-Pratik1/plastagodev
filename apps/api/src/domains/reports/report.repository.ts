@@ -239,9 +239,18 @@ export const reportRepository = {
         revenueCents += (split?.base ?? 0) + (split?.additional ?? 0);
       }
 
+      /*
+       * ⚠️ A null key is a job with no zone — a data fault, since every job is
+       * written with one. It is grouped and SHOWN rather than dropped or thrown
+       * on: the revenue is real and has to reach the total, and a row somebody
+       * can see is how the fault gets found. Dropping it would make the zone
+       * report quietly disagree with the financial one.
+       */
+      const zoneId = row._id === null ? '' : row._id.toString();
+
       return {
-        zoneId: row._id.toString(),
-        label: names.get(row._id.toString()) ?? UNKNOWN_ZONE_LABEL,
+        zoneId,
+        label: zoneId === '' ? 'No zone' : (names.get(zoneId) ?? UNKNOWN_ZONE_LABEL),
         jobs: row.jobs,
         areaM2: row.areaM2,
         revenueCents,

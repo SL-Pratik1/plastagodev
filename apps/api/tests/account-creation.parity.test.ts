@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { SEED_ZONES, ZONE } from './helpers/fake-settings.js';
 import type { AccountDraft, LeadConversion, Role } from '@plastago/shared';
 import {
   clearOutbound,
@@ -75,8 +76,31 @@ vi.mock('../src/domains/settings/settings.repository.js', () => ({
       Promise.resolve(
         id === 'tier-1' ? { id, label: 'Tier 1', effectiveFrom: '2026-04-01' } : null,
       ),
-  },
-}));
+    /*
+     * The zone register, as far as the zone existence guard needs it.
+     *
+     * ⚠️ Answers for the seeded ids and nothing else, so a test that invents a
+     * zone gets the same 422 the real guard would give it.
+     */
+    findZone: (id: string) => {
+      const zone = SEED_ZONES.find((candidate: { id: string }) => candidate.id === id);
+      return Promise.resolve(
+        zone
+          ? {
+              id: zone.id,
+              slug: zone.slug,
+              label: zone.label,
+              displayOrder: 0,
+              archived: false,
+              placeCount: 0,
+              accountCount: 0,
+              jobCount: 0,
+              archivable: true,
+            }
+          : null,
+      );
+    },
+  },}));
 
 const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 const { accountService } = await import('../src/domains/accounts/account.service.js');
@@ -106,7 +130,7 @@ const TERMS = {
   poPolicy: 'required-before-invoice',
   captureMode: 'area-and-weight',
   paymentTermsDays: 30,
-  primaryZone: 'newcastle',
+  primaryZoneId: ZONE.newcastle,
   accountsContactName: 'Jo Bloggs',
   accountsContactEmail: 'jo@acme.com.au',
 } as const;

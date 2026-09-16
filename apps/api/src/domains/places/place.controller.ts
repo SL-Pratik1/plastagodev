@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import { PlaceWriteSchema } from '@plastago/shared';
+import type { PlaceWriteSchema } from '@plastago/shared';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { AppError } from '../../lib/app-error.js';
 import type { Caller } from './place.service.js';

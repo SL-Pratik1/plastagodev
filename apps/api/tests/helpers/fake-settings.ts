@@ -9,6 +9,7 @@ import type {
   Settings,
   Zone,
   ZoneRateInput,
+  ZoneSummary,
 } from '@plastago/shared';
 import type { ResolvedRate } from '../../src/domains/settings/settings.repository.js';
 
@@ -49,8 +50,81 @@ const SEEDED_CARDS: readonly RateCardId[] = [
   'default',
 ];
 
-/** Declared zone order, so a rate table never reorders between two reads. */
-const ZONE_ORDER: readonly Zone[] = ['sydney', 'wollongong', 'newcastle'];
+/**
+ * The zones every suite starts with (M6.3).
+ *
+ * ── Why the ids are literals ──────────────────────────────────────────────
+ * Zones are documents now, so a fixture has to invent their ids. Hardcoded
+ * 24-hex strings rather than `new ObjectId()` so a failure message names the
+ * same zone every run and two suites can refer to the same one — the fake never
+ * reaches Mongo, so nothing here has to be a real BSON id, only shaped like one.
+ *
+ * Array ORDER is `displayOrder`. Decimal strings, never numbers.
+ */
+interface FakeZone {
+  id: string;
+  slug: string;
+  label: string;
+  serviceCharge: string;
+  ratePerM2: string;
+}
+
+export const SEED_ZONES: readonly FakeZone[] = [
+  {
+    id: '000000000000000000000001',
+    slug: 'sydney',
+    label: 'Sydney',
+    serviceCharge: '220.00',
+    ratePerM2: '0.16',
+  },
+  {
+    id: '000000000000000000000002',
+    slug: 'wollongong',
+    label: 'Wollongong',
+    serviceCharge: '250.00',
+    ratePerM2: '0.18',
+  },
+  {
+    id: '000000000000000000000003',
+    slug: 'newcastle',
+    label: 'Newcastle',
+    serviceCharge: '250.00',
+    ratePerM2: '0.20',
+  },
+];
+
+/** Reach for a seeded zone by name, so a test reads as prose. */
+export const ZONE = {
+  sydney: SEED_ZONES[0]!.id,
+  wollongong: SEED_ZONES[1]!.id,
+  newcastle: SEED_ZONES[2]!.id,
+} as const;
+
+/**
+ * The figures for a zone, with a fallback.
+ *
+ * ⚠️ A fallback, not a default. `noUncheckedIndexedAccess` makes the lookup
+ * possibly-undefined, and a zone a test INVENTS — which is the entire point of
+ * the zone-CRUD suite — has no entry here. Returning Sydney's figures keeps
+ * those tests about the zone and not about arithmetic they never asserted.
+ */
+function ratesFor(zoneId: string): { serviceCharge: string; ratePerM2: string } {
+  const zone = SEED_ZONES.find((candidate) => candidate.id === zoneId);
+  return {
+    serviceCharge: zone?.serviceCharge ?? SEED_ZONES[0]!.serviceCharge,
+    ratePerM2: zone?.ratePerM2 ?? SEED_ZONES[0]!.ratePerM2,
+  };
+}
+
+/** One rate row per seeded zone, as a settings tree carries them. */
+function seededZoneRates() {
+  return SEED_ZONES.map((zone) => ({
+    zoneId: zone.id,
+    zoneLabel: zone.label,
+    serviceCharge: zone.serviceCharge,
+    ratePerM2: zone.ratePerM2,
+  }));
+}
 
 /** Apply the same `deletable` rule the real repository applies on read. */
 function toContractService(service: StoredService): AdditionalServiceSetting {
@@ -73,13 +147,6 @@ function toContractService(service: StoredService): AdditionalServiceSetting {
  * assertions are about the lookup the service performs — a quote that silently
  * priced against the wrong rate card would still return a plausible number.
  */
-
-/** The three zones, verbatim (M6.3). Decimal strings, never numbers. */
-const ZONE_RATES: Record<Zone, { serviceCharge: string; ratePerM2: string }> = {
-  sydney: { serviceCharge: '220.00', ratePerM2: '0.16' },
-  wollongong: { serviceCharge: '250.00', ratePerM2: '0.18' },
-  newcastle: { serviceCharge: '250.00', ratePerM2: '0.20' },
-};
 
 const SEED_SERVICES: Record<string, StoredService> = {
   'recycling-bags': {
@@ -160,6 +227,22 @@ export function createFakeSettingsRepository() {
   /** Zones that have no rate on any card at all — the "nothing configured" path. */
   let unpricedZones = new Set<Zone>();
 
+  /** The zone register, as a test has left it. Mutable: zones are data now. */
+  let zones: ZoneSummary[] = SEED_ZONES.map((zone, index) => ({
+    id: zone.id,
+    slug: zone.slug,
+    label: zone.label,
+    displayOrder: index,
+    archived: false,
+    placeCount: 0,
+    accountCount: 0,
+    jobCount: 0,
+    archivable: true,
+  }));
+
+  /** Rate rows per zone, so a copy can be asserted rather than assumed. */
+  const zoneRateRows = new Map<string, Array<{ rateCardId: RateCardId; effectiveFrom: string }>>();
+
   let settings: Settings = baseSettings();
   /**
    * M2.4a. Not on the `Settings` contract any more — the General tab is gone —
@@ -233,7 +316,11 @@ export function createFakeSettingsRepository() {
   let logoKey = '';
 
   const calls = {
-    resolveRate: [] as Array<{ rateCardId: RateCardId; zone: Zone; onDate: string }>,
+    resolveRate: [] as Array<{ rateCardId: RateCardId; zoneId: Zone; onDate: string }>,
+    createdZones: [] as Array<{ slug: string; label: string; copyRatesFromZoneId: string }>,
+    renamedZones: [] as Array<{ id: string; label: string }>,
+    reorderedZones: [] as string[][],
+    archivedZones: [] as Array<{ id: string; archived: boolean }>,
     findAdditionalService: [] as string[],
     savedInvoicing: null as Settings['invoicing'] | null,
     createdRateCards: [] as Array<{ id: RateCardId; effectiveFrom: string }>,
@@ -256,12 +343,12 @@ export function createFakeSettingsRepository() {
 
     async resolveRate(
       rateCardId: RateCardId,
-      zone: Zone,
+      zoneId: Zone,
       onDate: string,
     ): Promise<ResolvedRate | null> {
-      calls.resolveRate.push({ rateCardId, zone, onDate });
+      calls.resolveRate.push({ rateCardId, zoneId, onDate });
 
-      if (unpricedZones.has(zone)) return Promise.resolve(null);
+      if (unpricedZones.has(zoneId)) return Promise.resolve(null);
 
       // Mirrors the real fallback: a card with no rate for this zone falls back
       // to `default` — resolved ON THE SAME DATE, never on today.
@@ -277,16 +364,165 @@ export function createFakeSettingsRepository() {
       const inForce = starts.filter((start) => start <= onDate).at(-1);
       if (inForce === undefined) return Promise.resolve(null);
 
-      const override = scheduledRates.get(`${resolved}:${inForce}:${zone}`);
+      const override = scheduledRates.get(`${resolved}:${inForce}:${zoneId}`);
+      const seeded = ratesFor(zoneId);
 
       return Promise.resolve({
         rateCardId: resolved,
         label: `${resolved} rates`,
-        zone,
-        serviceCharge: override?.serviceCharge ?? ZONE_RATES[zone].serviceCharge,
-        ratePerM2: override?.ratePerM2 ?? ZONE_RATES[zone].ratePerM2,
+        zoneId,
+        zoneLabel: zones.find((zone) => zone.id === zoneId)?.label ?? 'Unknown zone',
+        serviceCharge: override?.serviceCharge ?? seeded.serviceCharge,
+        ratePerM2: override?.ratePerM2 ?? seeded.ratePerM2,
         scheduleFrom: inForce,
       });
+    },
+
+    /* ── Zones (M6.3) ────────────────────────────────────────────────────── */
+
+    async allZones(): Promise<ZoneSummary[]> {
+      return Promise.resolve(zones.map((zone) => ({ ...zone })));
+    },
+
+    async activeZones(): Promise<ZoneSummary[]> {
+      return Promise.resolve(zones.filter((zone) => !zone.archived).map((zone) => ({ ...zone })));
+    },
+
+    /* ⚠️ Archived included, exactly like the real one. See the note there. */
+    async findZone(id: string): Promise<ZoneSummary | null> {
+      const zone = zones.find((candidate) => candidate.id === id);
+      return Promise.resolve(zone ? { ...zone } : null);
+    },
+
+    async findZoneBySlug(slug: string): Promise<ZoneSummary | null> {
+      const zone = zones.find((candidate) => candidate.slug === slug);
+      return Promise.resolve(zone ? { ...zone } : null);
+    },
+
+    async findZoneLabel(id: string): Promise<string | null> {
+      return Promise.resolve(zones.find((zone) => zone.id === id)?.label ?? null);
+    },
+
+    async activeZoneIds(): Promise<string[]> {
+      return Promise.resolve(zones.filter((zone) => !zone.archived).map((zone) => zone.id));
+    },
+
+    async nextZoneDisplayOrder(): Promise<number> {
+      return Promise.resolve(
+        zones.reduce((highest, zone) => Math.max(highest, zone.displayOrder), -1) + 1,
+      );
+    },
+
+    /**
+     * ⚠️ This ACTUALLY COPIES the rate rows, across every remembered schedule.
+     *
+     * A fake that only recorded the call would let the real bug through — the
+     * one where only the open schedule is copied, so a back-dated booking in the
+     * new zone resolves nothing and 503s. The point of the fake here is that
+     * `resolveRate(card, newZone, aDateInAClosedWindow)` answers correctly
+     * afterwards, which it cannot do unless the copy really happened.
+     */
+    async createZoneCopyingRates(input: {
+      slug: string;
+      label: string;
+      displayOrder: number;
+      copyRatesFromZoneId: string;
+    }): Promise<{ id: string; rowsCopied: number }> {
+      calls.createdZones.push({
+        slug: input.slug,
+        label: input.label,
+        copyRatesFromZoneId: input.copyRatesFromZoneId,
+      });
+
+      const id = `0000000000000000000000${String(zones.length + 1).padStart(2, '0')}`;
+
+      zones = [
+        ...zones,
+        {
+          id,
+          slug: input.slug,
+          label: input.label,
+          displayOrder: input.displayOrder,
+          archived: false,
+          placeCount: 0,
+          accountCount: 0,
+          jobCount: 0,
+          archivable: true,
+        },
+      ];
+
+      // Every schedule the source zone has a row on, not just the open one.
+      let rowsCopied = 0;
+      for (const [key, rate] of [...scheduledRates.entries()]) {
+        const [cardId, effectiveFrom, zoneId] = key.split(':');
+        if (zoneId !== input.copyRatesFromZoneId) continue;
+
+        scheduledRates.set(`${cardId ?? ''}:${effectiveFrom ?? ''}:${id}`, { ...rate });
+        rowsCopied += 1;
+      }
+
+      /*
+       * Plus the seeded schedule, which `baseSettings` writes without going
+       * through `rememberRates` — so a zone created in a suite that never issued
+       * a schedule of its own still prices.
+       */
+      for (const cardId of cardsWithRates) {
+        const key = `${cardId}:${SEEDED_SCHEDULE_FROM}:${id}`;
+        if (!scheduledRates.has(key)) {
+          scheduledRates.set(key, ratesFor(input.copyRatesFromZoneId));
+          rowsCopied += 1;
+        }
+      }
+
+      zoneRateRows.set(
+        id,
+        [...cardsWithRates].map((rateCardId) => ({
+          rateCardId,
+          effectiveFrom: SEEDED_SCHEDULE_FROM,
+        })),
+      );
+
+      return Promise.resolve({ id, rowsCopied });
+    },
+
+    async renameZone(id: string, label: string): Promise<void> {
+      calls.renamedZones.push({ id, label });
+      zones = zones.map((zone) => (zone.id === id ? { ...zone, label } : zone));
+      return Promise.resolve();
+    },
+
+    async reorderZones(orderedIds: readonly string[]): Promise<void> {
+      calls.reorderedZones.push([...orderedIds]);
+      zones = zones.map((zone) => ({ ...zone, displayOrder: orderedIds.indexOf(zone.id) }));
+      return Promise.resolve();
+    },
+
+    async setZoneArchived(id: string, archived: boolean): Promise<void> {
+      calls.archivedZones.push({ id, archived });
+      zones = zones.map((zone) =>
+        zone.id === id ? { ...zone, archived, archivable: !archived } : zone,
+      );
+      return Promise.resolve();
+    },
+
+    async countActiveZones(): Promise<number> {
+      return Promise.resolve(zones.filter((zone) => !zone.archived).length);
+    },
+
+    async countPlacesInZone(id: string): Promise<number> {
+      return Promise.resolve(zones.find((zone) => zone.id === id)?.placeCount ?? 0);
+    },
+
+    async countAccountsInZone(id: string): Promise<number> {
+      return Promise.resolve(zones.find((zone) => zone.id === id)?.accountCount ?? 0);
+    },
+
+    async countJobsInZone(id: string): Promise<number> {
+      return Promise.resolve(zones.find((zone) => zone.id === id)?.jobCount ?? 0);
+    },
+
+    async countLeadsInZone(): Promise<number> {
+      return Promise.resolve(0);
     },
 
     async findAdditionalService(code: string): Promise<AdditionalServiceSetting | null> {
@@ -538,7 +774,7 @@ export function createFakeSettingsRepository() {
     zones: readonly ZoneRateInput[],
   ): void {
     for (const zone of zones) {
-      scheduledRates.set(`${id}:${effectiveFrom}:${zone.zone}`, {
+      scheduledRates.set(`${id}:${effectiveFrom}:${zone.zoneId}`, {
         serviceCharge: zone.serviceCharge,
         ratePerM2: zone.ratePerM2,
       });
@@ -552,6 +788,36 @@ export function createFakeSettingsRepository() {
     /** Force a card to have no rates, so the `default` fallback is exercised. */
     removeRatesFor(...cards: RateCardId[]): void {
       cardsWithRates = new Set([...cardsWithRates].filter((card) => !cards.includes(card)));
+    },
+
+    /** The zone ids a suite may price against, in display order. */
+    zoneIds(): string[] {
+      return zones.filter((zone) => !zone.archived).map((zone) => zone.id);
+    },
+
+    /** What stands behind a zone, for the archive refusals. */
+    putPlacesInZone(id: string, count: number): void {
+      zones = zones.map((zone) => (zone.id === id ? { ...zone, placeCount: count } : zone));
+    },
+
+    putAccountsInZone(id: string, count: number): void {
+      zones = zones.map((zone) => (zone.id === id ? { ...zone, accountCount: count } : zone));
+    },
+
+    putJobsInZone(id: string, count: number): void {
+      zones = zones.map((zone) => (zone.id === id ? { ...zone, jobCount: count } : zone));
+    },
+
+    /** Retire a zone directly, without going through the service's refusals. */
+    archiveZoneDirectly(id: string): void {
+      zones = zones.map((zone) =>
+        zone.id === id ? { ...zone, archived: true, archivable: false } : zone,
+      );
+    },
+
+    /** Which cards ended up with a rate row for a zone — the copy, asserted. */
+    rateRowsForZone(id: string): Array<{ rateCardId: RateCardId; effectiveFrom: string }> {
+      return zoneRateRows.get(id) ?? [];
     },
 
     /** Force a zone to be unpriced everywhere — the configuration-gap path. */
@@ -659,7 +925,16 @@ function withSchedule(
         // Ascending, so each schedule can see the one that follows it.
         const ordered = [
           ...card.schedules.map((schedule) => ({ ...schedule })),
-          { effectiveFrom, effectiveTo: '', zones: [...zones] },
+          {
+            effectiveFrom,
+            effectiveTo: '',
+            /* The read shape carries the zone's NAME; the write shape does not. */
+            zones: zones.map((rate) => ({
+              ...rate,
+              zoneLabel:
+                SEED_ZONES.find((zone) => zone.id === rate.zoneId)?.label ?? 'Unknown zone',
+            })),
+          },
         ].sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
 
         const bounded = ordered.map((schedule, index) => {
@@ -720,6 +995,17 @@ function withServices(settings: Settings, services: Record<string, StoredService
 function baseSettings(): Settings {
   return {
     pricing: {
+      zones: SEED_ZONES.map((zone, index) => ({
+        id: zone.id,
+        slug: zone.slug,
+        label: zone.label,
+        displayOrder: index,
+        archived: false,
+        placeCount: 0,
+        accountCount: 0,
+        jobCount: 0,
+        archivable: true,
+      })),
       /*
        * The seeded cards, each with one open schedule from `2026-04-01`.
        *
@@ -733,12 +1019,12 @@ function baseSettings(): Settings {
         accountCount: 0,
         effectiveFrom: SEEDED_SCHEDULE_FROM,
         effectiveTo: '',
-        zones: ZONE_ORDER.map((zone) => ({ zone, ...ZONE_RATES[zone] })),
+        zones: seededZoneRates(),
         schedules: [
           {
             effectiveFrom: SEEDED_SCHEDULE_FROM,
             effectiveTo: '',
-            zones: ZONE_ORDER.map((zone) => ({ zone, ...ZONE_RATES[zone] })),
+            zones: seededZoneRates(),
           },
         ],
         // `default` is never deletable — `resolveRate` falls back to it.

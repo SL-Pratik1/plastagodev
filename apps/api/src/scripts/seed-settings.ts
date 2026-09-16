@@ -353,7 +353,7 @@ Seeded settings into "${mongoose.connection.name}".
   Next job number     ${String(SEQUENCE_STARTS.nextJobNumber)}  (start; advances as jobs are raised)
   Next invoice number ${String(SEQUENCE_STARTS.nextInvoiceNumber)}  (start; advances as invoices are raised)
 
-${SEED_ZONES.map((zone) => `${zone.label} is ${zone.serviceCharge} + ${zone.ratePerM2}/m²`).join('; ')}.
+${SEED_ZONES.map((zone) => `${zone.label} is $${zone.serviceCharge} + $${zone.ratePerM2}/m²`).join('; ')}.
 `);
 }
 

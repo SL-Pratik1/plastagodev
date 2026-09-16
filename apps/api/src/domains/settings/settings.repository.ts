@@ -1452,11 +1452,22 @@ async function findRateOn(
   zoneId: Zone,
   onDate: string,
 ): Promise<RawZoneRate | null> {
+  /*
+   * ⚠️ Not an id at all — answer "no rate" rather than throwing.
+   *
+   * Mongoose casts this value into the query, and `new ObjectId('sydney')`
+   * throws. A caller holding a stale zone deserves the 503 that says no rate is
+   * configured, which the office can act on, rather than a 500 that says
+   * nothing.
+   */
+  if (!isObjectId(zoneId)) return null;
+  const zoneObjectId = new Types.ObjectId(zoneId);
+
   const at = startOfSydneyDay(onDate);
 
   return ZoneRateModel.findOne({
     rateCardId,
-    zoneId,
+    zoneId: zoneObjectId,
     effectiveFrom: { $lte: at },
     $or: [{ effectiveTo: null }, { effectiveTo: { $gte: at } }],
   })
