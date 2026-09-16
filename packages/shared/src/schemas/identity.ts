@@ -93,9 +93,9 @@ export function normaliseMobile(value: string): string {
  * collection is built from. Changing it to E.164 would silently fail to match
  * every mobile already in the database.
  *
- * E.164 is the WIRE form, required by Twilio and rejected-with-21211 without
- * it. Keeping the two apart means the display and the lookup never change
- * shape just because a messaging vendor did.
+ * E.164 is the WIRE form, required by ClickSend and rejected without it.
+ * Keeping the two apart means the display and the lookup never change shape
+ * just because a messaging vendor did.
  *
  * ⚠️ Australia only, which is the whole customer base. A number that does not
  * look like an Australian mobile is returned untouched rather than guessed at:

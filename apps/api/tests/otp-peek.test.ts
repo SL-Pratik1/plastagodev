@@ -63,10 +63,10 @@ describe('otp peek', () => {
       MS_GRAPH_CLIENT_ID: 'client',
       MS_GRAPH_CLIENT_SECRET: 'secret',
       MS_GRAPH_MAIL_SENDER: 'noreply@plastago.com.au',
-      SMS_PROVIDER: 'twilio',
-      TWILIO_ACCOUNT_SID: 'sid',
-      TWILIO_AUTH_TOKEN: 'token',
-      TWILIO_FROM: '+61400000000',
+      SMS_PROVIDER: 'clicksend',
+      CLICKSEND_USERNAME: 'user',
+      CLICKSEND_API_KEY: 'key',
+      CLICKSEND_FROM: 'PlastaGo',
     });
 
     peek.rememberOtpCode(IDENTIFIER, CODE);

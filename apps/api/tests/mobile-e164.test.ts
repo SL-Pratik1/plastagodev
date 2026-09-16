@@ -7,8 +7,8 @@ import { describe, expect, it } from 'vitest';
  * ── The bug this guards ───────────────────────────────────────────────────
  * PlastaGo stores mobiles in Australian local form (`0412345678`) because that
  * is what people type, what an operator recognises, and what the unique index
- * on the users collection is built from. Twilio accepts only E.164 and answers
- * anything else with error 21211.
+ * on the users collection is built from. ClickSend accepts only E.164 and
+ * rejects anything else.
  *
  * For a while nothing converted between them, so every driver sign-in SMS
  * failed — and SMS is a driver's ONLY way into the app (§9 A2). It was
@@ -36,7 +36,7 @@ describe('normaliseMobile — the STORAGE form', () => {
 });
 
 describe('toE164Mobile — the WIRE form', () => {
-  it('converts the stored form to what Twilio will accept', () => {
+  it('converts the stored form to what ClickSend will accept', () => {
     expect(toE164Mobile('0412345678')).toBe('+61412345678');
   });
 
@@ -48,7 +48,7 @@ describe('toE164Mobile — the WIRE form', () => {
 
   it('is idempotent, so a value that went through twice is still valid', () => {
     // Worth pinning: a second pass creeping in somewhere must not produce
-    // `+61+61…`, which fails at Twilio with the same opaque 21211.
+    // `+61+61…`, which ClickSend rejects as an invalid recipient.
     expect(toE164Mobile(toE164Mobile('0412345678'))).toBe('+61412345678');
   });
 
@@ -62,7 +62,7 @@ describe('toE164Mobile — the WIRE form', () => {
     /*
      * A wrong guess is worse than a rejection: prefixing an unknown number
      * with +61 can deliver a sign-in code to a stranger's handset. Returning
-     * it untouched makes Twilio refuse it with a clear error instead.
+     * it untouched makes ClickSend refuse it with a clear error instead.
      */
     expect(toE164Mobile('+14155552671')).toBe('+14155552671');
     expect(toE164Mobile('not-a-number')).toBe('notanumber');

@@ -336,7 +336,7 @@ export const poReviewService = {
      *
      * Matt, 33:25, wants the supervisor on the order to get a login without
      * anybody keying one in. But confirming the purchase order is the act that
-     * matters commercially, and it must not fail because Twilio is down or
+     * matters commercially, and it must not fail because ClickSend is down or
      * because that mobile turns out to belong to somebody else. So this runs
      * last, reports its outcome as a status rather than throwing, and a purchase
      * order with no supervisor attached stays perfectly usable — 34:52: *"it
