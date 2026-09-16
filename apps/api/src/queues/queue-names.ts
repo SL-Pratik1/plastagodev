@@ -6,7 +6,7 @@
  * declared as comments rather than code — add them when their domain lands, not
  * before, so `/queues` never lists a worker that does not exist.
  *
- *   'notifications'   M8  — SMS + email fan-out via Twilio / M365
+ *   'notifications'   M8  — SMS + email fan-out via ClickSend / M365
  *   'documents'       M7  — invoice + certificate PDF rendering (Playwright)
  *   'po-ingestion'    M2.12 — M365 mailbox poll → Mistral OCR → match
  *   'xero-sync'       M7.8 — invoice push, payment pull

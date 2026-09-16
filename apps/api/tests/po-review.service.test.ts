@@ -47,7 +47,7 @@ let invited: Array<{ accountId: string; name: string; email: string | null; mobi
 let supervisorLinks: Array<{ purchaseOrderId: string; userId: string }> = [];
 /** Invitations actually handed to the outbound service. */
 let notified: Array<{ subjectKey: string; email: string | null; mobile: string | null }> = [];
-/** Set to make the outbound service throw, standing in for Twilio being down. */
+/** Set to make the outbound service throw, standing in for ClickSend being down. */
 let outboundFails = false;
 /**
  * Whether a copy of the original was taken.
@@ -126,7 +126,7 @@ vi.mock('../src/domains/notifications/outbound.service.js', () => ({
       subjectKey: string;
       recipient: { email: string | null; mobile: string | null };
     }) => {
-      if (outboundFails) return Promise.reject(new Error('Twilio is down'));
+      if (outboundFails) return Promise.reject(new Error('ClickSend is down'));
       notified.push({
         subjectKey: input.subjectKey,
         email: input.recipient.email,

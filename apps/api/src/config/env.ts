@@ -200,7 +200,7 @@ const EnvSchema = z
      * is this variable plus its credentials — never a code change (§8).
      */
     MAIL_PROVIDER: z.enum(['stub', 'graph']).default('stub'),
-    SMS_PROVIDER: z.enum(['stub', 'twilio']).default('stub'),
+    SMS_PROVIDER: z.enum(['stub', 'clicksend']).default('stub'),
 
     /** I5/I6 — one Entra app registration serves Mail.Send now and Mail.Read later. */
     MS_GRAPH_TENANT_ID: z.string().min(1).optional(),
@@ -210,10 +210,18 @@ const EnvSchema = z
     MS_GRAPH_MAIL_SENDER: z.string().email().optional(),
 
     /** I2 — SMS to drivers and site supervisors. */
-    TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
-    TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
-    /** A Twilio number in E.164, or an approved alphanumeric sender id. */
-    TWILIO_FROM: z.string().min(1).optional(),
+    CLICKSEND_USERNAME: z.string().min(1).optional(),
+    /** The API key from Dashboard → API Credentials. NOT the account password. */
+    CLICKSEND_API_KEY: z.string().min(1).optional(),
+    /**
+     * A dedicated number in E.164, or an approved alphanumeric sender id such
+     * as `PlastaGo`.
+     *
+     * ⚠️ An alphanumeric sender cannot receive a reply. That is fine for every
+     * message we send — none of them ask for one; where a reply would be
+     * wanted, `notice-messages.ts` puts a phone number in the body instead.
+     */
+    CLICKSEND_FROM: z.string().min(1).optional(),
 
     /** Shown in the OTP message so the recipient knows who is asking. */
     OTP_SENDER_NAME: z.string().min(1).default('PlastaGo'),
@@ -521,13 +529,13 @@ const EnvSchema = z
       }
     }
 
-    if (value.SMS_PROVIDER === 'twilio') {
-      for (const key of ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM'] as const) {
+    if (value.SMS_PROVIDER === 'clicksend') {
+      for (const key of ['CLICKSEND_USERNAME', 'CLICKSEND_API_KEY', 'CLICKSEND_FROM'] as const) {
         if (!value[key]) {
           ctx.addIssue({
             code: 'custom',
             path: [key],
-            message: 'Required when SMS_PROVIDER=twilio',
+            message: 'Required when SMS_PROVIDER=clicksend',
           });
         }
       }

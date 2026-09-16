@@ -4,7 +4,7 @@ import * as z from 'zod';
  * Client-side environment, validated at module load.
  *
  * Everything here is PUBLIC — Vite inlines `VITE_*` into the bundle. Secrets
- * (Twilio, Mistral, Xero, S3) belong on the API only; nothing that must stay
+ * (ClickSend, Mistral, Xero, S3) belong on the API only; nothing that must stay
  * private may ever appear in this file.
  */
 const EnvSchema = z.object({

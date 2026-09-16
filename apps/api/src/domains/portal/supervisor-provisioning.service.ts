@@ -140,7 +140,7 @@ export const supervisorProvisioning = {
     /*
      * Told, not invited. Swallowed on failure — see `quietly` below. A login
      * that exists but whose SMS bounced is recoverable by resending; a purchase
-     * order rolled back because Twilio was down is not.
+     * order rolled back because ClickSend was down is not.
      */
     await this.notify({
       userId,

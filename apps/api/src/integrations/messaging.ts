@@ -1,7 +1,7 @@
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { createGraphMailer } from './graph-mailer.js';
-import { createTwilioSmsSender } from './twilio-sms.js';
+import { createClickSendSmsSender } from './clicksend-sms.js';
 
 const log = logger.child({ module: 'messaging' });
 
@@ -51,10 +51,10 @@ export interface OutboundSms {
    * The recipient in PlastaGo's own storage form — Australian local,
    * `0412345678` (see `normaliseMobile`).
    *
-   * ⚠️ NOT E.164. Each provider formats for its own vendor: Twilio converts to
-   * `+61…` because it rejects anything else with error 21211, and the stub
-   * prints what it was given so the console matches what is on screen
-   * everywhere else in the app.
+   * ⚠️ NOT E.164. Each provider formats for its own vendor: ClickSend converts
+   * to `+61…` because it will not accept anything else, and the stub prints
+   * what it was given so the console matches what is on screen everywhere else
+   * in the app.
    */
   to: string;
   body: string;
@@ -219,7 +219,8 @@ export function getMailer(): Mailer {
 }
 
 export function getSmsSender(): SmsSender {
-  smsSender ??= env.SMS_PROVIDER === 'twilio' ? createTwilioSmsSender() : createStubSmsSender();
+  smsSender ??=
+    env.SMS_PROVIDER === 'clicksend' ? createClickSendSmsSender() : createStubSmsSender();
   return smsSender;
 }
 
