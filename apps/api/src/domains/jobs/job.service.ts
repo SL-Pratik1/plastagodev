@@ -192,7 +192,7 @@ export const jobService = {
 
     return pricingService.quote({
       rateCardId: account.rateCardId,
-      zone: place.zone,
+      zoneId: place.zoneId,
       expectedAreaM2: quantities.expectedAreaM2,
       bagCount: quantities.bagCount,
       // M6.2 — the SAME date `create` below prices on, so the estimate the
@@ -317,7 +317,7 @@ export const jobService = {
 
     const { preview: quote, appliedRate } = await pricingService.quoteWithAppliedRate({
       rateCardId: account.rateCardId,
-      zone: place.zone,
+      zoneId: place.zoneId,
       expectedAreaM2: quantities.expectedAreaM2,
       bagCount: quantities.bagCount,
       /*
@@ -371,7 +371,7 @@ export const jobService = {
           // job (M6.3) and the pin plots it, and neither can be guessed.
           suburb: place.suburb,
           postcode: place.postcode,
-          zone: place.zone,
+          zoneId: place.zoneId,
           latitude: location.latitude,
           longitude: location.longitude,
           locationSource: location.locationSource,
@@ -505,7 +505,7 @@ export const jobService = {
     if (forNotice) await jobNotices.booked(forNotice);
 
     log.info(
-      { jobId: created.id, jobNumber, accountId: account.id, zone: place.zone },
+      { jobId: created.id, jobNumber, accountId: account.id, zone: place.zoneLabel },
       'job created',
     );
 

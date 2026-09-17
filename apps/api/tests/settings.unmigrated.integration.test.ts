@@ -198,12 +198,33 @@ describe('pricing from a database the migration has not touched', () => {
      * had agreed on that day. This test exists so the behaviour is a stated
      * decision rather than an accident of a query.
      */
+    const zoneId = new mongoose.Types.ObjectId();
+
     await mongoose.connection.collection('zonerates').insertOne({
       rateCardId: 'tier-1',
-      zone: 'sydney',
+      zoneId,
       serviceCharge: mongoose.Types.Decimal128.fromString('220.00'),
       ratePerM2: mongoose.Types.Decimal128.fromString('0.16'),
     });
+
+    await expect(
+      settingsRepository.resolveRate('tier-1', zoneId.toString(), '2026-09-11'),
+    ).resolves.toBeNull();
+  });
+
+  /**
+   * A zone id that is not an id at all.
+   *
+   * ⚠️ The same class of unmigrated state as the row above, one layer out: a
+   * caller holding the OLD slug — a stale tab, a replayed request, a bookmark
+   * from before zones were records. Mongoose casts the value into the query and
+   * `new ObjectId('sydney')` throws, so without a guard this surfaced as a 500.
+   *
+   * Null is the honest answer, and it becomes the 503 that names the problem:
+   * "no rate is configured", which the office can act on.
+   */
+  it('prices nothing for a zone id that is not an id, rather than throwing', async () => {
+    if (!reachable) return;
 
     await expect(
       settingsRepository.resolveRate('tier-1', 'sydney', '2026-09-11'),

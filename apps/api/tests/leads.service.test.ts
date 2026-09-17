@@ -1,4 +1,5 @@
 import type { LeadConversion, LeadCreate, Role } from '@plastago/shared';
+import { SEED_ZONES, ZONE } from './helpers/fake-settings.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearOutbound,
@@ -139,8 +140,31 @@ vi.mock('../src/domains/settings/settings.repository.js', () => ({
       Promise.resolve(
         knownRateCards.has(id) ? { id, label: `${id} rates`, effectiveFrom: '2026-04-01' } : null,
       ),
-  },
-}));
+    /*
+     * The zone register, as far as the zone existence guard needs it.
+     *
+     * ⚠️ Answers for the seeded ids and nothing else, so a test that invents a
+     * zone gets the same 422 the real guard would give it.
+     */
+    findZone: (id: string) => {
+      const zone = SEED_ZONES.find((candidate: { id: string }) => candidate.id === id);
+      return Promise.resolve(
+        zone
+          ? {
+              id: zone.id,
+              slug: zone.slug,
+              label: zone.label,
+              displayOrder: 0,
+              archived: false,
+              placeCount: 0,
+              accountCount: 0,
+              jobCount: 0,
+              archivable: true,
+            }
+          : null,
+      );
+    },
+  },}));
 
 const { leadService } = await import('../src/domains/queues/lead.service.js');
 const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
@@ -174,7 +198,7 @@ function lead(overrides: Record<string, unknown> = {}) {
     mobile: '0400111222',
     status: 'quoted',
     source: 'phone',
-    zone: 'sydney',
+    zoneId: ZONE.sydney,
     suburbs: 'Oran Park, Catherine Field',
     typicalVolumeM2: 800,
     expectedFrequency: 'Weekly',
@@ -196,7 +220,7 @@ function draft(overrides: Partial<LeadCreate> = {}): LeadCreate {
     email: 'sam@newlands.com.au',
     mobile: '0400111222',
     source: 'phone',
-    zone: 'sydney',
+    zoneId: ZONE.sydney,
     suburbs: 'Oran Park',
     typicalVolumeM2: 800,
     expectedFrequency: 'Weekly',
@@ -218,7 +242,7 @@ function conversion(overrides: Partial<LeadConversion> = {}): LeadConversion {
     poPolicy: 'required-before-invoice',
     captureMode: 'area-only',
     paymentTermsDays: 7,
-    primaryZone: 'sydney',
+    primaryZoneId: ZONE.sydney,
     /*
      * Blank by default, so the default case is the one that exercises the
      * fallback to the lead's own contact. A test that always overrode it would
@@ -345,7 +369,7 @@ describe('taking a lead by hand (A.1)', () => {
       leadService.create(
         draft({
           mobile: '',
-          zone: null,
+          zoneId: null,
           suburbs: '',
           typicalVolumeM2: null,
           expectedFrequency: '',

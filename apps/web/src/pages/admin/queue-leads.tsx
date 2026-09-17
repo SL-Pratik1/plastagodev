@@ -3,8 +3,6 @@ import {
   LEAD_SOURCE_LABELS,
   LEAD_STATUSES,
   LEAD_STATUS_LABELS,
-  ZONES,
-  ZONE_LABELS,
   type LeadListItem,
   type LeadStatus,
 } from '@plastago/shared';
@@ -20,7 +18,9 @@ import {
 import { PlusIcon, SproutIcon } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
+import type { ZoneOption } from '@/services/types';
 import { DataTable } from '@/components/data-table/data-table';
+import { useZoneOptions } from '@/features/lookups/queries';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
@@ -57,6 +57,33 @@ const STATUS_VARIANT: Record<LeadStatus, BadgeProps['variant']> = {
   lost: 'outline',
 };
 
+/**
+ * The filter bar, with the loaded zones spliced back where they were.
+ *
+ * See `jobs.tsx:filtersWithZones` for why the position is fixed. The sentinel
+ * stays LAST inside the built list, so it keeps its place at the bottom of the
+ * dropdown rather than drifting to wherever the zones happen to end.
+ */
+function filtersWithZones(zones: readonly ZoneOption[]): FilterDefinition[] {
+  const zoneFilter: FilterDefinition = {
+    key: 'zoneId',
+    label: 'Zone',
+    allLabel: 'All areas',
+    options: [
+      ...zones.map((zone) => ({
+        value: zone.value,
+        label: zone.archived ? `${zone.label} (retired)` : zone.label,
+      })),
+      // A lead outside every serviced zone is not a data gap — it is a lead we
+      // probably cannot service, and that is worth being able to filter for.
+      { value: 'none', label: 'Outside the service area' },
+    ],
+  };
+
+  const index = STATIC_FILTERS.findIndex((filter) => filter.key === 'owner');
+  return [...STATIC_FILTERS.slice(0, index), zoneFilter, ...STATIC_FILTERS.slice(index)];
+}
+
 const STATIC_FILTERS: readonly FilterDefinition[] = [
   {
     key: 'status',
@@ -69,17 +96,6 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
     label: 'Source',
     allLabel: 'Any source',
     options: LEAD_SOURCES.map((source) => ({ value: source, label: LEAD_SOURCE_LABELS[source] })),
-  },
-  {
-    key: 'zone',
-    label: 'Zone',
-    allLabel: 'All areas',
-    options: [
-      ...ZONES.map((zone) => ({ value: zone, label: ZONE_LABELS[zone] })),
-      // A lead outside the three zones is not a data gap — it is a lead we
-      // probably cannot service, and that is worth being able to filter for.
-      { value: 'none', label: 'Outside the service area' },
-    ],
   },
   {
     key: 'owner',
@@ -137,10 +153,10 @@ const COLUMNS: readonly DataTableColumn<LeadListItem>[] = [
     cell: (row) => (
       <span className="block">
         <span className="block text-sm">
-          {row.zone === null ? (
+          {row.zoneLabel === null ? (
             <span className="text-warning">Outside service area</span>
           ) : (
-            ZONE_LABELS[row.zone]
+            row.zoneLabel
           )}
         </span>
         <span className="block truncate text-xs text-muted-foreground">{row.suburbs}</span>
@@ -315,6 +331,17 @@ export function AdminQueueLeadsPage() {
   const closed = (stats?.won ?? 0) + (stats?.lost ?? 0);
   const conversion = closed === 0 ? null : Math.round((won / closed) * 100);
 
+  /*
+   * ⚠️ Falls back to an empty list rather than gating the grid on a spinner.
+   *
+   * The zone filter renders with only "All zones" until the register lands,
+   * exactly as the Account and Driver filters beside it already do. One request
+   * per session — the reference cache holds it for an hour — so this is a
+   * first-paint concern on one screen, not a recurring one.
+   */
+  const zones = useZoneOptions().data ?? [];
+
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -345,7 +372,7 @@ export function AdminQueueLeadsPage() {
         <DataTableToolbar
           controller={controller}
           searchPlaceholder="Search company, contact, email or suburb…"
-          filters={STATIC_FILTERS}
+          filters={filtersWithZones(zones)}
         />
 
         <DataTable

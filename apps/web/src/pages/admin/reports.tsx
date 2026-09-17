@@ -1,11 +1,4 @@
-import {
-  ZONE_LABELS,
-  type Certificate,
-  type FinancialRow,
-  type ReportFilters,
-  type VolumeRow,
-  type Zone,
-} from '@plastago/shared';
+import type { Certificate, FinancialRow, ReportFilters, VolumeRow } from '@plastago/shared';
 import {
   Alert,
   Badge,
@@ -40,7 +33,7 @@ import {
   useMonthlyVolumeReport,
   useZoneVolumeReport,
 } from '@/features/reports/queries';
-import { useAccountOptions, useDriverOptions } from '@/features/lookups/queries';
+import { useAccountOptions, useDriverOptions, useZoneOptions } from '@/features/lookups/queries';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatMoney, formatWeight } from '@/lib/format';
 
@@ -99,10 +92,10 @@ export function AdminReportsPage() {
     () => ({
       from: params.get('from') ?? firstOfMonthsAgo(2),
       to: params.get('to') ?? today(),
+      zoneId: params.get('zoneId'),
       accountId: params.get('account'),
       // Narrowed by suburb now — there is no site record to key on (Matt, 0:29).
       suburb: params.get('suburb'),
-      zone: (params.get('zone') as Zone | null) ?? null,
       driverId: params.get('driver'),
     }),
     [params],
@@ -116,6 +109,11 @@ export function AdminReportsPage() {
 
   const monthly = useMonthlyVolumeReport(filters, tab === 'volumes');
   const zones = useZoneVolumeReport(filters, tab === 'zones');
+  /*
+   * The zone REGISTER, for the filter dropdown — distinct from `zones` above,
+   * which is the volume report itself.
+   */
+  const zoneOptions = useZoneOptions().data ?? [];
   const financial = useFinancialReport(filters, tab === 'financial');
   const certificates = useCertificates(certificateQuery.query, tab === 'certificates');
 
@@ -178,15 +176,21 @@ export function AdminReportsPage() {
             <label className="flex flex-col gap-1 text-xs text-muted-foreground sm:w-40">
               Zone
               <Select
-                value={filters.zone ?? ''}
+                value={filters.zoneId ?? ''}
                 onChange={(event) => {
-                  setParam('zone', event.target.value);
+                  setParam('zoneId', event.target.value);
                 }}
               >
                 <option value="">All zones</option>
-                {(Object.keys(ZONE_LABELS) as Zone[]).map((zone) => (
-                  <option key={zone} value={zone}>
-                    {ZONE_LABELS[zone]}
+                {/*
+                  Retired zones are OFFERED, and marked as such. A report is
+                  about work that has already happened, so a zone the office has
+                  since stopped servicing is exactly the one somebody may need
+                  to report on.
+                */}
+                {zoneOptions.map((zone) => (
+                  <option key={zone.value} value={zone.value}>
+                    {zone.archived ? `${zone.label} (retired)` : zone.label}
                   </option>
                 ))}
               </Select>
@@ -348,13 +352,13 @@ export function AdminReportsPage() {
                 <SimpleTable
                   caption="Volumes by zone"
                   rows={zones.data.rows}
-                  getRowId={(row) => row.zone}
+                  getRowId={(row) => row.zoneId}
                   columns={[
                     {
                       id: 'zone',
                       header: 'Zone',
                       priority: 'primary',
-                      cell: (row) => ZONE_LABELS[row.zone],
+                      cell: (row) => row.label,
                     },
                     { id: 'jobs', header: 'Jobs', numeric: true, cell: (row) => row.jobs },
                     {

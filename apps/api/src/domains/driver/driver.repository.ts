@@ -8,6 +8,7 @@ import type {
   WeightBasis,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { UNKNOWN_ZONE_LABEL, zoneLabels } from '../settings/zone-lookup.js';
 import { AccountModel } from '../accounts/account.model.js';
 import {
   JobChargeModel,
@@ -48,7 +49,12 @@ interface RawJobForDriver {
   addressLine: string;
   suburb: string;
   postcode: string;
-  zone: RunStop['zone'];
+  /*
+   * ⚠️ What the JOB stores — an ObjectId, and no name. The zone's name is
+   * joined on in `decorate` below, with everything else the driver's screen
+   * needs that does not live on the job.
+   */
+  zoneId: mongoose.Types.ObjectId;
   latitude: number;
   longitude: number;
   locationSource: RunStop['locationSource'];
@@ -79,7 +85,9 @@ interface RawJobForDriver {
   completedAt: Date | null;
 }
 
-export interface DriverStopRow extends RawJobForDriver {
+export interface DriverStopRow extends Omit<RawJobForDriver, 'zoneId'> {
+  zoneId: RunStop['zoneId'];
+  zoneLabel: RunStop['zoneLabel'];
   /** From the account — m²-only accounts never prompt for kilograms (M2.3). */
   capturesWeight: boolean;
   loadType: LoadType;
@@ -743,7 +751,7 @@ async function decorate(jobs: RawJobForDriver[]): Promise<DriverStopRow[]> {
     (id) => new mongoose.Types.ObjectId(id),
   );
 
-  const [accounts, photoCounts, assessments] = await Promise.all([
+  const [accounts, photoCounts, assessments, zones] = await Promise.all([
     AccountModel.find({ _id: { $in: accountIds } }, { captureMode: 1 }).lean<
       Array<{ _id: mongoose.Types.ObjectId; captureMode: string }>
     >(),
@@ -754,6 +762,12 @@ async function decorate(jobs: RawJobForDriver[]): Promise<DriverStopRow[]> {
     JobRiskAssessmentModel.find({ jobId: { $in: jobIds } }, { jobId: 1, completedAt: 1 }).lean<
       Array<{ jobId: mongoose.Types.ObjectId; completedAt: Date }>
     >(),
+    /*
+     * The zone NAMES. A driver's run sheet says "Wollongong", and the job row
+     * holds only the id — so this is the fourth thing joined on for the whole
+     * page rather than one lookup per stop.
+     */
+    zoneLabels(),
   ]);
 
   const captureByAccount = new Map(
@@ -766,6 +780,8 @@ async function decorate(jobs: RawJobForDriver[]): Promise<DriverStopRow[]> {
 
   return jobs.map((job) => ({
     ...job,
+    zoneId: job.zoneId.toString(),
+    zoneLabel: zones.get(job.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
     capturesWeight: captureByAccount.get(job.accountId.toHexString()) === 'area-and-weight',
     /*
      * Bagged when the site has a crane to lift them, hand-load otherwise. A

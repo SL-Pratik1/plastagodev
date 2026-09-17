@@ -1,4 +1,9 @@
-import { IsoDateSchema, RateCardIdSchema, ServiceCodeSchema, ZONES } from '@plastago/shared';
+import {
+  IsoDateSchema,
+  RateCardIdSchema,
+  ServiceCodeSchema,
+  ZoneSchema,
+} from '@plastago/shared';
 import * as z from 'zod';
 
 /**
@@ -17,6 +22,9 @@ import * as z from 'zod';
  * that could never name a real card is refused as a 422 before it reaches a
  * database lookup that would 404.
  */
+/** One zone, by id. */
+export const ZoneIdParamsSchema = z.object({ id: ZoneSchema }).meta({ id: 'ZoneIdParams' });
+
 export const RateCardIdParamsSchema = z
   .object({ id: RateCardIdSchema })
   .meta({ id: 'RateCardIdParams' });
@@ -37,7 +45,7 @@ export const ServiceCodeParamsSchema = z
 export const QuoteQuerySchema = z
   .object({
     rateCardId: RateCardIdSchema,
-    zone: z.enum(ZONES),
+    zoneId: ZoneSchema,
     /**
      * Nullable, not optional-and-defaulted-to-zero. A fixed-price builder's job
      * genuinely has no area (Matt, 31:04), and a zero would price it as if the

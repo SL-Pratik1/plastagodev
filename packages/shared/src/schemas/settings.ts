@@ -5,7 +5,7 @@ import {
   NonEmptyStringSchema,
   NonNegativeMoneySchema,
 } from './primitives.js';
-import { BrandIdSchema, RateCardIdSchema, ZONES, ZoneSchema } from './party.js';
+import { BrandIdSchema, RateCardIdSchema, ZoneSchema, ZoneSlugSchema } from './party.js';
 
 /**
  * Settings (W3), plus brands (M1.1), rate cards (M6) and invoice branding (M7.5).
@@ -34,7 +34,9 @@ import { BrandIdSchema, RateCardIdSchema, ZONES, ZoneSchema } from './party.js';
 
 export const ZoneRateSchema = z
   .object({
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, so a rate table renders without holding a zone map. */
+    zoneLabel: NonEmptyStringSchema,
     /*
      * Deliberately permissive, unlike `ZoneRateInput` below.
      *
@@ -85,7 +87,15 @@ export const AppliedRateSchema = z
     rateCardId: RateCardIdSchema,
     /** The card's name as it read when the job was priced. */
     rateCardLabel: NonEmptyStringSchema,
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /**
+     * The zone's name as it read when the job was priced.
+     *
+     * ⚠️ Frozen text, exactly like `rateCardLabel` above, and NOT re-resolved
+     * from `zoneId`. Renaming a zone must never rewrite the description on an
+     * invoice the customer has already paid.
+     */
+    zoneLabel: NonEmptyStringSchema,
     /** Which schedule priced it, so a dispute can be traced to a decision. */
     scheduleFrom: IsoDateSchema,
     serviceCharge: MoneySchema,
@@ -186,7 +196,7 @@ export const RateCardSummarySchema = z
  */
 export const ZoneRateInputSchema = z
   .object({
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
     /*
      * ⚠️ Non-negative. `MoneySchema` permits a leading minus, and a schedule
      * issued with `serviceCharge: "-220.00"` saved cleanly with a 201 — every
@@ -203,21 +213,28 @@ export const ZoneRateInputSchema = z
   .meta({ id: 'ZoneRateInput' });
 
 /**
- * Every zone must be priced, in one go.
+ * The zone rates on one schedule, as far as a schema can check them.
  *
  * A schedule missing a zone is not a half-finished schedule — it is a card that
  * silently falls back to `default` for that zone, which is how a builder ends
- * up invoiced at somebody else's rate. So the array is checked for
- * completeness here rather than trusted from the form.
+ * up invoiced at somebody else's rate.
+ *
+ * ── What moved, and why ───────────────────────────────────────────────────
+ * This used to assert `.length(ZONES.length)` and that every member of `ZONES`
+ * appeared. Neither is expressible now: the zone list is a collection, and a
+ * contract package must not read one.
+ *
+ * ⚠️ COMPLETENESS IS STILL ENFORCED — it moved to
+ * `settingsService.assertPricesEveryZone`, which checks the array against the
+ * zones that actually exist and answers with a 422 naming each missing one.
+ * That is a stronger check than this ever was: the old one counted to three and
+ * would have passed a schedule pricing Sydney three times.
  */
-const CompleteZoneRatesSchema = z
+const ZoneRatesSchema = z
   .array(ZoneRateInputSchema)
-  .length(ZONES.length, `Price all ${String(ZONES.length)} zones`)
-  .refine((rates) => new Set(rates.map((rate) => rate.zone)).size === rates.length, {
+  .min(1, 'Price at least one zone')
+  .refine((rates) => new Set(rates.map((rate) => rate.zoneId)).size === rates.length, {
     message: 'Each zone may appear only once',
-  })
-  .refine((rates) => ZONES.every((zone) => rates.some((rate) => rate.zone === zone)), {
-    message: 'Every zone needs a rate',
   });
 
 /** A brand-new card, with its opening schedule. */
@@ -240,7 +257,7 @@ export const RateCardCreateSchema = z
       .min(1, 'Name the rate card — the office picks it by this on a customer')
       .max(80, 'Keep the name under 80 characters'),
     effectiveFrom: IsoDateSchema,
-    zones: CompleteZoneRatesSchema,
+    zones: ZoneRatesSchema,
   })
   .meta({ id: 'RateCardCreate' });
 
@@ -254,7 +271,7 @@ export const RateCardCreateSchema = z
 export const RateScheduleCreateSchema = z
   .object({
     effectiveFrom: IsoDateSchema,
-    zones: CompleteZoneRatesSchema,
+    zones: ZoneRatesSchema,
   })
   .meta({ id: 'RateScheduleCreate' });
 
@@ -420,8 +437,97 @@ export const TemplatePreviewSchema = z
 
 export type TemplatePreview = z.infer<typeof TemplatePreviewSchema>;
 
+/* ── Zones (M6.3) ─────────────────────────────────────────────────────────── */
+
+/**
+ * One service area, as the settings screen reads it.
+ *
+ * ⚠️ `slug` is the human handle and `id` is the key. Five collections point at
+ * the id; nothing joins on the slug. Renaming changes neither — only `label`.
+ */
+export const ZoneSummarySchema = z
+  .object({
+    id: ZoneSchema,
+    slug: ZoneSlugSchema,
+    label: NonEmptyStringSchema,
+    displayOrder: z.number().int().nonnegative(),
+    archived: z.boolean(),
+    /**
+     * What stands behind this zone. The screen shows these before it offers to
+     * retire one, because retiring a zone nothing points at is housekeeping and
+     * retiring one with fifty jobs behind it is a decision.
+     */
+    placeCount: z.number().int().nonnegative(),
+    accountCount: z.number().int().nonnegative(),
+    jobCount: z.number().int().nonnegative(),
+    /**
+     * Whether this zone may be retired. Computed by the server, never stored —
+     * the same split as `RateCardSummary.deletable`, and for the same reason: a
+     * UI that guessed would offer a retire that comes back 409.
+     */
+    archivable: z.boolean(),
+  })
+  .meta({ id: 'ZoneSummary' });
+
+export type ZoneSummary = z.infer<typeof ZoneSummarySchema>;
+
+/** A new service area, priced by copying one that already exists. */
+export const ZoneCreateSchema = z
+  .object({
+    label: z
+      .string()
+      .trim()
+      .min(1, 'Name the zone — it appears on every rate card and quote')
+      .max(60, 'Keep the name under 60 characters'),
+    /**
+     * ⚠️ Required, with no default.
+     *
+     * A zone created with no prices prices NOTHING on any card, and the first
+     * sign of it is a 503 on a booking form weeks later. Making the caller
+     * nominate a source is what turns "add a zone" into a complete act — and
+     * copying per card preserves each customer's negotiated discount instead of
+     * flattening every card to one number.
+     */
+    copyRatesFromZoneId: ZoneSchema,
+  })
+  .meta({ id: 'ZoneCreate' });
+
+export type ZoneCreate = z.infer<typeof ZoneCreateSchema>;
+
+/** Renaming a zone. Its id, its slug and its rates are not reachable from here. */
+export const ZoneUpdateSchema = z
+  .object({
+    label: z.string().trim().min(1, 'Name the zone').max(60, 'Keep the name under 60 characters'),
+  })
+  .meta({ id: 'ZoneUpdate' });
+
+export type ZoneUpdate = z.infer<typeof ZoneUpdateSchema>;
+
+/**
+ * The whole list, in the order it should read.
+ *
+ * A whole-list PUT rather than a per-zone `displayOrder` PATCH: two PATCHes can
+ * leave two zones claiming the same position, and the sort is then whatever
+ * Mongo returns — which is the exact bug the old `ZONES.indexOf` prevented by
+ * accident.
+ */
+export const ZoneOrderSchema = z
+  .object({
+    zoneIds: z.array(ZoneSchema).min(1, 'Send the whole list'),
+  })
+  .meta({ id: 'ZoneOrder' });
+
+export type ZoneOrder = z.infer<typeof ZoneOrderSchema>;
+
 export const PricingSettingsSchema = z
   .object({
+    /**
+     * The service areas, in display order (M6.3).
+     *
+     * First, because zones are the COLUMNS of everything below them: every rate
+     * schedule prices one row per zone and the server refuses a partial one.
+     */
+    zones: z.array(ZoneSummarySchema),
     rateCards: z.array(RateCardSummarySchema),
     additionalServices: z.array(AdditionalServiceSettingSchema),
     /**

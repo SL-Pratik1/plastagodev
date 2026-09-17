@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
+import type { ZoneOption } from '@/services/types';
 import { useServices } from '@/services/services-context';
 
 /**
@@ -54,6 +55,40 @@ export function useRateCardOptions() {
     queryFn: () => lookups.rateCards(),
     ...REFERENCE_CACHE,
   });
+}
+
+/**
+ * M6.3 — the service zones, for every picker, filter and label.
+ *
+ * ⚠️ Invalidated whenever a zone is added, renamed, reordered or retired,
+ * through `queryKeys.lookups.all` — the pricing mutations already do that.
+ * Without it a zone created on the Pricing tab would be invisible everywhere
+ * else for the rest of the session, which reads as the save having failed.
+ *
+ * ── Archived zones are INCLUDED here ─────────────────────────────────────
+ * Deliberately. Use `useSelectableZones` for anything somebody picks FROM;
+ * this list is also what names a retired zone on a job booked last March.
+ */
+export function useZoneOptions() {
+  const { lookups } = useServices();
+  return useQuery({
+    queryKey: queryKeys.lookups.zones(),
+    queryFn: () => lookups.zones(),
+    ...REFERENCE_CACHE,
+  });
+}
+
+/**
+ * The zones a form may offer.
+ *
+ * ⚠️ Archived zones are filtered out, EXCEPT the one the record already has.
+ * A lead captured against a zone retired last week must still convert without
+ * silently re-zoning the account — so `keep` puts that one back, and only that
+ * one.
+ */
+export function useSelectableZones(keep?: string | null): ZoneOption[] {
+  const zones = useZoneOptions().data ?? [];
+  return zones.filter((zone) => !zone.archived || zone.value === keep);
 }
 
 /**

@@ -81,6 +81,7 @@ import type {
   PortalSupervisor,
   PortalSupervisorInvite,
   Place,
+  PlaceWrite,
   PricePreview,
   RateCardCreate,
   RateCardSummary,
@@ -101,6 +102,9 @@ import type {
   UserDraft,
   UserListItem,
   UserStatus,
+  ZoneCreate,
+  ZoneSummary,
+  ZoneUpdate,
 } from '@plastago/shared';
 
 /**
@@ -167,6 +171,26 @@ export interface LookupOption {
  * page through an entire domain to populate itself. These are small, cached
  * hard, and read by many screens.
  */
+/**
+ * One zone, shaped for a picker or a filter.
+ *
+ * ── Why this is not a plain `LookupOption` ────────────────────────────────
+ * Because a zone has to answer two questions a rate card never did. A PICKER
+ * must offer only the zones the office still services. A FILTER over historical
+ * work must be able to name a zone that has since been retired, or the jobs grid
+ * grows a filter option that matches rows it cannot label.
+ *
+ * One request carrying the whole register with a flag answers both; two
+ * endpoints would be two caches to keep in step.
+ */
+export interface ZoneOption {
+  /** The zone's id. What every record stores and every filter sends. */
+  value: string;
+  label: string;
+  /** Retired: still nameable, no longer offered on new work. */
+  archived: boolean;
+}
+
 export interface LookupService {
   accounts: () => Promise<LookupOption[]>;
   builders: () => Promise<LookupOption[]>;
@@ -180,6 +204,15 @@ export interface LookupService {
    * missing every card added since the last deploy.
    */
   rateCards: () => Promise<LookupOption[]>;
+  /**
+   * M6.3 — the service zones.
+   *
+   * ⚠️ Read from here, never from a constant. Zones used to be a compile-time
+   * enum with a matching label map; they are records an administrator creates
+   * now, so a screen holding its own list would be missing every zone added
+   * since the last deploy — and naming one would be impossible.
+   */
+  zones: () => Promise<ZoneOption[]>;
   /**
    * Address lookup (Matt, 7:25) — matches on suburb name or postcode.
    *
@@ -523,6 +556,29 @@ export interface SettingsService {
   uploadLogo: (file: File) => Promise<string | null>;
   /** Take the logo off. Invoices fall back to the company name in text. */
   removeLogo: () => Promise<void>;
+
+  /* ── Zones (M6.3) ────────────────────────────────────────────────────── */
+
+  /**
+   * A new service area, priced by copying one that already exists.
+   *
+   * ⚠️ `copyRatesFromZoneId` is required. A zone with no rates prices nothing on
+   * any card, and the first sign of it is a booking form refusing to quote —
+   * weeks later, on somebody else's screen.
+   */
+  createZone: (input: ZoneCreate) => Promise<ZoneSummary>;
+  /** Renames the label. The id and slug are deliberately not reachable. */
+  renameZone: (id: string, input: ZoneUpdate) => Promise<ZoneSummary>;
+  /**
+   * The whole list, in the order it should read.
+   *
+   * ⚠️ Whole-list, not one zone's position: two moves landing together would
+   * otherwise leave two zones claiming the same slot.
+   */
+  reorderZones: (zoneIds: readonly string[]) => Promise<ZoneSummary[]>;
+  /** ⚠️ RETIRES the zone. It is never deleted — historical records still need it. */
+  archiveZone: (id: string) => Promise<ZoneSummary>;
+  restoreZone: (id: string) => Promise<ZoneSummary>;
 
   /* ── Rate cards (M6.1, M6.2) ─────────────────────────────────────────── */
 
@@ -868,9 +924,40 @@ export interface XeroConnectionStatus {
   invoiceStatus: 'DRAFT' | 'AUTHORISED';
 }
 
+/**
+ * M6.3 — the suburbs PlastaGo services.
+ *
+ * ── Why its own service and not a slice of `SettingsService` ──────────────
+ * A settings section is part of the one `Settings` document that screen reads
+ * whole, and folding this in would carry the whole suburb table on every
+ * settings read, on every tab, for one screen.
+ *
+ * ⚠️ These rows ARE the place type-ahead behind every booking form
+ * (`LookupService.places`). That lookup stays read-and-search-only; this is the
+ * write side, and a write here has to invalidate it — see
+ * `features/suburbs/queries.ts`.
+ */
+export interface SuburbService {
+  /** Every suburb, archived included. The admin screen has to show both. */
+  list: () => Promise<Place[]>;
+  create: (draft: PlaceWrite) => Promise<Place>;
+  update: (id: string, draft: PlaceWrite) => Promise<Place>;
+  /**
+   * ⚠️ Two outcomes behind one verb.
+   *
+   * A suburb nothing has ever been collected from is a typo and is REMOVED. One
+   * with jobs behind it is a place the business has left, and is archived — the
+   * jobs still name it, and rebooking a futile pickup there has to keep working.
+   * Resolves to the archived row, or null when it was really deleted.
+   */
+  remove: (id: string) => Promise<Place | null>;
+  restore: (id: string) => Promise<Place>;
+}
+
 export interface Services {
   readonly auth: AuthService;
   readonly lookups: LookupService;
+  readonly suburbs: SuburbService;
   readonly users: UserService;
   readonly customers: CustomerService;
   readonly jobs: JobService;

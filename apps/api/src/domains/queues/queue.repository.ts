@@ -12,6 +12,7 @@ import type {
   QueueCounts,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { UNKNOWN_ZONE_LABEL, zoneLabels } from '../settings/zone-lookup.js';
 import { fromDecimal128 } from '../../lib/money.js';
 import { AccountModel, ContactModel } from '../accounts/account.model.js';
 import { InvoiceLineModel, InvoiceModel } from '../invoices/invoice.model.js';
@@ -215,10 +216,13 @@ export const queueRepository = {
       FutileReviewModel.aggregate<{ total: number }>([...pipeline, { $count: 'total' }]),
     ]);
 
-    const photoCounts = await countPhotos(rows.map((row) => row.job._id));
+    const [photoCounts, zones] = await Promise.all([
+      countPhotos(rows.map((row) => row.job._id)),
+      zoneLabels(),
+    ]);
 
     return {
-      data: rows.map((row) => toFutileItem(row, feeExGst, photoCounts)),
+      data: rows.map((row) => toFutileItem(row, feeExGst, photoCounts, zones)),
       meta: pageMeta(query, totals[0]?.total ?? 0),
     };
   },
@@ -241,7 +245,7 @@ export const queueRepository = {
     const counts = new Map([[row.job._id.toHexString(), photos.length]]);
 
     return {
-      ...toFutileItem(row, feeExGst, counts),
+      ...toFutileItem(row, feeExGst, counts, await zoneLabels()),
       photos: photos.map(toJobPhoto),
       decisionNote: row.decisionNote ?? null,
       decidedAt: row.decidedAt ? row.decidedAt.toISOString() : null,
@@ -777,7 +781,8 @@ interface RawJobJoin {
   builderName: string;
   siteName: string;
   suburb: string;
-  zone: FutileReviewItem['zone'];
+  /* The job stores an id; the queue shows the zone's current name. */
+  zoneId: mongoose.Types.ObjectId;
   driverId: mongoose.Types.ObjectId | null;
   driverName: string | null;
   readyDate: string;
@@ -830,6 +835,7 @@ function toFutileItem(
   row: RawFutileRow,
   feeExGst: string,
   photoCounts: Map<string, number>,
+  zones: ReadonlyMap<string, string>,
 ): FutileReviewItem {
   return {
     id: row._id.toHexString(),
@@ -841,7 +847,8 @@ function toFutileItem(
     builderName: row.job.builderName,
     siteName: row.job.siteName,
     suburb: row.job.suburb,
-    zone: row.job.zone,
+    zoneId: row.job.zoneId.toString(),
+    zoneLabel: zones.get(row.job.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
     driverId: row.job.driverId ? row.job.driverId.toHexString() : null,
     driverName: row.job.driverName,
     reason: row.reason,

@@ -7,7 +7,7 @@ import {
 } from './helpers/fake-outbound.js';
 import type { JobDraft, Role } from '@plastago/shared';
 import { createFakeJobRepository } from './helpers/fake-jobs.js';
-import { createFakeSettingsRepository } from './helpers/fake-settings.js';
+import { ZONE, createFakeSettingsRepository } from './helpers/fake-settings.js';
 
 /**
  * Job rules (M2).
@@ -82,7 +82,8 @@ vi.mock('../src/domains/places/place.service.js', () => ({
         suburb: 'Kellyville',
         postcode: '2155',
         state: 'NSW',
-        zone: 'sydney' as const,
+        zoneId: ZONE.sydney,
+        zoneLabel: 'Sydney',
         latitude: -33.7118,
         longitude: 150.9542,
         label: 'Kellyville NSW 2155',
@@ -350,7 +351,7 @@ describe('booking a job', () => {
 
     expect(repo.calls.lastCreate?.suburb).toBe('Kellyville');
     expect(repo.calls.lastCreate?.postcode).toBe('2155');
-    expect(repo.calls.lastCreate?.zone).toBe('sydney');
+    expect(repo.calls.lastCreate?.zoneId).toBe(ZONE.sydney);
     expect(repo.calls.lastCreate?.latitude).toBe(-33.7118);
   });
 

@@ -9,8 +9,6 @@ import {
   CAPTURE_MODE_LABELS,
   PO_POLICIES,
   PO_POLICY_LABELS,
-  ZONES,
-  ZONE_LABELS,
   type AccountType,
 } from '@plastago/shared';
 import {
@@ -36,7 +34,7 @@ import { Link, useNavigate } from 'react-router';
 import { PageHeader } from '@/components/page-header';
 import { CONFIGURED_BRAND_IDS, IS_MULTI_BRAND } from '@/config/brands';
 import { useCreateCustomer } from '@/features/customers/queries';
-import { useRateCardOptions } from '@/features/lookups/queries';
+import { useRateCardOptions, useSelectableZones } from '@/features/lookups/queries';
 import { normaliseAbnInput } from '@/lib/format';
 import { describeError } from '@/lib/error-message';
 import { isServiceError } from '@/services/service-error';
@@ -81,7 +79,29 @@ import { isServiceError } from '@/services/service-error';
 const CustomerFormSchema = AccountDraftSchema.extend({
   accountType: z.literal('').or(AccountTypeSchema),
   rateCardId: z.string(),
+  /*
+   * Overridden to a plain string so '' is representable in the form.
+   *
+   * ⚠️ It used to default to Sydney, because a constant was lying around to
+   * default to. The same argument the file already makes for `accountType` and
+   * `rateCardId` applies here: the zone decides the service charge and the
+   * per-m² rate on every invoice, so an unnoticed default is a pricing incident
+   * that surfaces a month later as an invoice nobody can explain.
+   *
+   * It also solves the ordering problem outright — '' is valid before the zone
+   * list loads and after, so `defaultValues` never has to wait on a fetch.
+   */
+  primaryZoneId: z.string(),
 }).superRefine((values, ctx) => {
+  if (values.primaryZoneId === '') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['primaryZoneId'],
+      message:
+        'Choose the primary zone. The service charge and the per-m² rate both vary by zone.',
+    });
+  }
+
   if (values.accountType === '') {
     ctx.addIssue({
       code: 'custom',
@@ -116,6 +136,8 @@ export function AdminCustomerCreatePage() {
    * of silently assigning the default.
    */
   const rateCards = useRateCardOptions().data ?? [];
+  /* Live zones only: a new customer is never assigned to a retired one. */
+  const zones = useSelectableZones();
 
   const {
     register,
@@ -139,7 +161,7 @@ export function AdminCustomerCreatePage() {
       poPolicy: 'not-required',
       captureMode: 'area-only',
       paymentTermsDays: 7,
-      primaryZone: 'sydney',
+      primaryZoneId: '',
       accountsContactName: '',
       accountsContactEmail: '',
       sendInvitation: false,
@@ -296,14 +318,15 @@ export function AdminCustomerCreatePage() {
               id="cc-zone"
               label="Primary zone"
               required
-              error={errors.primaryZone?.message}
+              error={errors.primaryZoneId?.message}
               hint="Where most of their work is. Each job is still zoned by its own address."
             >
               {(aria) => (
-                <Select {...aria} {...register('primaryZone')}>
-                  {ZONES.map((zone) => (
-                    <option key={zone} value={zone}>
-                      {ZONE_LABELS[zone]}
+                <Select {...aria} {...register('primaryZoneId')} disabled={zones.length === 0}>
+                  <option value="">Choose a zone…</option>
+                  {zones.map((zone) => (
+                    <option key={zone.value} value={zone.value}>
+                      {zone.label}
                     </option>
                   ))}
                 </Select>

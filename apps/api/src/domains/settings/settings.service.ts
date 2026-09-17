@@ -9,6 +9,11 @@ import type {
   RateScheduleCreate,
   Role,
   Settings,
+  ZoneCreate,
+  ZoneRateInput,
+  ZoneOrder,
+  ZoneSummary,
+  ZoneUpdate,
   InvoiceTemplate,
   InvoiceTemplateWrite,
   InvoicingSettings,
@@ -378,6 +383,224 @@ export const settingsService = {
 
   /* ── Rate cards (M6.1) ─────────────────────────────────────────────────── */
 
+  /* ── Zones (M6.3) ──────────────────────────────────────────────────────── */
+
+  /**
+   * A new service area, priced by copying one that already exists.
+   *
+   * ── Why the caller nominates a zone to copy ───────────────────────────────
+   * A zone with no rates prices nothing on any card, so every job booked into it
+   * falls back to `default` — which has no rates for it either — and the booking
+   * is refused with a 503 the office cannot act on. Copying per card also keeps
+   * each customer's negotiated discount: Clarendon's new-zone row comes from
+   * Clarendon's source row, not from one flat number applied to everybody.
+   *
+   * The slug is derived from the label, so an administrator opening "Central
+   * Coast" does not also have to invent `central-coast`.
+   */
+  async createZone(input: ZoneCreate, caller: Caller): Promise<ZoneSummary> {
+    assertZoneAdmin(caller);
+
+    const slug = slugify(input.label);
+    if (slug === '') {
+      throw AppError.validation('That name cannot be turned into an id', [
+        { path: 'label', message: 'Use at least one letter or digit' },
+      ]);
+    }
+
+    /*
+     * 409 rather than 422: the request is well-formed, it just lost a race with
+     * a zone that already exists.
+     *
+     * ⚠️ `findZoneBySlug` sees ARCHIVED zones, and must. A retired zone still
+     * owns its rate rows in `zonerates`, so reissuing its slug would hand a
+     * brand-new zone a price list nobody set.
+     */
+    const clash = await settingsRepository.findZoneBySlug(slug);
+    if (clash) {
+      throw AppError.conflict(
+        clash.archived
+          ? `"${clash.label}" was retired rather than deleted, and still holds its old prices. Restore it instead of creating it again.`
+          : `A zone called "${clash.label}" already exists`,
+      );
+    }
+
+    const source = await settingsRepository.findZone(input.copyRatesFromZoneId);
+    if (!source) {
+      throw AppError.validation('Pick a zone to copy prices from', [
+        { path: 'copyRatesFromZoneId', message: 'Choose one of the zones from the list' },
+      ]);
+    }
+
+    const { id, rowsCopied } = await settingsRepository.createZoneCopyingRates({
+      slug,
+      label: input.label.trim(),
+      displayOrder: await settingsRepository.nextZoneDisplayOrder(),
+      copyRatesFromZoneId: source.id,
+    });
+
+    /*
+     * Zero copied rows is a real state on an install where no card has a
+     * schedule yet — allowed rather than refused, for the same reason
+     * `settingsRepository.get()` no longer throws on an empty database: this is
+     * the screen where that gets fixed. Logged at `warn` because the zone prices
+     * nothing until a schedule is issued, and nobody would otherwise be told.
+     */
+    if (rowsCopied === 0) {
+      log.warn(
+        { zoneId: id, slug, copiedFrom: source.slug },
+        'zone created with NO rates — no card had a schedule to copy',
+      );
+    } else {
+      log.info({ zoneId: id, slug, copiedFrom: source.slug, rowsCopied }, 'zone created');
+    }
+
+    return findZoneOrThrow(id);
+  },
+
+  /**
+   * Renaming a zone.
+   *
+   * ⚠️ The slug and the id are NOT reachable from here, by design. They are the
+   * key stored on every job, place, account, lead and rate row — changing one is
+   * a five-collection migration, not an edit. The label is what anybody actually
+   * wants to change, and it is safe: a charge-line description froze the zone's
+   * name at quote time, so this never moves a word on an invoice already raised.
+   */
+  async renameZone(id: string, input: ZoneUpdate, caller: Caller): Promise<ZoneSummary> {
+    assertZoneAdmin(caller);
+    await findZoneOrThrow(id);
+
+    await settingsRepository.renameZone(id, input.label.trim());
+    log.info({ zoneId: id }, 'zone renamed');
+
+    return findZoneOrThrow(id);
+  },
+
+  /**
+   * The whole list, in the order it should read.
+   *
+   * ── Why the whole list, and not one zone's position ───────────────────────
+   * Two `PATCH`es moving different zones can leave both claiming the same
+   * position, and the sort is then whatever Mongo returns — which is the exact
+   * bug the old `ZONES.indexOf` prevented by accident. Sending the whole order
+   * makes that unrepresentable, and validating it against the register means a
+   * stale tab cannot half-reorder anything.
+   */
+  async reorderZones(input: ZoneOrder, caller: Caller): Promise<ZoneSummary[]> {
+    assertZoneAdmin(caller);
+
+    const zones = await settingsRepository.allZones();
+    const known = new Set(zones.map((zone) => zone.id));
+    const sent = new Set(input.zoneIds);
+
+    if (sent.size !== input.zoneIds.length) {
+      throw AppError.validation('That order lists a zone twice', [
+        { path: 'zoneIds', message: 'Send each zone exactly once' },
+      ]);
+    }
+
+    const unknown = input.zoneIds.filter((id) => !known.has(id));
+    if (unknown.length > 0) {
+      throw AppError.validation('That order names something that is not a zone', [
+        { path: 'zoneIds', message: 'Reload the page and try again' },
+      ]);
+    }
+
+    const missing = zones.filter((zone) => !sent.has(zone.id));
+    if (missing.length > 0) {
+      throw AppError.validation('That order is missing a zone', [
+        {
+          path: 'zoneIds',
+          message: `${missing.map((zone) => zone.label).join(', ')} ${missing.length === 1 ? 'is' : 'are'} not in the list — reload the page and try again`,
+        },
+      ]);
+    }
+
+    await settingsRepository.reorderZones(input.zoneIds);
+    log.info({ count: input.zoneIds.length }, 'zones reordered');
+
+    return settingsRepository.allZones();
+  },
+
+  /**
+   * Retire a zone. It is never deleted.
+   *
+   * ── Why archive and not delete ────────────────────────────────────────────
+   * Three reasons, any one of them sufficient. Jobs are never deleted, so a
+   * job-count guard would refuse a delete permanently after one pickup — a
+   * "delete" that is always refused is not a feature. A deleted document leaves
+   * a dangling `zoneId` on five collections and a financial report unable to
+   * name its own rows. And freeing the slug would let a new zone silently adopt
+   * the old one's rate rows.
+   *
+   * ⚠️ Jobs and leads are deliberately NOT guards. Both are history: a job
+   * carries its own frozen `appliedRate` and never reads the zone table again.
+   * Guarding on them would mean a zone with any past work could never be
+   * retired — which is every zone anybody would ever want to retire. Their
+   * counts ride on `ZoneSummary` so the screen can warn instead.
+   */
+  async archiveZone(id: string, caller: Caller): Promise<ZoneSummary> {
+    assertZoneAdmin(caller);
+
+    const zone = await findZoneOrThrow(id);
+    // Retiring a retired zone is not an error; it is the state being asked for.
+    if (zone.archived) return zone;
+
+    /*
+     * 1. The last one standing. A platform with no zones cannot price or book
+     *    anything, and the failure would surface on a booking form rather than
+     *    here.
+     */
+    if ((await settingsRepository.countActiveZones()) <= 1) {
+      throw AppError.conflict(
+        'This is the only zone left. A booking has to be priced in a zone, so add another one before retiring this.',
+      );
+    }
+
+    /*
+     * 2. Suburbs still in it — the guard that matters.
+     *
+     * ⚠️ A suburb in a retired zone is still in the picker, so the office books
+     * a job into a zone no future schedule will price, and the booking is
+     * refused at quote time with a 503 naming the zone — weeks after the
+     * decision that caused it.
+     */
+    if (zone.placeCount > 0) {
+      throw AppError.conflict(
+        `${String(zone.placeCount)} suburb${zone.placeCount === 1 ? ' is' : 's are'} still in this zone. Move ${zone.placeCount === 1 ? 'it' : 'them'} to another zone first.`,
+      );
+    }
+
+    /*
+     * 3. Customers whose primary zone this is. Cosmetic on its own —
+     *    `primaryZoneId` prices nothing, the job's own zone does — but it shows
+     *    on the customer record and the accounts grid, and an account naming a
+     *    zone the business no longer services is a support call.
+     */
+    if (zone.accountCount > 0) {
+      throw AppError.conflict(
+        `${String(zone.accountCount)} customer${zone.accountCount === 1 ? ' has' : 's have'} this as their primary zone. Move ${zone.accountCount === 1 ? 'them' : 'them'} to another zone first.`,
+      );
+    }
+
+    await settingsRepository.setZoneArchived(id, true);
+    log.info({ zoneId: id, jobs: zone.jobCount }, 'zone retired — historical records keep it');
+
+    return findZoneOrThrow(id);
+  },
+
+  /** Put a retired zone back into service, with the prices it always had. */
+  async restoreZone(id: string, caller: Caller): Promise<ZoneSummary> {
+    assertZoneAdmin(caller);
+    await findZoneOrThrow(id);
+
+    await settingsRepository.setZoneArchived(id, false);
+    log.info({ zoneId: id }, 'zone restored');
+
+    return findZoneOrThrow(id);
+  },
+
   /**
    * A new rate card, with its opening schedule.
    *
@@ -387,6 +610,7 @@ export const settingsService = {
    */
   async createRateCard(input: RateCardCreate, caller: Caller): Promise<RateCardSummary> {
     assertWriter(caller);
+    await assertPricesEveryZone(input.zones);
 
     const id = input.id ?? slugify(input.label);
     if (id === '') {
@@ -455,6 +679,7 @@ export const settingsService = {
   ): Promise<RateCardSummary> {
     assertWriter(caller);
     await assertCardExists(id);
+    await assertPricesEveryZone(input.zones);
 
     const starts = await settingsRepository.scheduleStarts(id);
     if (starts.includes(input.effectiveFrom)) {
@@ -696,6 +921,85 @@ function assertWriter(caller: Caller): void {
   assertStaff(caller);
   if (!caller.roles.some((role) => WRITERS.has(role))) {
     throw AppError.forbidden('Only an administrator can change platform settings');
+  }
+}
+
+/**
+ * Zone administration is tighter than the rest of this file.
+ *
+ * ⚠️ `WRITERS` above admits operations, because repricing a card or renaming a
+ * template is day-to-day office work. A zone is not: adding one writes a rate
+ * row on every card for every schedule they have ever had, and retiring one
+ * decides where the business goes. That is an administrator's call, so the route
+ * gate says so and this says it again — the same double-gate the rest of the
+ * domain uses, at a tighter setting.
+ */
+function assertZoneAdmin(caller: Caller): void {
+  assertStaff(caller);
+  if (!caller.roles.includes('super-admin')) {
+    throw AppError.forbidden('Only an administrator can change the service zones');
+  }
+}
+
+async function findZoneOrThrow(id: string): Promise<ZoneSummary> {
+  const zone = await settingsRepository.findZone(id);
+  if (!zone) throw AppError.notFound(`No zone is configured for "${id}"`);
+  return zone;
+}
+
+/**
+ * Every zone that exists must be priced, in one go.
+ *
+ * ── Why this is here and not in the schema ────────────────────────────────
+ * It WAS in the schema — `.length(ZONES.length)` plus a refine over the enum.
+ * Neither is expressible once zones are a collection, because `@plastago/shared`
+ * is a contract package with no I/O.
+ *
+ * ── Why it reads the zones rather than counting them ──────────────────────
+ * The refusal has to NAME what is missing. "Price all 4 zones" sends an
+ * administrator back to a form to count rows; "Newcastle has no price on this
+ * schedule" sends them to the field. Every issue is at `path: 'zones'` so the
+ * form attaches it to the rate table rather than to the page.
+ *
+ * This is also a STRONGER check than the one it replaced, which counted to three
+ * and would have accepted a schedule that priced Sydney three times.
+ *
+ * ⚠️ Archived zones are deliberately not required. A retired zone must not block
+ * every future rate change; its historical rows still resolve for a reissued
+ * invoice, which is the only thing that still reads them.
+ */
+async function assertPricesEveryZone(rates: readonly ZoneRateInput[]): Promise<void> {
+  const zones = await settingsRepository.activeZones();
+  const priced = new Set(rates.map((rate) => rate.zoneId));
+
+  const missing = zones.filter((zone) => !priced.has(zone.id));
+  if (missing.length > 0) {
+    throw AppError.validation(
+      'Every zone needs a rate',
+      missing.map((zone) => ({
+        path: 'zones',
+        message: `${zone.label} has no price on this schedule`,
+      })),
+    );
+  }
+
+  /*
+   * A rate naming something that is not a zone.
+   *
+   * ⚠️ Newly reachable: `zonerates.zoneId` has no Mongoose `enum` any more, so
+   * without this the row would insert cleanly and price nothing, and the only
+   * symptom would be a rate table with a row nobody recognises.
+   */
+  const known = new Set(zones.map((zone) => zone.id));
+  const unknown = rates.filter((rate) => !known.has(rate.zoneId));
+  if (unknown.length > 0) {
+    throw AppError.validation(
+      'That is not a zone',
+      unknown.map((rate) => ({
+        path: 'zones',
+        message: `"${rate.zoneId}" is not one of the zones — reload the page and try again`,
+      })),
+    );
   }
 }
 

@@ -5,8 +5,6 @@ import {
   LEAD_SOURCES,
   LEAD_SOURCE_LABELS,
   MAX_UPLOAD_BYTES,
-  ZONES,
-  ZONE_LABELS,
   type LeadCreate,
 } from '@plastago/shared';
 import {
@@ -29,6 +27,7 @@ import { useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router';
 import * as z from 'zod';
+import { useSelectableZones } from '@/features/lookups/queries';
 import { PageHeader } from '@/components/page-header';
 import { useLeadAttach, useLeadCreate } from '@/features/queues/queries';
 import { describeError } from '@/lib/error-message';
@@ -82,8 +81,16 @@ const FormSchema = z.object({
   email: z.email('Enter a valid email address').max(160, 'Keep the email under 160 characters'),
   mobile: z.string().trim().max(20, 'A mobile number is at most 20 characters'),
   source: z.enum(LEAD_SOURCES),
-  /** '' is "outside the service area" — the same answer the grid filters on. */
-  zone: z.union([z.enum(ZONES), z.literal('')]),
+  /**
+   * '' is "outside the service area" — the same answer the grid filters on.
+   *
+   * ⚠️ A bare string now, not `z.enum(ZONES)`. Zones are records an
+   * administrator creates, so there is no closed set to check against here and
+   * the server is the authority on whether an id names one. What this still
+   * guarantees is the thing the form cares about: '' is a deliberate answer,
+   * not a missing one.
+   */
+  zoneId: z.string(),
   suburbs: z.string().trim().max(200, 'Keep the suburb list under 200 characters'),
   /**
    * Kept as a string so '' survives as its own answer. `z.coerce.number()` turns
@@ -111,13 +118,15 @@ function toLead(values: FormValues): LeadCreate {
   const volume = values.typicalVolumeM2.trim();
   return {
     ...values,
-    zone: values.zone === '' ? null : values.zone,
+    zoneId: values.zoneId === '' ? null : values.zoneId,
     typicalVolumeM2: volume === '' ? null : Number(volume),
   };
 }
 
 export function AdminQueueLeadCreatePage() {
   const navigate = useNavigate();
+  /* Live zones only: a new lead is never captured against a retired one. */
+  const zones = useSelectableZones();
   const toast = useToast();
   const createLead = useLeadCreate();
   const attach = useLeadAttach();
@@ -207,7 +216,7 @@ export function AdminQueueLeadCreatePage() {
       // web form would poison the one number this queue was built to answer:
       // where our enquiries actually come from.
       source: 'phone',
-      zone: '',
+      zoneId: '',
       suburbs: '',
       typicalVolumeM2: '',
       expectedFrequency: '',
@@ -354,14 +363,14 @@ export function AdminQueueLeadCreatePage() {
                 <Field
                   id="lead-zone"
                   label="Zone"
-                  error={errors.zone?.message}
+                  error={errors.zoneId?.message}
                   hint="Which service area they fall in."
                 >
                   {(aria) => (
-                    <Select {...aria} {...register('zone')}>
-                      {ZONES.map((zone) => (
-                        <option key={zone} value={zone}>
-                          {ZONE_LABELS[zone]}
+                    <Select {...aria} {...register('zoneId')}>
+                      {zones.map((zone) => (
+                        <option key={zone.value} value={zone.value}>
+                          {zone.label}
                         </option>
                       ))}
                       {/* A real answer, not a blank one: a lead we probably

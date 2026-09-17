@@ -64,7 +64,9 @@ export const FutileReviewItemSchema = z
     builderName: z.string(),
     siteName: NonEmptyStringSchema,
     suburb: NonEmptyStringSchema,
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, resolved server-side. */
+    zoneLabel: NonEmptyStringSchema,
     driverId: ObjectIdSchema.nullable(),
     driverName: z.string().nullable(),
     reason: ExceptionReasonSchema,
@@ -849,7 +851,9 @@ export const LeadListItemSchema = z
     status: LeadStatusSchema,
     source: LeadSourceSchema,
     /** A.2 — inferred from the postcode, not asked for. */
-    zone: ZoneSchema.nullable(),
+    zoneId: ZoneSchema.nullable(),
+    /** The zone's name, resolved server-side. Null when the lead is outside them all. */
+    zoneLabel: NonEmptyStringSchema.nullable(),
     suburbs: z.string(),
     typicalVolumeM2: z.number().nonnegative().nullable(),
     expectedFrequency: z.string(),
@@ -920,7 +924,7 @@ export const LeadCreateSchema = z
      * `null` is a real answer, not a missing one: it means a lead we probably
      * cannot service, which the queue filters for on purpose.
      */
-    zone: ZoneSchema.nullable(),
+    zoneId: ZoneSchema.nullable(),
     suburbs: z.string().trim().max(200),
     /** Nullable rather than 0 — "they did not say" is not "no plasterboard". */
     typicalVolumeM2: z
@@ -969,7 +973,7 @@ export const LeadConversionSchema = z
     poPolicy: PoPolicySchema,
     captureMode: CaptureModeSchema,
     paymentTermsDays: z.number().int().min(0).max(90),
-    primaryZone: ZoneSchema,
+    primaryZoneId: ZoneSchema,
     /*
      * No first site.
      *

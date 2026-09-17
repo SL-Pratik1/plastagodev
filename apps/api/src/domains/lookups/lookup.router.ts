@@ -56,6 +56,13 @@ lookupRouter.get(
 );
 
 lookupRouter.get(
+  '/zones',
+  asyncHandler(async (req: ValidatedRequest<object>, res: Response): Promise<void> => {
+    res.json(await lookupService.zones(callerFrom(req)));
+  }),
+);
+
+lookupRouter.get(
   '/rate-cards',
   asyncHandler(async (req: ValidatedRequest<object>, res: Response): Promise<void> => {
     res.json(await lookupService.rateCards(callerFrom(req)));

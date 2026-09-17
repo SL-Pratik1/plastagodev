@@ -1,6 +1,6 @@
 import { PricePreviewSchema } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createFakeSettingsRepository } from './helpers/fake-settings.js';
+import { ZONE, createFakeSettingsRepository } from './helpers/fake-settings.js';
 
 /**
  * Pricing (M6).
@@ -50,7 +50,7 @@ describe('quoting a job', () => {
   it('prices Matt’s Domain job to the cent', async () => {
     const quote = await pricingService.quote({
       rateCardId: 'clarendon-domaine',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       expectedAreaM2: 823.41,
       bagCount: 0,
       onDate: PRICED_ON,
@@ -64,7 +64,7 @@ describe('quoting a job', () => {
   it('returns a breakdown, not just a total', async () => {
     const quote = await pricingService.quote({
       rateCardId: 'tier-1',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       expectedAreaM2: 1000,
       bagCount: 2,
       onDate: PRICED_ON,
@@ -84,7 +84,7 @@ describe('quoting a job', () => {
   it('conforms to the shared contract', async () => {
     const quote = await pricingService.quote({
       rateCardId: 'default',
-      zone: 'newcastle',
+      zoneId: ZONE.newcastle,
       expectedAreaM2: 500,
       bagCount: 1,
       onDate: PRICED_ON,
@@ -98,21 +98,21 @@ describe('quoting a job', () => {
   it('charges the zone the job is in, not the one before it', async () => {
     const sydney = await pricingService.quote({
       rateCardId: 'default',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       expectedAreaM2: 1000,
       bagCount: 0,
       onDate: PRICED_ON,
     });
     const wollongong = await pricingService.quote({
       rateCardId: 'default',
-      zone: 'wollongong',
+      zoneId: ZONE.wollongong,
       expectedAreaM2: 1000,
       bagCount: 0,
       onDate: PRICED_ON,
     });
     const newcastle = await pricingService.quote({
       rateCardId: 'default',
-      zone: 'newcastle',
+      zoneId: ZONE.newcastle,
       expectedAreaM2: 1000,
       bagCount: 0,
       onDate: PRICED_ON,
@@ -131,7 +131,7 @@ describe('quoting a job', () => {
   it('prices a job with no area at the call-out fee, and says so', async () => {
     const quote = await pricingService.quote({
       rateCardId: 'wisdom',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       expectedAreaM2: null,
       bagCount: 0,
       onDate: PRICED_ON,
@@ -145,7 +145,7 @@ describe('quoting a job', () => {
   it('omits the area line rather than showing a zero one', async () => {
     const quote = await pricingService.quote({
       rateCardId: 'default',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       expectedAreaM2: 0,
       bagCount: 0,
       onDate: PRICED_ON,
@@ -160,7 +160,7 @@ describe('quoting a job', () => {
     // own breakdown.
     const quote = await pricingService.quote({
       rateCardId: 'default',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       expectedAreaM2: 823.41,
       bagCount: 0,
       onDate: PRICED_ON,
@@ -175,7 +175,7 @@ describe('quoting a job', () => {
 
     const quote = await pricingService.quote({
       rateCardId: 'tier-4',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       expectedAreaM2: 100,
       bagCount: 0,
       onDate: PRICED_ON,
@@ -192,12 +192,12 @@ describe('quoting a job', () => {
    * never invoiced.
    */
   it('refuses to guess when a zone has no rate at all', async () => {
-    repo.unprice('newcastle');
+    repo.unprice(ZONE.newcastle);
 
     await expect(
       pricingService.quote({
         rateCardId: 'default',
-        zone: 'newcastle',
+        zoneId: ZONE.newcastle,
         expectedAreaM2: 100,
         bagCount: 0,
         onDate: PRICED_ON,
@@ -208,7 +208,7 @@ describe('quoting a job', () => {
   it('looks up the card it was asked for', async () => {
     await pricingService.quote({
       rateCardId: 'wisdom',
-      zone: 'wollongong',
+      zoneId: ZONE.wollongong,
       expectedAreaM2: 10,
       bagCount: 0,
       onDate: PRICED_ON,
@@ -222,14 +222,14 @@ describe('quoting a job', () => {
      * invisible in the total.
      */
     expect(repo.calls.resolveRate).toEqual([
-      { rateCardId: 'wisdom', zone: 'wollongong', onDate: PRICED_ON },
+      { rateCardId: 'wisdom', zoneId: ZONE.wollongong, onDate: PRICED_ON },
     ]);
   });
 
   it('does not go looking for bag rates when there are no bags', async () => {
     await pricingService.quote({
       rateCardId: 'default',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       expectedAreaM2: 100,
       bagCount: 0,
       onDate: PRICED_ON,

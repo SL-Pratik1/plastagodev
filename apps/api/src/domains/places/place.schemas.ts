@@ -1,3 +1,4 @@
+import { ObjectIdSchema } from '@plastago/shared';
 import * as z from 'zod';
 
 /**
@@ -17,3 +18,8 @@ import * as z from 'zod';
 export const SearchPlacesQuerySchema = z
   .object({ q: z.string().trim().max(80).optional().default('') })
   .meta({ id: 'SearchPlacesQuery' });
+
+/** One suburb, by id, for the admin routes. */
+export const PlaceIdParamsSchema = z
+  .object({ id: ObjectIdSchema })
+  .meta({ id: 'PlaceIdParams' });

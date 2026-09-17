@@ -1,4 +1,5 @@
 import type { Driver, Run, RunStatus, UnallocatedJob } from '@plastago/shared';
+import { ZONE } from './fake-settings.js';
 import type { CreateRunInput } from '../../src/domains/dispatch/run.repository.js';
 
 /**
@@ -115,7 +116,8 @@ export function createFakeRunRepository() {
         builderName: 'GJ Gardner',
         siteName: `Lot ${String(facts.jobNumber)}`,
         suburb: facts.suburb,
-        zone: 'sydney' as const,
+        zoneId: ZONE.sydney,
+        zoneLabel: 'Sydney',
         serviceLevel: 'standard' as const,
         readyDate: '2026-03-02',
         targetDate: '2026-03-09',

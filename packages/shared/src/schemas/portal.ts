@@ -184,7 +184,9 @@ export const PortalJobStepSchema = z
 
 export const PortalJobSchema = PortalJobListItemSchema.extend({
   builderName: z.string(),
-  zone: ZoneSchema,
+  zoneId: ZoneSchema,
+  /** The zone's name, resolved server-side. */
+  zoneLabel: NonEmptyStringSchema,
   notes: z.string(),
   driverName: z.string().nullable(),
   arrivedAt: IsoDateTimeSchema.nullable(),
@@ -466,7 +468,9 @@ export const PortalAccountSchema = z
     paymentTermsDays: z.number().int().nonnegative(),
     poPolicy: z.enum(['not-required', 'required-before-invoice']),
     captureMode: z.enum(['area-only', 'area-and-weight']),
-    primaryZone: ZoneSchema,
+    primaryZoneId: ZoneSchema,
+    /** Resolved server-side: the portal may not read the zone register. */
+    primaryZoneLabel: NonEmptyStringSchema,
     contacts: z.array(
       z.object({
         id: ObjectIdSchema,

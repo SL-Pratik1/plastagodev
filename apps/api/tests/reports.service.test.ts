@@ -1,4 +1,5 @@
 import type { ReportFilters, Role } from '@plastago/shared';
+import { ZONE } from './helpers/fake-settings.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -61,9 +62,9 @@ vi.mock('../src/domains/reports/report.repository.js', () => ({
       Promise.resolve([{ month: '2026-09', jobs: 6, areaM2: 4100.44 }]),
     byZone: () =>
       Promise.resolve([
-        { zone: 'sydney', jobs: 4, areaM2: 3200, revenueCents: 140_000 },
+        { zoneId: ZONE.sydney, jobs: 4, areaM2: 3200, revenueCents: 140_000 },
         // A zone with no jobs — the average must not divide by zero.
-        { zone: 'newcastle', jobs: 0, areaM2: 0, revenueCents: 0 },
+        { zoneId: ZONE.newcastle, jobs: 0, areaM2: 0, revenueCents: 0 },
       ]),
     financial: () =>
       Promise.resolve([
@@ -148,7 +149,7 @@ function filters(overrides: Partial<ReportFilters> = {}): ReportFilters {
     to: '2026-09-30',
     accountId: null,
     suburb: null,
-    zone: null,
+    zoneId: null,
     driverId: null,
     ...overrides,
   };

@@ -4,7 +4,6 @@ import {
   type ExceptionReason,
   type FreightItem,
   type RateCardId,
-  type Zone,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { connectMongo, disconnectMongo, isMongoConnected } from '../db/mongo.js';
@@ -43,6 +42,7 @@ import {
 import {
   SETTINGS_SINGLETON_ID,
   SettingsModel,
+  ZoneModel,
   ZoneRateModel,
 } from '../domains/settings/settings.model.js';
 import { UserDeviceModel, UserSignInModel } from '../domains/users/user.model.js';
@@ -212,7 +212,8 @@ interface AccountSeed {
   status: 'active' | 'inactive';
   abn: string;
   paymentTermsDays: number;
-  primaryZone: Zone;
+  /** The zone's SLUG. Resolved to an id at write time — see `zoneOf`. */
+  primaryZone: string;
   riskAssessmentRequired: boolean;
   approveNewSupervisors: boolean;
   certificateEmail: string | null;
@@ -654,6 +655,8 @@ const STREETS = [
 /* ══ Working types ══════════════════════════════════════════════════════════ */
 interface SeededAccount extends AccountSeed {
   id: mongoose.Types.ObjectId;
+  /** Resolved once, when the account is written. */
+  primaryZoneId: mongoose.Types.ObjectId;
 }
 
 interface SeededDriver {
@@ -665,7 +668,8 @@ interface SeededDriver {
 interface SeededPlace {
   suburb: string;
   postcode: string;
-  zone: Zone;
+  /** REFERENCE → `zones._id`. Named through `zoneNames` where a name is wanted. */
+  zoneId: mongoose.Types.ObjectId;
   latitude: number;
   longitude: number;
 }
@@ -701,7 +705,7 @@ async function seedAccounts(): Promise<SeededAccount[]> {
   const contactDocs: Record<string, unknown>[] = [];
   for (const seed of ACCOUNTS) {
     const id = oid();
-    seeded.push({ ...seed, id });
+    seeded.push({ ...seed, id, primaryZoneId: zoneOf(seed.primaryZone) });
     const slug = seed.name.toLowerCase().replace(/[^a-z0-9]+/g, '');
     accountDocs.push({
       _id: id,
@@ -716,7 +720,7 @@ async function seedAccounts(): Promise<SeededAccount[]> {
       status: seed.status,
       abn: seed.abn,
       paymentTermsDays: seed.paymentTermsDays,
-      primaryZone: seed.primaryZone,
+      primaryZoneId: zoneOf(seed.primaryZone),
       riskAssessmentRequired: seed.riskAssessmentRequired,
       approveNewSupervisors: seed.approveNewSupervisors,
       certificateEmail: seed.certificateEmail,
@@ -1448,14 +1452,21 @@ function makeJobFactory(
   const next = (options: JobOptions): JobDraft => {
     const { account } = options;
     // Contractors travel; a builder's work sits in the estates it is building.
-    const local = places.filter((candidate) => candidate.zone === account.primaryZone);
+    const local = places.filter(
+      (candidate) => candidate.zoneId.toString() === account.primaryZoneId.toString(),
+    );
     const place =
       account.accountType === 'builder' && local.length > 0 && chance(0.75)
         ? pick(local)
         : pick(places);
     const rate =
-      rates.get(`${account.rateCardId}:${place.zone}`) ?? rates.get(`default:${place.zone}`);
-    if (!rate) throw new Error(`no rate for ${account.rateCardId}/${place.zone}`);
+      rates.get(`${account.rateCardId}:${place.zoneId.toString()}`) ??
+      rates.get(`default:${place.zoneId.toString()}`);
+    if (!rate) {
+      throw new Error(
+        `no rate for ${account.rateCardId}/${zoneNames.get(place.zoneId.toString()) ?? place.zoneId.toString()}`,
+      );
+    }
 
     /*
      * Wisdom's fixed price, Matt 31:04: their order carries a line item and no
@@ -1501,7 +1512,7 @@ function makeJobFactory(
       addressLine: `${String(streetNumber)} ${street}`,
       suburb: place.suburb,
       postcode: place.postcode,
-      zone: place.zone,
+      zoneId: place.zoneId,
       latitude: place.latitude + (random() - 0.5) * 0.02,
       longitude: place.longitude + (random() - 0.5) * 0.02,
       accessNotes: chance(0.6)
@@ -1615,11 +1626,31 @@ interface RunDraft {
   stops: JobDraft[];
 }
 
-const ZONE_RUN_NAMES: Record<Zone, string> = {
-  sydney: 'Sydney',
-  wollongong: 'South Coast',
-  newcastle: 'Newcastle',
-};
+/**
+ * Zone id → name, loaded once in `main`.
+ *
+ * ⚠️ Replaces a local `ZONE_RUN_NAMES` map that disagreed with the real labels —
+ * it called Wollongong "South Coast", so the demo's run names had never matched
+ * the zone they were in. One source now, read out of the database rather than
+ * restated here.
+ */
+let zoneNames: Map<string, string> = new Map();
+
+/** Zone SLUG → id, so the hand-written demo data can still name a zone. */
+let zoneIds: Map<string, mongoose.Types.ObjectId> = new Map();
+
+/**
+ * The id behind a slug this script names by hand.
+ *
+ * ⚠️ Throws rather than defaulting. `enum: ZONES` on the models used to catch a
+ * typo here; nothing does now, and a silent fallback would seed a demo that
+ * looks right and prices in the wrong zone.
+ */
+function zoneOf(slug: string): mongoose.Types.ObjectId {
+  const id = zoneIds.get(slug);
+  if (!id) throw new Error(`unknown zone "${slug}" — is the settings seed up to date?`);
+  return id;
+}
 
 /**
  * Twelve weeks of work, ending three weeks into the future.
@@ -1691,12 +1722,12 @@ function buildSchedule(
     driver: SeededDriver | null,
     status: string,
     sequenceForDay: number | null,
-    zone: Zone,
+    zoneId: mongoose.Types.ObjectId,
   ): RunDraft => {
     const run: RunDraft = {
       id: oid(),
       runNumber,
-      name: `${ZONE_RUN_NAMES[zone]} run ${String(sequenceForDay ?? 1)}`,
+      name: `${zoneNames.get(zoneId.toString()) ?? 'Unknown zone'} run ${String(sequenceForDay ?? 1)}`,
       date,
       status,
       driver,
@@ -1745,7 +1776,8 @@ function buildSchedule(
         ? [...drivers]
         : [...drivers].sort(() => random() - 0.5).slice(0, recent ? 2 : 1);
     working.forEach((driver, index) => {
-      const zone = pick(['sydney', 'sydney', 'sydney', 'wollongong', 'newcastle'] as const);
+      /* Weighted: Sydney is most of the work, which is what the demo should look like. */
+      const zone = zoneOf(pick(['sydney', 'sydney', 'sydney', 'wollongong', 'newcastle'] as const));
       const run = newRun(date, driver, 'closed', index + 1, zone);
       const stops = int(1, 3);
       for (let stop = 0; stop < stops; stop += 1) {
@@ -1831,26 +1863,26 @@ function buildSchedule(
   const [first, second, third, fourth] = drivers;
   if (first) {
     // Mid-run: one stop done, one being worked, one still ahead.
-    const run = newRun(TODAY, first, 'in-progress', 1, 'sydney');
+    const run = newRun(TODAY, first, 'in-progress', 1, zoneOf('sydney'));
     addStop(run, 'completed', at(TODAY, 7, 42));
     const arrived = addStop(run, 'arrived', null);
     arrived.doc.arrivedAt = at(TODAY, 9, 15);
     addStop(run, 'assigned', null);
   }
   if (second) {
-    const run = newRun(TODAY, second, 'in-progress', 1, 'wollongong');
+    const run = newRun(TODAY, second, 'in-progress', 1, zoneOf('wollongong'));
     addStop(run, 'completed', at(TODAY, 7, 20));
     addStop(run, 'completed', at(TODAY, 9, 5));
     addStop(run, 'in-transit', null);
   }
   if (third) {
     // Staffed but not started — the ordinary state of an afternoon run.
-    const run = newRun(TODAY, third, 'assigned', 1, 'newcastle');
+    const run = newRun(TODAY, third, 'assigned', 1, zoneOf('newcastle'));
     addStop(run, 'assigned', null);
     addStop(run, 'assigned', null);
   }
   if (fourth) {
-    const run = newRun(TODAY, fourth, 'assigned', 1, 'sydney');
+    const run = newRun(TODAY, fourth, 'assigned', 1, zoneOf('sydney'));
     addStop(run, 'assigned', null);
     addStop(run, 'assigned', null);
     addStop(run, 'assigned', null);
@@ -1861,7 +1893,7 @@ function buildSchedule(
    * is not assigned until somebody is going to do it — which is exactly the
    * distinction the allocation board is drawing.
    */
-  const unstaffed = newRun(TODAY, null, 'planning', null, 'sydney');
+  const unstaffed = newRun(TODAY, null, 'planning', null, zoneOf('sydney'));
   addStop(unstaffed, 'booked', null);
   addStop(unstaffed, 'booked', null);
 
@@ -1874,19 +1906,19 @@ function buildSchedule(
       driver,
       'assigned',
       1,
-      pick(['sydney', 'wollongong', 'newcastle'] as const),
+      zoneOf(pick(['sydney', 'wollongong', 'newcastle'] as const)),
     );
     const stops = int(2, 3);
     for (let stop = 0; stop < stops; stop += 1) addStop(run, 'assigned', null);
     // Matt, 40:03 — a driver normally takes two runs in a day. One of them does.
     if (index === 0) {
-      const second = newRun(tomorrow, driver, 'assigned', 2, 'sydney');
+      const second = newRun(tomorrow, driver, 'assigned', 2, zoneOf('sydney'));
       addStop(second, 'assigned', null);
       addStop(second, 'assigned', null);
     }
   });
   drivers.slice(0, 2).forEach((driver) => {
-    const run = newRun(dayAfter, driver, 'assigned', 1, 'sydney');
+    const run = newRun(dayAfter, driver, 'assigned', 1, zoneOf('sydney'));
     addStop(run, 'assigned', null);
     addStop(run, 'assigned', null);
   });
@@ -1896,7 +1928,7 @@ function buildSchedule(
     null,
     'planning',
     null,
-    'sydney',
+    zoneOf('sydney'),
   );
   addStop(planning, 'booked', null);
   addStop(planning, 'booked', null);
@@ -3322,7 +3354,7 @@ async function seedLeads(accounts: readonly SeededAccount[]): Promise<void> {
       email: 'grant@bellriverhomes.com.au',
       status: 'new',
       source: 'enquiry-form',
-      zone: 'sydney',
+      zoneId: zoneOf('sydney'),
       suburbs: 'Box Hill, Marsden Park',
       volume: 600,
       frequency: '3–4 per week',
@@ -3335,7 +3367,7 @@ async function seedLeads(accounts: readonly SeededAccount[]): Promise<void> {
       email: 'simone@hotondoillawarra.com.au',
       status: 'contacted',
       source: 'phone',
-      zone: 'wollongong',
+      zoneId: zoneOf('wollongong'),
       suburbs: 'Shell Cove, Dapto',
       volume: 350,
       frequency: 'Weekly',
@@ -3348,7 +3380,7 @@ async function seedLeads(accounts: readonly SeededAccount[]): Promise<void> {
       email: 'adam@thrivehomes.com.au',
       status: 'quoted',
       source: 'referral',
-      zone: 'newcastle',
+      zoneId: zoneOf('newcastle'),
       suburbs: 'Thornton, Fletcher',
       volume: 800,
       frequency: '2 per week',
@@ -3361,7 +3393,7 @@ async function seedLeads(accounts: readonly SeededAccount[]): Promise<void> {
       email: 'tomas@allcastlehomes.com.au',
       status: 'won',
       source: 'referral',
-      zone: 'newcastle',
+      zoneId: zoneOf('newcastle'),
       suburbs: 'Medowie, Thornton',
       volume: 500,
       frequency: 'Weekly',
@@ -3374,7 +3406,7 @@ async function seedLeads(accounts: readonly SeededAccount[]): Promise<void> {
       email: 'priya@visionhomesnsw.com.au',
       status: 'lost',
       source: 'enquiry-form',
-      zone: 'sydney',
+      zoneId: zoneOf('sydney'),
       suburbs: 'Leppington, Austral',
       volume: 250,
       frequency: 'Fortnightly',
@@ -3387,7 +3419,7 @@ async function seedLeads(accounts: readonly SeededAccount[]): Promise<void> {
       email: 'ben@sanctuaryliving.com.au',
       status: 'contacted',
       source: 'other',
-      zone: 'sydney',
+      zoneId: zoneOf('sydney'),
       suburbs: 'Oran Park, Catherine Field',
       volume: 420,
       frequency: 'Weekly',
@@ -3411,7 +3443,7 @@ async function seedLeads(accounts: readonly SeededAccount[]): Promise<void> {
       mobile: `04${String(int(10, 99))}${String(int(100_000, 999_999))}`,
       status: lead.status,
       source: lead.source,
-      zone: lead.zone,
+      zoneId: lead.zoneId,
       suburbs: lead.suburbs,
       typicalVolumeM2: lead.volume,
       expectedFrequency: lead.frequency,
@@ -3870,7 +3902,12 @@ async function seedNotifications(
  */
 async function loadRates(): Promise<RateTable> {
   const rows = await ZoneRateModel.find({}).lean<
-    Array<{ rateCardId: string; zone: Zone; serviceCharge: unknown; ratePerM2: unknown }>
+    Array<{
+      rateCardId: string;
+      zoneId: mongoose.Types.ObjectId;
+      serviceCharge: unknown;
+      ratePerM2: unknown;
+    }>
   >();
   if (rows.length === 0) {
     throw new Error('no zone rates — run `npm run seed:settings` before this script');
@@ -3878,12 +3915,31 @@ async function loadRates(): Promise<RateTable> {
 
   const table: RateTable = new Map();
   for (const row of rows) {
-    table.set(`${row.rateCardId}:${row.zone}`, {
+    table.set(`${row.rateCardId}:${row.zoneId.toString()}`, {
       serviceCharge: moneyToCents(fromDecimal128(row.serviceCharge as never)),
       ratePerM2: moneyToCents(fromDecimal128(row.ratePerM2 as never)),
     });
   }
   return table;
+}
+
+/**
+ * The zone register, into the two module-level maps.
+ *
+ * Read out of the database rather than restated here — the same reasoning as
+ * `loadRates` and `loadPlaces`, and the reason the old local label map (which
+ * called Wollongong "South Coast") is gone.
+ */
+async function loadZones(): Promise<void> {
+  const rows = await ZoneModel.find({})
+    .lean<Array<{ _id: mongoose.Types.ObjectId; slug: string; label: string }>>();
+
+  if (rows.length === 0) {
+    throw new Error('no zones — run `npm run seed:settings` before this script');
+  }
+
+  zoneNames = new Map(rows.map((row) => [row._id.toString(), row.label]));
+  zoneIds = new Map(rows.map((row) => [row.slug, row._id]));
 }
 
 async function loadPlaces(): Promise<SeededPlace[]> {
@@ -3915,6 +3971,15 @@ async function main(): Promise<void> {
       `${String(existingJobs)} jobs are already here. Run \`npm run seed:all\`, which resets first.`,
     );
   }
+
+  /*
+   * ⚠️ The zone register FIRST, and everything below depends on it.
+   *
+   * `zoneOf` resolves every zone this script names by hand, and the account and
+   * run fixtures are evaluated as soon as `seedAccounts` runs — so the maps have
+   * to be populated before that, not alongside it.
+   */
+  await loadZones();
 
   const [places, rates] = await Promise.all([loadPlaces(), loadRates()]);
 

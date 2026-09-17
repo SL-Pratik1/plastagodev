@@ -55,6 +55,22 @@ export const lookupService = {
     assertOffice(caller);
     return lookupRepository.rateCards();
   },
+
+  /**
+   * M6.3 — the zones, for every picker, filter and label that used `ZONE_LABELS`.
+   *
+   * Same story as the rate cards above, one release later and on nine screens
+   * rather than four.
+   *
+   * ⚠️ Office only, like everything else on this router. A customer's portal
+   * shows the zone of their own account and their own jobs, but those arrive
+   * with the name already resolved on the record — the register itself is the
+   * list of markets PlastaGo operates in, and that is not a builder's business.
+   */
+  async zones(caller: Caller): Promise<Array<LookupRow & { archived: boolean }>> {
+    assertOffice(caller);
+    return lookupRepository.zones();
+  },
 };
 
 function assertOffice(caller: Caller): void {

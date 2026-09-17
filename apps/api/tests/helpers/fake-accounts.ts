@@ -1,4 +1,5 @@
 import type { Account, AccountListItem, AccountType, PageMeta } from '@plastago/shared';
+import { ZONE } from './fake-settings.js';
 import type {
   AccountScope,
   CreateAccountInput,
@@ -75,7 +76,8 @@ function accountOf(id: string, row: StoredAccount): Account {
     postcode: null,
     detailsCompletedAt: null,
     paymentTermsDays: 7,
-    primaryZone: 'sydney',
+    primaryZoneId: ZONE.sydney,
+    primaryZoneLabel: 'Sydney',
     contacts: [],
     preferredPickupWindow: null,
     notes: '',

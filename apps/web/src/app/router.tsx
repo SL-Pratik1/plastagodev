@@ -53,6 +53,7 @@ import {
   ReportsPage,
   ExtractorPage,
   SettingsPage,
+  SuburbsPage,
   XeroPage,
   UserDetailPage,
   UsersPage,
@@ -341,7 +342,16 @@ export const router = createBrowserRouter([
                   },
                   {
                     element: <RequireCapability capability="settings:manage" />,
-                    children: [{ path: 'settings', element: load(<SettingsPage />) }],
+                    children: [
+                      { path: 'settings', element: load(<SettingsPage />) },
+                      /*
+                       * M6.3 — the suburbs that decide a job's zone, and the
+                       * zone decides the rate. Same capability as Settings
+                       * because it is the same act: changing what the platform
+                       * charges, for everybody, from the next booking on.
+                       */
+                      { path: 'suburbs', element: load(<SuburbsPage />) },
+                    ],
                   },
                 ],
               },

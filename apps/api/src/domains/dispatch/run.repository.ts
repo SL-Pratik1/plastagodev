@@ -8,6 +8,7 @@ import type {
   UnallocatedJob,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { UNKNOWN_ZONE_LABEL, zoneLabels } from '../settings/zone-lookup.js';
 import { JobModel } from '../jobs/job.model.js';
 import { getStorage } from '../../integrations/storage.js';
 import { RunModel, RunTipOffModel } from './run.model.js';
@@ -46,7 +47,13 @@ interface RawStop {
   builderName: string;
   siteName: string;
   suburb: string;
-  zone: RunStopSummary['zone'];
+  /*
+   * ⚠️ What the JOB stores — an ObjectId, and no label. A run sheet shows the
+   * zone's CURRENT name, so the label is joined on at read time rather than
+   * denormalised onto the job. `appliedRate.zoneLabel` is the frozen one, and
+   * it is frozen because it reaches an invoice.
+   */
+  zoneId: mongoose.Types.ObjectId;
   serviceLevel: RunStopSummary['serviceLevel'];
   readyDate: string;
   targetDate: string;
@@ -369,6 +376,8 @@ export const runRepository = {
       .sort({ targetDate: 1, jobNumber: 1 })
       .lean<RawStop[]>();
 
+    const zones = await zoneLabels();
+
     return rows.map((row) => ({
       id: row._id.toHexString(),
       jobNumber: row.jobNumber,
@@ -376,7 +385,8 @@ export const runRepository = {
       builderName: row.builderName,
       siteName: row.siteName,
       suburb: row.suburb,
-      zone: row.zone,
+      zoneId: row.zoneId.toString(),
+      zoneLabel: zones.get(row.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
       serviceLevel: row.serviceLevel,
       readyDate: row.readyDate,
       targetDate: row.targetDate,
@@ -439,7 +449,7 @@ function toRun(row: RawRun, group: StopGroup, tipOff: RunTipOff | null): Run {
   };
 }
 
-function toStop(row: RawStop): RunStopSummary {
+function toStop(row: RawStop, zones: ReadonlyMap<string, string>): RunStopSummary {
   return {
     id: row._id.toHexString(),
     jobNumber: row.jobNumber,
@@ -451,7 +461,8 @@ function toStop(row: RawStop): RunStopSummary {
     builderName: row.builderName,
     siteName: row.siteName,
     suburb: row.suburb,
-    zone: row.zone,
+    zoneId: row.zoneId.toString(),
+    zoneLabel: zones.get(row.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
     serviceLevel: row.serviceLevel,
     readyDate: row.readyDate,
     targetDate: row.targetDate,
@@ -484,15 +495,18 @@ async function toTipOff(row: RawTipOff): Promise<RunTipOff> {
 
 /** Stops for many runs at once, grouped by run. One query for a whole board. */
 async function stopsOf(runIds: mongoose.Types.ObjectId[]): Promise<Map<string, StopGroup>> {
-  const rows = await JobModel.find({ runId: { $in: runIds } })
-    .sort({ runSequence: 1 })
-    .lean<Array<RawStop & { runId: mongoose.Types.ObjectId }>>();
+  const [rows, zones] = await Promise.all([
+    JobModel.find({ runId: { $in: runIds } })
+      .sort({ runSequence: 1 })
+      .lean<Array<RawStop & { runId: mongoose.Types.ObjectId }>>(),
+    zoneLabels(),
+  ]);
 
   const grouped = new Map<string, StopGroup>();
   for (const row of rows) {
     const key = row.runId.toHexString();
     const group = grouped.get(key) ?? { stops: [], totalBags: 0 };
-    group.stops.push(toStop(row));
+    group.stops.push(toStop(row, zones));
     group.totalBags += row.bagCount;
     grouped.set(key, group);
   }

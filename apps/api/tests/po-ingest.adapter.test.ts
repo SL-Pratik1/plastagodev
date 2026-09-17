@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ZONE } from './helpers/fake-settings.js';
 
 /**
  * I6 · M2.12 — turning an extractor result into a review-queue row.
@@ -32,7 +33,14 @@ let accounts: AccountRow[] = [];
 let lastAccountQuery: string | undefined;
 
 /** The suburbs the places table holds. Set per test. */
-let places: Array<{ id: string; suburb: string; postcode: string; zone: string; label: string }> =
+let places: Array<{
+  id: string;
+  suburb: string;
+  postcode: string;
+  zoneId: string;
+  zoneLabel: string;
+  label: string;
+}> =
   [];
 
 let stored: Array<{ key: string; contentType: string }> = [];
@@ -152,7 +160,8 @@ const CATHERINE_FIELD = {
   id: 'catherine-field',
   suburb: 'Catherine Field',
   postcode: '2557',
-  zone: 'sydney',
+  zoneId: ZONE.sydney,
+  zoneLabel: 'Sydney',
   label: 'Catherine Field NSW 2557',
 };
 
@@ -373,7 +382,7 @@ describe('resolving the site to a serviceable suburb', () => {
     const { diagnostics } = await adaptExtraction(extraction(WISDOM), context);
 
     expect(diagnostics.suburbResolved).toBe(true);
-    expect(diagnostics.zone).toBe('sydney');
+    expect(diagnostics.zone).toBe('Sydney');
   });
 
   /*
@@ -396,8 +405,8 @@ describe('resolving the site to a serviceable suburb', () => {
 
   it('never falls back to a nearby suburb when the name does not match exactly', async () => {
     places = [
-      { id: 'oran-park', suburb: 'Oran Park', postcode: '2570', zone: 'sydney', label: 'Oran Park NSW 2570' },
-      { id: 'marsden-park', suburb: 'Marsden Park', postcode: '2765', zone: 'sydney', label: 'Marsden Park NSW 2765' },
+      { id: 'oran-park', suburb: 'Oran Park', postcode: '2570', zoneId: ZONE.sydney, zoneLabel: 'Sydney', label: 'Oran Park NSW 2570' },
+      { id: 'marsden-park', suburb: 'Marsden Park', postcode: '2765', zoneId: ZONE.sydney, zoneLabel: 'Sydney', label: 'Marsden Park NSW 2765' },
     ];
 
     const { diagnostics } = await adaptExtraction(
@@ -413,13 +422,13 @@ describe('resolving the site to a serviceable suburb', () => {
   it('uses the suburb name to break a tie when a postcode covers several', async () => {
     places = [
       CATHERINE_FIELD,
-      { id: 'gregory-hills', suburb: 'Gregory Hills', postcode: '2557', zone: 'sydney', label: 'Gregory Hills NSW 2557' },
+      { id: 'gregory-hills', suburb: 'Gregory Hills', postcode: '2557', zoneId: ZONE.sydney, zoneLabel: 'Sydney', label: 'Gregory Hills NSW 2557' },
     ];
 
     const { diagnostics } = await adaptExtraction(extraction(WISDOM), context);
 
     expect(diagnostics.suburbResolved).toBe(true);
-    expect(diagnostics.zone).toBe('sydney');
+    expect(diagnostics.zone).toBe('Sydney');
   });
 });
 

@@ -1,4 +1,4 @@
-import { LEAD_SOURCES, LEAD_STATUSES, ZONES } from '@plastago/shared';
+import { LEAD_SOURCES, LEAD_STATUSES } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
 export const LEADS_COLLECTION = 'leads';
@@ -43,7 +43,15 @@ const leadSchema = new Schema(
      * Null is a REAL answer, not a missing one: it means a lead PlastaGo
      * probably cannot service, which the queue filters for on purpose.
      */
-    zone: { type: String, enum: ZONES, default: null },
+    /**
+     * REFERENCE → `zones._id`.
+     *
+     * ⚠️ No `enum`: zones are records an administrator creates, so Mongo can no
+     * longer vouch for the value — `leadService` checks it exists. Null means
+     * the lead is outside every serviced zone, which is a real answer and the
+     * row the office most wants to find.
+     */
+    zoneId: { type: Schema.Types.ObjectId, default: null, ref: 'Zone' },
     suburbs: { type: String, required: false, default: '', trim: true },
 
     /** Nullable rather than 0 — "they did not say" is not "no plasterboard". */
@@ -88,7 +96,7 @@ leadSchema.index(
   { name: 'open_pipeline', partialFilterExpression: { convertedAccountId: null } },
 );
 
-leadSchema.index({ zone: 1, status: 1 }, { name: 'zone_status' });
+leadSchema.index({ zoneId: 1, status: 1 }, { name: 'zone_status' });
 
 /**
  * Duplicate detection, not a constraint.

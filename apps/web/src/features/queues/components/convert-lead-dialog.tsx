@@ -8,8 +8,6 @@ import {
   CAPTURE_MODE_LABELS,
   PO_POLICIES,
   PO_POLICY_LABELS,
-  ZONES,
-  ZONE_LABELS,
   type AccountType,
   type BrandId,
   type CaptureMode,
@@ -33,7 +31,7 @@ import { SproutIcon } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { CONFIGURED_BRAND_IDS, IS_MULTI_BRAND } from '@/config/brands';
-import { useRateCardOptions } from '@/features/lookups/queries';
+import { useRateCardOptions, useSelectableZones } from '@/features/lookups/queries';
 import { useLeadConvert } from '@/features/queues/queries';
 import { normaliseAbnInput } from '@/lib/format';
 import { describeError } from '@/lib/error-message';
@@ -71,7 +69,7 @@ const FIELDS: Record<string, { label: string; inputId: string }> = {
   poPolicy: { label: 'Purchase orders', inputId: 'convert-po-policy' },
   captureMode: { label: 'What the driver captures', inputId: 'convert-capture' },
   paymentTermsDays: { label: 'Payment terms', inputId: 'convert-terms' },
-  primaryZone: { label: 'Primary zone', inputId: 'convert-zone' },
+  primaryZoneId: { label: 'Primary zone', inputId: 'convert-zone' },
   accountsContactName: { label: 'Accounts contact', inputId: 'convert-contact-name' },
   accountsContactEmail: { label: 'Invoices emailed to', inputId: 'convert-contact-email' },
 };
@@ -123,7 +121,7 @@ export interface ConvertibleLead {
   contactName: string;
   /** Pre-fills the accounts contact, and is where the welcome email goes. */
   email: string;
-  zone: Zone | null;
+  zoneId: Zone | null;
 }
 
 /* ── A.4 · Convert Lead → Account ─────────────────────────────────────────── */
@@ -148,7 +146,7 @@ interface ConvertForm {
   poPolicy: PoPolicy;
   captureMode: CaptureMode;
   paymentTermsDays: string;
-  primaryZone: Zone;
+  primaryZoneId: Zone;
   accountsContactName: string;
   accountsContactEmail: string;
   notes: string;
@@ -190,6 +188,11 @@ export function ConvertLeadDialog({
    * silently converting onto the wrong card.
    */
   const rateCards = useRateCardOptions().data ?? [];
+  /*
+   * The lead own zone is KEPT even if it has since been retired, so a lead
+   * captured last month still converts without silently re-zoning the account.
+   */
+  const zones = useSelectableZones(lead.zoneId);
 
   const [form, setForm] = useState<ConvertForm>(() => ({
     // Three letters of the company name plus 001 is the pattern their existing
@@ -206,7 +209,15 @@ export function ConvertLeadDialog({
     poPolicy: 'not-required',
     captureMode: 'area-only',
     paymentTermsDays: '7',
-    primaryZone: lead.zone ?? 'sydney',
+    /*
+     * ⚠️ Empty rather than a default zone.
+     *
+     * It fell back to Sydney, because a constant was lying around to fall back
+     * to. The zone decides the service charge and the per-m² rate on every
+     * invoice, so a silent default is a pricing incident that surfaces a month
+     * later — the same argument this dialog already makes for the rate card.
+     */
+    primaryZoneId: lead.zoneId ?? '',
     /*
      * Pre-filled from the lead, and EDITABLE.
      *
@@ -271,6 +282,10 @@ export function ConvertLeadDialog({
       next.accountType =
         'Choose builder or contractor. It decides whether they get site supervisors and which booking form they see.';
     }
+    if (!form.primaryZoneId) {
+      next.primaryZoneId =
+        'Choose the primary zone. The service charge and the per-m² rate both vary by zone.';
+    }
     const terms = Number(form.paymentTermsDays);
     if (!Number.isInteger(terms) || terms < 0 || terms > 90) {
       next.paymentTermsDays = 'Whole days, 0 to 90. Their standard is 7.';
@@ -328,7 +343,7 @@ export function ConvertLeadDialog({
           poPolicy: form.poPolicy,
           captureMode: form.captureMode,
           paymentTermsDays: terms,
-          primaryZone: form.primaryZone,
+          primaryZoneId: form.primaryZoneId,
           accountsContactName: contactName,
           accountsContactEmail: contactEmail,
           notes: form.notes.trim(),
@@ -707,14 +722,15 @@ export function ConvertLeadDialog({
               {(control) => (
                 <Select
                   {...control}
-                  value={form.primaryZone}
+                  value={form.primaryZoneId}
                   onChange={(event) => {
-                    set('primaryZone', event.target.value as Zone);
+                    set('primaryZoneId', event.target.value);
                   }}
                 >
-                  {ZONES.map((zone) => (
-                    <option key={zone} value={zone}>
-                      {ZONE_LABELS[zone]}
+                  <option value="">Choose a zone…</option>
+                  {zones.map((zone) => (
+                    <option key={zone.value} value={zone.value}>
+                      {zone.label}
                     </option>
                   ))}
                 </Select>

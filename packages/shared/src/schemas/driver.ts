@@ -105,7 +105,9 @@ export const RunStopSchema = z
     addressLine: NonEmptyStringSchema,
     suburb: NonEmptyStringSchema,
     postcode: z.string(),
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, resolved server-side. */
+    zoneLabel: NonEmptyStringSchema,
     latitude: z.number(),
     longitude: z.number(),
     /**

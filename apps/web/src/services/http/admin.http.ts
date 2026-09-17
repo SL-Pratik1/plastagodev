@@ -444,7 +444,7 @@ export function createHttpReportService(api: ApiClient): ReportService {
 
     if (filters.accountId) params.accountId = filters.accountId;
     if (filters.suburb) params.suburb = filters.suburb;
-    if (filters.zone) params.zone = filters.zone;
+    if (filters.zoneId) params.zoneId = filters.zoneId;
     if (filters.driverId) params.driverId = filters.driverId;
 
     return params;

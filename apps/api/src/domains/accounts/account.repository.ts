@@ -12,6 +12,7 @@ import type {
   RateCardId,
   Zone,
 } from '@plastago/shared';
+import { zoneLabelFor } from '../settings/zone-lookup.js';
 import mongoose from 'mongoose';
 import { withTransaction } from '../../lib/transaction.js';
 import { AccountModel, ContactModel } from './account.model.js';
@@ -82,7 +83,7 @@ export interface CreateAccountInput {
   captureMode: CaptureMode;
   abn: string;
   paymentTermsDays: number;
-  primaryZone: Zone;
+  primaryZoneId: Zone;
   notes: string;
   contact: { name: string; email: string | null } | null;
 }
@@ -120,7 +121,7 @@ interface RawAccount {
   status: AccountStatus;
   abn: string;
   paymentTermsDays: number;
-  primaryZone: Zone;
+  primaryZoneId: mongoose.Types.ObjectId;
   invoiceTemplateId: string | null;
   riskAssessmentRequired: boolean;
   certificateEmail: string | null;
@@ -250,7 +251,13 @@ export const accountRepository = {
       postcode: account.postcode ?? null,
       detailsCompletedAt: account.detailsCompletedAt?.toISOString() ?? null,
       paymentTermsDays: account.paymentTermsDays,
-      primaryZone: account.primaryZone,
+      primaryZoneId: account.primaryZoneId.toString(),
+      /*
+       * Named here rather than by the caller. One extra read of a collection
+       * holding a handful of rows, and it means neither the office screen nor
+       * the customer portal has to hold a zone map to render one field.
+       */
+      primaryZoneLabel: await zoneLabelFor(account.primaryZoneId),
       contacts: contacts.map(toContact),
       preferredPickupWindow: account.preferredPickupWindow,
       notes: account.notes,
@@ -339,7 +346,7 @@ export const accountRepository = {
               status: 'active',
               abn: input.abn,
               paymentTermsDays: input.paymentTermsDays,
-              primaryZone: input.primaryZone,
+              primaryZoneId: new mongoose.Types.ObjectId(input.primaryZoneId),
               // Off by default: the account rule is a builder's contractual
               // demand, not a PlastaGo policy. Defaulting it on would make
               // every driver on a new account fill in an unrequested form.

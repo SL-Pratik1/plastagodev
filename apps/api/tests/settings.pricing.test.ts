@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Role } from '@plastago/shared';
 import { AdditionalServiceUpdateSchema } from '@plastago/shared';
-import { createFakeSettingsRepository } from './helpers/fake-settings.js';
+import { ZONE, createFakeSettingsRepository } from './helpers/fake-settings.js';
 
 /**
  * Rate cards and additional services (M6.1, M6.2, M6.5).
@@ -37,13 +37,16 @@ beforeEach(() => {
   repo = createFakeSettingsRepository();
 });
 
-/** Three complete zones, which every schedule write requires. */
+/**
+ * A price for every ACTIVE zone — what every schedule write now requires.
+ *
+ * ⚠️ Derived from the fake rather than hardcoded to three. The completeness
+ * check moved out of the schema, where it counted to three, and into the
+ * service, where it reads the zone register — so a helper that kept returning
+ * three would pass while the rule it is exercising checked against four.
+ */
 function zones(serviceCharge = '220.00', ratePerM2 = '0.16') {
-  return [
-    { zone: 'sydney' as const, serviceCharge, ratePerM2 },
-    { zone: 'wollongong' as const, serviceCharge, ratePerM2 },
-    { zone: 'newcastle' as const, serviceCharge, ratePerM2 },
-  ];
+  return repo.zoneIds().map((zoneId) => ({ zoneId, serviceCharge, ratePerM2 }));
 }
 
 /* ── Creating a card (M6.1) ──────────────────────────────────────────────── */
@@ -333,10 +336,10 @@ describe('pricing reads the schedule in force on the job own date', () => {
 
     // A September job still gets September's rate even though October's
     // schedule is now the current one. This is the whole point of M6.2.
-    const september = await repo.repository.resolveRate('tier-1', 'sydney', '2026-09-15');
+    const september = await repo.repository.resolveRate('tier-1', ZONE.sydney, '2026-09-15');
     expect(september?.serviceCharge).toBe('220.00');
 
-    const october = await repo.repository.resolveRate('tier-1', 'sydney', '2026-10-15');
+    const october = await repo.repository.resolveRate('tier-1', ZONE.sydney, '2026-10-15');
     expect(october?.serviceCharge).toBe('999.00');
   });
 
@@ -348,10 +351,10 @@ describe('pricing reads the schedule in force on the job own date', () => {
     );
 
     // "Effective from 1 October" means a job ON the 1st uses the new rate.
-    const boundary = await repo.repository.resolveRate('tier-1', 'sydney', '2026-10-01');
+    const boundary = await repo.repository.resolveRate('tier-1', ZONE.sydney, '2026-10-01');
     expect(boundary?.serviceCharge).toBe('999.00');
 
-    const dayBefore = await repo.repository.resolveRate('tier-1', 'sydney', '2026-09-30');
+    const dayBefore = await repo.repository.resolveRate('tier-1', ZONE.sydney, '2026-09-30');
     expect(dayBefore?.serviceCharge).toBe('220.00');
   });
 
@@ -362,7 +365,7 @@ describe('pricing reads the schedule in force on the job own date', () => {
       ADMIN,
     );
 
-    const rate = await repo.repository.resolveRate('tier-1', 'sydney', '2026-10-15');
+    const rate = await repo.repository.resolveRate('tier-1', ZONE.sydney, '2026-10-15');
     expect(rate?.scheduleFrom).toBe('2026-10-01');
   });
 
@@ -372,7 +375,7 @@ describe('pricing reads the schedule in force on the job own date', () => {
      * price, and inventing one from the earliest schedule would apply figures
      * nobody had agreed at the time.
      */
-    await expect(repo.repository.resolveRate('tier-1', 'sydney', '1999-01-01')).resolves.toBeNull();
+    await expect(repo.repository.resolveRate('tier-1', ZONE.sydney, '1999-01-01')).resolves.toBeNull();
   });
 });
 
@@ -609,14 +612,31 @@ describe('removing a rate schedule', () => {
   });
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
 
-  const zones = [
-    { zone: 'sydney' as const, serviceCharge: '220.00', ratePerM2: '0.1600' },
-    { zone: 'wollongong' as const, serviceCharge: '250.00', ratePerM2: '0.1800' },
-    { zone: 'newcastle' as const, serviceCharge: '250.00', ratePerM2: '0.2000' },
-  ];
+  /**
+   * Four-decimal rates, which is what this block is actually about.
+   *
+   * ⚠️ Built from the register rather than listed, for the same reason as the
+   * shared helper above — a hardcoded three would stop covering the rule the
+   * moment a test added a zone. The figures still come from a literal table, so
+   * the 4-dp assertions below are unchanged.
+   */
+  const zones = () => {
+    const rates: Record<string, { serviceCharge: string; ratePerM2: string }> = {
+      [ZONE.sydney]: { serviceCharge: '220.00', ratePerM2: '0.1600' },
+      [ZONE.wollongong]: { serviceCharge: '250.00', ratePerM2: '0.1800' },
+      [ZONE.newcastle]: { serviceCharge: '250.00', ratePerM2: '0.2000' },
+    };
+
+    return repo
+      .zoneIds()
+      .map((zoneId) => ({
+        zoneId,
+        ...(rates[zoneId] ?? { serviceCharge: '220.00', ratePerM2: '0.1600' }),
+      }));
+  };
 
   it('removes a schedule that has not started yet', async () => {
-    await settingsService.issueSchedule('default', { effectiveFrom: future, zones }, ADMIN);
+    await settingsService.issueSchedule('default', { effectiveFrom: future, zones: zones() }, ADMIN);
 
     await settingsService.deleteSchedule('default', future, ADMIN);
 
@@ -629,7 +649,7 @@ describe('removing a rate schedule', () => {
    * move a figure on a document a builder already has.
    */
   it('refuses a schedule that has already started', async () => {
-    await settingsService.issueSchedule('default', { effectiveFrom: yesterday, zones }, ADMIN);
+    await settingsService.issueSchedule('default', { effectiveFrom: yesterday, zones: zones() }, ADMIN);
 
     await expect(
       settingsService.deleteSchedule('default', yesterday, ADMIN),
@@ -640,7 +660,7 @@ describe('removing a rate schedule', () => {
 
   /* Today's is what every booking taken this morning was priced on. */
   it('refuses the schedule in force today', async () => {
-    await settingsService.issueSchedule('default', { effectiveFrom: today, zones }, ADMIN);
+    await settingsService.issueSchedule('default', { effectiveFrom: today, zones: zones() }, ADMIN);
 
     await expect(settingsService.deleteSchedule('default', today, ADMIN)).rejects.toMatchObject({
       status: 409,
@@ -653,7 +673,7 @@ describe('removing a rate schedule', () => {
    */
   it('refuses to remove a card’s only schedule', async () => {
     const card = await settingsService.createRateCard(
-      { label: 'Solo Homes', effectiveFrom: future, zones },
+      { label: 'Solo Homes', effectiveFrom: future, zones: zones() },
       ADMIN,
     );
 
@@ -669,7 +689,7 @@ describe('removing a rate schedule', () => {
   });
 
   it('refuses a caller who is not an administrator', async () => {
-    await settingsService.issueSchedule('default', { effectiveFrom: future, zones }, ADMIN);
+    await settingsService.issueSchedule('default', { effectiveFrom: future, zones: zones() }, ADMIN);
 
     await expect(
       settingsService.deleteSchedule('default', future, OFFICE),

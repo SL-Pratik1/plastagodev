@@ -1,7 +1,6 @@
 import {
   CAPTURE_MODE_LABELS,
   PO_POLICY_LABELS,
-  ZONE_LABELS,
   type PortalAccount,
 } from '@plastago/shared';
 import {
@@ -366,7 +365,7 @@ function AccountSettings({ account }: { account: PortalAccount }) {
                   { label: 'Payment terms', value: `${String(account.paymentTermsDays)} days` },
                   { label: 'Purchase orders', value: PO_POLICY_LABELS[account.poPolicy] },
                   { label: 'We record', value: CAPTURE_MODE_LABELS[account.captureMode] },
-                  { label: 'Service area', value: ZONE_LABELS[account.primaryZone] },
+                  { label: 'Service area', value: account.primaryZoneLabel },
                 ]}
               />
               <p className="mt-3">

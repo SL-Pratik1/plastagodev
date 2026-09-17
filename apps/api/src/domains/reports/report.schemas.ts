@@ -2,7 +2,6 @@ import {
   CertificateScopeSchema,
   IsoDateSchema,
   ObjectIdSchema,
-  ZoneSchema,
 } from '@plastago/shared';
 import * as z from 'zod';
 
@@ -31,7 +30,8 @@ export const ReportFiltersQuerySchema = z
      * office actually asks about — "how much came out of Kellyville".
      */
     suburb: z.string().trim().max(80).nullable().default(null),
-    zone: ZoneSchema.nullable().default(null),
+    /* A plain string: see the note on ReportFilters in @plastago/shared. */
+    zoneId: z.string().trim().max(40).nullable().default(null),
     driverId: ObjectIdSchema.nullable().default(null),
   })
   .meta({ id: 'ReportFiltersQuery' });

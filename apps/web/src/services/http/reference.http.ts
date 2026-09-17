@@ -9,6 +9,7 @@ import {
   NotificationSchema,
   NotificationSummarySchema,
   PlaceSchema,
+  type PlaceWrite,
   SettingsSchema,
   PresignedUploadSchema,
   type InvoicingSettings,
@@ -23,6 +24,9 @@ import {
   type RateScheduleCreate,
   type UserDraft,
   type UserStatus,
+  type ZoneCreate,
+  ZoneSummarySchema,
+  type ZoneUpdate,
 } from '@plastago/shared';
 import * as z from 'zod';
 import type {
@@ -33,6 +37,7 @@ import type {
   LookupService,
   NotificationService,
   SettingsService,
+  SuburbService,
   UserService,
 } from '../types.js';
 import { NoContentSchema, listParams, pageOf } from './list-params.js';
@@ -56,6 +61,13 @@ const LookupOptionSchema = z.object({
   group: z.string().optional(),
 });
 
+/** A zone carries one thing a lookup option does not: whether it is retired. */
+const ZoneOptionSchema = z.object({
+  value: z.string(),
+  label: z.string(),
+  archived: z.boolean(),
+});
+
 /* ── Reference lists ─────────────────────────────────────────────────────── */
 
 export function createHttpLookupService(api: ApiClient): LookupService {
@@ -70,6 +82,11 @@ export function createHttpLookupService(api: ApiClient): LookupService {
     drivers: () => list('drivers'),
     rateCards: () => list('rate-cards'),
 
+    zones: () =>
+      viaService(() =>
+        api.request(`${base}/zones`, { schema: z.array(ZoneOptionSchema) }),
+      ),
+
     places: (query: string) =>
       viaService(() =>
         api.request(`${base}/places`, {
@@ -77,6 +94,49 @@ export function createHttpLookupService(api: ApiClient): LookupService {
           // valid request for "show me the list", not a skipped call.
           searchParams: { q: query },
           schema: z.array(PlaceSchema),
+        }),
+      ),
+  };
+}
+
+/* ── M6.3 · suburbs ──────────────────────────────────────────────────────── */
+
+export function createHttpSuburbService(api: ApiClient): SuburbService {
+  const base = `${API_PREFIX}/lookups/places`;
+
+  return {
+    list: () => viaService(() => api.request(`${base}/all`, { schema: z.array(PlaceSchema) })),
+
+    create: (draft: PlaceWrite) =>
+      viaService(() => api.request(base, { method: 'POST', body: draft, schema: PlaceSchema })),
+
+    update: (id: string, draft: PlaceWrite) =>
+      viaService(() =>
+        api.request(`${base}/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          body: draft,
+          schema: PlaceSchema,
+        }),
+      ),
+
+    /*
+     * ⚠️ 200 with the archived row, or 204 when it was really deleted — the
+     * screen has to tell them apart, because "retired, and here is why" is a
+     * different thing to show than "gone".
+     */
+    remove: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          schema: PlaceSchema.nullable(),
+        }),
+      ),
+
+    restore: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/${encodeURIComponent(id)}/restore`, {
+          method: 'POST',
+          schema: PlaceSchema,
         }),
       ),
   };
@@ -304,6 +364,46 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
     },
 
     /* ── Rate cards (M6.1, M6.2) ───────────────────────────────────────── */
+
+    createZone: (input: ZoneCreate) =>
+      viaService(() =>
+        api.request(`${base}/zones`, { method: 'POST', body: input, schema: ZoneSummarySchema }),
+      ),
+
+    renameZone: (id: string, input: ZoneUpdate) =>
+      viaService(() =>
+        api.request(`${base}/zones/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          body: input,
+          schema: ZoneSummarySchema,
+        }),
+      ),
+
+    reorderZones: (zoneIds: readonly string[]) =>
+      viaService(() =>
+        api.request(`${base}/zones/order`, {
+          method: 'PUT',
+          body: { zoneIds },
+          schema: z.array(ZoneSummarySchema),
+        }),
+      ),
+
+    /* ⚠️ Returns the RETIRED zone, not 204 — the screen shows what happened. */
+    archiveZone: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/zones/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          schema: ZoneSummarySchema,
+        }),
+      ),
+
+    restoreZone: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/zones/${encodeURIComponent(id)}/restore`, {
+          method: 'POST',
+          schema: ZoneSummarySchema,
+        }),
+      ),
 
     createRateCard: (input: RateCardCreate) =>
       viaService(() =>

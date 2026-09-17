@@ -65,7 +65,7 @@ export function PortalReportsPage() {
     to: params.get('to') ?? defaultTo,
     accountId: null,
     suburb: params.get('suburb') || null,
-    zone: null,
+    zoneId: null,
     driverId: null,
   };
 

@@ -1,4 +1,5 @@
 import type { JobStatus, LoadType, WeightBasis } from '@plastago/shared';
+import { ZONE } from './fake-settings.js';
 import mongoose from 'mongoose';
 import type {
   DriverMessageRow,
@@ -118,7 +119,7 @@ export function createFakeDriverRepository(driverId: string) {
       addressLine: '46 Allambie Circuit',
       suburb: stop.suburb,
       postcode: '2155',
-      zone: 'sydney',
+      zoneId: ZONE.sydney,
       latitude: -33.7,
       longitude: 150.9,
       accessNotes: '',

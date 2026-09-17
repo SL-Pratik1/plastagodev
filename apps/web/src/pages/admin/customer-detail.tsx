@@ -6,7 +6,6 @@ import {
   CAPTURE_MODE_LABELS,
   CONTACT_ROLE_LABELS,
   PO_POLICY_LABELS,
-  ZONE_LABELS,
   type Account,
   type AccountType,
   type InvoiceListItem,
@@ -342,7 +341,7 @@ export function AdminCustomerDetailPage() {
                         </span>
                       ),
                     },
-                    { label: 'Primary zone', value: ZONE_LABELS[account.primaryZone] },
+                    { label: 'Primary zone', value: account.primaryZoneLabel },
                     { label: 'PO policy', value: PO_POLICY_LABELS[account.poPolicy] },
                     { label: 'Capture', value: CAPTURE_MODE_LABELS[account.captureMode] },
                     {

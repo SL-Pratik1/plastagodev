@@ -5,7 +5,6 @@ import {
   CAPTURE_MODES,
   CONTACT_ROLES,
   PO_POLICIES,
-  ZONES,
 } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
@@ -81,7 +80,13 @@ const accountSchema = new Schema(
 
     abn: { type: String, required: true, trim: true },
     paymentTermsDays: { type: Number, required: true, min: 0, max: 90 },
-    primaryZone: { type: String, required: true, enum: ZONES },
+    /**
+     * REFERENCE → `zones._id`.
+     *
+     * ⚠️ No `enum`: zones are records an administrator creates, so Mongo can no
+     * longer vouch for the value. `accountService` checks it exists.
+     */
+    primaryZoneId: { type: Schema.Types.ObjectId, required: true, ref: 'Zone' },
 
     /**
      * M4.8b — this builder contractually requires a Site Risk Assessment.

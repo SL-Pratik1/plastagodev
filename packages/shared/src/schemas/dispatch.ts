@@ -112,7 +112,9 @@ export const RunStopSummarySchema = z
     builderName: z.string(),
     siteName: NonEmptyStringSchema,
     suburb: NonEmptyStringSchema,
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, resolved server-side. */
+    zoneLabel: NonEmptyStringSchema,
     serviceLevel: ServiceLevelSchema,
     readyDate: IsoDateSchema,
     targetDate: IsoDateSchema,
@@ -262,7 +264,9 @@ export const DriverDaySchema = z
         accountName: NonEmptyStringSchema,
         siteName: NonEmptyStringSchema,
         suburb: NonEmptyStringSchema,
-        zone: ZoneSchema,
+        zoneId: ZoneSchema,
+        /** The zone's name, resolved server-side. */
+        zoneLabel: NonEmptyStringSchema,
         serviceLevel: ServiceLevelSchema,
         expectedAreaM2: z.number().nonnegative().nullable(),
         /** M3.5 — past its target date, so it gets highlighted on the board. */
@@ -281,7 +285,9 @@ export const UnallocatedJobSchema = z
     builderName: z.string(),
     siteName: NonEmptyStringSchema,
     suburb: NonEmptyStringSchema,
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, resolved server-side. */
+    zoneLabel: NonEmptyStringSchema,
     serviceLevel: ServiceLevelSchema,
     readyDate: IsoDateSchema,
     targetDate: IsoDateSchema,
@@ -306,7 +312,9 @@ export const AllocationBoardSchema = z
     unallocatedBySuburb: z.array(
       z.object({
         suburb: NonEmptyStringSchema,
-        zone: ZoneSchema,
+        zoneId: ZoneSchema,
+        /** The zone's name, resolved server-side. */
+        zoneLabel: NonEmptyStringSchema,
         jobs: z.array(UnallocatedJobSchema),
         totalExpectedAreaM2: z.number().nonnegative(),
         atRiskCount: z.number().int().nonnegative(),
@@ -340,7 +348,9 @@ export const RunSheetStopSchema = z
     lotNumber: z.string().nullable(),
     addressLine: NonEmptyStringSchema,
     suburb: NonEmptyStringSchema,
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, resolved server-side. */
+    zoneLabel: NonEmptyStringSchema,
     /** The customer's PO or job reference — one field (Matt, 9:08). */
     poNumber: z.string().nullable(),
     contactName: z.string().nullable(),
@@ -397,7 +407,9 @@ export const MapPinSchema = z
     accountName: NonEmptyStringSchema,
     siteName: NonEmptyStringSchema,
     suburb: NonEmptyStringSchema,
-    zone: ZoneSchema,
+    zoneId: ZoneSchema,
+    /** The zone's name, resolved server-side. */
+    zoneLabel: NonEmptyStringSchema,
     driverName: z.string().nullable(),
     /** Which run the pin belongs to, so the map can colour by run. */
     runId: ObjectIdSchema.nullable(),

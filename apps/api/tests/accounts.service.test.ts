@@ -1,4 +1,5 @@
 import { AccountListItemSchema, AccountSchema } from '@plastago/shared';
+import { SEED_ZONES, ZONE } from './helpers/fake-settings.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountDraft, Role } from '@plastago/shared';
 import { createFakeAccountRepository } from './helpers/fake-accounts.js';
@@ -58,6 +59,30 @@ vi.mock('../src/domains/settings/settings.repository.js', () => ({
       Promise.resolve(
         knownRateCards.has(id) ? { id, label: `${id} rates`, effectiveFrom: '2026-04-01' } : null,
       ),
+    /*
+     * The zone register, as far as `assertZoneExists` needs it.
+     *
+     * ⚠️ Answers for the seeded ids and nothing else, so a test that invents a
+     * zone gets the same 422 the real guard would give it.
+     */
+    findZone: (id: string) => {
+      const zone = SEED_ZONES.find((candidate: { id: string }) => candidate.id === id);
+      return Promise.resolve(
+        zone
+          ? {
+              id: zone.id,
+              slug: zone.slug,
+              label: zone.label,
+              displayOrder: 0,
+              archived: false,
+              placeCount: 0,
+              accountCount: 0,
+              jobCount: 0,
+              archivable: true,
+            }
+          : null,
+      );
+    },
   },
 }));
 
@@ -91,7 +116,7 @@ function draft(overrides: Partial<AccountDraft> = {}): AccountDraft {
     poPolicy: 'not-required',
     captureMode: 'area-only',
     paymentTermsDays: 7,
-    primaryZone: 'sydney',
+    primaryZoneId: ZONE.sydney,
     accountsContactName: 'Jo Bloggs',
     accountsContactEmail: 'jo@acme.com.au',
     sendInvitation: false,

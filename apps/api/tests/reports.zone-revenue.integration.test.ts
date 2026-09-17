@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { JobChargeModel, JobModel } from '../src/domains/jobs/job.model.js';
 import { reportRepository } from '../src/domains/reports/report.repository.js';
+import { ZONE } from './helpers/fake-settings.js';
 
 /**
  * The zone report's revenue must come from the CHARGES on a job, not from the
@@ -65,7 +66,7 @@ async function seedJob() {
     addressLine: '1 Example Rise',
     suburb: 'Box Hill',
     postcode: '2765',
-    zone: 'sydney',
+    zoneId: new mongoose.Types.ObjectId(ZONE.sydney),
     status: 'completed',
     completedAt: new Date('2026-07-15T04:00:00.000Z'),
     readyDate: '2026-07-14',
@@ -115,7 +116,13 @@ describe('zone revenue', () => {
     await seedJob();
 
     const rows = await reportRepository.byZone(FILTERS);
-    const sydney = rows.find((row) => row.zone === 'sydney');
+    /*
+     * Matched on the ID, not the name. This suite seeds jobs and charges into
+     * its own database and never writes the zone register, so there is nothing
+     * for the label join to find — which is the honest state for a report over
+     * a partial dataset, and not what this test is about.
+     */
+    const sydney = rows.find((row) => row.zoneId === ZONE.sydney);
 
     // 220.00 service fee + 90.00 contamination = 310.00, NOT the 220.00 quote.
     expect(sydney?.revenueCents).toBe(31_000);

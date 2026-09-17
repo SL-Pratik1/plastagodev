@@ -67,7 +67,7 @@ export interface AccountProvision {
   poPolicy: PoPolicy;
   captureMode: CaptureMode;
   paymentTermsDays: number;
-  primaryZone: Zone;
+  primaryZoneId: Zone;
   accountsContactName: string;
   accountsContactEmail: string;
   notes: string;
@@ -181,6 +181,17 @@ export const accountService = {
      */
     await assertRateCardExists(input.rateCardId);
 
+    /*
+     * WARNING: the zone must EXIST — the same story as the rate card above, and
+     * it became true on the same day.
+     *
+     * `enum: ZONES` on the model was the only thing rejecting an unknown zone.
+     * Zones are runtime data now, so `primaryZoneId: '68f3…dead'` would save
+     * cleanly and the account would carry a zone nothing can name — on the
+     * customer detail screen, on the accounts grid, and in the financial report.
+     */
+    await assertZoneExists(input.primaryZoneId);
+
     const contactName = input.accountsContactName.trim();
     const contactEmail = input.accountsContactEmail.trim();
 
@@ -222,7 +233,7 @@ export const accountService = {
       captureMode: input.captureMode,
       abn: input.abn.trim(),
       paymentTermsDays: input.paymentTermsDays,
-      primaryZone: input.primaryZone,
+      primaryZoneId: input.primaryZoneId,
       notes: input.notes.trim(),
       contact: contactName === '' ? null : { name: contactName, email: contactEmail || null },
     });
@@ -278,7 +289,7 @@ export const accountService = {
       poPolicy: draft.poPolicy,
       captureMode: draft.captureMode,
       paymentTermsDays: draft.paymentTermsDays,
-      primaryZone: draft.primaryZone,
+      primaryZoneId: draft.primaryZoneId,
       accountsContactName: draft.accountsContactName,
       accountsContactEmail: draft.accountsContactEmail,
       notes: draft.notes,
@@ -506,6 +517,35 @@ function scopeFor(caller: Caller): AccountScope {
  * look entirely healthy doing it — a pricing incident nobody notices until the
  * customer does (M6.1).
  */
+/**
+ * The zone exists, and is still offered.
+ *
+ * ⚠️ One of the guards that REPLACED `enum: ZONES` on the account model. Mongo
+ * used to refuse an unknown zone; nothing does now except this.
+ *
+ * Archived is refused too: a retired zone is one the office has stopped
+ * servicing, and putting a new customer's primary zone there would seed a
+ * relationship into a market that is being wound down.
+ */
+async function assertZoneExists(zoneId: string): Promise<void> {
+  const zone = await settingsRepository.findZone(zoneId);
+
+  if (!zone) {
+    throw AppError.validation('That is not a zone', [
+      { path: 'primaryZoneId', message: 'Choose one of the zones from the list' },
+    ]);
+  }
+
+  if (zone.archived) {
+    throw AppError.validation('That zone has been retired', [
+      {
+        path: 'primaryZoneId',
+        message: `${zone.label} is no longer serviced — choose another zone`,
+      },
+    ]);
+  }
+}
+
 async function assertRateCardExists(rateCardId: string): Promise<void> {
   if (await settingsRepository.findRateCard(rateCardId)) return;
 
