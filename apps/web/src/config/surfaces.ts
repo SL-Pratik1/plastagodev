@@ -15,10 +15,10 @@ import { ROLE_SURFACE, type Role, type Surface } from '@plastago/shared';
  *   drivers.plastago.com.au  →  /driver   drivers
  *
  * Locally those are three ports rather than three hostnames — see
- * `scripts/dev-ports.mjs`, which also records what ports cannot reproduce.
+ * `vite.config.ts`, which also records what ports cannot reproduce.
  *
  * ── Why 'all' still exists ────────────────────────────────────────────────
- * It is how this app worked before the split, and `PLASTAGO_SURFACES=all` still does
+ * It is how this app worked before the split, and a bare `npm run dev` still does
  * it: one server, all three surfaces, every cross-surface move an ordinary route
  * change. Three dev servers cost three times the memory and three dependency
  * pre-bundles, which is the wrong trade for a change that touches one screen.
@@ -47,7 +47,8 @@ function parseSurface(value: string): ActiveSurface {
    */
   throw new Error(
     `VITE_SURFACE must be admin, portal, driver or all — got "${value}". ` +
-      'Set PLASTAGO_SURFACE when starting Vite (see scripts/dev-ports.mjs).',
+      "Start Vite through the surface's own config — `npm run dev:admin`, " +
+      '`dev:portal` or `dev:driver` in apps/web (see vite.config.ts).',
   );
 }
 

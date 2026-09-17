@@ -1,11 +1,22 @@
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-// eslint-disable-next-line import/extensions -- plain .mjs, shared with scripts/
-import { devPorts, legacyDriverAppPort } from '../../scripts/dev-ports.mjs';
+/** `KEY=value` out of a dotenv file, ignoring comments. `fallback` if absent. */
+function readEnvPort(file: string, key: string, fallback: number): number {
+  let text: string;
+  try {
+    text = readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8');
+  } catch {
+    return fallback; // no .env yet — the default is the right answer
+  }
+  const match = new RegExp(String.raw`^\s*${key}\s*=\s*(.*)$`, 'm').exec(text);
+  const port = Number(match?.[1]?.trim().replace(/^["']|["']$/g, ''));
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : fallback;
+}
 
 /**
  * ⚠️ SUPERSEDED — see the README. The driver screens live in `apps/web` and are
@@ -18,9 +29,10 @@ import { devPorts, legacyDriverAppPort } from '../../scripts/dev-ports.mjs';
  * app nobody uses. `npm run dev:driver` still starts it, and the port moves
  * with `PLASTAGO_PORT_LEGACY_DRIVER` in `apps/driver/.env`.
  */
-const PORT = legacyDriverAppPort();
+const PORT = readEnvPort('./.env', 'PLASTAGO_PORT_LEGACY_DRIVER', 5174);
 
-const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? `http://localhost:${devPorts().api}`;
+const API_PORT = readEnvPort('../api/.env', 'PORT', 4000);
+const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? `http://localhost:${API_PORT}`;
 
 export default defineConfig({
   plugins: [

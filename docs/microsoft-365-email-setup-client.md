@@ -1,6 +1,6 @@
 # Microsoft 365 Email Setup — Instructions for Your IT Team
 
-**Purpose:** allow the PlastaGo platform to send transactional email (order confirmations, purchase orders, notifications) from two of your mailboxes.
+**Purpose:** allow the PlastaGo platform to send transactional email (sign-in codes, invoices, job notifications) from one of your mailboxes.
 
 **Audience:** your Microsoft 365 / Entra ID administrator.
 
@@ -19,7 +19,7 @@
 | 2, 3, 4 | **Application Administrator** or **Cloud Application Administrator** (Global Administrator also works) |
 | 5 | **Exchange Administrator** |
 
-**Mailboxes must be in Exchange Online.** This method does not work for mailboxes still hosted on an on-premises Exchange server. If you run a hybrid setup, please confirm that `noreply@` and `po@` are cloud mailboxes, or let us know and we will discuss alternatives.
+**The mailbox must be in Exchange Online.** This method does not work for a mailbox still hosted on an on-premises Exchange server. If you run a hybrid setup, please confirm that `noreply@plastago.com.au` is a cloud mailbox, or let us know and we will discuss alternatives.
 
 **PowerShell module.** Step 5 needs the Exchange Online management module. If it is not already installed:
 
@@ -31,27 +31,28 @@ Install-Module -Name ExchangeOnlineManagement -Scope CurrentUser
 
 ## 1. What we are asking for, and what we are not
 
-We need app-only ("daemon") access to Microsoft Graph so our platform can send mail from two specific mailboxes without a signed-in user.
+We need app-only ("daemon") access to Microsoft Graph so our platform can send mail from one specific mailbox without a signed-in user.
 
 | | |
 |---|---|
-| **Mailboxes in scope** | `noreply@<your-domain>` and `po@<your-domain>` — only these two |
-| **Access level** | Send mail from those two mailboxes |
+| **Mailbox in scope** | `noreply@plastago.com.au` — only this one |
+| **Access level** | Send mail from that mailbox |
 | **Not requested** | Access to any other mailbox, user data, files, Teams, SharePoint, or directory data |
+| **Not requested** | Read access to any mailbox — the application only sends |
 | **Not requested** | Tenant-wide `Mail.Send` consent (see the note in step 3 — we specifically do *not* want this) |
 
-The setup below is scoped in Exchange Online, so the credential we receive is only ever able to reach those two mailboxes. You can revoke it at any time in one step (see section 7).
+The setup below is scoped in Exchange Online, so the credential we receive is only ever able to reach that one mailbox. You can revoke it at any time in one step (see section 7).
 
 ---
 
-## 2. Create the two mailboxes
+## 2. Create the mailbox
 
-Skip this if `noreply@` and `po@` already exist.
+Skip this if `noreply@plastago.com.au` already exists.
 
 1. Go to the **Microsoft 365 admin center** → **Teams & groups** → **Shared mailboxes**.
-2. Create `noreply@<your-domain>` and `po@<your-domain>`.
+2. Create `noreply@plastago.com.au`.
 
-**Shared mailboxes are free and require no licence**, so this adds nothing to your bill. Regular licensed mailboxes work equally well if you prefer.
+**Shared mailboxes are free and require no licence**, so this adds nothing to your bill. A regular licensed mailbox works equally well if you prefer.
 
 ---
 
@@ -69,7 +70,7 @@ Skip this if `noreply@` and `po@` already exist.
 >
 > Leave the **API permissions** section empty. Granting `Mail.Send` there applies it **tenant-wide**, which would let the application send mail as *every* mailbox in your organisation. We do not want that level of access.
 >
-> Instead, the next step grants send rights on the two named mailboxes only, using Exchange Online role-based access control.
+> Instead, the next step grants send rights on the one named mailbox only, using Exchange Online role-based access control.
 
 ---
 
@@ -85,11 +86,11 @@ You now have three values: the tenant ID, the client ID, and this service princi
 
 ---
 
-## 5. Scope access to the two mailboxes (RBAC for Applications)
+## 5. Scope access to the mailbox (RBAC for Applications)
 
 This uses **RBAC for Applications**, which is Microsoft's current and supported method for limiting an application to specific mailboxes. It replaces the older Application Access Policy approach, which Microsoft has marked as legacy and will deprecate.
 
-Run the following in **Exchange Online PowerShell**, signed in as an account holding the **Exchange Administrator** role. Replace the three placeholder values first.
+Run the following in **Exchange Online PowerShell**, signed in as an account holding the **Exchange Administrator** role. Replace the two placeholder values first.
 
 ```powershell
 Connect-ExchangeOnline
@@ -102,10 +103,10 @@ $sp = New-ServicePrincipal `
         -ObjectId "<ENTERPRISE_APP_OBJECT_ID>" `
         -DisplayName "PlastaGo Mail Integration"
 
-# Define exactly which mailboxes the app may touch.
+# Define exactly which mailbox the app may touch.
 New-ManagementScope `
   -Name "PlastaGo Mailboxes" `
-  -RecipientRestrictionFilter "EmailAddresses -eq 'noreply@<your-domain>' -or EmailAddresses -eq 'po@<your-domain>'"
+  -RecipientRestrictionFilter "EmailAddresses -eq 'noreply@plastago.com.au'"
 
 # Grant send rights on that scope, and nothing else.
 New-ManagementRoleAssignment `
@@ -119,7 +120,7 @@ New-ManagementRoleAssignment `
 ```powershell
 Test-ServicePrincipalAuthorization `
   -Identity "<APPLICATION_CLIENT_ID>" `
-  -Resource "noreply@<your-domain>"
+  -Resource "noreply@plastago.com.au"
 ```
 
 > **Please note:** RBAC changes can take up to about **one hour** to take effect on live Microsoft Graph API calls, even once the test command above reports success. If our first test send fails immediately after setup, this is usually why.
@@ -140,18 +141,29 @@ Go to the app registration → **Certificates & secrets**.
 
 ### Please send us the following
 
-| Item | Value |
-|---|---|
-| Directory (tenant) ID | |
-| Application (client) ID | |
-| Sending mailbox 1 | `noreply@` ______________________ |
-| Sending mailbox 2 | `po@` ______________________ |
-| Client secret expiry date | |
-| Client secret value | **Do not enter here — send separately, see below** |
+Please fill in the four values below and return this page to us.
+
+**1. Directory (tenant) ID**
+
+&nbsp;&nbsp;&nbsp;&nbsp;`________________________________________`
+
+**2. Application (client) ID**
+
+&nbsp;&nbsp;&nbsp;&nbsp;`________________________________________`
+
+**3. Sending mailbox**
+
+&nbsp;&nbsp;&nbsp;&nbsp;`________________________________________` (expected: `noreply@plastago.com.au`)
+
+**4. Client secret expiry date**
+
+&nbsp;&nbsp;&nbsp;&nbsp;`________________________________________`
+
+**5. Client secret value** — please do **not** write it here. Send it separately, as described below.
 
 **How to send the client secret:** please share it through a password manager link (1Password, Keeper, Bitwarden, LastPass or similar) or your organisation's approved secrets tool.
 
-Please **do not** send the secret by email, chat, SMS, or in a document alongside the client ID. Anyone who obtains the secret together with the tenant and client IDs can send mail from those two mailboxes until it is revoked.
+Please **do not** send the secret by email, chat, SMS, or in a document alongside the client ID. Anyone who obtains the secret together with the tenant and client IDs can send mail from that mailbox until it is revoked.
 
 ---
 
@@ -187,9 +199,3 @@ Nothing else in your Microsoft 365 configuration is modified by this setup.
 ## Questions
 
 If anything above is unclear, or if your security policy requires a different approach, please contact us before making changes and we will work through it with your team. We are happy to join a call and walk through it with your administrator.
-
-**Contact:** `<your name>` — `<your email>`
-
----
-
-*Prepared for `<client name>` · `<date>`*

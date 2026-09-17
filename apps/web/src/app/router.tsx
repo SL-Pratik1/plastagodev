@@ -146,7 +146,7 @@ const load = (element: ReactNode) => <Suspense fallback={<PageSkeleton />}>{elem
  * So the routes are absent rather than guarded, and being absent is what
  * `SurfaceElsewhere` turns into a redirect to the origin that does serve them.
  *
- * In single-server mode (`PLASTAGO_SURFACES=all`) `servesSurface` is true for all
+ * In single-server mode (a bare `npm run dev`) `servesSurface` is true for all
  * three and this collapses back to mounting everything, unchanged.
  */
 function surfaceRoutes(surface: Surface, route: RouteObject): RouteObject[] {
