@@ -45,9 +45,21 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
     key: 'readiness',
     label: 'Ready confirmed',
     allLabel: 'Confirmed and not',
+    /*
+     * ⚠️ The VALUES here are the API's words, not the screen's.
+     *
+     * They reach `PortalJobsQuerySchema.readiness` verbatim — `listParams`
+     * passes every filter through untranslated — and that enum is
+     * `pending | certified`. 'unconfirmed' and 'confirmed' read better but were
+     * refused, so choosing either option replaced the whole list with "Check
+     * the highlighted fields": a validation error about a form, on a screen
+     * that has no form on it.
+     *
+     * The LABELS are still the customer's words. Only the wire values changed.
+     */
     options: [
-      { value: 'unconfirmed', label: 'Not yet confirmed' },
-      { value: 'confirmed', label: 'Confirmed ready' },
+      { value: 'pending', label: 'Not yet confirmed' },
+      { value: 'certified', label: 'Confirmed ready' },
     ],
   },
   {

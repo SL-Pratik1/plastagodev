@@ -1,29 +1,28 @@
-import { EXPIRY_STATE_LABELS, type DriverListItem } from '@plastago/shared';
-import { Alert, Badge, Card, Pagination } from '@plastago/ui';
+import type { DriverListItem } from '@plastago/shared';
+import { Badge, Card, Pagination } from '@plastago/ui';
 import { IdCardIcon } from 'lucide-react';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn, FilterDefinition } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
-import { ExpiryBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
 import { useDriverList } from '@/features/fleet/queries';
-import { formatDate, formatMobile, formatRelative } from '@/lib/format';
+import { formatMobile } from '@/lib/format';
 
 /**
- * Drivers (M9.8 · F53).
+ * Drivers (M9.9 · F22).
  *
- * ── Sorted by what is expiring, not alphabetically ─────────────────────────
- * They already have this module in TransVirtual and do not maintain it, so
- * **the reminder is the feature, not the register**. Anything expired or inside
- * its reminder window floats to the top, and the expiry column is the one the
- * eye lands on.
+ * ── Why this is a roster and not a compliance register ─────────────────────
+ * F53 framed this list around licence expiry — the reminder was meant to be the
+ * feature. Nothing in the product could ever record a licence, so the expiry
+ * column, its filter and its warning banner only ever reported on an empty
+ * collection, which reads as "everybody is current" rather than "nothing was
+ * ever entered". They were removed rather than left to reassure falsely; if
+ * credential tracking comes back it needs a way to WRITE a credential first.
  *
- * Chain of Responsibility under the HVNL makes licence currency an *operator*
- * obligation, not just the driver's — which is why this list belongs to the
- * office rather than to each driver.
+ * The device column went the same way — device registration is never captured.
  */
-const FILTER_KEYS = ['status', 'expiry', 'vehicle'] as const;
+const FILTER_KEYS = ['status', 'vehicle'] as const;
 
 const FILTERS: readonly FilterDefinition[] = [
   {
@@ -33,16 +32,6 @@ const FILTERS: readonly FilterDefinition[] = [
     options: [
       { value: 'active', label: 'Active' },
       { value: 'inactive', label: 'Inactive' },
-    ],
-  },
-  {
-    key: 'expiry',
-    label: 'Credentials',
-    allLabel: 'Any credential state',
-    options: [
-      { value: 'expired', label: 'Expired' },
-      { value: 'due-soon', label: 'Expiring within a month' },
-      { value: 'valid', label: 'All valid' },
     ],
   },
   {
@@ -80,23 +69,9 @@ const COLUMNS: readonly DataTableColumn<DriverListItem>[] = [
     ),
   },
   {
-    id: 'nextExpiry',
-    header: 'Next expiry',
-    sortKey: 'nextExpiryOn',
-    priority: 'secondary',
-    cell: (row) => (
-      <span className="flex flex-col gap-1">
-        <ExpiryBadge state={row.nextExpiryState} />
-        <span className="text-xs text-muted-foreground tabular-nums">
-          {formatDate(row.nextExpiryOn)}
-        </span>
-      </span>
-    ),
-  },
-  {
     id: 'vehicle',
     header: 'Vehicle',
-    priority: 'detail',
+    priority: 'secondary',
     cell: (row) =>
       row.vehicleRego === null ? (
         <span className="text-muted-foreground">Unassigned</span>
@@ -120,46 +95,18 @@ const COLUMNS: readonly DataTableColumn<DriverListItem>[] = [
       </span>
     ),
   },
-  {
-    id: 'sync',
-    header: 'Device',
-    priority: 'detail',
-    cell: (row) =>
-      row.lastSyncAt === null ? (
-        <span className="text-muted-foreground">—</span>
-      ) : (
-        <span className="flex flex-col gap-0.5">
-          <Badge variant={row.pendingSyncActions > 0 ? 'warning' : 'success'}>
-            {row.pendingSyncActions > 0 ? `${String(row.pendingSyncActions)} queued` : 'In sync'}
-          </Badge>
-          <span className="text-xs text-muted-foreground">{formatRelative(row.lastSyncAt)}</span>
-        </span>
-      ),
-  },
 ];
 
 export function AdminDriversPage() {
   const controller = useListQuery({ filterKeys: FILTER_KEYS });
   const { data, error, isPending, isFetching, refetch } = useDriverList(controller.query);
 
-  const expiring = (data?.data ?? []).filter((driver) => driver.nextExpiryState !== 'valid');
-
   return (
     <div className="space-y-6">
       <PageHeader
         title="Drivers"
-        description="Licences, tickets and training with expiry reminders — plus the metrics that feed costing."
+        description="Who is on the road, what they drive, and the metrics that feed costing."
       />
-
-      {expiring.length > 0 && (
-        <Alert variant="warning" title="Credentials need attention">
-          {expiring.length === 1
-            ? '1 driver has a credential expired or expiring within the month.'
-            : `${String(expiring.length)} drivers have a credential expired or expiring within the month.`}{' '}
-          Licence currency is an operator obligation under the Heavy Vehicle National Law, not just
-          the driver’s.
-        </Alert>
-      )}
 
       <Card className="overflow-hidden p-0">
         <DataTableToolbar
@@ -201,11 +148,6 @@ export function AdminDriversPage() {
           />
         )}
       </Card>
-
-      <p className="text-xs text-muted-foreground">
-        Sorted with anything expired or expiring first — {EXPIRY_STATE_LABELS.expired.toLowerCase()}
-        , then {EXPIRY_STATE_LABELS['due-soon'].toLowerCase()}. This list exists to be chased.
-      </p>
     </div>
   );
 }

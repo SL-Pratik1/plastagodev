@@ -35,7 +35,6 @@ let futileRows: Array<Record<string, unknown>> = [];
 let approvalRows: Array<Record<string, unknown>> = [];
 let awaitingPoRows: Array<Record<string, unknown>> = [];
 let expiringVehicles: Array<Record<string, unknown>> = [];
-let stuckDevices: Array<Record<string, unknown>> = [];
 
 vi.mock('../src/domains/notifications/notification.repository.js', () => ({
   notificationRepository: {
@@ -82,10 +81,6 @@ vi.mock('../src/domains/queues/queue.repository.js', () => ({
 
 vi.mock('../src/domains/fleet/vehicle.repository.js', () => ({
   vehicleRepository: { expiringSoon: () => Promise.resolve(expiringVehicles) },
-}));
-
-vi.mock('../src/domains/users/user.repository.js', () => ({
-  userRepository: { stuckDevices: () => Promise.resolve(stuckDevices) },
 }));
 
 const { notificationService } = await import(
@@ -139,7 +134,6 @@ beforeEach(() => {
   approvalRows = [];
   awaitingPoRows = [];
   expiringVehicles = [];
-  stuckDevices = [];
 });
 
 describe('an inbox belongs to one person', () => {
@@ -278,39 +272,6 @@ describe('⚠️ restraint — what is allowed to be urgent', () => {
     await notificationService.runQueueSweep();
 
     expect(raised[0]?.severity).toBe('action');
-  });
-});
-
-describe('§6A.8 — a stuck offline queue must be visible', () => {
-  /*
-   * There is no error-tracking vendor. A driver's phone holding fourteen unsent
-   * actions since Tuesday is invisible unless the product says so.
-   */
-  it('raises when a device has not drained its queue', async () => {
-    stuckDevices = [
-      {
-        userId: 'usr9',
-        label: "Troy's iPhone",
-        pendingSyncActions: 14,
-        lastSyncAt: new Date(Date.now() - 3 * 86_400_000),
-      },
-    ];
-
-    await notificationService.runQueueSweep();
-
-    expect(raised[0]?.category).toBe('sync');
-    expect(raised[0]?.title).toContain('14 unsent actions');
-    expect(raised[0]?.body).toContain('3 days ago');
-  });
-
-  it('handles a device that has never synced at all', async () => {
-    stuckDevices = [
-      { userId: 'usr9', label: "Troy's iPhone", pendingSyncActions: 6, lastSyncAt: null },
-    ];
-
-    await notificationService.runQueueSweep();
-
-    expect(raised[0]?.body).toContain('never');
   });
 });
 

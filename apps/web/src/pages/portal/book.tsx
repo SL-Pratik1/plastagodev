@@ -186,7 +186,23 @@ export function PortalBookPage() {
       siteContactMobile: '',
       siteContactEmail: '',
       readyDate: '',
-      expectedAreaM2: '' as unknown as number,
+      /*
+       * `null`, not `''` — *"the PO will tell us"*, which is exactly what the
+       * submit below already sends for a builder.
+       *
+       * ⚠️ An empty STRING made this form unsubmittable for EVERY builder
+       * account. `expectedAreaM2` coerces before it validates, `Number('')` is
+       * 0, and 0 fails `.positive()` — on a field that is not rendered for a
+       * builder at all (see the guard further down). So the resolver reported
+       * an error against an input that was not on the page: `handleSubmit`
+       * refused to run, `shouldFocusError` had nothing to focus, no message
+       * could appear anywhere, and "Book pickup" did nothing at all.
+       *
+       * `null` is what `.nullable()` on the schema is there for, and it leaves
+       * the contractor path alone: they still see the field, and leaving it
+       * blank still fails on the guard below, against an input they can see.
+       */
+      expectedAreaM2: null,
       bagCount: 0,
       serviceLevel: 'standard',
       poNumber: '',

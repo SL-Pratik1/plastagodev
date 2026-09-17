@@ -147,12 +147,70 @@ describe.runIf(process.env.SKIP_INTEGRATION !== '1')('number sequences', () => {
     });
   });
 
-  it('refuses when there is no settings document at all', async () => {
+  /*
+   * A brand-new database, with no settings document at all.
+   *
+   * ── Why this no longer expects a refusal ──────────────────────────────────
+   * It used to assert that an unseeded install was refused and told to run
+   * `seed:settings`, on the reasoning that inventing a number would let a
+   * misconfigured environment invoice real customers. The reasoning held for
+   * the NUMBER and not for the DOCUMENT: `seed:settings` refuses to run with
+   * NODE_ENV=production, so on a fresh production database the instruction was
+   * impossible to follow and the first job anyone raised returned a 500.
+   *
+   * Nothing is invented here. The document is created from the SCHEMA's own
+   * declared defaults, so the first job number is the one M1.4 specifies —
+   * 61,300, continuing TransVirtual — and not 1.
+   */
+  it('creates the settings document when there is none, and starts at the declared number', async () => {
     if (!reachable) return;
-    // A genuinely unseeded install is a deployment problem, and inventing a
-    // number here would let a misconfigured environment invoice real customers.
-    await expect(settingsRepository.takeNextNumber('nextJobNumber')).rejects.toThrow(
-      /not been seeded/,
+    expect(await SettingsModel.countDocuments()).toBe(0);
+
+    const first = await settingsRepository.takeNextNumber('nextJobNumber');
+    const second = await settingsRepository.takeNextNumber('nextJobNumber');
+
+    expect(first).toBe(SEQUENCE_STARTS.nextJobNumber);
+    expect(second).toBe(SEQUENCE_STARTS.nextJobNumber + 1);
+    expect(first).toBeGreaterThan(61_000);
+  });
+
+  /*
+   * ⚠️ The document it creates has to be COMPLETE, not just the one sequence.
+   *
+   * A pipeline upsert would write `_id` and `nextJobNumber` alone. `get()`
+   * falls back to defaults only when the document is ENTIRELY absent, so a
+   * partial one reaches the settings contract with `undefined` where it
+   * declares a number — and the settings screen goes down. That is the failure
+   * this assertion exists to catch.
+   */
+  it('creates a complete document, not just the sequence it needed', async () => {
+    if (!reachable) return;
+    await settingsRepository.takeNextNumber('nextJobNumber');
+
+    const settings = await settingsRepository.get();
+
+    expect(settings.invoicing.defaultPaymentTermsDays).toBe(7);
+    expect(settings.invoicing.splitAdditionalCharges).toBe(true);
+    expect(await settingsRepository.slaBusinessDays()).toBe(5);
+    // The other sequences are present too, at their own declared starts.
+    expect(await settingsRepository.takeNextNumber('nextInvoiceNumber')).toBe(
+      SEQUENCE_STARTS.nextInvoiceNumber,
     );
+  });
+
+  /*
+   * Two first bookings landing together on an empty database: both find no
+   * document, both try to insert, and one loses on a duplicate `_id`. The
+   * loser must still get its own number rather than an error or a repeat.
+   */
+  it('hands out distinct numbers when several first bookings race the creation', async () => {
+    if (!reachable) return;
+
+    const allocated = await Promise.all(
+      Array.from({ length: 20 }, () => settingsRepository.takeNextNumber('nextJobNumber')),
+    );
+
+    expect(new Set(allocated).size).toBe(20);
+    expect(Math.min(...allocated)).toBe(SEQUENCE_STARTS.nextJobNumber);
   });
 });

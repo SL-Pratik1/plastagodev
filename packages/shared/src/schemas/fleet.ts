@@ -1,7 +1,6 @@
 import * as z from 'zod';
 import {
   IsoDateSchema,
-  IsoDateTimeSchema,
   MoneySchema,
   NonEmptyStringSchema,
   ObjectIdSchema,
@@ -68,39 +67,16 @@ export const CREDENTIAL_TYPE_LABELS: Record<CredentialType, string> = {
   'hvnl-medical': 'Heavy vehicle medical',
 };
 
-export const DriverCredentialSchema = z
-  .object({
-    id: ObjectIdSchema,
-    type: CredentialTypeSchema,
-    reference: z.string().nullable(),
-    issuedOn: IsoDateSchema.nullable(),
-    expiresOn: IsoDateSchema.nullable(),
-    state: ExpiryStateSchema,
-    /** F53 names a licence PHOTO specifically. */
-    hasDocument: z.boolean(),
-  })
-  .meta({ id: 'DriverCredential' });
-
-/** F53 — "driver training records". */
-export const DriverTrainingSchema = z
-  .object({
-    id: ObjectIdSchema,
-    name: NonEmptyStringSchema,
-    completedOn: IsoDateSchema,
-    expiresOn: IsoDateSchema.nullable(),
-    state: ExpiryStateSchema,
-    provider: z.string().nullable(),
-  })
-  .meta({ id: 'DriverTraining' });
-
 /**
  * F22 — driver performance.
  *
  * ⚠️ Two drivers. This is framed as **operational insight and costing input**,
  * not performance management, and the screen says so — its real value is feeding
- * the cost-per-km and job-duration models. Distance and drive time only became
- * measurable because F11 is full (continuous location), so they are honest
- * numbers rather than estimates.
+ * the cost-per-km and job-duration models.
+ *
+ * `distanceKm` used to sit here and was always null: it needs F11's continuous
+ * location, which is not recorded. A field that can only ever render an em dash
+ * is a promise the product does not keep, so it went rather than waiting.
  */
 export const DriverPerformanceSchema = z
   .object({
@@ -112,11 +88,10 @@ export const DriverPerformanceSchema = z
     futileRatePercent: z.number().nonnegative(),
     contaminationCount: z.number().int().nonnegative(),
     contaminationRatePercent: z.number().nonnegative(),
-    /** Their photo protocol expects ~10 per job; this is adherence to it. */
+    /** Their photo protocol names four required shots; this is adherence to it. */
     photoCompliancePercent: z.number().nonnegative(),
-    /** M2.4a — collected within ready date + 5 business days. */
+    /** M2.4a — collected on or before the job's target date. */
     slaAdherencePercent: z.number().nonnegative(),
-    distanceKm: z.number().nonnegative().nullable(),
   })
   .meta({ id: 'DriverPerformance' });
 
@@ -124,6 +99,23 @@ export const DRIVER_EMPLOYMENT = ['subcontractor', 'employee'] as const;
 export const DriverEmploymentSchema = z.enum(DRIVER_EMPLOYMENT).meta({ id: 'DriverEmployment' });
 export type DriverEmployment = z.infer<typeof DriverEmploymentSchema>;
 
+/**
+ * The office's view of a driver.
+ *
+ * ── Why this is shorter than F53 asked for ────────────────────────────────
+ * `employment`, `startedOn` and `notes` were on the roster row, and
+ * `credentials` / `training` / `nextExpiryState` on their own collections — but
+ * no endpoint and no form ever wrote any of them, so outside the demo seed they
+ * were permanently the schema default. A credential list that is empty because
+ * nothing can fill it renders as "this driver is compliant", which is the
+ * opposite of what an empty compliance register means.
+ *
+ * `lastSyncAt` / `pendingSyncActions` went for the same reason: device
+ * registration is never recorded, so they were fixed at null and 0.
+ *
+ * They are all recoverable from git if credential tracking is built properly —
+ * which starts with a way to WRITE a credential, not a way to display one.
+ */
 export const DriverListItemSchema = z
   .object({
     id: ObjectIdSchema,
@@ -131,30 +123,17 @@ export const DriverListItemSchema = z
     mobile: z.string(),
     email: z.email().nullable(),
     active: z.boolean(),
-    /** Confirmed on Call 2: "basically all of our guys are subcontractors". */
-    employment: DriverEmploymentSchema,
     vehicleRego: z.string().nullable(),
     vehicleLabel: z.string().nullable(),
     dailyJobCapacity: z.number().int().positive(),
     jobsToday: z.number().int().nonnegative(),
-    /** The soonest credential expiry, and its state — the reminder surface. */
-    nextExpiryOn: IsoDateSchema.nullable(),
-    nextExpiryState: ExpiryStateSchema,
-    lastSyncAt: IsoDateTimeSchema.nullable(),
-    pendingSyncActions: z.number().int().nonnegative(),
   })
   .meta({ id: 'DriverListItem' });
 
 export const DriverProfileSchema = DriverListItemSchema.extend({
-  startedOn: IsoDateSchema,
-  notes: z.string(),
-  credentials: z.array(DriverCredentialSchema),
-  training: z.array(DriverTrainingSchema),
   performance: DriverPerformanceSchema,
 }).meta({ id: 'DriverProfile' });
 
-export type DriverCredential = z.infer<typeof DriverCredentialSchema>;
-export type DriverTraining = z.infer<typeof DriverTrainingSchema>;
 export type DriverPerformance = z.infer<typeof DriverPerformanceSchema>;
 export type DriverListItem = z.infer<typeof DriverListItemSchema>;
 export type DriverProfile = z.infer<typeof DriverProfileSchema>;

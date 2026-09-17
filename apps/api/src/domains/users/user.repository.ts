@@ -371,26 +371,6 @@ export const userRepository = {
       device: input.device,
     });
   },
-
-  /** §6A.8 — devices whose offline queue has not drained. */
-  async stuckDevices(minPending: number): Promise<
-    Array<{ userId: string; label: string; pendingSyncActions: number; lastSyncAt: Date | null }>
-  > {
-    const rows = await UserDeviceModel.find({
-      pendingSyncActions: { $gte: minPending },
-      revokedAt: null,
-    })
-      .sort({ pendingSyncActions: -1 })
-      .limit(50)
-      .lean();
-
-    return rows.map((row) => ({
-      userId: row.userId.toHexString(),
-      label: row.label,
-      pendingSyncActions: row.pendingSyncActions,
-      lastSyncAt: row.lastSyncAt ?? null,
-    }));
-  },
 };
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */

@@ -172,12 +172,46 @@ function describeApiError(error: ApiRequestError): ErrorPresentation {
   return { ...base, requestId: error.requestId };
 }
 
+/**
+ * A 409 already carries the only sentence that helps — so it is not discarded.
+ *
+ * ── Why this one code is an exception to the rule at the top of the file ───
+ * Every other code names a CLASS of failure, and the class is all the server
+ * knows: a 404 is a 404 whatever was missing. A conflict is the opposite. It is
+ * raised deliberately, one call site at a time, and the reason is the entire
+ * point of raising it — *"Run 1 is with a driver. Unassign it before changing
+ * its stops."* Collapsing that to "someone else changed this, reload" does not
+ * merely lose detail, it asserts something UNTRUE: nobody else touched the run,
+ * and reloading cannot help. The user reloads, repeats the identical click, and
+ * gets the identical message.
+ *
+ * Found in QA on the dispatch board, where "Add to run" on a staffed run was
+ * unexplainable from the UI alone.
+ *
+ * ⚠️ This does not reopen the door to leaking exception text. A conflict only
+ * reaches here from a PARSED error envelope — an unreadable body becomes
+ * `INTERNAL_ERROR` → `UNEXPECTED` in `toApiRequestError`, never `CONFLICT` — so
+ * the message is always copy a person wrote for a person. Every
+ * `AppError.conflict` call site in the API is written that way, and keeping it
+ * that way is now a requirement of adding one.
+ */
+function describeConflict(message: string, requestId?: string): ErrorPresentation {
+  const sentence = message.trim();
+  if (sentence.length === 0) return { ...GENERIC.CONFLICT, requestId };
+
+  // The reason IS the headline. Callers render `detail ?? title`, and the
+  // generic "reload before saving again" underneath would contradict it.
+  return { title: sentence, retryable: false, requestId };
+}
+
 export function describeError(error: unknown): ErrorPresentation {
   if (isServiceError(error)) {
+    if (error.code === 'CONFLICT') return describeConflict(error.message, error.requestId);
     return { ...GENERIC[error.code], requestId: error.requestId };
   }
 
   if (error instanceof ApiRequestError) {
+    if (error.code === 'CONFLICT') return describeConflict(error.message, error.requestId);
     return describeApiError(error);
   }
 

@@ -85,6 +85,30 @@ const RUN_STATUS_VARIANT: Record<Run['status'], BadgeProps['variant']> = {
 };
 
 /**
+ * Can this run still take a stop on or off?
+ *
+ * The mirror of `MUTABLE_STATUS` in `dispatch.service.ts`: **only `planning`.**
+ * Once a driver has the run on his phone, changing its contents underneath him
+ * is how a stop gets missed, so the API refuses it and the allocator unassigns
+ * first — a deliberate speed bump.
+ *
+ * ⚠️ The board used to allow `assigned` here, which made every "Add to run" on a
+ * staffed run a guaranteed 409. Keep this function and `MUTABLE_STATUS` in step:
+ * an offer the server always refuses is worse than no offer, because the
+ * allocator cannot tell it apart from a system that is broken.
+ */
+function acceptsStops(run: Run): boolean {
+  return run.status === 'planning';
+}
+
+/** Why a run is closed to stop changes, in the words the allocator needs. */
+function closedToStopsReason(run: Run): string {
+  return run.status === 'assigned'
+    ? 'take the driver off first'
+    : `${RUN_STATUS_LABELS[run.status].toLowerCase()} — stops are fixed`;
+}
+
+/**
  * Allocation & dispatch (M3).
  *
  * Three views of one day's work, sharing a date: the board (which runs exist and
@@ -444,12 +468,17 @@ function UnallocatedColumn({
                                 <MenuItem
                                   key={run.id}
                                   icon={RouteIcon}
-                                  disabled={run.status !== 'planning' && run.status !== 'assigned'}
+                                  disabled={!acceptsStops(run)}
                                   onSelect={() => {
                                     onAddToRun(run.id, run.name, job);
                                   }}
                                 >
                                   {run.name} ({run.stops.length})
+                                  {!acceptsStops(run) && (
+                                    <span className="text-muted-foreground">
+                                      {' '}· {closedToStopsReason(run)}
+                                    </span>
+                                  )}
                                 </MenuItem>
                               ))}
                               {board.runs.length > 0 && <MenuSeparator />}
@@ -500,7 +529,19 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
   const deleteRun = useDeleteRun();
   const optimise = useOptimiseRun();
 
-  const editable = run.status === 'planning' || run.status === 'assigned';
+  /*
+   * ⚠️ Each action is gated by the rule the API enforces for THAT action, not
+   * by one shared "editable" flag.
+   *
+   * There used to be one — `planning || assigned` — and it was wrong for every
+   * action it guarded, because the API draws the line in a different place each
+   * time: stops and deletion need `planning` (`assertPlanning`, `deleteRun`),
+   * assigning a driver needs `planning`, and taking one off needs `assigned`.
+   * A single flag cannot express that, so the board offered work the server
+   * refuses and the allocator met a toast instead of a disabled item.
+   */
+  const planning = run.status === 'planning';
+  const staffed = run.status === 'assigned';
 
   const guard = async (action: () => Promise<unknown>, failure: string) => {
     try {
@@ -555,7 +596,7 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
                    * boundary.
                    */
                   disabled={
-                    driver.driverId === run.driverId || !editable || driver.status === 'off'
+                    driver.driverId === run.driverId || !planning || driver.status === 'off'
                   }
                   onSelect={() => {
                     void guard(
@@ -579,7 +620,9 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
               <MenuSeparator />
               <MenuItem
                 icon={RouteIcon}
-                disabled={run.stops.length < 2}
+                // Reordering rewrites every stop's sequence, so it is a change
+                // to the run's contents and carries the same `planning` guard.
+                disabled={run.stops.length < 2 || !planning}
                 onSelect={() => {
                   void guard(
                     () =>
@@ -614,7 +657,9 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
 
               {run.driverId !== null && (
                 <MenuItem
-                  disabled={!editable}
+                  // The one action that needs `assigned` rather than
+                  // `planning`: a run already on the road cannot be handed back.
+                  disabled={!staffed}
                   onSelect={() => {
                     void guard(
                       () =>
@@ -632,7 +677,7 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
               <MenuSeparator />
               <MenuItem
                 tone="destructive"
-                disabled={!editable}
+                disabled={!planning}
                 onSelect={() => {
                   void guard(
                     () =>
@@ -738,6 +783,18 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
                       <MenuItem
                         key={other.id}
                         icon={RouteIcon}
+                        /*
+                         * Both ends have to be open. This item only calls
+                         * `removeJobFromRun` — it takes the stop off THIS run
+                         * and leaves the allocator to place it on the other —
+                         * so the removal needs this run in `planning`, and
+                         * offering a destination that cannot then accept it
+                         * would strand the job in the "to place" column.
+                         *
+                         * Ungated, this was the same guaranteed 409 as
+                         * "Add to run".
+                         */
+                        disabled={!planning || !acceptsStops(other)}
                         onSelect={() => {
                           void guard(
                             () =>
@@ -756,6 +813,7 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
                   <MenuSeparator />
                   <MenuItem
                     tone="destructive"
+                    disabled={!planning}
                     onSelect={() => {
                       void guard(
                         () =>

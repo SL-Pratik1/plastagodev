@@ -3,12 +3,12 @@ import { AppError } from '../../lib/app-error.js';
 import { rosterRepository, type ListDriversQuery } from './roster.repository.js';
 
 /**
- * The driver roster (M9.8 · F53, M9.9 · F22) — business rules only.
+ * The driver roster (M9.9 · F22) — business rules only.
  *
  * ── Who may see it ────────────────────────────────────────────────────────
  * Office roles. A driver does not read the roster: their own licence expiry
- * belongs on their own app (M4), and a screen listing every driver's compliance
- * state and job rate is not something to hand one subcontractor about another.
+ * belongs on their own app (M4), and a screen listing every driver's vehicle
+ * and job rate is not something to hand one subcontractor about another.
  *
  * ⚠️ F22 is framed as OPERATIONAL INSIGHT, not performance management, and the
  * framing is load-bearing rather than decorative. There are two drivers; a

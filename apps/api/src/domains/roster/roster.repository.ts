@@ -1,35 +1,28 @@
-import type {
-  CredentialType,
-  DriverCredential,
-  DriverListItem,
-  DriverPerformance,
-  DriverProfile,
-  ExpiryState,
-  PageMeta,
-} from '@plastago/shared';
+import type { DriverListItem, DriverPerformance, DriverProfile, PageMeta } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { todayInSydney } from '../../lib/business-day.js';
 import { UserModel } from '../auth/auth.model.js';
 import { VehicleModel } from '../fleet/vehicle.model.js';
 import { JobChargeModel, JobModel, JobPhotoModel } from '../jobs/job.model.js';
-import { UserDeviceModel } from '../users/user.model.js';
-import {
-  DriverCredentialModel,
-  DriverRosterModel,
-  DriverTrainingModel,
-} from './roster.model.js';
+import { DriverRosterModel } from './roster.model.js';
 
 /**
  * Repository layer — the ONLY file in this domain that touches Mongoose
  * (§6A.3 #5).
  *
  * ── The joins this file exists to do ──────────────────────────────────────
- * A driver's roster row is assembled from five places: `users` (who they are),
- * `driverrosters` (employment, capacity), `vehicles` (their truck),
- * `userdevices` (§6A.8 sync health) and the credential/training collections.
- * Doing that per driver would be five queries times two drivers today and times
+ * A driver's roster row is assembled from four places: `users` (who they are),
+ * `driverrosters` (capacity), `vehicles` (their truck) and `jobs` (their day).
+ * Doing that per driver would be four queries times two drivers today and times
  * twenty later; every list below is written as a fixed number of queries for the
  * whole page instead.
+ *
+ * ── What used to be here ──────────────────────────────────────────────────
+ * Credentials, training, expiry state and device sync health. Every one of them
+ * was read-only in the product — no endpoint and no form ever wrote a
+ * credential, and device registration is never recorded — so they cost queries
+ * on every page load to render defaults. The collections and their models are
+ * untouched; only the reads are gone. See `fleet.ts` for the full reasoning.
  */
 
 export interface ListDriversQuery {
@@ -38,12 +31,7 @@ export interface ListDriversQuery {
   sort?: string | undefined;
   q?: string | undefined;
   active?: boolean | undefined;
-  /** The reminder filter — "who has something expiring". */
-  expiry?: ExpiryState | undefined;
 }
-
-/** M9.8 — how far ahead a credential counts as expiring. */
-const DUE_SOON_DAYS = 30;
 
 interface RawUser {
   _id: mongoose.Types.ObjectId;
@@ -84,23 +72,8 @@ export const rosterRepository = {
       UserModel.countDocuments(filter),
     ]);
 
-    const items = await decorate(rows);
-
-    /*
-     * ⚠️ The expiry filter is applied AFTER the page, deliberately.
-     *
-     * The state is derived from dates in another collection, so it cannot be a
-     * Mongo predicate on `users` without a lookup that would make the common
-     * unfiltered listing pay for it. With two drivers that is free; the note is
-     * here so that whoever adds the twentieth knows the trade was made
-     * knowingly, and that the fix is an aggregation, not a bigger page size.
-     */
-    const filtered = query.expiry
-      ? items.filter((item) => item.nextExpiryState === query.expiry)
-      : items;
-
     return {
-      data: filtered,
+      data: await decorate(rows),
       meta: {
         page: query.page,
         pageSize: query.pageSize,
@@ -121,43 +94,7 @@ export const rosterRepository = {
     const [listItem] = await decorate([user]);
     if (!listItem) return null;
 
-    const [roster, credentials, training, performance] = await Promise.all([
-      DriverRosterModel.findOne({ userId: user._id }).lean(),
-      credentialsFor(user._id),
-      trainingFor(user._id),
-      performanceFor(user._id),
-    ]);
-
-    return {
-      ...listItem,
-      startedOn: (roster?.startedOn as string | undefined) ?? todayInSydney(),
-      notes: (roster?.notes) ?? '',
-      credentials,
-      training,
-      performance,
-    };
-  },
-
-  /** M9.8 — everything expiring, for the notification sweep. */
-  async expiringCredentials(withinDays: number): Promise<
-    Array<{ userId: string; driverName: string; type: CredentialType; expiresOn: string }>
-  > {
-    const cutoff = addDays(todayInSydney(), withinDays);
-
-    const rows = await DriverCredentialModel.find({
-      expiresOn: { $ne: null, $lte: cutoff },
-    }).lean<Array<{ userId: mongoose.Types.ObjectId; type: CredentialType; expiresOn: string }>>();
-
-    if (rows.length === 0) return [];
-
-    const names = await namesFor(rows.map((row) => row.userId));
-
-    return rows.map((row) => ({
-      userId: row.userId.toHexString(),
-      driverName: names.get(row.userId.toHexString()) ?? 'A driver',
-      type: row.type,
-      expiresOn: row.expiresOn,
-    }));
+    return { ...listItem, performance: await performanceFor(user._id) };
   },
 };
 
@@ -166,8 +103,8 @@ export const rosterRepository = {
 /**
  * Turns user rows into roster rows, in a fixed number of queries.
  *
- * Four lookups for the whole page rather than four per driver — see the note at
- * the top of the file.
+ * Three lookups for the whole page rather than three per driver — see the note
+ * at the top of the file.
  */
 async function decorate(users: RawUser[]): Promise<DriverListItem[]> {
   if (users.length === 0) return [];
@@ -176,55 +113,30 @@ async function decorate(users: RawUser[]): Promise<DriverListItem[]> {
   const names = users.map((user) => user.name);
   const today = todayInSydney();
 
-  const [rosters, vehicles, devices, jobCounts, credentials] = await Promise.all([
+  const [rosters, vehicles, jobCounts] = await Promise.all([
     DriverRosterModel.find({ userId: { $in: ids } }).lean(),
     /*
      * The truck is paired by NAME (see `vehicle.model.ts`) — a deliberate choice
-     * there so the pairing survives a driver leaving. Matched here rather than
-     * left null, which is what this field returned before fleet existed.
+     * there so the pairing survives a driver leaving.
      */
-    VehicleModel.find({ assignedDriverName: { $in: names } }, { rego: 1, label: 1, assignedDriverName: 1 }).lean(),
-    UserDeviceModel.find({ userId: { $in: ids }, revokedAt: null })
-      .sort({ lastSeenAt: -1 })
-      .lean(),
+    VehicleModel.find(
+      { assignedDriverName: { $in: names } },
+      { rego: 1, label: 1, assignedDriverName: 1 },
+    ).lean(),
     JobModel.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
       { $match: { driverId: { $in: ids }, readyDate: today } },
       { $group: { _id: '$driverId', count: { $sum: 1 } } },
     ]),
-    DriverCredentialModel.find({ userId: { $in: ids } }, { userId: 1, expiresOn: 1 }).lean(),
   ]);
 
   const rosterByUser = new Map(rosters.map((row) => [String(row.userId), row]));
-  const vehicleByName = new Map(
-    vehicles.map((row) => [row.assignedDriverName ?? '', row]),
-  );
+  const vehicleByName = new Map(vehicles.map((row) => [row.assignedDriverName ?? '', row]));
   const jobsByDriver = new Map(jobCounts.map((row) => [row._id.toHexString(), row.count]));
-
-  /* The MOST RECENTLY SEEN device per driver: an old handset still on file would
-   * otherwise show its stale sync state and make a working driver look broken. */
-  const deviceByUser = new Map<string, (typeof devices)[number]>();
-  for (const device of devices) {
-    const key = String(device.userId);
-    if (!deviceByUser.has(key)) deviceByUser.set(key, device);
-  }
-
-  /** The SOONEST expiry per driver — the one the reminder is about. */
-  const soonestByUser = new Map<string, string>();
-  for (const credential of credentials) {
-    const expiresOn = credential.expiresOn as string | null;
-    if (!expiresOn) continue;
-
-    const key = String(credential.userId);
-    const current = soonestByUser.get(key);
-    if (!current || expiresOn < current) soonestByUser.set(key, expiresOn);
-  }
 
   return users.map((user) => {
     const key = user._id.toHexString();
     const roster = rosterByUser.get(key);
     const vehicle = vehicleByName.get(user.name);
-    const device = deviceByUser.get(key);
-    const nextExpiryOn = soonestByUser.get(key) ?? null;
 
     return {
       id: key,
@@ -233,46 +145,12 @@ async function decorate(users: RawUser[]): Promise<DriverListItem[]> {
       mobile: user.phoneNumber ?? '',
       email: user.email,
       active: user.status === 'active',
-      employment: (roster?.employment) ?? 'subcontractor',
       vehicleRego: vehicle?.rego ?? null,
       vehicleLabel: vehicle?.label ?? null,
-      dailyJobCapacity: (roster?.dailyJobCapacity) ?? 8,
+      dailyJobCapacity: roster?.dailyJobCapacity ?? 8,
       jobsToday: jobsByDriver.get(key) ?? 0,
-      nextExpiryOn,
-      nextExpiryState: expiryState(nextExpiryOn),
-      lastSyncAt: device?.lastSyncAt ? new Date(device.lastSyncAt).toISOString() : null,
-      pendingSyncActions: (device?.pendingSyncActions) ?? 0,
     };
   });
-}
-
-async function credentialsFor(userId: mongoose.Types.ObjectId): Promise<DriverCredential[]> {
-  const rows = await DriverCredentialModel.find({ userId }).sort({ expiresOn: 1 }).lean();
-
-  return rows.map((row) => ({
-    id: String(row._id),
-    type: row.type,
-    reference: (row.reference as string | null) ?? null,
-    issuedOn: (row.issuedOn as string | null) ?? null,
-    expiresOn: (row.expiresOn as string | null) ?? null,
-    state: expiryState((row.expiresOn as string | null) ?? null),
-    hasDocument: Boolean(row.storageKey),
-  }));
-}
-
-async function trainingFor(
-  userId: mongoose.Types.ObjectId,
-): Promise<DriverProfile['training']> {
-  const rows = await DriverTrainingModel.find({ userId }).sort({ completedOn: -1 }).lean();
-
-  return rows.map((row) => ({
-    id: String(row._id),
-    name: row.name,
-    completedOn: row.completedOn,
-    expiresOn: (row.expiresOn as string | null) ?? null,
-    state: expiryState((row.expiresOn as string | null) ?? null),
-    provider: (row.provider as string | null) ?? null,
-  }));
 }
 
 /* ── F22 · Performance ───────────────────────────────────────────────────── */
@@ -338,10 +216,6 @@ async function performanceFor(userId: mongoose.Types.ObjectId): Promise<DriverPe
     contaminationRatePercent: percent(contamination, attended),
     photoCompliancePercent: photoStats,
     slaAdherencePercent: slaStats,
-    // Honest absence. Distance needs F11's continuous location, which is not
-    // being recorded yet, and an invented kilometre figure would feed straight
-    // into the cost-per-km model.
-    distanceKm: null,
   };
 }
 
@@ -357,7 +231,16 @@ async function jobIdsFor(
   return rows.map((row) => row._id);
 }
 
-/** Their protocol expects five named shots per job; this is adherence to it. */
+/**
+ * Their protocol names five shots, of which FOUR are required — "cars on site"
+ * applies only where the driver could not close the site.
+ *
+ * ⚠️ The threshold is `REQUIRED_PHOTO_SLOTS`, not the size of the protocol. It
+ * used to be five, which meant a driver who closed every site correctly could
+ * never reach it and scored 0% for doing the job right.
+ */
+const REQUIRED_PHOTO_SLOTS = 4;
+
 async function photoCompliance(jobIds: mongoose.Types.ObjectId[]): Promise<number> {
   // No jobs is not non-compliance. A new driver reading 0% would be wrong.
   if (jobIds.length === 0) return 100;
@@ -365,7 +248,7 @@ async function photoCompliance(jobIds: mongoose.Types.ObjectId[]): Promise<numbe
   const withPhotos = await JobPhotoModel.aggregate<{ _id: mongoose.Types.ObjectId }>([
     { $match: { jobId: { $in: jobIds }, slot: { $ne: null } } },
     { $group: { _id: '$jobId', slots: { $addToSet: '$slot' } } },
-    { $match: { $expr: { $gte: [{ $size: '$slots' }, 5] } } },
+    { $match: { $expr: { $gte: [{ $size: '$slots' }, REQUIRED_PHOTO_SLOTS] } } },
     { $project: { _id: 1 } },
   ]);
 
@@ -386,46 +269,15 @@ async function slaAdherence(userId: mongoose.Types.ObjectId, since: Date): Promi
   if (rows.length === 0) return 100;
 
   const onTime = rows.filter(
-    (row) => row.completedAt.toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' }) <= row.targetDate,
+    (row) =>
+      row.completedAt.toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' }) <=
+      row.targetDate,
   ).length;
 
   return percent(onTime, rows.length);
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
-
-async function namesFor(
-  ids: mongoose.Types.ObjectId[],
-): Promise<Map<string, string>> {
-  const rows = await UserModel.find({ _id: { $in: ids } }, { name: 1 }).lean<
-    Array<{ _id: mongoose.Types.ObjectId; name: string }>
-  >();
-
-  return new Map(rows.map((row) => [row._id.toHexString(), row.name]));
-}
-
-/**
- * Derived, never stored.
- *
- * A stored state is a field that goes stale overnight — and it goes stale into
- * "valid" on the morning the licence actually expired, which is the one day it
- * had to be right.
- */
-function expiryState(expiresOn: string | null): ExpiryState {
-  if (!expiresOn) return 'valid';
-
-  const today = todayInSydney();
-  if (expiresOn < today) return 'expired';
-  if (expiresOn <= addDays(today, DUE_SOON_DAYS)) return 'due-soon';
-
-  return 'valid';
-}
-
-function addDays(isoDate: string, days: number): string {
-  const date = new Date(`${isoDate}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
 
 function median(values: number[]): number | null {
   if (values.length === 0) return null;

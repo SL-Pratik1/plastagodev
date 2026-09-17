@@ -156,7 +156,7 @@ export function PortalDashboardPage() {
             30-second confirmation is the cheapest way to avoid it.
           </p>
           <Link
-            to="/portal/jobs?readiness=unconfirmed"
+            to="/portal/jobs?readiness=pending"
             className={buttonVariants({ variant: 'outline', size: 'sm' })}
           >
             <ClipboardCheckIcon aria-hidden />

@@ -5,7 +5,6 @@ import { todayInSydney } from '../../lib/business-day.js';
 import { jobRepository } from '../jobs/job.repository.js';
 import { queueRepository } from '../queues/queue.repository.js';
 import { vehicleRepository } from '../fleet/vehicle.repository.js';
-import { userRepository } from '../users/user.repository.js';
 import { jobNotices } from './job-notices.service.js';
 import {
   notificationRepository,
@@ -44,8 +43,6 @@ const AGE_THRESHOLDS = {
   chargeApproval: 3,
   /** Matt's three months start here. */
   awaitingPo: 7,
-  /** §6A.8 — a phone that has not drained its queue. */
-  stuckSyncActions: 5,
   /** M9.8 — the registration that grounds a truck legally. */
   expiryDays: 30,
 } as const;
@@ -96,7 +93,7 @@ export const notificationService = {
       return { raised: 0 };
     }
 
-    const [futile, approvals, awaitingPo, expiring, stuckDevices] = await Promise.all([
+    const [futile, approvals, awaitingPo, expiring] = await Promise.all([
       queueRepository.futileList(
         { page: 1, pageSize: 20, agedOverDays: AGE_THRESHOLDS.futileReview },
         '0.00',
@@ -112,7 +109,6 @@ export const notificationService = {
         agedOverDays: AGE_THRESHOLDS.awaitingPo,
       }),
       vehicleRepository.expiringSoon(AGE_THRESHOLDS.expiryDays),
-      userRepository.stuckDevices(AGE_THRESHOLDS.stuckSyncActions),
     ]);
 
     let raised = 0;
@@ -211,24 +207,6 @@ export const notificationService = {
         });
         raised += 1;
       }
-
-      /*
-       * §6A.8 — there is no error-tracking vendor, so a stuck offline queue has
-       * to be visible in the product. A driver's phone holding fourteen unsent
-       * actions since Tuesday is invisible otherwise.
-       */
-      for (const device of stuckDevices) {
-        await notificationRepository.raise({
-          userId: recipient.id,
-          category: 'sync',
-          severity: 'action',
-          title: `${device.label} has ${String(device.pendingSyncActions)} unsent actions`,
-          body: `Last synced ${device.lastSyncAt ? daysAgo(device.lastSyncAt.toISOString()) : 'never'}. The driver may be out of signal, or the app may be stuck.`,
-          href: `/admin/users/${device.userId}`,
-          subjectKey: `stuck-sync:${device.userId}`,
-        });
-        raised += 1;
-      }
     }
 
     log.info(
@@ -238,7 +216,6 @@ export const notificationService = {
         approvals: approvals.data.length,
         awaitingPo: awaitingPo.data.length,
         expiring: expiring.length,
-        stuckDevices: stuckDevices.length,
         raised,
       },
       'queue sweep complete',

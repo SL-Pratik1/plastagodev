@@ -734,24 +734,74 @@ export const settingsRepository = {
   async takeNextNumber(field: SequenceField): Promise<number> {
     const start = SEQUENCE_STARTS[field];
 
-    const updated = await SettingsModel.findOneAndUpdate(
-      { _id: SETTINGS_SINGLETON_ID },
-      [{ $set: { [field]: { $add: [{ $ifNull: [`$${field}`, start] }, 1] } } }],
-      {
-        // `before` so the caller gets the number it reserved rather than the one
-        // after it — off-by-one here is a permanently skipped invoice number.
-        returnDocument: 'before',
-        projection: { [field]: 1 },
-        // Mongoose 9 requires opting in before it will send an array as an
-        // aggregation pipeline; without it the driver rejects the update.
-        updatePipeline: true,
-      },
-    ).lean<Record<string, number>>();
+    const reserve = (): Promise<Record<string, number> | null> =>
+      SettingsModel.findOneAndUpdate(
+        { _id: SETTINGS_SINGLETON_ID },
+        [{ $set: { [field]: { $add: [{ $ifNull: [`$${field}`, start] }, 1] } } }],
+        {
+          // `before` so the caller gets the number it reserved rather than the one
+          // after it — off-by-one here is a permanently skipped invoice number.
+          returnDocument: 'before',
+          projection: { [field]: 1 },
+          // Mongoose 9 requires opting in before it will send an array as an
+          // aggregation pipeline; without it the driver rejects the update.
+          updatePipeline: true,
+        },
+      ).lean<Record<string, number>>();
+
+    let updated = await reserve();
 
     if (!updated) {
-      // No settings document at all is a genuinely unseeded install, which is a
-      // deployment problem rather than something a caller can recover from.
-      throw new Error('Settings have not been seeded — run `npm run seed:settings`');
+      /*
+       * No settings document yet — a brand-new database, not a broken one.
+       *
+       * This used to refuse the booking and say to run `seed:settings`. That
+       * script REFUSES to run with NODE_ENV=production, so on a fresh
+       * production database the instruction could not be followed and the
+       * first job anyone raised returned a 500. An install can create its own
+       * singleton; it should not need a script to exist.
+       *
+       * ⚠️ A PLAIN update, deliberately — NOT the pipeline above. Mongoose
+       * applies schema defaults on an upsert-insert only for a non-pipeline
+       * update, so this writes a COMPLETE document: `slaBusinessDays`,
+       * `defaultPaymentTermsDays`, `splitAdditionalCharges` and every sequence.
+       * A pipeline upsert would write `_id` and this one sequence alone, and
+       * `get()` would then hand `undefined` to fields its contract declares
+       * required — which is what takes the settings screen down.
+       *
+       * `assumedCostPerJob` is stated because it has no schema default: a cost
+       * per job is a real figure somebody supplies, and zero reads as "not set
+       * yet" rather than as a claim that jobs are free. The same value `get()`
+       * already falls back to.
+       */
+      try {
+        await SettingsModel.updateOne(
+          { _id: SETTINGS_SINGLETON_ID },
+          { $setOnInsert: { assumedCostPerJob: toDecimal128('0') } },
+          { upsert: true },
+        );
+      } catch (error) {
+        /*
+         * Two first bookings at once: both find no document, both insert, and
+         * the loser gets a duplicate key on `_id`. The document it wanted now
+         * exists, which is all this step was for, so the reserve below can
+         * proceed. Anything else is a real failure and still throws.
+         */
+        const code = (error as { code?: unknown } | null)?.code;
+        if (code !== 11000) throw error;
+      }
+
+      updated = await reserve();
+    }
+
+    /*
+     * Still nothing means the document was created and then disappeared between
+     * two round trips. Not a state a caller can do anything about — and
+     * returning `start` here would hand the SAME number to every booking that
+     * followed, which is the one outcome worse than a failed booking.
+     */
+    if (!updated) {
+      throw new Error(`Could not reserve ${field} — the settings document is missing`);
     }
 
     // Undefined here means the field was missing and the pipeline above has just

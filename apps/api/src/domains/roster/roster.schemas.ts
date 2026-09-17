@@ -1,4 +1,4 @@
-import { ExpiryStateSchema, ObjectIdSchema } from '@plastago/shared';
+import { ObjectIdSchema } from '@plastago/shared';
 import * as z from 'zod';
 
 /** Request shapes for the driver roster — transport, not domain. */
@@ -7,6 +7,11 @@ export const DriverIdParamsSchema = z
   .object({ id: ObjectIdSchema })
   .meta({ id: 'DriverIdParams' });
 
+/**
+ * ⚠️ The `expiry` filter went with credential tracking — it selected on a state
+ * derived from a collection nothing could write, so every value but `valid`
+ * returned an empty page. See `fleet.ts`.
+ */
 export const ListDriversQuerySchema = z
   .object({
     page: z.coerce.number().int().min(1).default(1),
@@ -18,7 +23,5 @@ export const ListDriversQuerySchema = z
       .enum(['true', 'false'])
       .optional()
       .transform((value) => (value === undefined ? undefined : value === 'true')),
-    /** F53's reminder filter — "who has something expiring". */
-    expiry: ExpiryStateSchema.optional(),
   })
   .meta({ id: 'ListDriversQuery' });
