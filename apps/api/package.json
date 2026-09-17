@@ -25,6 +25,7 @@
     "setup:extractor": "tsx src/scripts/setup-extractor.ts",
     "seed:reset": "tsx src/scripts/seed-reset.ts",
     "migrate:rate-schedules": "tsx src/scripts/migrate-rate-schedules.ts",
+    "migrate:zones": "tsx src/scripts/migrate-zones.ts",
     "seed:demo": "tsx src/scripts/seed-demo.ts",
     "seed:all": "npm run seed:reset && npm run seed:auth && npm run seed:settings && npm run seed:places && npm run seed:demo",
     "migrate:po-review-reasons": "tsx src/scripts/migrate-po-review-reasons.ts",
