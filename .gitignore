@@ -10,8 +10,14 @@ dev-dist/
 # Turborepo
 .turbo/
 
-# Local stub file storage (STORAGE_STUB_DIR) — runtime uploads, not source
-apps/api/.storage/
+# Local stub file storage (STORAGE_STUB_DIR) — runtime uploads, not source.
+#
+# Unanchored, so it catches every copy rather than one path. The old rule named
+# `apps/api/.storage/` alone, and the two it did not name — `.storage/` at the
+# repo root and the per-environment `.storage-qa/` — were committed for months:
+# invoice PDFs, job photos and delivery dockets, in a source repository.
+.storage/
+.storage-*/
 
 # NOTE: apps/api/openapi/openapi.json IS committed on purpose.
 # It is the published contract the Flutter repo pins a version of (§6A.5), and

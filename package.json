@@ -28,8 +28,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,cjs,json,md,css,yaml,yml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,cjs,json,md,css,yaml,yml}\"",
     "clean": "turbo run clean",
-    "clean:all": "turbo run clean && rm -rf node_modules .turbo",
-    "driver:handover": "node scripts/capture-driver-handover.mjs"
+    "clean:all": "turbo run clean && rm -rf node_modules .turbo"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
