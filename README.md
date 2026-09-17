@@ -40,16 +40,23 @@ One codebase, started once per surface. In production they are three hostnames
 ports. A role only ever sees its own address — ask the portal for `/admin` and
 you are redirected to the console, deep link intact.
 
-`apps/web/.env` controls it:
+Each surface has its own Vite config in `apps/web`, so a surface is chosen by
+picking a config rather than by setting an environment variable:
 
 ```bash
-PLASTAGO_SURFACES=admin,portal,driver   # default — three servers
-PLASTAGO_SURFACES=all                   # one server, every surface, admin port
-PLASTAGO_SURFACES=admin                 # just the one you are working on
+npm run dev            # one server, every surface, admin port — the default
+npm run dev:admin      # just the console        (apps/web)
+npm run dev:portal     # just the customer portal
+npm run dev:driver     # just the driver app
 ```
 
-Three dev servers cost three times the memory and three dependency pre-bundles,
-so naming the surface you are working on is noticeably faster.
+The same three exist for builds: `build:admin`, `build:portal`, `build:driver`.
+Each bakes its own manifest, name and icon into `dist/`, which is what a
+per-origin deployment installs as its own app.
+
+A dev server per surface costs its own memory and its own dependency pre-bundle,
+so the combined default is the faster choice for a change that touches one
+screen — and the split behaviour is still exercised by building a surface.
 
 > ⚠️ **A port is not an origin, for cookies.** Browsers scope cookies by host and
 > ignore the port, so the surfaces share a session locally and will not once the
@@ -57,8 +64,8 @@ so naming the surface you are working on is noticeably faster.
 > manifests — behaves as it will in production.
 
 Moving a port means moving it in three files (`PLASTAGO_PORT_*`, `CORS_ORIGINS`,
-`PUBLIC_*_URL`). `npm run check:ports` verifies they agree and runs as part of
-`npm run dev`; `scripts/dev-ports.mjs` documents the whole arrangement.
+`PUBLIC_*_URL`) — nothing checks that they agree, so change all three together.
+`apps/web/vite.config.ts` resolves the ports and documents the whole arrangement.
 
 > ⚠️ **`apps/driver` is superseded.** The driver screens now live in `apps/web`
 > under `/driver/*`, served on their own port. The standalone build is kept only
@@ -159,17 +166,15 @@ would guarantee drift.
 
 ## Commands
 
-| Command             | Does                                       |
-| ------------------- | ------------------------------------------ |
-| `npm run dev`       | API + all three surfaces                   |
-| `npm run check:ports` | Verify the three port files agree        |
-| `npm run free-ports` | Kill stale dev servers from this repo     |
-| `npm run build`     | Everything, with typecheck                 |
-| `npm run typecheck` | All 6 packages                             |
-| `npm run lint`      | Type-aware ESLint                          |
-| `npm test`          | Vitest                                     |
-| `npm run openapi`   | Regenerate `apps/api/openapi/openapi.json` |
-| `npm run format`    | Prettier                                   |
+| Command             | Does                                        |
+| ------------------- | ------------------------------------------- |
+| `npm run dev`       | API + one server serving all three surfaces |
+| `npm run build`     | Everything, with typecheck                  |
+| `npm run typecheck` | All 6 packages                              |
+| `npm run lint`      | Type-aware ESLint                           |
+| `npm test`          | Vitest                                      |
+| `npm run openapi`   | Regenerate `apps/api/openapi/openapi.json`  |
+| `npm run format`    | Prettier                                    |
 
 Turborepo caches all of these. `--force` to bypass.
 
