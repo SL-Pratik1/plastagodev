@@ -1,4 +1,5 @@
-import type { Place, PlaceWrite, Role } from '@plastago/shared';
+import type { LocatedPlaceWrite, Place, PlaceWrite, Role } from '@plastago/shared';
+import { getMapsProvider } from '../../integrations/maps.js';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { settingsRepository } from '../settings/settings.repository.js';
@@ -97,7 +98,7 @@ export const placeService = {
       throw AppError.conflict(`${input.suburb} ${input.postcode} is already in the picker`);
     }
 
-    const place = await placeRepository.create(input);
+    const place = await placeRepository.create(await locate(input));
     log.info({ placeId: place.id, zoneId: input.zoneId }, 'suburb added');
     return place;
   },
@@ -125,7 +126,7 @@ export const placeService = {
       throw AppError.conflict(`${input.suburb} ${input.postcode} is already in the picker`);
     }
 
-    await placeRepository.update(id, input);
+    await placeRepository.update(id, await locate(input));
     log.info({ placeId: id, zoneId: input.zoneId }, 'suburb updated');
     return requirePlace(id);
   },
@@ -190,6 +191,56 @@ async function requirePlace(id: string): Promise<Place> {
   const place = await placeRepository.findById(id);
   if (!place) throw AppError.notFound(`No suburb is configured for "${id}"`);
   return place;
+}
+
+/**
+ * Fill in the pin, so an administrator never types a coordinate (I3).
+ *
+ * ── Why the form stopped asking ───────────────────────────────────────────
+ * It asked for a latitude and a longitude, and nobody adding "we now collect
+ * from Gregory Hills" knows either. The pin is not optional — it is what puts
+ * every job in that suburb on the dispatch map, and what a geocoded street
+ * address is distance-checked against (see `resolveLocation` in the jobs
+ * service) — so the answer is to LOOK IT UP, not to drop it.
+ *
+ * ── Why a typed pin still wins ────────────────────────────────────────────
+ * A supplied coordinate is used as given and Google is not called. That is the
+ * correction path: this screen is the only place a wrong pin can be fixed, and
+ * a lookup that silently overrode the fix would make the fix impossible.
+ *
+ * ── Why the failure is a 422 and not a fallback ───────────────────────────
+ * Every other maps call here falls back to something correct — the suburb
+ * centroid, the allocator's own ordering. There is nothing to fall back TO for
+ * a suburb that has no pin at all, and inventing one (the postcode's centre,
+ * the zone's other suburbs) would put jobs somewhere plausible and wrong. So it
+ * refuses, names the reason, and the screen reveals the two fields.
+ */
+async function locate(input: PlaceWrite): Promise<LocatedPlaceWrite> {
+  if (input.latitude !== undefined && input.longitude !== undefined) {
+    return { ...input, latitude: input.latitude, longitude: input.longitude };
+  }
+
+  const pin = await getMapsProvider().geocodeSuburb({
+    suburb: input.suburb,
+    postcode: input.postcode,
+    state: input.state,
+  });
+
+  if (!pin) {
+    log.warn(
+      { suburb: input.suburb, postcode: input.postcode, provider: getMapsProvider().name },
+      'could not locate the suburb — asking for the pin instead',
+    );
+    throw AppError.validation(`We could not find ${input.suburb} ${input.postcode} on the map`, [
+      {
+        path: 'latitude',
+        message: 'Enter the pin by hand — right-click the suburb in Google Maps to read it off',
+      },
+    ]);
+  }
+
+  log.info({ suburb: input.suburb, matched: pin.formattedAddress }, 'suburb located');
+  return { ...input, latitude: pin.latitude, longitude: pin.longitude };
 }
 
 /**

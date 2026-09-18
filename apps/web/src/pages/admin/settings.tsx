@@ -84,6 +84,7 @@ import {
   useReorderZones,
   useRestoreZone,
 } from '@/features/settings/queries';
+import { SuburbsSection } from '@/features/suburbs/components/suburbs-section';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
 import { useUnsavedChanges } from '@/lib/use-unsaved-changes';
@@ -93,6 +94,55 @@ type TabKey = (typeof TABS)[number];
 
 /** The tab shown when the URL carries no `?tab=`, and the one it omits. */
 const DEFAULT_TAB: TabKey = 'roles';
+
+/*
+ * The sub-tabs inside Pricing and Invoicing, in the order they are offered.
+ *
+ * ── Why these tabs exist ───────────────────────────────────────────────────
+ * Each of those two panels was one long scroll: Pricing stacked the zone
+ * register, the rate cards and the additional services; Invoicing stacked five
+ * cards. Every one of them is a place an administrator arrives at deliberately,
+ * so every visit began by scrolling past the other four — and the two halves of
+ * a single decision (a zone, and the suburbs that fall in it) were furthest
+ * apart of all.
+ *
+ * The FIRST entry of each list is that tab's default, and it is the value the
+ * URL omits.
+ */
+const PRICING_SECTIONS = ['zones', 'suburbs', 'cards', 'services'] as const;
+const INVOICING_SECTIONS = ['workflow', 'business', 'payment', 'templates'] as const;
+
+type InvoicingSection = (typeof INVOICING_SECTIONS)[number];
+
+/**
+ * The sub-tab inside a tab, held in `?section=` so a reload, the back button
+ * and a pasted link all land where the person was.
+ *
+ * ⚠️ ONE parameter shared by both tabs, not one each. A section name only means
+ * anything inside the tab that owns it, and an unrecognised value falls back to
+ * that tab's first section — so `?tab=invoicing&section=suburbs`, which is what
+ * a stale URL or a tab switch would otherwise leave behind, opens Workflow
+ * rather than an empty panel.
+ */
+function useSection<T extends string>(sections: readonly [T, ...T[]]): [T, (next: string) => void] {
+  const [params, setParams] = useSearchParams();
+  const raw = params.get('section') ?? '';
+  const current: T = (sections as readonly string[]).includes(raw) ? (raw as T) : sections[0];
+
+  const select = (next: string) => {
+    setParams(
+      (currentParams) => {
+        const nextParams = new URLSearchParams(currentParams);
+        if (next === sections[0]) nextParams.delete('section');
+        else nextParams.set('section', next);
+        return nextParams;
+      },
+      { replace: true },
+    );
+  };
+
+  return [current, select];
+}
 
 /**
  * Settings (W3), plus brands (M1.1), rate cards (M6) and invoice branding
@@ -158,6 +208,15 @@ export function AdminSettingsPage() {
         const nextParams = new URLSearchParams(current);
         if (next === DEFAULT_TAB) nextParams.delete('tab');
         else nextParams.set('tab', next);
+
+        /*
+         * Both of these belong to the tab being left: `section` names a sub-tab
+         * that the next tab has never heard of, and `zoneId` is the Suburbs
+         * filter. Carrying them across would leave a filter applied on a list
+         * whose control is no longer on screen.
+         */
+        nextParams.delete('section');
+        nextParams.delete('zoneId');
         return nextParams;
       },
       { replace: true },
@@ -422,6 +481,7 @@ function RolesSection() {
 
 function PricingSection({ settings }: { settings: Settings }) {
   const [newCardOpen, setNewCardOpen] = useState(false);
+  const [section, setSection] = useSection(PRICING_SECTIONS);
 
   /*
    * The zone register, read once for the whole tab.
@@ -441,97 +501,127 @@ function PricingSection({ settings }: { settings: Settings }) {
    */
   const zoneKey = zoneOptions.map((zone) => zone.value).join(',');
 
+  /*
+   * Zones FIRST, because they are the columns of everything after them: a rate
+   * schedule prices one row per zone and the server refuses a partial one. So
+   * the order of these tabs is the order the work has to be done in — open a
+   * zone, point suburbs at it, then price it.
+   */
   return (
-    <div className="space-y-4">
-      {/*
-        Editable, but only through the one operation that is safe.
+    <Tabs variant="pill" value={section} onValueChange={setSection}>
+      <TabsList label="Pricing sections">
+        <TabsTrigger value="zones" badge={settings.pricing.zones.length}>
+          Zones
+        </TabsTrigger>
+        <TabsTrigger value="suburbs">Suburbs</TabsTrigger>
+        <TabsTrigger value="cards" badge={settings.pricing.rateCards.length}>
+          Rate cards
+        </TabsTrigger>
+        <TabsTrigger value="services" badge={settings.pricing.additionalServices.length}>
+          Additional services
+        </TabsTrigger>
+      </TabsList>
 
-        Rates are effective-dated: pricing a job reads the rates in force on
-        that job's date. So there is no "edit these rates" control anywhere on
-        this tab — changing a price means ISSUING A NEW SCHEDULE with its own
-        start date, and the old one stays exactly as it was. Every job also
-        carries a frozen copy of the rates it was priced on, so even deleting a
-        card cannot move a figure on an invoice somebody has already been sent.
-      */}
-      <Alert variant="info" title="Changing a rate issues a new schedule — it never overwrites">
-        Pricing a job always uses the rates in force on that job’s date, so reissuing or crediting
-        a March invoice uses March’s rates. Add a schedule with a start date and the current one is
-        closed the day before; nothing already priced moves.
-      </Alert>
-
-      {/*
-        Zones FIRST, because they are the columns of everything below: a rate
-        schedule prices one row per zone and the server refuses a partial one.
-      */}
-      <ZonesCard zones={settings.pricing.zones} />
-
-      <Card>
-        <CardHeader className="flex flex-wrap items-start justify-between gap-3">
-          <span>
-            <CardTitle>Rate cards</CardTitle>
-            <CardDescription>Resolution order is named card → tier → default.</CardDescription>
-          </span>
-          <Button
-            size="sm"
-            onClick={() => {
-              setNewCardOpen(true);
-            }}
-          >
-            <PlusIcon aria-hidden />
-            New rate card
-          </Button>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {settings.pricing.rateCards.map((card) => (
-            <RateCardRow
-              key={card.id}
-              card={card}
-              zoneOptions={zoneOptions}
-              zoneLabels={zoneLabels}
-              zoneKey={zoneKey}
-            />
-          ))}
-
-          {settings.pricing.rateCards.length === 0 && (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              No rate cards yet. Every account needs one before it can be priced.
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      <NewRateCardDialog
-        /*
-          ⚠️ Keyed on the zone ids, because the grid inside is seeded ONCE.
-
-          `useState` runs its initialiser on mount and never again. Open this
-          before the register lands and the grid seeds empty, then sits empty
-          while the rest of the screen fills in — and the only clue is a Create
-          button complaining about zones it is not showing. Remounting on a
-          changed key is React's own answer; the alternative is an effect that
-          calls setState and cascades a render.
-        */
-        key={zoneKey}
-        zoneOptions={zoneOptions}
-        zoneLabels={zoneLabels}
-        open={newCardOpen}
-        onClose={() => {
-          setNewCardOpen(false);
-        }}
-      />
-
-      <AdditionalServicesCard services={settings.pricing.additionalServices} />
+      <TabsPanel value="zones">
+        <ZonesCard zones={settings.pricing.zones} />
+      </TabsPanel>
 
       {/*
-        The "Margin assumption" card used to sit here. It was two read-only
-        facts and a paragraph, which is a document rather than a screen.
-
-        ⚠️ `assumedCostPerJob` itself is NOT dead — the financial summary report
-        computes every margin figure from it, and says so in its own footnote,
-        which is where a reader actually needs the number. It is a seed-time
-        value now, like the SLA.
+        M6.3. It was its own item under Configuration until this tab existed,
+        which put it a whole navigation group away from the zones it feeds —
+        see `features/suburbs/components/suburbs-section.tsx`.
       */}
-    </div>
+      <TabsPanel value="suburbs">
+        <SuburbsSection />
+      </TabsPanel>
+
+      <TabsPanel value="cards" className="space-y-4">
+        {/*
+          Editable, but only through the one operation that is safe.
+
+          Rates are effective-dated: pricing a job reads the rates in force on
+          that job's date. So there is no "edit these rates" control anywhere on
+          this tab — changing a price means ISSUING A NEW SCHEDULE with its own
+          start date, and the old one stays exactly as it was. Every job also
+          carries a frozen copy of the rates it was priced on, so even deleting a
+          card cannot move a figure on an invoice somebody has already been sent.
+        */}
+        <Alert variant="info" title="Changing a rate issues a new schedule — it never overwrites">
+          Pricing a job always uses the rates in force on that job’s date, so reissuing or crediting
+          a March invoice uses March’s rates. Add a schedule with a start date and the current one
+          is closed the day before; nothing already priced moves.
+        </Alert>
+
+        <Card>
+          <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+            <span>
+              <CardTitle>Rate cards</CardTitle>
+              <CardDescription>Resolution order is named card → tier → default.</CardDescription>
+            </span>
+            <Button
+              size="sm"
+              onClick={() => {
+                setNewCardOpen(true);
+              }}
+            >
+              <PlusIcon aria-hidden />
+              New rate card
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {settings.pricing.rateCards.map((card) => (
+              <RateCardRow
+                key={card.id}
+                card={card}
+                zoneOptions={zoneOptions}
+                zoneLabels={zoneLabels}
+                zoneKey={zoneKey}
+              />
+            ))}
+
+            {settings.pricing.rateCards.length === 0 && (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No rate cards yet. Every account needs one before it can be priced.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        <NewRateCardDialog
+          /*
+            ⚠️ Keyed on the zone ids, because the grid inside is seeded ONCE.
+
+            `useState` runs its initialiser on mount and never again. Open this
+            before the register lands and the grid seeds empty, then sits empty
+            while the rest of the screen fills in — and the only clue is a Create
+            button complaining about zones it is not showing. Remounting on a
+            changed key is React's own answer; the alternative is an effect that
+            calls setState and cascades a render.
+          */
+          key={zoneKey}
+          zoneOptions={zoneOptions}
+          zoneLabels={zoneLabels}
+          open={newCardOpen}
+          onClose={() => {
+            setNewCardOpen(false);
+          }}
+        />
+      </TabsPanel>
+
+      <TabsPanel value="services">
+        <AdditionalServicesCard services={settings.pricing.additionalServices} />
+
+        {/*
+          The "Margin assumption" card used to sit here. It was two read-only
+          facts and a paragraph, which is a document rather than a screen.
+
+          ⚠️ `assumedCostPerJob` itself is NOT dead — the financial summary report
+          computes every margin figure from it, and says so in its own footnote,
+          which is where a reader actually needs the number. It is a seed-time
+          value now, like the SLA.
+        */}
+      </TabsPanel>
+    </Tabs>
   );
 }
 
@@ -548,11 +638,11 @@ function PricingSection({ settings }: { settings: Settings }) {
 /**
  * The service zones (M6.3).
  *
- * ── Why zones sit above rate cards, and not on a tab of their own ─────────
- * Because they are the COLUMNS of everything below. Every rate schedule prices
- * one row per zone and the server refuses a partial one, so adding a zone here
- * changes the shape of every form underneath — and that is a cause and effect
- * somebody should be able to see without navigating.
+ * ── Why zones come first among the pricing tabs ───────────────────────────
+ * Because they are the COLUMNS of everything after them. Every rate schedule
+ * prices one row per zone and the server refuses a partial one, so adding a
+ * zone here changes the shape of every form on the Rate cards tab. The tab
+ * order is the order the work has to be done in.
  *
  * ── Why a new zone is not usable the moment it is created ─────────────────
  * A job is zoned by its SUBURB. Until a suburb points at a new zone nothing can
@@ -583,7 +673,9 @@ function ZonesCard({ zones }: { zones: readonly ZoneSummary[] }) {
           <Button
             size="sm"
             disabled={zones.length === 0}
-            title={zones.length === 0 ? 'A new zone copies its prices from an existing one' : undefined}
+            title={
+              zones.length === 0 ? 'A new zone copies its prices from an existing one' : undefined
+            }
             onClick={() => {
               setAdding(true);
             }}
@@ -807,7 +899,17 @@ function ZoneRow({
             {zone.jobCount === 1 ? '' : 's'}
           </>
         )}{' '}
-        <Link className="underline underline-offset-2" to={`/admin/suburbs?zoneId=${zone.id}`}>
+        {/*
+          The Suburbs tab is a sibling of this one now, so this is a change of
+          sub-tab rather than a navigation — but it stays a real <Link> with a
+          real href, because it is the answer to "which suburbs are in this
+          zone?" and that is a thing people send each other.
+        */}
+        <Link
+          className="underline underline-offset-2"
+          to={`/admin/settings?tab=pricing&section=suburbs&zoneId=${zone.id}`}
+          replace
+        >
           Manage suburbs
         </Link>
       </p>
@@ -947,8 +1049,8 @@ function AddZoneDialog({
         </Field>
 
         <Alert variant="neutral" title="Nothing can be booked here yet">
-          A job is zoned by its suburb, so this zone stays empty until a suburb points at it. Add
-          or re-zone one on the Suburbs screen straight after.
+          A job is zoned by its suburb, so this zone stays empty until a suburb points at it. Add or
+          re-zone one on the Suburbs screen straight after.
         </Alert>
       </div>
     </Dialog>
@@ -1590,7 +1692,12 @@ function NewRateCardDialog({
 
         <div>
           <p className="mb-2 text-sm font-medium">Zone rates</p>
-          <ZoneRateFields zones={zones} labels={zoneLabels} onChange={setZones} disabled={create.isPending} />
+          <ZoneRateFields
+            zones={zones}
+            labels={zoneLabels}
+            onChange={setZones}
+            disabled={create.isPending}
+          />
         </div>
       </div>
     </Dialog>
@@ -1720,7 +1827,12 @@ function IssueScheduleDialog({
 
         <div>
           <p className="mb-2 text-sm font-medium">Zone rates</p>
-          <ZoneRateFields zones={zones} labels={zoneLabels} onChange={setZones} disabled={issue.isPending} />
+          <ZoneRateFields
+            zones={zones}
+            labels={zoneLabels}
+            onChange={setZones}
+            disabled={issue.isPending}
+          />
         </div>
 
         <Alert variant="neutral" title="Pre-filled with today’s rates">
@@ -1804,11 +1916,7 @@ function RenameCardDialog({
  * different because they are read at pricing time, which is why those get
  * dated schedules and these get a text box.
  */
-function AdditionalServicesCard({
-  services,
-}: {
-  services: readonly AdditionalServiceSetting[];
-}) {
+function AdditionalServicesCard({ services }: { services: readonly AdditionalServiceSetting[] }) {
   const [adding, setAdding] = useState(false);
 
   return (
@@ -2217,6 +2325,16 @@ function InvoicingSection({ settings }: { settings: Settings }) {
   const [prefixError, setPrefixError] = useState<string | null>(null);
 
   /*
+   * ⚠️ The draft and the unsaved bar live ABOVE the tabs, not inside a panel.
+   *
+   * Workflow, Business details and Payment details are three faces of ONE form
+   * with one save. Holding the draft here is what lets somebody fill in the ABN
+   * and the BSB in either order and save once; rendering the bar outside the
+   * panels is what keeps "Save" on screen whichever face they end on.
+   */
+  const [section, setSection] = useSection(INVOICING_SECTIONS);
+
+  /*
    * ⚠️ Compared against the writable projection for the same reason the key
    * above uses it: `logoUrl` differs on every read, so comparing it would put
    * this form into "unsaved changes" — with a navigation guard attached —
@@ -2225,9 +2343,22 @@ function InvoicingSection({ settings }: { settings: Settings }) {
   const dirty = JSON.stringify(draft) !== JSON.stringify(writable(settings.invoicing));
   useUnsavedChanges(dirty);
 
+  const show = (next: InvoicingSection) => {
+    setSection(next);
+  };
+
   const submit = async () => {
+    /*
+     * ⚠️ Every refusal below opens the tab holding the field it is about.
+     *
+     * Both validated fields are on Workflow and the save bar is reachable from
+     * all four tabs, so without this, pressing Save on Payment details with a
+     * bad prefix sets an error message onto a panel that is not being rendered
+     * — a button that visibly does nothing.
+     */
     if (draft.defaultPaymentTermsDays < 0 || draft.defaultPaymentTermsDays > 90) {
       setTermsError('Enter between 0 and 90 days');
+      show('workflow');
       return;
     }
     setTermsError(null);
@@ -2237,6 +2368,7 @@ function InvoicingSection({ settings }: { settings: Settings }) {
     // else's problem to unpick.
     if (!/^[A-Za-z0-9-]*$/.test(draft.invoiceNumberPrefix.trim())) {
       setPrefixError('Letters, digits and hyphens only');
+      show('workflow');
       return;
     }
     setPrefixError(null);
@@ -2251,31 +2383,41 @@ function InvoicingSection({ settings }: { settings: Settings }) {
   };
 
   return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>Workflow</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-start gap-3">
-            <Switch
-              checked={draft.splitAdditionalCharges}
-              onCheckedChange={(checked) => {
-                setDraft({ ...draft, splitAdditionalCharges: checked });
-              }}
-              id="split-charges"
-              aria-label="Invoice additional charges separately"
-            />
-            <label htmlFor="split-charges" className="text-sm">
-              Invoice additional charges separately
-              <span className="block text-xs text-muted-foreground">
-                The base invoice goes out on completion against the original PO; additional charges
-                follow once their own PO arrives, so cash for the job is never delayed.
-              </span>
-            </label>
-          </div>
+    <Tabs variant="pill" value={section} onValueChange={setSection}>
+      <TabsList label="Invoicing sections">
+        <TabsTrigger value="workflow">Workflow</TabsTrigger>
+        <TabsTrigger value="business">Your business</TabsTrigger>
+        <TabsTrigger value="payment">Payment details</TabsTrigger>
+        <TabsTrigger value="templates" badge={settings.invoicing.templates.length}>
+          Templates
+        </TabsTrigger>
+      </TabsList>
 
-          {/*
+      <TabsPanel value="workflow">
+        <Card>
+          <CardHeader>
+            <CardTitle>Workflow</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-start gap-3">
+              <Switch
+                checked={draft.splitAdditionalCharges}
+                onCheckedChange={(checked) => {
+                  setDraft({ ...draft, splitAdditionalCharges: checked });
+                }}
+                id="split-charges"
+                aria-label="Invoice additional charges separately"
+              />
+              <label htmlFor="split-charges" className="text-sm">
+                Invoice additional charges separately
+                <span className="block text-xs text-muted-foreground">
+                  The base invoice goes out on completion against the original PO; additional
+                  charges follow once their own PO arrives, so cash for the job is never delayed.
+                </span>
+              </label>
+            </div>
+
+            {/*
             Matt, 7:07: *"customisable invoice number prefixes… select the prefix
             like, for example, if we had PGA, it would put PGA dash in front of
             the invoice number."*
@@ -2283,240 +2425,259 @@ function InvoicingSection({ settings }: { settings: Settings }) {
             Presentation only. The stored number is a bare sequence Xero matches
             on, so changing this renumbers nothing.
           */}
-          <div className="sm:max-w-xs">
-            <Field
-              id="invoice-prefix"
-              label="Invoice number prefix"
-              error={prefixError ?? undefined}
-              hint={
-                draft.invoiceNumberPrefix.trim() === ''
-                  ? 'Leave blank for plain numbers, e.g. #104312.'
-                  : `Invoices will read ${draft.invoiceNumberPrefix.trim()}-104312.`
-              }
-            >
-              {(aria) => (
-                <Input
-                  {...aria}
-                  value={draft.invoiceNumberPrefix}
-                  maxLength={8}
-                  placeholder="PGA"
-                  className="font-mono"
-                  autoComplete="off"
-                  spellCheck={false}
-                  onChange={(event) => {
-                    setDraft({ ...draft, invoiceNumberPrefix: event.target.value });
-                    setPrefixError(null);
-                  }}
-                />
-              )}
-            </Field>
-          </div>
+            <div className="sm:max-w-xs">
+              <Field
+                id="invoice-prefix"
+                label="Invoice number prefix"
+                error={prefixError ?? undefined}
+                hint={
+                  draft.invoiceNumberPrefix.trim() === ''
+                    ? 'Leave blank for plain numbers, e.g. #104312.'
+                    : `Invoices will read ${draft.invoiceNumberPrefix.trim()}-104312.`
+                }
+              >
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.invoiceNumberPrefix}
+                    maxLength={8}
+                    placeholder="PGA"
+                    className="font-mono"
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(event) => {
+                      setDraft({ ...draft, invoiceNumberPrefix: event.target.value });
+                      setPrefixError(null);
+                    }}
+                  />
+                )}
+              </Field>
+            </div>
 
-          <div className="sm:max-w-xs">
-            <Field
-              id="payment-terms"
-              label="Default payment terms"
-              required
-              error={termsError ?? undefined}
-              hint="Days. Their standard is 7."
-            >
-              {(aria) => (
-                <Input
-                  {...aria}
-                  type="number"
-                  min={0}
-                  max={90}
-                  value={draft.defaultPaymentTermsDays}
-                  onChange={(event) => {
-                    setDraft({ ...draft, defaultPaymentTermsDays: Number(event.target.value) });
-                  }}
-                />
-              )}
-            </Field>
-          </div>
-        </CardContent>
-      </Card>
+            <div className="sm:max-w-xs">
+              <Field
+                id="payment-terms"
+                label="Default payment terms"
+                required
+                error={termsError ?? undefined}
+                hint="Days. Their standard is 7."
+              >
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    type="number"
+                    min={0}
+                    max={90}
+                    value={draft.defaultPaymentTermsDays}
+                    onChange={(event) => {
+                      setDraft({ ...draft, defaultPaymentTermsDays: Number(event.target.value) });
+                    }}
+                  />
+                )}
+              </Field>
+            </div>
+          </CardContent>
+        </Card>
+      </TabsPanel>
 
-      <LogoCard logoUrl={settings.invoicing.logoUrl} />
+      {/*
+        The logo sits with the printed company details because that is what it
+        is — the top of the page the two of them share. It does NOT save with
+        the form, and its own card says so.
+      */}
+      <TabsPanel value="business" className="space-y-4">
+        <LogoCard logoUrl={settings.invoicing.logoUrl} />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Your business, as it prints</CardTitle>
-          <CardDescription>
-            These appear on every invoice PDF. Leave a field blank and it is left off the page.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field id="company-name" label="Company name">
-              {(aria) => (
-                <Input
-                  {...aria}
-                  value={draft.companyName}
-                  placeholder="PlastaGo Pty Ltd"
-                  onChange={(event) => {
-                    setDraft({ ...draft, companyName: event.target.value });
-                  }}
-                />
-              )}
-            </Field>
-            {/*
+        <Card>
+          <CardHeader>
+            <CardTitle>Your business, as it prints</CardTitle>
+            <CardDescription>
+              These appear on every invoice PDF. Leave a field blank and it is left off the page.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field id="company-name" label="Company name">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.companyName}
+                    placeholder="PlastaGo Pty Ltd"
+                    onChange={(event) => {
+                      setDraft({ ...draft, companyName: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+              {/*
               ⚠️ Not decoration. A tax invoice over $82.50 must carry the
               supplier's ABN, and a customer may lawfully withhold payment on
               one that does not — so the hint says what it is FOR.
             */}
-            <Field
-              id="company-abn"
-              label="ABN"
-              hint="Required on a tax invoice. Without it a customer can refuse to pay."
-            >
-              {(aria) => (
-                <Input
-                  {...aria}
-                  value={draft.companyAbn}
-                  placeholder="51 824 753 556"
-                  onChange={(event) => {
-                    setDraft({ ...draft, companyAbn: event.target.value });
-                  }}
-                />
-              )}
-            </Field>
-          </div>
+              <Field
+                id="company-abn"
+                label="ABN"
+                hint="Required on a tax invoice. Without it a customer can refuse to pay."
+              >
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.companyAbn}
+                    placeholder="51 824 753 556"
+                    onChange={(event) => {
+                      setDraft({ ...draft, companyAbn: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+            </div>
 
-          <Field id="company-address" label="Address">
-            {(aria) => (
-              <Input
-                {...aria}
-                value={draft.companyAddress}
-                placeholder="1 Recycling Way, Smithfield NSW 2164"
-                onChange={(event) => {
-                  setDraft({ ...draft, companyAddress: event.target.value });
-                }}
-              />
-            )}
-          </Field>
+            <Field id="company-address" label="Address">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={draft.companyAddress}
+                  placeholder="1 Recycling Way, Smithfield NSW 2164"
+                  onChange={(event) => {
+                    setDraft({ ...draft, companyAddress: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field id="company-phone" label="Phone">
-              {(aria) => (
-                <Input
-                  {...aria}
-                  value={draft.companyPhone}
-                  onChange={(event) => {
-                    setDraft({ ...draft, companyPhone: event.target.value });
-                  }}
-                />
-              )}
-            </Field>
-            <Field id="company-email" label="Accounts email">
-              {(aria) => (
-                <Input
-                  {...aria}
-                  type="email"
-                  value={draft.companyEmail}
-                  onChange={(event) => {
-                    setDraft({ ...draft, companyEmail: event.target.value });
-                  }}
-                />
-              )}
-            </Field>
-          </div>
-        </CardContent>
-      </Card>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field id="company-phone" label="Phone">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.companyPhone}
+                    onChange={(event) => {
+                      setDraft({ ...draft, companyPhone: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+              <Field id="company-email" label="Accounts email">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    type="email"
+                    value={draft.companyEmail}
+                    onChange={(event) => {
+                      setDraft({ ...draft, companyEmail: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+            </div>
+          </CardContent>
+        </Card>
+      </TabsPanel>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Payment details</CardTitle>
-          <CardDescription>Printed under the totals, with the invoice number as the reference.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <Field id="bank-bsb" label="BSB">
-              {(aria) => (
-                <Input
-                  {...aria}
-                  value={draft.bankBsb}
-                  placeholder="062-000"
-                  onChange={(event) => {
-                    setDraft({ ...draft, bankBsb: event.target.value });
-                  }}
-                />
-              )}
-            </Field>
-            <Field id="bank-account" label="Account number">
-              {(aria) => (
-                <Input
-                  {...aria}
-                  value={draft.bankAccount}
-                  onChange={(event) => {
-                    setDraft({ ...draft, bankAccount: event.target.value });
-                  }}
-                />
-              )}
-            </Field>
-            {/*
+      <TabsPanel value="payment">
+        <Card>
+          <CardHeader>
+            <CardTitle>Payment details</CardTitle>
+            <CardDescription>
+              Printed under the totals, with the invoice number as the reference.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <Field id="bank-bsb" label="BSB">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.bankBsb}
+                    placeholder="062-000"
+                    onChange={(event) => {
+                      setDraft({ ...draft, bankBsb: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+              <Field id="bank-account" label="Account number">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.bankAccount}
+                    onChange={(event) => {
+                      setDraft({ ...draft, bankAccount: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+              {/*
               The payer's own banking software asks for this. An invoice
               without it generates a phone call on every first payment.
             */}
-            <Field id="bank-account-name" label="Account name">
+              <Field id="bank-account-name" label="Account name">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.bankAccountName}
+                    placeholder="PlastaGo Pty Ltd"
+                    onChange={(event) => {
+                      setDraft({ ...draft, bankAccountName: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+            </div>
+
+            <Field id="terms-text" label="Payment terms wording">
               {(aria) => (
-                <Input
+                <Textarea
                   {...aria}
-                  value={draft.bankAccountName}
-                  placeholder="PlastaGo Pty Ltd"
+                  rows={2}
+                  value={draft.termsText}
+                  placeholder="Payment due within 7 days of the invoice date."
                   onChange={(event) => {
-                    setDraft({ ...draft, bankAccountName: event.target.value });
+                    setDraft({ ...draft, termsText: event.target.value });
                   }}
                 />
               )}
             </Field>
-          </div>
 
-          <Field id="terms-text" label="Payment terms wording">
-            {(aria) => (
-              <Textarea
-                {...aria}
-                rows={2}
-                value={draft.termsText}
-                placeholder="Payment due within 7 days of the invoice date."
-                onChange={(event) => {
-                  setDraft({ ...draft, termsText: event.target.value });
+            <Field id="footer-text" label="Footer text" hint="One line, at the foot of every page.">
+              {(aria) => (
+                <Textarea
+                  {...aria}
+                  rows={2}
+                  value={draft.footerText}
+                  onChange={(event) => {
+                    setDraft({ ...draft, footerText: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
+
+            <div className="flex items-center gap-3">
+              <Switch
+                checked={draft.showGbcaBadge}
+                onCheckedChange={(checked) => {
+                  setDraft({ ...draft, showGbcaBadge: checked });
                 }}
+                id="gbca-badge"
+                aria-label="Show the GBCA member badge"
               />
-            )}
-          </Field>
+              <label htmlFor="gbca-badge" className="text-sm">
+                Show the GBCA member badge
+              </label>
+            </div>
+          </CardContent>
+        </Card>
+      </TabsPanel>
 
-          <Field id="footer-text" label="Footer text" hint="One line, at the foot of every page.">
-            {(aria) => (
-              <Textarea
-                {...aria}
-                rows={2}
-                value={draft.footerText}
-                onChange={(event) => {
-                  setDraft({ ...draft, footerText: event.target.value });
-                }}
-              />
-            )}
-          </Field>
+      <TabsPanel value="templates">
+        <InvoiceTemplatesCard templates={settings.invoicing.templates} />
+      </TabsPanel>
 
-          <div className="flex items-center gap-3">
-            <Switch
-              checked={draft.showGbcaBadge}
-              onCheckedChange={(checked) => {
-                setDraft({ ...draft, showGbcaBadge: checked });
-              }}
-              id="gbca-badge"
-              aria-label="Show the GBCA member badge"
-            />
-            <label htmlFor="gbca-badge" className="text-sm">
-              Show the GBCA member badge
-            </label>
-          </div>
-        </CardContent>
-      </Card>
-
-      <InvoiceTemplatesCard templates={settings.invoicing.templates} />
-
+      {/*
+        ⚠️ OUTSIDE the panels on purpose — see the note on the draft. One form
+        spans three of these tabs, so the bar has to stay on screen whichever of
+        them the administrator finishes on.
+      */}
       <UnsavedBar
         visible={dirty}
         pending={save.isPending}
@@ -2524,12 +2685,12 @@ function InvoicingSection({ settings }: { settings: Settings }) {
         onDiscard={() => {
           setDraft(writable(settings.invoicing));
           setTermsError(null);
+          setPrefixError(null);
         }}
       />
-    </div>
+    </Tabs>
   );
 }
-
 
 /* ── The logo (M7.5) ─────────────────────────────────────────────────────── */
 
@@ -3028,8 +3189,7 @@ function InvoiceTemplateDialog({
           <label htmlFor="template-weight" className="text-sm">
             Print kilograms alongside square metres
             <span className="block text-xs text-muted-foreground">
-              For accounts whose capture mode records weight. An m²-only account has none to
-              print.
+              For accounts whose capture mode records weight. An m²-only account has none to print.
             </span>
           </label>
         </div>

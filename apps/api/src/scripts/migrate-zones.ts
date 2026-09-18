@@ -137,7 +137,12 @@ async function main(): Promise<void> {
    * next boot from the schema.
    */
   const STALE_INDEXES: Record<string, readonly string[]> = {
-    zonerates: ['card_zone_from_unique', 'card_zone_open_unique', 'card_zone_resolve'],
+    zonerates: [
+      'card_zone_from_unique',
+      'card_zone_open_unique',
+      'card_zone_resolve',
+      'card_zone_unique',
+    ],
     places: ['zone'],
     jobs: ['zone_ready'],
     leads: ['zone_status'],
@@ -153,6 +158,34 @@ async function main(): Promise<void> {
         /* Already gone — a re-run, or a database that never had it. */
         console.log(`    absent   ${coll}.${name}`);
       }
+    }
+  }
+
+  /*
+   * The safety net, because the list above is a list of NAMES.
+   *
+   * Naming them is the careful choice — it cannot take an index somebody added
+   * for an unrelated reason. It is also only as good as the schema version the
+   * list was written against: this database had `card_zone_unique`, which is
+   * none of the three names above, so the drop reported `absent` three times
+   * and the re-point below then died on the index that was still there.
+   *
+   * So anything still keyed on `zone` in these four collections goes too. The
+   * collections are fixed, the key shape is checked, and every drop is printed
+   * — an index that survives this step breaks step 4, and it is better to name
+   * one out loud than to fail three hundred rows in.
+   */
+  for (const coll of Object.keys(STALE_INDEXES)) {
+    const existing = await db
+      .collection(coll)
+      .indexes()
+      .catch(() => [] as { name?: string; key: Record<string, unknown> }[]);
+
+    for (const index of existing) {
+      if (index.name === undefined || index.name === '_id_') continue;
+      if (!Object.keys(index.key).includes('zone')) continue;
+      await db.collection(coll).dropIndex(index.name);
+      console.log(`    dropped  ${coll}.${index.name}  (matched on shape)`);
     }
   }
 
@@ -194,15 +227,13 @@ async function main(): Promise<void> {
   let snapshots = 0;
   for (const [slug, id] of zoneId) {
     const zone = await db.collection('zones').findOne({ slug });
-    const result = await db
-      .collection('jobs')
-      .updateMany(
-        { 'appliedRate.zone': slug },
-        {
-          $set: { 'appliedRate.zoneId': id, 'appliedRate.zoneLabel': zone?.label ?? titleCase(slug) },
-          $unset: { 'appliedRate.zone': '' },
-        },
-      );
+    const result = await db.collection('jobs').updateMany(
+      { 'appliedRate.zone': slug },
+      {
+        $set: { 'appliedRate.zoneId': id, 'appliedRate.zoneLabel': zone?.label ?? titleCase(slug) },
+        $unset: { 'appliedRate.zone': '' },
+      },
+    );
     snapshots += result.modifiedCount;
   }
   console.log(`    ${'appliedRate'.padEnd(12)} ${String(snapshots).padStart(4)} snapshot(s)`);
@@ -222,25 +253,33 @@ async function main(): Promise<void> {
 
   if (slugKeyed.length > 0) {
     /*
-     * ⚠️ `_id` is immutable, so this is insert-then-delete rather than an
+     * ⚠️ `_id` is immutable, so this is delete-then-insert rather than an
      * update. Safe only because nothing stores a place id — a job keeps the
      * suburb and postcode it was booked into, never the row it was picked from.
      * That was verified before this script was written; if it ever stops being
      * true, this step has to re-point those references first.
+     *
+     * ⚠️ DELETE FIRST, and all of them, before a single insert. The obvious
+     * order — insert the new row, then drop the old — fails on the first
+     * suburb: `places` is unique on `{suburb, postcode}`, so while the slug-
+     * keyed row is still there its replacement is a duplicate of it. Doing it
+     * per row in the other order would work, but leaves the collection half
+     * re-keyed if the process dies mid-loop; every row is already held in
+     * `slugKeyed` above, so there is no reason to read the collection again.
      */
-    for (const place of slugKeyed) {
-      const { _id, ...rest } = place;
-      await db.collection('places').insertOne({ _id: new mongoose.Types.ObjectId(), ...rest });
-      await db.collection('places').deleteOne({ _id });
-    }
+    const rekeyed = slugKeyed.map(({ _id, ...rest }) => ({
+      _id: new mongoose.Types.ObjectId(),
+      ...rest,
+    }));
+
+    await db.collection('places').deleteMany({ _id: { $in: slugKeyed.map((place) => place._id) } });
+    await db.collection('places').insertMany(rekeyed);
   }
   console.log(`\n  places re-keyed to ObjectId: ${String(slugKeyed.length)}`);
 
   /* ── 6. Verify ──────────────────────────────────────────────────────── */
 
-  const ids = new Set(
-    (await db.collection('zones').distinct('_id')).map((id) => String(id)),
-  );
+  const ids = new Set((await db.collection('zones').distinct('_id')).map((id) => String(id)));
 
   let dangling = 0;
   let leftover = 0;
@@ -253,7 +292,10 @@ async function main(): Promise<void> {
     ['jobs', 'zoneId', 'zone'],
     ['leads', 'zoneId', 'zone'],
   ] as const) {
-    const rows = await db.collection(coll).find({}, { projection: { [field]: 1 } }).toArray();
+    const rows = await db
+      .collection(coll)
+      .find({}, { projection: { [field]: 1 } })
+      .toArray();
     const bad = rows.filter((row) => {
       const value = row[field] as unknown;
       return value != null && !ids.has(String(value));
@@ -269,10 +311,14 @@ async function main(): Promise<void> {
     );
   }
 
-  const staleSnapshots = await db.collection('jobs').countDocuments({ 'appliedRate.zone': { $exists: true } });
+  const staleSnapshots = await db
+    .collection('jobs')
+    .countDocuments({ 'appliedRate.zone': { $exists: true } });
   const slugLeft = await db.collection('places').countDocuments({ _id: { $type: 'string' } });
 
-  console.log(`    ${'appliedRate'.padEnd(12)}      · ${String(staleSnapshots)} still on the old field`);
+  console.log(
+    `    ${'appliedRate'.padEnd(12)}      · ${String(staleSnapshots)} still on the old field`,
+  );
   console.log(`    ${'places._id'.padEnd(12)}      · ${String(slugLeft)} still slug-keyed`);
 
   const clean = dangling === 0 && leftover === 0 && staleSnapshots === 0 && slugLeft === 0;
@@ -283,7 +329,8 @@ async function main(): Promise<void> {
       : `\n  ✗ INCOMPLETE — ${String(dangling)} dangling, ${String(leftover + staleSnapshots)} on the old shape, ${String(slugLeft)} slug-keyed\n`,
   );
 
-  if (!clean) throw new Error('migration did not finish cleanly — restore the backup and investigate');
+  if (!clean)
+    throw new Error('migration did not finish cleanly — restore the backup and investigate');
 
   log.info({ zones: ordered.length }, 'zone migration complete');
 }

@@ -80,6 +80,7 @@ export {
   type TabsListProps,
   type TabsTriggerProps,
   type TabsPanelProps,
+  type TabsVariant,
 } from './components/tabs.js';
 export { Pagination, type PaginationProps } from './components/pagination.js';
 

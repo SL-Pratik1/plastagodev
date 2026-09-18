@@ -115,9 +115,20 @@ function buildAuth(transactionsAvailable: boolean) {
     advanced: {
       defaultCookieAttributes: {
         httpOnly: true,
-        sameSite: 'lax',
-        // Dev is plain http on localhost; anything deployed is https.
-        secure: isProduction,
+        /*
+         * `lax` unless the app and the API are on different SITES — see
+         * AUTH_CROSS_SITE_COOKIE in env.ts for when that is, and for what
+         * `none` still cannot fix.
+         */
+        sameSite: env.AUTH_CROSS_SITE_COOKIE ? 'none' : 'lax',
+        /*
+         * Dev is plain http on localhost; anything deployed is https.
+         *
+         * Forced on for a cross-site cookie whatever NODE_ENV says, because a
+         * browser rejects `SameSite=None` without `Secure` — and a deployment
+         * that needs the first has https for the second.
+         */
+        secure: isProduction || env.AUTH_CROSS_SITE_COOKIE,
         path: '/',
       },
       // ⚠️ Do NOT set `database.generateId`. Left alone, the Mongo adapter
