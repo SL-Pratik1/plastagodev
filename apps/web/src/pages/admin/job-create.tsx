@@ -36,6 +36,7 @@ import {
   useCreateJob,
   useJobPricePreview,
 } from '@/features/jobs/queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
 import { isServiceError } from '@/services/service-error';
@@ -110,10 +111,6 @@ const FormSchema = z.object({
 
 type FormValues = z.input<typeof FormSchema>;
 
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
 export function AdminJobCreatePage() {
   const navigate = useNavigate();
   const toast = useToast();
@@ -144,7 +141,7 @@ export function AdminJobCreatePage() {
       siteContactEmail: '',
       poNumber: '',
       purchaseOrderId: '',
-      readyDate: todayIso(),
+      readyDate: todayInSydney(),
       serviceLevel: 'standard',
       freightItem: 'plasterboard-bagged',
       expectedAreaM2: 0,
@@ -222,7 +219,7 @@ export function AdminJobCreatePage() {
       // Real, not a placeholder: the order supplies the area, so a quote
       // that omitted it would be the wrong number.
       purchaseOrderId: purchaseOrderId || null,
-      readyDate: readyDate || todayIso(),
+      readyDate: readyDate || todayInSydney(),
       serviceLevel,
       freightItem,
       expectedAreaM2: Number(expectedAreaM2) || 0,

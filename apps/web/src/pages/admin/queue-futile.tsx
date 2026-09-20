@@ -33,6 +33,7 @@ import { AgeBadge } from '@/components/queues/age-badge';
 import { EvidenceGrid } from '@/components/queues/evidence-grid';
 import { useAccountOptions, useDriverOptions, useZoneOptions } from '@/features/lookups/queries';
 import { useFutileDecide, useFutileList, useFutileReview } from '@/features/queues/queries';
+import { addDays, todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatDate, formatDateTime, formatMoney } from '@/lib/format';
 import { useNow } from '@/lib/use-now';
@@ -354,7 +355,7 @@ function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogPr
   // is not React-Compiler safe, and a dialog left open past midnight would
   // otherwise keep offering yesterday's "tomorrow".
   const now = useNow(60_000);
-  const earliest = new Date(now + 86_400_000).toISOString().slice(0, 10);
+  const earliest = addDays(todayInSydney(now), 1);
 
   const reset = () => {
     setOutcome('rescheduled');

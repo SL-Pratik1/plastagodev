@@ -61,6 +61,7 @@ import { JobCommentThreads } from '@/features/jobs/components/comment-thread';
 import { useRaiseInvoiceForJob } from '@/features/invoices/queries';
 import { useAddJobCharge, useCancelJob, useJob, useRescheduleJob } from '@/features/jobs/queries';
 import { useSettings } from '@/features/settings/queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatDateTime, formatMoney, formatWeight } from '@/lib/format';
 
@@ -196,7 +197,7 @@ export function AdminJobDetailPage() {
   const atRisk =
     !isTerminal &&
     job.status !== 'futile' &&
-    job.targetDate <= new Date().toISOString().slice(0, 10);
+    job.targetDate <= todayInSydney();
   const capturesWeight = job.recoveredWeightKg !== null;
 
   const doCancel = async () => {

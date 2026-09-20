@@ -22,6 +22,7 @@ import { useForm } from 'react-hook-form';
 import { Link, useNavigate, useParams } from 'react-router';
 import * as z from 'zod';
 import { usePortalEditJob, usePortalJob, usePortalScope } from '@/features/portal/queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatDate } from '@/lib/format';
 import { isServiceError } from '@/services/service-error';
@@ -99,7 +100,7 @@ function EditForm({ job }: { job: PortalJob }) {
   const scope = usePortalScope();
   const edit = usePortalEditJob();
 
-  const today = new Date(now).toISOString().slice(0, 10);
+  const today = todayInSydney(now);
   const poRequired = scope.data?.poRequired ?? false;
 
   const {

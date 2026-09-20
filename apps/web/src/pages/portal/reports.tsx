@@ -22,6 +22,7 @@ import { useSearchParams } from 'react-router';
 import { MonthlyVolumeChart } from '@/components/charts/portal-charts';
 import { StatCard } from '@/components/stat-card';
 import { usePortalMonthlyReport, usePortalScope } from '@/features/portal/queries';
+import { firstOfMonthsAgo, todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatMoney, formatWeight } from '@/lib/format';
 import { useNow } from '@/lib/use-now';
@@ -53,12 +54,8 @@ export function PortalReportsPage() {
 
   // Default window: the last three months, which is what a customer opening a
   // "monthly report" almost always wants. A single month hides the trend.
-  const today = new Date(now);
-  const defaultTo = today.toISOString().slice(0, 10);
-  const start = new Date(today);
-  start.setUTCMonth(start.getUTCMonth() - 2);
-  start.setUTCDate(1);
-  const defaultFrom = start.toISOString().slice(0, 10);
+  const defaultTo = todayInSydney(now);
+  const defaultFrom = firstOfMonthsAgo(2, now);
 
   const filters: ReportFilters = {
     from: params.get('from') ?? defaultFrom,

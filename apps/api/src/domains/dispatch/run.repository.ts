@@ -314,6 +314,22 @@ export const runRepository = {
    *
    * The propagation is what lets the driver app ask "my jobs today" without
    * joining through runs, and what puts a driver's name on the jobs grid.
+   *
+   * ⚠️ The stamp and the status move are two different writes, over two
+   * different sets of stops, and collapsing them back into one is a bug.
+   *
+   * The stamp has to reach EVERY open stop. A run is unassigned to be edited
+   * and then re-assigned, and a stop that had already moved past `booked` by
+   * then — someone marked it arrived from the office — came back with no
+   * driver on it at all. The run sheet still listed it, because that query
+   * goes by `runId`; but `findJobForDriver` filters by `driverId`, so the
+   * driver could see the stop and not open it, and every status write against
+   * it failed the same filter. A stop you can see and cannot touch is worse
+   * than one that is missing.
+   *
+   * The status move stays gated on `booked` for the opposite reason: that one
+   * must never walk a stop BACKWARDS. Sending `arrived` back to `assigned`
+   * would discard the driver's own timestamped progress.
    */
   async assign(
     runId: string,
@@ -334,9 +350,11 @@ export const runRepository = {
     if (result.matchedCount !== 1) return false;
 
     await JobModel.updateMany(
-      { runId: _id, status: 'booked' },
-      { $set: { driverId: driver, driverName, status: 'assigned' } },
+      { runId: _id, status: { $in: OPEN_JOB_STATUSES } },
+      { $set: { driverId: driver, driverName } },
     );
+
+    await JobModel.updateMany({ runId: _id, status: 'booked' }, { $set: { status: 'assigned' } });
 
     return true;
   },

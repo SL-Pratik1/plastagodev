@@ -19,6 +19,7 @@ import {
 import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { isServiceError } from '@/services/service-error';
 import { useAddVehicleExpense } from '../queries';
@@ -92,7 +93,7 @@ export function VehicleExpenseDialog({
   useEffect(() => {
     if (!open) return;
     reset({
-      incurredOn: new Date().toISOString().slice(0, 10),
+      incurredOn: todayInSydney(),
       odometerKm: String(vehicle.odometerKm),
       kind: defaultKind,
       description: '',

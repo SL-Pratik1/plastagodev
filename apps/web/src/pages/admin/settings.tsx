@@ -91,6 +91,7 @@ import {
   useRestoreZone,
 } from '@/features/settings/queries';
 import { SuburbsSection } from '@/features/suburbs/components/suburbs-section';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
 import { useUnsavedChanges } from '@/lib/use-unsaved-changes';
@@ -1507,7 +1508,7 @@ function RateCardRow({
 
 /** Which schedule is in force today, by the same rule the server applies. */
 function currentScheduleFrom(card: RateCardSummary): string | undefined {
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+  const today = todayInSydney();
 
   return card.schedules.find(
     (schedule) =>
@@ -1621,19 +1622,6 @@ function ScheduleTable({
 }
 
 /* ── Editing rates ───────────────────────────────────────────────────────── */
-
-/**
- * Today in Sydney, as `YYYY-MM-DD`.
- *
- * ⚠️ Not `new Date().toISOString().slice(0, 10)`. That is UTC, which is the
- * previous day for the first ten or eleven hours of every Sydney morning — so
- * a schedule someone meant to start "today" would be back-dated by one day,
- * and the server would reject it against an invoiced job for no reason the
- * person could see.
- */
-function todayInSydney(): string {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
-}
 
 /**
  * A blank set of zone rates — one row per LIVE zone, every one required.

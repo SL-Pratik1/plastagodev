@@ -76,7 +76,11 @@ export function currentPosition(): Promise<PositionFix | null> {
   return Promise.race([fix, giveUp]);
 }
 
-/** Today, as the business reckons it. The driver app's run sheet is a day. */
-export function todayInSydney(): string {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
-}
+/**
+ * Re-exported so the callers already importing it from here keep working.
+ *
+ * The definition lives in `business-day.ts` — a date helper has no business in
+ * a geolocation module, and two copies of "what day is it" is exactly how the
+ * console and the driver app came to disagree about it.
+ */
+export { todayInSydney } from './business-day';

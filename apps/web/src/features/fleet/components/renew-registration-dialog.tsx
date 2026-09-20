@@ -5,6 +5,7 @@ import { useEffect } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import * as z from 'zod';
 import { useRenewRegistration } from '../queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatDate } from '@/lib/format';
 
@@ -87,7 +88,7 @@ export function RenewRegistrationDialog({ open, onClose, vehicle }: RenewRegistr
         id: vehicle.id,
         expense: values.logCost
           ? {
-              incurredOn: new Date().toISOString().slice(0, 10),
+              incurredOn: todayInSydney(),
               odometerKm: vehicle.odometerKm,
               kind: 'registration',
               description: `Registration renewal to ${formatDate(newExpiry)}`,

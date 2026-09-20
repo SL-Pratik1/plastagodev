@@ -41,6 +41,7 @@ import {
   usePortalScope,
   usePortalSetUrgency,
 } from '@/features/portal/queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import {
   formatArea,
@@ -127,7 +128,7 @@ function PickupDetail({ job }: { job: PortalJob }) {
   const capturesWeight = scope.data?.capturesWeight ?? false;
   const isDone = job.status === 'completed' || job.status === 'admin-complete';
   const isClosed = isDone || job.status === 'cancelled' || job.status === 'futile';
-  const atRisk = !isClosed && job.targetDate <= new Date(now).toISOString().slice(0, 10);
+  const atRisk = !isClosed && job.targetDate <= todayInSydney(now);
 
   const confirmReady = async () => {
     try {
@@ -502,7 +503,7 @@ function ChangeRequestDialog({
   const [note, setNote] = useState('');
   const [fieldError, setFieldError] = useState<string | null>(null);
 
-  const today = new Date(now).toISOString().slice(0, 10);
+  const today = todayInSydney(now);
 
   const close = () => {
     setKind('reschedule');

@@ -37,6 +37,7 @@ import {
   useZoneVolumeReport,
 } from '@/features/reports/queries';
 import { useAccountOptions, useDriverOptions, useZoneOptions } from '@/features/lookups/queries';
+import { firstOfMonthsAgo, todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatMoney, formatWeight } from '@/lib/format';
 
@@ -54,16 +55,6 @@ type TabKey = (typeof TABS)[number];
  * The operations dashboard lives at its own route rather than as a tab here —
  * it is opened hourly and everything on this page is opened monthly.
  */
-function firstOfMonthsAgo(months: number): string {
-  const date = new Date();
-  date.setMonth(date.getMonth() - months, 1);
-  return date.toISOString().slice(0, 10);
-}
-
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
 export function AdminReportsPage() {
   const [params, setParams] = useSearchParams();
   const accounts = useAccountOptions();
@@ -94,7 +85,7 @@ export function AdminReportsPage() {
   const filters = useMemo<ReportFilters>(
     () => ({
       from: params.get('from') ?? firstOfMonthsAgo(2),
-      to: params.get('to') ?? today(),
+      to: params.get('to') ?? todayInSydney(),
       zoneId: params.get('zoneId'),
       accountId: params.get('account'),
       // Narrowed by suburb now — there is no site record to key on (Matt, 0:29).

@@ -30,6 +30,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router';
 import * as z from 'zod';
 import { PlacePicker } from '@/components/place-picker';
 import { usePortalBook, usePortalQuote, usePortalScope } from '@/features/portal/queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
 import { isServiceError } from '@/services/service-error';
@@ -138,7 +139,7 @@ export function PortalBookPage() {
    */
   const [place, setPlace] = useState<Place | null>(null);
 
-  const today = new Date(now).toISOString().slice(0, 10);
+  const today = todayInSydney(now);
   const poRequired = scope.data?.poRequired ?? false;
   const canSeePricing = scope.data?.canSeePricing ?? false;
 

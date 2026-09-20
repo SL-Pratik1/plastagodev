@@ -65,15 +65,12 @@ import {
   useRunSheet,
   useUnassignRun,
 } from '@/features/dispatch/queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatDateTime, formatMobile } from '@/lib/format';
 
 const TABS = ['board', 'run-sheet', 'map'] as const;
 type TabKey = (typeof TABS)[number];
-
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
-}
 
 const RUN_STATUS_VARIANT: Record<Run['status'], BadgeProps['variant']> = {
   planning: 'outline',
@@ -132,7 +129,7 @@ function closedToStopsReason(run: Run): string {
 export function AdminDispatchPage() {
   const [params, setParams] = useSearchParams();
 
-  const date = params.get('date') ?? todayIso();
+  const date = params.get('date') ?? todayInSydney();
   const rawTab = params.get('tab');
   const tab: TabKey = (TABS as readonly string[]).includes(rawTab ?? '')
     ? (rawTab as TabKey)
@@ -161,7 +158,7 @@ export function AdminDispatchPage() {
             <DatePicker
               value={date}
               onChange={(event) => {
-                setParam('date', event.target.value, todayIso());
+                setParam('date', event.target.value, todayInSydney());
               }}
               className="w-auto"
             />
