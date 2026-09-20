@@ -1,4 +1,4 @@
-import type { JobCommentDraftSchema, JobDraftSchema } from '@plastago/shared';
+import type { JobChargeDraftSchema, JobCommentDraftSchema, JobDraftSchema } from '@plastago/shared';
 import type { Request, Response } from 'express';
 import { AppError } from '../../lib/app-error.js';
 import type { ValidatedRequest } from '../../middleware/validate.js';
@@ -113,6 +113,22 @@ export const jobController = {
       callerOf(req),
     );
     res.status(201).json(comment);
+  },
+
+  /** M6.5 — an extra the office adds from the configured price list. */
+  addCharge: async (
+    req: ValidatedRequest<{
+      params: typeof JobIdParamsSchema;
+      body: typeof JobChargeDraftSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const charge = await jobService.addCharge(
+      req.validated.params.id,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.status(201).json(charge);
   },
 };
 

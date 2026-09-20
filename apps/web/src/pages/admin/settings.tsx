@@ -1,5 +1,7 @@
 import {
   BRAND_IDS,
+  CHARGE_CODES,
+  CHARGE_CODE_LABELS,
   BRAND_LABELS,
   INVOICE_LAYOUT_DESCRIPTIONS,
   INVOICE_LAYOUT_LABELS,
@@ -8,6 +10,7 @@ import {
   ROLES,
   type AdditionalServiceSetting,
   type BrandId,
+  type ChargeCode,
   type InvoiceLayout,
   type InvoiceTemplate,
   type InvoiceTemplateWrite,
@@ -50,6 +53,7 @@ import {
   ChevronUpIcon,
   EyeIcon,
   ImageIcon,
+  PenLineIcon,
   PlusIcon,
   Trash2Icon,
   UploadIcon,
@@ -65,7 +69,9 @@ import {
   useCreateAdditionalService,
   useDeleteSchedule,
   usePreviewTemplate,
+  useRemoveCertificateSignature,
   useRemoveLogo,
+  useUploadCertificateSignature,
   useUploadLogo,
   useCreateInvoiceTemplate,
   useCreateRateCard,
@@ -110,7 +116,13 @@ const DEFAULT_TAB: TabKey = 'roles';
  * URL omits.
  */
 const PRICING_SECTIONS = ['zones', 'suburbs', 'cards', 'services'] as const;
-const INVOICING_SECTIONS = ['workflow', 'business', 'payment', 'templates'] as const;
+const INVOICING_SECTIONS = [
+  'workflow',
+  'business',
+  'payment',
+  'templates',
+  'certificates',
+] as const;
 
 type InvoicingSection = (typeof INVOICING_SECTIONS)[number];
 
@@ -262,7 +274,13 @@ export function AdminSettingsPage() {
         <TabsList label="Settings sections">
           <TabsTrigger value="roles">Users & roles</TabsTrigger>
           <TabsTrigger value="pricing">Pricing</TabsTrigger>
-          <TabsTrigger value="invoicing">Invoicing</TabsTrigger>
+          {/*
+            Certificates share this tab because they share its content: the
+            logo, the company details and the ABN under "Your business" print
+            on both documents. A separate top-level tab would put the branding
+            in one place and its second consumer in another.
+          */}
+          <TabsTrigger value="invoicing">Invoicing &amp; certificates</TabsTrigger>
         </TabsList>
 
         {/*
@@ -523,7 +541,7 @@ function PricingSection({ settings }: { settings: Settings }) {
       </TabsList>
 
       <TabsPanel value="zones">
-        <ZonesCard zones={settings.pricing.zones} />
+        <ZonesCard zones={settings.pricing.zones} rateCards={settings.pricing.rateCards} />
       </TabsPanel>
 
       {/*
@@ -655,7 +673,13 @@ function PricingSection({ settings }: { settings: Settings }) {
  * this card could never fail, which is worse than none: it reads as though the
  * gate were here, so the day somebody widens it they widen the wrong file.
  */
-function ZonesCard({ zones }: { zones: readonly ZoneSummary[] }) {
+function ZonesCard({
+  zones,
+  rateCards,
+}: {
+  zones: readonly ZoneSummary[];
+  rateCards: readonly RateCardSummary[];
+}) {
   const [adding, setAdding] = useState(false);
   const order = zones.filter((zone) => !zone.archived).map((zone) => zone.id);
 
@@ -670,12 +694,18 @@ function ZonesCard({ zones }: { zones: readonly ZoneSummary[] }) {
               order here is the order they appear in on every rate grid and filter.
             </CardDescription>
           </span>
+          {/*
+            ⚠️ Never disabled.
+
+            It used to be, whenever there were no zones, with a tooltip saying a
+            new zone copies an existing one. On an empty register that is a
+            button which disables itself for ever: no zones, so no zone can be
+            created, so there are still no zones — and nothing in the product
+            could ever be priced. The FIRST zone is created without a source;
+            the server refuses a sourceless second one.
+          */}
           <Button
             size="sm"
-            disabled={zones.length === 0}
-            title={
-              zones.length === 0 ? 'A new zone copies its prices from an existing one' : undefined
-            }
             onClick={() => {
               setAdding(true);
             }}
@@ -706,6 +736,7 @@ function ZonesCard({ zones }: { zones: readonly ZoneSummary[] }) {
 
       <AddZoneDialog
         zones={zones}
+        rateCards={rateCards}
         open={adding}
         onClose={() => {
           setAdding(false);
@@ -941,10 +972,13 @@ function ZoneRow({
  */
 function AddZoneDialog({
   zones,
+  rateCards,
   open,
   onClose,
 }: {
   zones: readonly ZoneSummary[];
+  /** Only for the preview — the copy itself happens server-side, per card. */
+  rateCards: readonly RateCardSummary[];
   open: boolean;
   onClose: () => void;
 }) {
@@ -955,21 +989,59 @@ function AddZoneDialog({
 
   const [label, setLabel] = useState('');
   const [copyFrom, setCopyFrom] = useState(live[0]?.id ?? '');
+  const [adjustService, setAdjustService] = useState('');
+  const [adjustRate, setAdjustRate] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const reset = () => {
     setLabel('');
     setCopyFrom(live[0]?.id ?? '');
+    setAdjustService('');
+    setAdjustRate('');
     setError(null);
   };
+
+  /*
+   * What every card will actually say, worked out before the save rather than
+   * discovered on the next screen.
+   *
+   * This is the whole reason the adjustment is safe to offer. A shift applied
+   * to seven negotiated prices is arithmetic done on the user's behalf, and
+   * arithmetic done out of sight is arithmetic nobody checks — a stray minus
+   * sign, or $30 typed into the per-m² box where it would mean thirty dollars a
+   * square metre. Shown as `before → after`, per card, it is checkable at a
+   * glance.
+   */
+  const preview = rateCards
+    .map((card) => {
+      const from = card.zones.find((zone) => zone.zoneId === copyFrom);
+      if (!from) return null;
+      return {
+        id: card.id,
+        label: card.label,
+        from,
+        serviceCharge: shiftedMoney(from.serviceCharge, adjustService, 2),
+        ratePerM2: shiftedMoney(from.ratePerM2, adjustRate, 4),
+      };
+    })
+    .filter((row) => row !== null);
 
   const submit = async () => {
     if (label.trim() === '') {
       setError('Name the zone — it appears on every rate card and every quote');
       return;
     }
-    if (copyFrom === '') {
+    // Only when there IS something to copy — see the field below.
+    if (live.length > 0 && copyFrom === '') {
       setError('Choose a zone to copy prices from');
+      return;
+    }
+    if (!isSignedMoney(adjustService)) {
+      setError('The service charge adjustment is an amount like 30.00, or -15.00 to go cheaper');
+      return;
+    }
+    if (!isSignedMoney(adjustRate)) {
+      setError('The rate adjustment is an amount like 0.0200, or -0.0100 to go cheaper');
       return;
     }
     setError(null);
@@ -977,7 +1049,11 @@ function AddZoneDialog({
     try {
       const zone = await create.mutateAsync({
         label: label.trim(),
-        copyRatesFromZoneId: copyFrom,
+        // Null is the first zone: there is nothing to copy from yet.
+        copyRatesFromZoneId: copyFrom === '' ? null : copyFrom,
+        // Omitted, not empty: the server reads absence as "copy verbatim".
+        ...(adjustService.trim() === '' ? {} : { adjustServiceCharge: adjustService.trim() }),
+        ...(adjustRate.trim() === '' ? {} : { adjustRatePerM2: adjustRate.trim() }),
       });
       reset();
       onClose();
@@ -1025,28 +1101,123 @@ function AddZoneDialog({
           )}
         </Field>
 
-        <Field
-          id="zone-copy"
-          label="Copy prices from"
-          required
-          hint="Each rate card copies its own figures for that zone, so per-customer discounts carry across."
-        >
-          {(aria) => (
-            <Select
-              {...aria}
-              value={copyFrom}
-              onChange={(event) => {
-                setCopyFrom(event.target.value);
-              }}
-            >
-              {live.map((zone) => (
-                <option key={zone.id} value={zone.id}>
-                  {zone.label}
-                </option>
-              ))}
-            </Select>
-          )}
-        </Field>
+        {/*
+          Absent on the FIRST zone, because there is nothing to copy. Showing an
+          empty required dropdown there is how this screen used to deadlock — it
+          asked for a choice it could not offer.
+        */}
+        {live.length === 0 ? (
+          <Alert variant="neutral" title="This is your first zone">
+            There is nothing to copy prices from yet. Create it, then add a rate card — the card
+            will ask for this zone's service charge and rate per m².
+          </Alert>
+        ) : (
+          <Field
+            id="zone-copy"
+            label="Copy prices from"
+            required
+            hint="Each rate card copies its own figures for that zone, so per-customer discounts carry across."
+          >
+            {(aria) => (
+              <Select
+                {...aria}
+                value={copyFrom}
+                onChange={(event) => {
+                  setCopyFrom(event.target.value);
+                }}
+              >
+                {live.map((zone) => (
+                  <option key={zone.id} value={zone.id}>
+                    {zone.label}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        )}
+
+        {/*
+          ── Why the adjustment is here and not on the Rate cards tab ────────
+          Because a copied zone is rarely priced identically to its source, and
+          correcting it afterwards meant issuing a NEW SCHEDULE on every card —
+          seven dated saves to fix one number. A zone that does not exist yet
+          has priced nothing, so there is no history to protect and its opening
+          figures can simply be set here.
+
+          A SHIFT, not a price: every card moves by the same amount and keeps
+          its own negotiated figure, so a discounted customer stays discounted.
+        */}
+        {/* Nothing to adjust when nothing is being copied. */}
+        <div className={cn('grid grid-cols-1 gap-4 sm:grid-cols-2', live.length === 0 && 'hidden')}>
+          <Field
+            id="zone-adjust-service"
+            label="Adjust service charge"
+            hint="Blank copies it unchanged. −15.00 to go cheaper."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={adjustService}
+                inputMode="decimal"
+                className="font-mono"
+                placeholder="30.00"
+                onChange={(event) => {
+                  setAdjustService(event.target.value);
+                }}
+              />
+            )}
+          </Field>
+
+          <Field
+            id="zone-adjust-rate"
+            label="Adjust rate per m²"
+            hint="Blank copies it unchanged. Four decimals."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={adjustRate}
+                inputMode="decimal"
+                className="font-mono"
+                placeholder="0.0200"
+                onChange={(event) => {
+                  setAdjustRate(event.target.value);
+                }}
+              />
+            )}
+          </Field>
+        </div>
+
+        {preview.length > 0 && (
+          <div className="overflow-hidden rounded-lg border border-border">
+            <table className="w-full text-sm">
+              <thead className="border-b border-border bg-muted/40 text-left text-xs text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2">Rate card</th>
+                  <th className="px-3 py-2 text-right">Service charge</th>
+                  <th className="px-3 py-2 text-right">Rate per m²</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.map((row) => (
+                  <tr key={row.id} className="border-b border-border/60 last:border-b-0">
+                    <td className="px-3 py-1.5">{row.label}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-xs tabular-nums">
+                      <span className="text-muted-foreground">{row.from.serviceCharge}</span>
+                      {' → '}
+                      <span className="font-semibold">{row.serviceCharge ?? '—'}</span>
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono text-xs tabular-nums">
+                      <span className="text-muted-foreground">{row.from.ratePerM2}</span>
+                      {' → '}
+                      <span className="font-semibold">{row.ratePerM2 ?? '—'}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
 
         <Alert variant="neutral" title="Nothing can be booked here yet">
           A job is zoned by its suburb, so this zone stays empty until a suburb points at it. Add or
@@ -1055,6 +1226,47 @@ function AddZoneDialog({
       </div>
     </Dialog>
   );
+}
+
+/**
+ * Ten-thousandths, because a rate carries four decimals and cents cannot hold
+ * them. `null` for anything that is not a decimal string; an empty box is a
+ * zero shift, not an error.
+ */
+function tenThousandths(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === '') return 0;
+  if (!/^-?\d+(\.\d{1,4})?$/.test(trimmed)) return null;
+
+  const negative = trimmed.startsWith('-');
+  const [whole = '0', fraction = ''] = (negative ? trimmed.slice(1) : trimmed).split('.');
+  const units = Number(whole) * 10_000 + Number(fraction.padEnd(4, '0'));
+  return negative ? -units : units;
+}
+
+function isSignedMoney(value: string): boolean {
+  return tenThousandths(value) !== null;
+}
+
+/**
+ * The shift the server is about to apply, computed here for the preview.
+ *
+ * ⚠️ Mirrors `shiftMoney` in the API's `lib/money.ts`, clamp included. A
+ * preview that disagreed with what gets saved would be worse than no preview:
+ * somebody would check it, see the number they wanted, and be wrong.
+ */
+function shiftedMoney(value: string, delta: string, decimals: 2 | 4): string | null {
+  const base = tenThousandths(value);
+  const move = tenThousandths(delta);
+  if (base === null || move === null) return null;
+
+  const shifted = Math.max(base + move, 0);
+  if (decimals === 4) {
+    return `${String(Math.floor(shifted / 10_000))}.${String(shifted % 10_000).padStart(4, '0')}`;
+  }
+
+  const cents = Math.round(shifted / 100);
+  return `${String(Math.floor(cents / 100))}.${String(cents % 100).padStart(2, '0')}`;
 }
 
 function RateCardRow({
@@ -1948,6 +2160,7 @@ function AdditionalServicesCard({ services }: { services: readonly AdditionalSer
       </Card>
 
       <NewServiceDialog
+        configured={services.map((service) => service.code)}
         open={adding}
         onClose={() => {
           setAdding(false);
@@ -2115,9 +2328,20 @@ function ServiceRow({ service }: { service: AdditionalServiceSetting }) {
   );
 }
 
-function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+function NewServiceDialog({
+  configured,
+  open,
+  onClose,
+}: {
+  /** Codes already on the price list — a second row for one is a duplicate. */
+  configured: readonly string[];
+  open: boolean;
+  onClose: () => void;
+}) {
   const toast = useToast();
   const create = useCreateAdditionalService();
+
+  const unconfigured = CHARGE_CODES.filter((chargeCode) => !configured.includes(chargeCode));
 
   const [code, setCode] = useState('');
   const [label, setLabel] = useState('');
@@ -2136,8 +2360,8 @@ function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => voi
   };
 
   const submit = async () => {
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(code.trim())) {
-      setError('The code is lowercase letters, digits and hyphens — “site-access-fee”.');
+    if (code === '') {
+      setError('Choose which charge this is — the list is what the application can apply.');
       return;
     }
     if (label.trim() === '') {
@@ -2201,6 +2425,19 @@ function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => voi
           </Alert>
         )}
 
+        {/*
+          ── Why this is a list and not a text box ───────────────────────────
+          It WAS a text box, and it accepted anything slug-shaped —
+          "site-access-fee" saved cleanly, appeared in the list, and could never
+          be applied to a job. `jobcharges.code` is an enum in Mongo and in
+          `ChargeCodeSchema`, so a charge configured outside that set has a
+          price, a name, and no way of ever reaching an invoice.
+
+          The set is fixed because each code is reached BY NAME somewhere — the
+          driver's contamination button, the futile queue, the quote. Adding a
+          genuinely new kind of charge is a code change, and pretending
+          otherwise here produced a list item that silently did nothing.
+        */}
         <Field
           id="svc-code"
           label="Code"
@@ -2208,17 +2445,25 @@ function NewServiceDialog({ open, onClose }: { open: boolean; onClose: () => voi
           hint="Permanent — it identifies the charge on invoices and in Xero."
         >
           {(aria) => (
-            <Input
+            <Select
               {...aria}
               value={code}
-              placeholder="site-access-fee"
               className="font-mono"
-              autoComplete="off"
-              spellCheck={false}
               onChange={(event) => {
-                setCode(event.target.value.toLowerCase());
+                setCode(event.target.value);
+                // The name follows the code, then stays editable: nobody wants
+                // to retype "Tipping fuel levy (7.5%)", and everybody wants to
+                // be able to.
+                setLabel(CHARGE_CODE_LABELS[event.target.value as ChargeCode] ?? '');
               }}
-            />
+            >
+              <option value="">Choose a charge…</option>
+              {unconfigured.map((chargeCode) => (
+                <option key={chargeCode} value={chargeCode}>
+                  {chargeCode} — {CHARGE_CODE_LABELS[chargeCode]}
+                </option>
+              ))}
+            </Select>
           )}
         </Field>
 
@@ -2384,13 +2629,14 @@ function InvoicingSection({ settings }: { settings: Settings }) {
 
   return (
     <Tabs variant="pill" value={section} onValueChange={setSection}>
-      <TabsList label="Invoicing sections">
+      <TabsList label="Invoicing and certificate sections">
         <TabsTrigger value="workflow">Workflow</TabsTrigger>
         <TabsTrigger value="business">Your business</TabsTrigger>
         <TabsTrigger value="payment">Payment details</TabsTrigger>
         <TabsTrigger value="templates" badge={settings.invoicing.templates.length}>
           Templates
         </TabsTrigger>
+        <TabsTrigger value="certificates">Certificates</TabsTrigger>
       </TabsList>
 
       <TabsPanel value="workflow">
@@ -2492,7 +2738,8 @@ function InvoicingSection({ settings }: { settings: Settings }) {
           <CardHeader>
             <CardTitle>Your business, as it prints</CardTitle>
             <CardDescription>
-              These appear on every invoice PDF. Leave a field blank and it is left off the page.
+              These appear on every invoice and every Certificate of Recycling. Leave a field blank
+              and it is left off the page.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -2674,6 +2921,63 @@ function InvoicingSection({ settings }: { settings: Settings }) {
       </TabsPanel>
 
       {/*
+        M9.5 — the signature block, and nothing else.
+
+        There is deliberately no layout control here. Scope Call 1 keeps
+        branding in scope and puts layout AUTHORING in v1.1, and Risk 5 names
+        the WYSIWYG designer as the biggest single scope trap in the project.
+        Everything else a certificate prints comes from "Your business".
+      */}
+      <TabsPanel value="certificates" className="space-y-4">
+        <SignatureCard signatureUrl={settings.invoicing.certificateSignatureUrl} />
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Who signs the certificate</CardTitle>
+            <CardDescription>
+              Printed under the signature. Leave the name blank and no signature block appears at
+              all — which is better than a rule with nothing above it.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field id="certificate-signature-name" label="Name">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.certificateSignatureName}
+                    placeholder="Matt Ryan"
+                    onChange={(event) => {
+                      setDraft({ ...draft, certificateSignatureName: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+              <Field id="certificate-signature-title" label="Title">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={draft.certificateSignatureTitle}
+                    placeholder="Director"
+                    onChange={(event) => {
+                      setDraft({ ...draft, certificateSignatureTitle: event.target.value });
+                    }}
+                  />
+                )}
+              </Field>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Alert variant="info" title="What else is on a certificate">
+          The tonnage is the weight recorded on collection, reconciled against the weighbridge
+          docket — never derived from the square metres used for pricing. Only crane-weighed pickups
+          produce one: an apportioned weight does not meet the compliance bar these documents are
+          read against.
+        </Alert>
+      </TabsPanel>
+
+      {/*
         ⚠️ OUTSIDE the panels on purpose — see the note on the draft. One form
         spans three of these tabs, so the bar has to stay on screen whichever of
         them the administrator finishes on.
@@ -2839,6 +3143,163 @@ function LogoCard({ logoUrl }: { logoUrl: string | null }) {
         title="Remove the logo?"
         description="Invoices will print the company name as text instead. Invoices already rendered keep the logo they were drawn with."
         confirmLabel="Remove logo"
+        tone="destructive"
+        pending={remove.isPending}
+      />
+    </Card>
+  );
+}
+
+/* ── The certificate signature (M9.5 · F52) ──────────────────────────────── */
+
+/**
+ * The signature every Certificate of Recycling carries.
+ *
+ * ── Why this mirrors the logo card rather than sharing it ────────────────
+ * The two are the same shape and one save apart in the code, and they were
+ * nearly folded into one component. They are not, because the copy is the
+ * whole job: every sentence on this card is about a compliance document an
+ * assessor reads, and every sentence on the logo card is about an invoice an
+ * accounts clerk reads. A shared component would take both sets of words as
+ * props, which is the same duplication wearing a parameter.
+ *
+ * ⚠️ Like the logo, this does NOT save with the form below it. The bytes go
+ * straight to storage and the setting changes on confirmation, so an upload
+ * abandoned halfway leaves the previous signature exactly where it was.
+ */
+function SignatureCard({ signatureUrl }: { signatureUrl: string | null }) {
+  const toast = useToast();
+  const upload = useUploadCertificateSignature();
+  const remove = useRemoveCertificateSignature();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
+  const choose = async (file: File | undefined) => {
+    if (!file) return;
+
+    /*
+     * Checked here as well as on the server, so somebody who picks a
+     * photograph of a signature is told at the button rather than after the
+     * upload.
+     */
+    if (!['image/png', 'image/jpeg', 'image/jpg'].includes(file.type)) {
+      toast.error('That file type cannot be printed', 'Use a PNG or a JPEG.');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('That image is too large', 'Keep it under 2 MB.');
+      return;
+    }
+
+    try {
+      await upload.mutateAsync(file);
+      toast.success('Signature updated', 'It will appear on the next certificate issued.');
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  const submitRemove = async () => {
+    try {
+      await remove.mutateAsync();
+      setConfirmRemove(false);
+      toast.success('Signature removed', 'Certificates will print the name over a rule instead.');
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Signature</CardTitle>
+        <CardDescription>
+          A scanned signature, printed above the name. Optional — without one the name prints over a
+          rule, which is what most of these documents carry anyway.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-wrap items-center gap-4">
+          {/* A real preview: the only question here is whether that is the right mark. */}
+          <span className="flex h-24 w-40 shrink-0 items-center justify-center rounded-lg border border-border bg-muted/30 p-2">
+            {signatureUrl === null ? (
+              <PenLineIcon className="size-8 text-muted-foreground/50" aria-hidden />
+            ) : (
+              <img
+                src={signatureUrl}
+                alt="The signature as it appears on certificates"
+                className="max-h-full max-w-full object-contain"
+              />
+            )}
+          </span>
+
+          <span className="flex min-w-0 flex-col gap-2">
+            <span className="text-sm text-muted-foreground">
+              {signatureUrl === null
+                ? 'No signature image — certificates print the name over a rule.'
+                : 'This is what your certificates carry today.'}
+            </span>
+
+            <span className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={upload.isPending}
+                onClick={() => {
+                  inputRef.current?.click();
+                }}
+              >
+                {upload.isPending && <Spinner className="text-current" />}
+                <UploadIcon aria-hidden />
+                {signatureUrl === null ? 'Upload a signature' : 'Replace'}
+              </Button>
+
+              {signatureUrl !== null && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={remove.isPending}
+                  onClick={() => {
+                    setConfirmRemove(true);
+                  }}
+                >
+                  <Trash2Icon aria-hidden />
+                  Remove
+                </Button>
+              )}
+            </span>
+
+            <span className="text-xs text-muted-foreground">
+              PNG or JPEG, up to 2 MB. A transparent PNG sits best on the page.
+            </span>
+          </span>
+        </div>
+
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png,image/jpeg"
+          className="sr-only"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            // Cleared so picking the SAME file again still fires a change.
+            event.target.value = '';
+            void choose(file);
+          }}
+        />
+      </CardContent>
+
+      <ConfirmDialog
+        open={confirmRemove}
+        onCancel={() => {
+          setConfirmRemove(false);
+        }}
+        onConfirm={() => void submitRemove()}
+        title="Remove the signature?"
+        description="Certificates will print the name over a rule instead. Certificates already issued keep the signature they were drawn with — their figures and their document are frozen."
+        confirmLabel="Remove signature"
         tone="destructive"
         pending={remove.isPending}
       />
@@ -3135,21 +3596,41 @@ function InvoiceTemplateDialog({
             )}
           </Field>
 
+          {/*
+            A colour WHEEL, not a hex box.
+
+            Whoever sets this is choosing how an invoice LOOKS, and `#1a4d3a`
+            is not a thing anybody knows by heart — with a typed box the first
+            sight of the colour was on a rendered document, which is the same
+            trap the Preview button was added to close. The picker is the
+            browser's own, so it costs nothing and works on a phone.
+
+            ⚠️ The hex is still SHOWN. It is what a brand guide quotes and what
+            support asks for; it is simply no longer the thing being typed.
+            Lower-cased on the way in because `<input type="color">` reports
+            `#RRGGBB` in some browsers and the stored value should not differ
+            between them for the same colour.
+          */}
           <Field
             id="template-accent"
             label="Accent colour"
             hint="The heading rule and table accent."
           >
             {(aria) => (
-              <Input
-                {...aria}
-                value={form.accentColour}
-                placeholder="#1a4d3a"
-                className="font-mono"
-                onChange={(event) => {
-                  setForm({ ...form, accentColour: event.target.value });
-                }}
-              />
+              <span className="flex items-center gap-3">
+                <input
+                  {...aria}
+                  type="color"
+                  value={form.accentColour.toLowerCase()}
+                  className="size-10 shrink-0 cursor-pointer rounded-md border border-border bg-transparent p-1"
+                  onChange={(event) => {
+                    setForm({ ...form, accentColour: event.target.value.toLowerCase() });
+                  }}
+                />
+                <span className="font-mono text-sm text-muted-foreground">
+                  {form.accentColour.toLowerCase()}
+                </span>
+              </span>
             )}
           </Field>
         </div>

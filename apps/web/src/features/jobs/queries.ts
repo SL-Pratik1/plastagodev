@@ -1,4 +1,4 @@
-import type { ExceptionReason, JobCommentDraft, JobDraft } from '@plastago/shared';
+import type { ExceptionReason, JobChargeDraft, JobCommentDraft, JobDraft } from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
 import { useServices } from '@/services/services-context';
@@ -127,6 +127,29 @@ export function useAddJobComment() {
       jobs.addComment(id, draft),
     onSuccess: (_comment, variables) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs.detail(variables.id) });
+    },
+  });
+}
+
+/**
+ * M6.5 — apply a configured extra to a job.
+ *
+ * ⚠️ Invalidates MORE than the job, unlike the comment above, and each one is
+ * load-bearing. A charge is money: it changes what the job is worth, it may
+ * land in the approvals queue (which is a badge in the sidebar), and it changes
+ * what an invoice for this job would come to. A screen still showing the old
+ * total after adding $90 reads as the click having failed, and the usual
+ * response to that is to click again.
+ */
+export function useAddJobCharge() {
+  const { jobs } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id, draft }: { id: string; draft: JobChargeDraft }) => jobs.addCharge(id, draft),
+    onSuccess: (_charge, variables) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.jobs.detail(variables.id) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.queues.all });
     },
   });
 }

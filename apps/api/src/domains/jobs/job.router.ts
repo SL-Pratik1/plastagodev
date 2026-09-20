@@ -1,4 +1,4 @@
-import { JobCommentDraftSchema, JobDraftSchema } from '@plastago/shared';
+import { JobChargeDraftSchema, JobCommentDraftSchema, JobDraftSchema } from '@plastago/shared';
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
 import { requireAuth, requireRole } from '../../middleware/require-auth.js';
@@ -63,11 +63,7 @@ jobRouter.get('/', validate({ query: ListJobsQuerySchema }), asyncHandler(jobCon
  */
 jobRouter.post('/', validate({ body: JobDraftSchema }), asyncHandler(jobController.create));
 
-jobRouter.post(
-  '/preview',
-  validate({ body: JobDraftSchema }),
-  asyncHandler(jobController.preview),
-);
+jobRouter.post('/preview', validate({ body: JobDraftSchema }), asyncHandler(jobController.preview));
 
 /**
  * M2.12 — the purchase orders a pickup can be booked against.
@@ -107,3 +103,15 @@ jobRouter.post(
   asyncHandler(jobController.addComment),
 );
 
+/**
+ * M6.5 — the office applies a configured extra to a job.
+ *
+ * Office-only, and refused in the service rather than here: a customer
+ * administrator can legitimately reach the other three routes above for their
+ * own jobs, so the guard is about the ACT, not the route.
+ */
+jobRouter.post(
+  '/:id/charges',
+  validate({ params: JobIdParamsSchema, body: JobChargeDraftSchema }),
+  asyncHandler(jobController.addCharge),
+);

@@ -363,6 +363,49 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
       );
     },
 
+    /* ── The certificate signature (M9.5 · F52) ────────────────────────── */
+
+    uploadCertificateSignature: async (file: File) => {
+      const path = `${base}/invoicing/certificate-signature`;
+
+      const ticket = await viaService(() =>
+        api.request(path, {
+          method: 'POST',
+          body: { contentType: file.type, contentLength: file.size },
+          schema: PresignedUploadSchema,
+        }),
+      );
+
+      const response = await fetch(ticket.uploadUrl, {
+        method: 'PUT',
+        headers: ticket.headers,
+        body: file,
+      });
+
+      if (!response.ok) {
+        throw new Error(`The signature could not be uploaded (${String(response.status)})`);
+      }
+
+      const { certificateSignatureUrl } = await viaService(() =>
+        api.request(path, {
+          method: 'PUT',
+          body: { key: ticket.key },
+          schema: SignatureConfirmedSchema,
+        }),
+      );
+
+      return certificateSignatureUrl;
+    },
+
+    removeCertificateSignature: async () => {
+      await viaService(() =>
+        api.request(`${base}/invoicing/certificate-signature`, {
+          method: 'DELETE',
+          schema: NoContentSchema,
+        }),
+      );
+    },
+
     /* ── Rate cards (M6.1, M6.2) ───────────────────────────────────────── */
 
     createZone: (input: ZoneCreate) =>
@@ -525,5 +568,6 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
 
 /** What the confirm answers with — the link to the logo now in force. */
 const LogoConfirmedSchema = z.object({ logoUrl: z.string().nullable() });
+const SignatureConfirmedSchema = z.object({ certificateSignatureUrl: z.string().nullable() });
 
 

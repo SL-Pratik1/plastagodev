@@ -152,19 +152,24 @@ export const portalCertificateController = {
     );
   },
 
-  /** 202: the render is queued, not done. */
+  /**
+   * 200 with `{ url }` — the document exists and this is a link to it.
+   *
+   * Was a 202 back when the render was going to be queued. It is not: the PDF
+   * is produced at issue, so by the time a customer can see the certificate at
+   * all there is a file to hand them, and an "accepted" with nothing to
+   * download would be a lie about work nobody is doing.
+   */
   requestCertificatePdf: async (
     req: ValidatedRequest<{ params: typeof PortalCertificateIdParamsSchema }>,
     res: Response,
   ): Promise<void> => {
-    res
-      .status(202)
-      .json(
-        await portalCertificateService.requestCertificatePdf(
-          req.validated.params.id,
-          callerFrom(req),
-        ),
-      );
+    res.json(
+      await portalCertificateService.requestCertificatePdf(
+        req.validated.params.id,
+        callerFrom(req),
+      ),
+    );
   },
 
   /**

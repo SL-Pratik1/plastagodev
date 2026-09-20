@@ -11,6 +11,7 @@ import {
   usePortalCertificates,
   usePortalScope,
 } from '@/features/portal/queries';
+import { useDocumentTab } from '@/features/documents/use-document-tab';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatWeight } from '@/lib/format';
 
@@ -57,19 +58,24 @@ export function PortalCertificatesPage() {
   const controller = useListQuery({ filterKeys: FILTER_KEYS, defaultPageSize: 20 });
   const { data, error, isPending, isFetching, refetch } = usePortalCertificates(controller.query);
   const requestPdf = usePortalCertificatePdf();
+  const openTab = useDocumentTab();
 
   const capturesWeight = scope.data?.capturesWeight ?? false;
   const rows = data?.data ?? [];
   const issued = rows.filter((row) => row.state === 'issued');
   const totalTonnes = issued.reduce((sum, row) => sum + row.tonnesDiverted, 0);
 
+  /*
+   * ⚠️ `openTab()` runs BEFORE the await, while the click is still the reason
+   * anything is happening — see `useDocumentTab`. Reserving it afterwards is
+   * the call a popup blocker eats, and the button would do nothing.
+   */
   const download = async (certificate: Certificate) => {
+    const deliver = openTab();
+
     try {
-      await requestPdf.mutateAsync(certificate.id);
-      toast.success(
-        `${certificate.reference} on the way`,
-        'The PDF will appear in your downloads shortly.',
-      );
+      const { url } = await requestPdf.mutateAsync(certificate.id);
+      deliver(url);
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);

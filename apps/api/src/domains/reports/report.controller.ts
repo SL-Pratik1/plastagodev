@@ -65,4 +65,19 @@ export const reportController = {
   ): Promise<void> => {
     res.json(await reportService.issueCertificate(req.validated.params.id, callerFrom(req)));
   },
+
+  /** `{ url }` — a short-lived link, never the storage key. */
+  certificatePdf: async (
+    req: ValidatedRequest<{ params: typeof CertificateIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await reportService.certificatePdfUrl(req.validated.params.id, callerFrom(req)));
+  },
+
+  resendCertificate: async (
+    req: ValidatedRequest<{ params: typeof CertificateIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await reportService.resendCertificate(req.validated.params.id, callerFrom(req)));
+  },
 };

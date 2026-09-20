@@ -3,7 +3,9 @@ import type {
   MapPin,
   RunSheetStop,
   BrandId,
+  ChargeApprovalState,
   ChargeCode,
+  ChargeSource,
   ExceptionReason,
   FreightItem,
   Job,
@@ -15,6 +17,7 @@ import type {
   JobPhoto,
   JobStatus,
   LocationSource,
+  Money,
   PageMeta,
   ServiceLevel,
   WeightBasis,
@@ -351,7 +354,7 @@ export const jobRepository = {
      */
     const [charges, events, photos, documents, comments, preStart, riskAssessment] =
       await Promise.all([
-        JobChargeModel.find({ jobId: row._id }).sort({ raisedAt: 1 }).lean(),
+        JobChargeModel.find({ jobId: row._id }).sort({ raisedAt: 1 }).lean<RawJobCharge[]>(),
         JobEventModel.find({ jobId: row._id }).sort({ at: 1 }).lean(),
         JobPhotoModel.find({ jobId: row._id }).sort({ takenAt: 1 }).lean(),
         JobDocumentModel.find({ jobId: row._id }).sort({ uploadedAt: 1 }).lean(),
@@ -372,57 +375,33 @@ export const jobRepository = {
       exceptionNote: row.exceptionNote,
       arrivedAt: row.arrivedAt ? row.arrivedAt.toISOString() : null,
       onSiteMinutes: row.onSiteMinutes,
-      charges: charges.map(
-        (charge): JobCharge => ({
-          id: charge._id.toHexString(),
-          code: charge.code,
-          description: charge.description,
-          quantity: charge.quantity,
-          unitRate: fromDecimal128(charge.unitRate),
-          amount: fromDecimal128(charge.amount),
-          source: charge.source,
-          approvalState: charge.approvalState,
-          raisedBy: charge.raisedBy ?? null,
-          raisedAt: charge.raisedAt.toISOString(),
-          photoCount: charge.photoCount,
-          note: charge.note ?? null,
-          decidedBy: charge.decidedBy ?? null,
-          decidedAt: charge.decidedAt ? charge.decidedAt.toISOString() : null,
-          decisionNote: charge.decisionNote ?? null,
-        }),
-      ),
-      events: events.map(
-        (event): JobEvent => ({
-          id: event._id.toHexString(),
-          at: event.at.toISOString(),
-          label: event.label,
-          actor: event.actor ?? '',
-          status: event.status ?? null,
-          detail: event.detail ?? null,
-          latitude: event.latitude ?? null,
-          longitude: event.longitude ?? null,
-        }),
-      ),
-      photos: photos.map(
-        (photo): JobPhoto => ({
-          id: photo._id.toHexString(),
-          caption: photo.caption,
-          takenAt: photo.takenAt.toISOString(),
-          takenBy: photo.takenBy ?? '',
-          latitude: photo.latitude ?? null,
-          longitude: photo.longitude ?? null,
-        }),
-      ),
-      documents: documents.map(
-        (document): JobDocument => ({
-          id: document._id.toHexString(),
-          name: document.name,
-          kind: document.kind,
-          uploadedAt: document.uploadedAt.toISOString(),
-          uploadedBy: document.uploadedBy ?? '',
-          sizeKb: document.sizeKb,
-        }),
-      ),
+      charges: charges.map(toJobCharge),
+      events: events.map((event): JobEvent => ({
+        id: event._id.toHexString(),
+        at: event.at.toISOString(),
+        label: event.label,
+        actor: event.actor ?? '',
+        status: event.status ?? null,
+        detail: event.detail ?? null,
+        latitude: event.latitude ?? null,
+        longitude: event.longitude ?? null,
+      })),
+      photos: photos.map((photo): JobPhoto => ({
+        id: photo._id.toHexString(),
+        caption: photo.caption,
+        takenAt: photo.takenAt.toISOString(),
+        takenBy: photo.takenBy ?? '',
+        latitude: photo.latitude ?? null,
+        longitude: photo.longitude ?? null,
+      })),
+      documents: documents.map((document): JobDocument => ({
+        id: document._id.toHexString(),
+        name: document.name,
+        kind: document.kind,
+        uploadedAt: document.uploadedAt.toISOString(),
+        uploadedBy: document.uploadedBy ?? '',
+        sizeKb: document.sizeKb,
+      })),
       comments: comments.map(toComment),
       invoiceNumber: row.invoiceNumber,
       invoicedAt: row.invoicedAt ? row.invoicedAt.toISOString() : null,
@@ -521,7 +500,14 @@ export const jobRepository = {
   async findSummary(
     id: string,
     scope: JobScope,
-  ): Promise<{ id: string; jobNumber: number; status: JobStatus; driverId: string | null } | null> {
+  ): Promise<{
+    id: string;
+    jobNumber: number;
+    status: JobStatus;
+    driverId: string | null;
+    /** Ex-GST, and the base a percentage charge is a percentage OF. */
+    totalExGst: Money;
+  } | null> {
     if (!mongoose.isValidObjectId(id)) return null;
 
     const filter: JobFilter = { _id: new mongoose.Types.ObjectId(id) };
@@ -531,7 +517,8 @@ export const jobRepository = {
       jobNumber: 1,
       status: 1,
       driverId: 1,
-    }).lean<Pick<RawJob, '_id' | 'jobNumber' | 'status' | 'driverId'>>();
+      totalExGst: 1,
+    }).lean<Pick<RawJob, '_id' | 'jobNumber' | 'status' | 'driverId' | 'totalExGst'>>();
 
     if (!row) return null;
 
@@ -540,7 +527,18 @@ export const jobRepository = {
       jobNumber: row.jobNumber,
       status: row.status,
       driverId: row.driverId ? row.driverId.toHexString() : null,
+      totalExGst: fromDecimal128(row.totalExGst),
     };
+  },
+
+  /** One charge, freshly read, so a create can answer with what it wrote. */
+  async findCharge(id: string): Promise<JobCharge | null> {
+    if (!mongoose.isValidObjectId(id)) return null;
+
+    const row = await JobChargeModel.findById(id).lean<RawJobCharge>();
+    if (!row) return null;
+
+    return toJobCharge(row);
   },
 
   async create(input: CreateJobInput): Promise<JobListItem> {
@@ -825,9 +823,96 @@ export const jobRepository = {
     const names = await JobModel.distinct('builderName', { builderName: { $nin: ['', '—'] } });
     return names.sort((a, b) => a.localeCompare(b));
   },
+
+  /**
+   * An extra the office has added to a job (M6.5).
+   *
+   * ⚠️ `source: 'office'`, and that is not cosmetic. Invoicing SPLITS on this
+   * field: a `driver` charge goes onto the additional-charges invoice with no
+   * PO number and into the awaiting-PO queue, because it is work the builder
+   * did not order. An office charge is the office's own decision and follows
+   * the same route — see `billableCharges` — so the value has to say which of
+   * the two a reader is looking at.
+   */
+  async addOfficeCharge(input: {
+    jobId: string;
+    code: ChargeCode;
+    description: string;
+    quantity: number;
+    unitRate: Money;
+    amount: Money;
+    approvalState: ChargeApprovalState;
+    raisedBy: string;
+    note: string | null;
+  }): Promise<string> {
+    const created = await JobChargeModel.create({
+      jobId: new mongoose.Types.ObjectId(input.jobId),
+      code: input.code,
+      description: input.description,
+      quantity: input.quantity,
+      unitRate: toDecimal128(input.unitRate),
+      amount: toDecimal128(input.amount),
+      source: 'office',
+      approvalState: input.approvalState,
+      raisedBy: input.raisedBy,
+      raisedAt: new Date(),
+      // Nobody stood at a fence to photograph this one.
+      photoCount: 0,
+      note: input.note,
+    });
+
+    return created._id.toHexString();
+  },
 };
 
 /* ── Mapping ─────────────────────────────────────────────────────────────── */
+
+/** One `jobcharges` row as Mongo hands it back. */
+interface RawJobCharge {
+  _id: mongoose.Types.ObjectId;
+  code: ChargeCode;
+  description: string;
+  quantity: number;
+  unitRate: mongoose.Types.Decimal128;
+  amount: mongoose.Types.Decimal128;
+  source: ChargeSource;
+  approvalState: ChargeApprovalState;
+  raisedBy?: string | null;
+  raisedAt: Date;
+  photoCount: number;
+  note?: string | null;
+  decidedBy?: string | null;
+  decidedAt?: Date | null;
+  decisionNote?: string | null;
+}
+
+/**
+ * A stored charge on the wire.
+ *
+ * Shared by the detail read and by the single-charge read a create answers
+ * with, so the two cannot drift — a charge that came back from `POST` shaped
+ * differently from the same charge on the next `GET` is a bug that only shows
+ * up after a refresh.
+ */
+function toJobCharge(charge: RawJobCharge): JobCharge {
+  return {
+    id: charge._id.toHexString(),
+    code: charge.code,
+    description: charge.description,
+    quantity: charge.quantity,
+    unitRate: fromDecimal128(charge.unitRate),
+    amount: fromDecimal128(charge.amount),
+    source: charge.source,
+    approvalState: charge.approvalState,
+    raisedBy: charge.raisedBy ?? null,
+    raisedAt: charge.raisedAt.toISOString(),
+    photoCount: charge.photoCount,
+    note: charge.note ?? null,
+    decidedBy: charge.decidedBy ?? null,
+    decidedAt: charge.decidedAt ? charge.decidedAt.toISOString() : null,
+    decisionNote: charge.decisionNote ?? null,
+  };
+}
 
 function toListItem(
   row: RawJob,
@@ -1191,9 +1276,7 @@ export async function setInvoiceStatus(
     {
       $set: {
         invoiceStatus: status,
-        ...(invoiceNumber === undefined
-          ? {}
-          : { invoiceNumber, invoicedAt: new Date() }),
+        ...(invoiceNumber === undefined ? {} : { invoiceNumber, invoicedAt: new Date() }),
       },
     },
   );

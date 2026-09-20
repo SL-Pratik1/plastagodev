@@ -255,6 +255,93 @@ export const settingsService = {
     log.info('invoice logo removed');
   },
 
+  /* ── The certificate signature (M9.5 · F52) ────────────────────────────── */
+
+  /*
+   * ── Why this repeats the logo's three steps rather than sharing them ─────
+   * It very nearly does share them, and that is the point of the near-miss:
+   * the two differ in the one place that matters, which is the key segment
+   * each will accept back from a client. Parameterising that into a single
+   * pair of methods makes the guard a variable, and a guard whose value
+   * arrives from the caller is not a guard — it is how a template PDF ends up
+   * stored as the logo, which is the exact bug the segment test was added to
+   * stop. Two short, explicit paths, each naming its own segment.
+   */
+
+  async presignCertificateSignature(
+    input: LogoUploadRequest,
+    caller: Caller,
+  ): Promise<PresignedUpload> {
+    assertWriter(caller);
+
+    const key = buildKey({
+      scope: 'settings',
+      ownerId: SETTINGS_OWNER,
+      kind: 'certificate-signature',
+      contentType: input.contentType,
+    });
+
+    return getStorage().presignUpload({
+      key,
+      contentType: input.contentType,
+      contentLength: input.contentLength,
+    });
+  },
+
+  /**
+   * Confirm the bytes landed, and point the certificates at them.
+   *
+   * ⚠️ Read back before it is accepted, exactly as the logo is: a key that
+   * 404s means the PUT never completed, and storing it would replace a working
+   * signature with a blank space on every certificate from then on.
+   */
+  async confirmCertificateSignature(key: string, caller: Caller): Promise<string | null> {
+    assertWriter(caller);
+
+    if (!SIGNATURE_KEY_SEGMENT.test(key)) {
+      throw AppError.validation('That is not a certificate signature', [
+        { path: 'key', message: 'Upload the signature again' },
+      ]);
+    }
+
+    try {
+      await getStorage().get(key);
+    } catch {
+      throw AppError.validation('The signature did not finish uploading', [
+        { path: 'key', message: 'Try the upload again' },
+      ]);
+    }
+
+    const previous = await settingsRepository.certificateSignatureKey();
+    await settingsRepository.setCertificateSignatureKey(key);
+
+    // New one stored first — see the note on the logo's ordering.
+    if (previous !== '' && previous !== key) await removeQuietly(previous);
+
+    log.info({ key }, 'certificate signature updated');
+    return (await settingsRepository.get()).invoicing.certificateSignatureUrl;
+  },
+
+  /**
+   * Take the signature image off the certificates.
+   *
+   * The NAME stays. Removing the image leaves the name printed over a rule,
+   * which is a signed document; clearing both would leave one that looks
+   * unsigned, and that is a separate decision the administrator makes on the
+   * form.
+   */
+  async removeCertificateSignature(caller: Caller): Promise<void> {
+    assertWriter(caller);
+
+    const previous = await settingsRepository.certificateSignatureKey();
+    if (previous === '') return;
+
+    await settingsRepository.setCertificateSignatureKey('');
+    await removeQuietly(previous);
+
+    log.info('certificate signature removed');
+  },
+
   /* ── Invoice templates (M7.5) ──────────────────────────────────────────── */
 
   async createInvoiceTemplate(
@@ -425,8 +512,35 @@ export const settingsService = {
       );
     }
 
-    const source = await settingsRepository.findZone(input.copyRatesFromZoneId);
-    if (!source) {
+    /*
+     * ── The first zone is the exception, and only the first ────────────────
+     * Copying is what stops a new zone pricing nothing. On an EMPTY register
+     * there is nothing to copy and nothing to break: no rate card prices any
+     * zone yet, so the card the administrator creates next will price this one
+     * as a matter of course.
+     *
+     * ⚠️ The moment one zone exists, a source is required again. Otherwise a
+     * second zone could be added with no rates beside a priced one, and the
+     * first sign of it would be a booking refused with a 503 weeks later —
+     * which is the failure this field was added to prevent.
+     */
+    const existing = await settingsRepository.countZones();
+
+    if (input.copyRatesFromZoneId === null && existing > 0) {
+      throw AppError.validation('Pick a zone to copy prices from', [
+        {
+          path: 'copyRatesFromZoneId',
+          message: 'Choose one of the zones from the list — a zone with no prices cannot be booked',
+        },
+      ]);
+    }
+
+    const source =
+      input.copyRatesFromZoneId === null
+        ? null
+        : await settingsRepository.findZone(input.copyRatesFromZoneId);
+
+    if (input.copyRatesFromZoneId !== null && !source) {
       throw AppError.validation('Pick a zone to copy prices from', [
         { path: 'copyRatesFromZoneId', message: 'Choose one of the zones from the list' },
       ]);
@@ -436,7 +550,9 @@ export const settingsService = {
       slug,
       label: input.label.trim(),
       displayOrder: await settingsRepository.nextZoneDisplayOrder(),
-      copyRatesFromZoneId: source.id,
+      copyRatesFromZoneId: source?.id ?? null,
+      adjustServiceCharge: input.adjustServiceCharge,
+      adjustRatePerM2: input.adjustRatePerM2,
     });
 
     /*
@@ -448,11 +564,11 @@ export const settingsService = {
      */
     if (rowsCopied === 0) {
       log.warn(
-        { zoneId: id, slug, copiedFrom: source.slug },
+        { zoneId: id, slug, copiedFrom: source?.slug ?? null },
         'zone created with NO rates — no card had a schedule to copy',
       );
     } else {
-      log.info({ zoneId: id, slug, copiedFrom: source.slug, rowsCopied }, 'zone created');
+      log.info({ zoneId: id, slug, copiedFrom: source?.slug ?? null, rowsCopied }, 'zone created');
     }
 
     return findZoneOrThrow(id);
@@ -762,7 +878,11 @@ export const settingsService = {
    * The repository reopens the previous schedule as part of the same removal,
    * so the card is left exactly as it was before the mistake.
    */
-  async deleteSchedule(id: string, effectiveFrom: string, caller: Caller): Promise<RateCardSummary> {
+  async deleteSchedule(
+    id: string,
+    effectiveFrom: string,
+    caller: Caller,
+  ): Promise<RateCardSummary> {
     assertWriter(caller);
     await assertCardExists(id);
 
@@ -1184,3 +1304,6 @@ async function removeQuietly(key: string): Promise<void> {
  * substring of a longer directory name.
  */
 const LOGO_KEY_SEGMENT = /(?:^|\/)settings\/singleton\/logo\/[^/]+$/;
+
+/** The same anchored test for the certificate signature (M9.5). */
+const SIGNATURE_KEY_SEGMENT = /(?:^|\/)settings\/singleton\/certificate-signature\/[^/]+$/;

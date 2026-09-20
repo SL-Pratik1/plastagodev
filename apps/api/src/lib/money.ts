@@ -73,6 +73,45 @@ export function fromDecimal128(value: Types.Decimal128 | null | undefined): Mone
 }
 
 /**
+ * Move a figure by a signed amount, keeping a RATE's precision.
+ *
+ * ── Why this cannot go through `moneyToCents` ─────────────────────────────
+ * That truncates to two places, which is right for an amount and destructive
+ * for a rate: shifting `0.1625` would silently store `0.16`, and the four
+ * decimals exist precisely because rounding a per-m² rate before multiplying by
+ * 823.41 m² loses real money on every large job. So the arithmetic happens in
+ * TEN-THOUSANDTHS, which holds every value either kind can carry.
+ *
+ * ⚠️ Clamped at zero. This shifts copied rate rows when a new zone is created,
+ * and an over-large negative adjustment would otherwise write a rate that bills
+ * the customer a negative amount — the exact failure `NonNegativeMoneySchema`
+ * exists to prevent on the way in.
+ */
+export function shiftMoney(value: Money, delta: Money): Money {
+  const shifted = toTenThousandths(value) + toTenThousandths(delta);
+  return fromTenThousandths(Math.max(shifted, 0));
+}
+
+function toTenThousandths(value: Money): number {
+  if (!/^-?\d+(\.\d{1,4})?$/.test(value)) {
+    throw new TypeError(`Not a decimal money string: ${JSON.stringify(value)}`);
+  }
+
+  const negative = value.startsWith('-');
+  const [whole = '0', fraction = ''] = (negative ? value.slice(1) : value).split('.');
+  const units = Number(whole) * 10_000 + Number(fraction.padEnd(4, '0'));
+  return negative ? -units : units;
+}
+
+/** Four decimal places, always — `Decimal128` keeps them and the reader needs them. */
+function fromTenThousandths(units: number): Money {
+  const rounded = Math.round(units);
+  const negative = rounded < 0;
+  const abs = Math.abs(rounded);
+  return `${negative ? '-' : ''}${String(Math.floor(abs / 10_000))}.${String(abs % 10_000).padStart(4, '0')}`;
+}
+
+/**
  * A rate, which is not an amount.
  *
  * `$0.16` per m² has to survive at its own precision — rounding it to cents

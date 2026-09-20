@@ -71,6 +71,32 @@ export const settingsController = {
     res.status(204).send();
   },
 
+  /* ── The certificate signature (M9.5) ─────────────────────────────────── */
+
+  presignCertificateSignature: async (
+    req: ValidatedRequest<{ body: typeof LogoUploadRequestSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await settingsService.presignCertificateSignature(req.validated.body, callerOf(req)));
+  },
+
+  /** 200 with the link to the signature now in force. */
+  confirmCertificateSignature: async (
+    req: ValidatedRequest<{ body: typeof LogoConfirmSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const certificateSignatureUrl = await settingsService.confirmCertificateSignature(
+      req.validated.body.key,
+      callerOf(req),
+    );
+    res.json({ certificateSignatureUrl });
+  },
+
+  removeCertificateSignature: async (req: Request, res: Response): Promise<void> => {
+    await settingsService.removeCertificateSignature(callerOf(req));
+    res.status(204).send();
+  },
+
   /** M7.5 — a rendered sample, so a template is never chosen blind. */
   previewTemplate: async (
     req: ValidatedRequest<{ params: typeof InvoiceTemplateIdParamsSchema }>,

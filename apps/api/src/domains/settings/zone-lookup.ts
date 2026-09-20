@@ -75,8 +75,9 @@ export async function zoneLabelFor(id: Types.ObjectId | string | null): Promise<
  * A handful of documents, so there is nothing to page or cache.
  */
 export async function zoneLabels(): Promise<Map<string, string>> {
-  const zones = await ZoneModel.find({}, { label: 1 })
-    .lean<Array<{ _id: Types.ObjectId; label: string }>>();
+  const zones = await ZoneModel.find({}, { label: 1 }).lean<
+    Array<{ _id: Types.ObjectId; label: string }>
+  >();
 
   return new Map(zones.map((zone) => [zone._id.toString(), zone.label]));
 }
@@ -87,9 +88,7 @@ export async function zoneLabels(): Promise<Map<string, string>> {
  * Carries the slug as well as the name because the SEEDS resolve by slug — it is
  * the only handle they have, the id being minted by Mongo on first insert.
  */
-export async function orderedZones(): Promise<
-  Array<{ id: string; slug: string; label: string }>
-> {
+export async function orderedZones(): Promise<Array<{ id: string; slug: string; label: string }>> {
   const zones = await ZoneModel.find({}, { slug: 1, label: 1, displayOrder: 1 })
     .sort({ displayOrder: 1 })
     .lean<Array<{ _id: Types.ObjectId; slug: string; label: string }>>();

@@ -27,7 +27,7 @@ import {
   type ReportFilters,
 } from '@plastago/shared';
 import type { CustomerPortalService, ListQuery } from '../types.js';
-import { AcceptedSchema, NoContentSchema, listParams, pageOf } from './list-params.js';
+import { NoContentSchema, SignedUrlSchema, listParams, pageOf } from './list-params.js';
 import { viaService } from './to-service-error.js';
 
 /**
@@ -203,14 +203,19 @@ export function createHttpPortalService(api: ApiClient): CustomerPortalService {
         }),
       ),
 
-    requestCertificatePdf: async (id: string) => {
-      await viaService(() =>
+    /**
+     * A link to the stored PDF.
+     *
+     * POST although it reads: it mints a signed URL, and a GET would leave
+     * that credential in browser history and in any proxy log on the way.
+     */
+    requestCertificatePdf: (id: string) =>
+      viaService(() =>
         api.request(`${base}/certificates/${id}/pdf`, {
           method: 'POST',
-          schema: AcceptedSchema,
+          schema: SignedUrlSchema,
         }),
-      );
-    },
+      ),
 
     /* ── M5.14 · the customer manages their own supervisors ───────────────── */
 

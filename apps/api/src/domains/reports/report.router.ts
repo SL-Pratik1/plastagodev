@@ -75,9 +75,33 @@ reportRouter.post(
   asyncHandler(reportController.prepareCertificate),
 );
 
-/** Freezes it. Once issued it cannot be re-issued — see the service. */
+/**
+ * Freezes it, renders the PDF and emails the customer.
+ *
+ * Once issued it cannot be re-issued — see the service.
+ */
 reportRouter.post(
   '/certificates/:id/issue',
   validate({ params: CertificateIdParamsSchema }),
   asyncHandler(reportController.issueCertificate),
+);
+
+/**
+ * A short-lived link to the stored PDF, for the office's own preview.
+ *
+ * ⚠️ POST rather than GET although it reads. It mints a credential — a signed
+ * URL — and a GET would end up in browser history, in a referrer header and in
+ * any proxy log between here and the office.
+ */
+reportRouter.post(
+  '/certificates/:id/pdf',
+  validate({ params: CertificateIdParamsSchema }),
+  asyncHandler(reportController.certificatePdf),
+);
+
+/** Sends the STORED document again — never a fresh rendering of it. */
+reportRouter.post(
+  '/certificates/:id/resend',
+  validate({ params: CertificateIdParamsSchema }),
+  asyncHandler(reportController.resendCertificate),
 );

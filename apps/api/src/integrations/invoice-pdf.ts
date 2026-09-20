@@ -1,6 +1,23 @@
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 import type { Invoice, InvoiceLayout, InvoiceTemplate, Settings } from '@plastago/shared';
 import { logger } from '../lib/logger.js';
+import {
+  A4,
+  CONTENT_WIDTH,
+  HAIRLINE,
+  INK,
+  MARGIN,
+  MUTED,
+  PAPER_TINT,
+  advance,
+  formatDate,
+  paragraph,
+  parseHex,
+  rule,
+  text,
+  wrap,
+  type Ctx,
+} from './pdf-primitives.js';
 
 const log = logger.child({ module: 'invoice-pdf' });
 
@@ -25,20 +42,6 @@ const log = logger.child({ module: 'invoice-pdf' });
  * decided, because a PDF that recomputed anything could disagree with the
  * invoice it claims to be — and the customer holds the copy that disagrees.
  */
-
-/* ── Page geometry, in PostScript points (72 per inch) ────────────────────── */
-
-const A4 = { width: 595.28, height: 841.89 } as const;
-const MARGIN = 48;
-const CONTENT_WIDTH = A4.width - MARGIN * 2;
-
-/** Leaves room for the footer and the page number below it. */
-const BOTTOM_LIMIT = 96;
-
-const INK = rgb(0.11, 0.12, 0.13);
-const MUTED = rgb(0.42, 0.45, 0.48);
-const HAIRLINE = rgb(0.85, 0.86, 0.87);
-const PAPER_TINT = rgb(0.97, 0.97, 0.98);
 
 /**
  * What the renderer needs, gathered by the caller.
@@ -67,117 +70,6 @@ export interface InvoicePdfInput {
   } | null;
 }
 
-/* ── A cursor over one growing document ───────────────────────────────────── */
-
-interface Ctx {
-  doc: PDFDocument;
-  page: PDFPage;
-  /** Distance from the top of the page to the next thing drawn. */
-  y: number;
-  regular: PDFFont;
-  bold: PDFFont;
-  accent: ReturnType<typeof rgb>;
-  pages: PDFPage[];
-}
-
-/**
- * Move down, starting a new page when the content would run into the footer.
- *
- * Returns nothing and mutates the cursor, because every draw helper below
- * needs the same "am I still on this page?" question answered the same way —
- * and a helper that forgot to ask would silently draw off the bottom edge.
- */
-function advance(ctx: Ctx, by: number): void {
-  ctx.y -= by;
-  if (ctx.y > BOTTOM_LIMIT) return;
-
-  ctx.page = ctx.doc.addPage([A4.width, A4.height]);
-  ctx.pages.push(ctx.page);
-  ctx.y = A4.height - MARGIN;
-}
-
-function text(
-  ctx: Ctx,
-  value: string,
-  options: {
-    x?: number;
-    size?: number;
-    font?: PDFFont;
-    colour?: ReturnType<typeof rgb>;
-    /** Right edge to align against, for money columns. */
-    rightAt?: number;
-  } = {},
-): void {
-  const font = options.font ?? ctx.regular;
-  const size = options.size ?? 9.5;
-  const x =
-    options.rightAt === undefined
-      ? (options.x ?? MARGIN)
-      : options.rightAt - font.widthOfTextAtSize(value, size);
-
-  ctx.page.drawText(value, {
-    x,
-    y: ctx.y,
-    size,
-    font,
-    color: options.colour ?? INK,
-  });
-}
-
-/**
- * Wrap to a width, measuring the real font rather than guessing at characters.
- *
- * A site address or a terms paragraph is arbitrary text an administrator
- * typed; counting characters overflows on capitals and wastes half a line on
- * lowercase. Returns the lines so callers can decide how many to keep.
- */
-function wrap(value: string, font: PDFFont, size: number, width: number): string[] {
-  const lines: string[] = [];
-
-  for (const paragraph of value.split('\n')) {
-    let current = '';
-
-    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
-      const candidate = current === '' ? word : `${current} ${word}`;
-      if (font.widthOfTextAtSize(candidate, size) <= width) {
-        current = candidate;
-        continue;
-      }
-      if (current !== '') lines.push(current);
-      current = word;
-    }
-
-    lines.push(current);
-  }
-
-  return lines;
-}
-
-function paragraph(
-  ctx: Ctx,
-  value: string,
-  options: { size?: number; colour?: ReturnType<typeof rgb>; leading?: number } = {},
-): void {
-  if (value.trim() === '') return;
-
-  const size = options.size ?? 9;
-  const leading = options.leading ?? size + 3;
-
-  for (const line of wrap(value, ctx.regular, size, CONTENT_WIDTH)) {
-    text(ctx, line, { size, colour: options.colour ?? MUTED });
-    advance(ctx, leading);
-  }
-}
-
-function rule(ctx: Ctx, colour = HAIRLINE, thickness = 0.75): void {
-  ctx.page.drawLine({
-    start: { x: MARGIN, y: ctx.y },
-    end: { x: MARGIN + CONTENT_WIDTH, y: ctx.y },
-    thickness,
-    color: colour,
-  });
-}
-
 /* ── Money and dates ──────────────────────────────────────────────────────── */
 
 /**
@@ -199,41 +91,6 @@ export function formatMoney(value: string): string {
 }
 
 /** `2026-09-11` → `11 Sep 2026`. Unambiguous for an Australian reader. */
-function formatDate(iso: string | null): string {
-  if (!iso) return '—';
-
-  const [year, month, day] = iso.split('-');
-  const months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-
-  const index = Number(month) - 1;
-  if (!year || !day || index < 0 || index > 11) return iso;
-
-  return `${day} ${months[index] ?? month} ${year}`;
-}
-
-/** `#1a4d3a` → a pdf-lib colour, falling back to ink on anything malformed. */
-function parseHex(hex: string): ReturnType<typeof rgb> {
-  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
-  if (!match?.[1]) return INK;
-
-  const int = Number.parseInt(match[1], 16);
-  return rgb(((int >> 16) & 255) / 255, ((int >> 8) & 255) / 255, (int & 255) / 255);
-}
-
-/* ── The document ─────────────────────────────────────────────────────────── */
 
 /**
  * Whether this template's layout prints the RCTI wording.

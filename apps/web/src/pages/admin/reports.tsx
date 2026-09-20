@@ -17,7 +17,7 @@ import {
   TabsTrigger,
   useToast,
 } from '@plastago/ui';
-import { AwardIcon, LayoutDashboardIcon } from 'lucide-react';
+import { AwardIcon, FileTextIcon, LayoutDashboardIcon, SendIcon } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { DataTable } from '@/components/data-table/data-table';
@@ -26,11 +26,14 @@ import type { DataTableColumn } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { PageHeader } from '@/components/page-header';
 import { StatCard } from '@/components/stat-card';
+import { useDocumentTab } from '@/features/documents/use-document-tab';
 import {
+  useCertificatePdf,
   useCertificates,
   useFinancialReport,
   useIssueCertificate,
   useMonthlyVolumeReport,
+  useResendCertificate,
   useZoneVolumeReport,
 } from '@/features/reports/queries';
 import { useAccountOptions, useDriverOptions, useZoneOptions } from '@/features/lookups/queries';
@@ -533,21 +536,65 @@ function CertificatesTab({
 }) {
   const toast = useToast();
   const issue = useIssueCertificate();
+  const preview = useCertificatePdf();
+  const resend = useResendCertificate();
   const [issuing, setIssuing] = useState<string | null>(null);
+  const openTab = useDocumentTab();
 
   const run = async (certificate: Certificate) => {
     setIssuing(certificate.id);
     try {
-      await issue.mutateAsync(certificate.id);
+      const result = await issue.mutateAsync(certificate.id);
+
+      /*
+       * ⚠️ Reports where it ACTUALLY went, never "emailed to the customer".
+       *
+       * Certificates go to a separate address from invoices (Matt, 31:04), and
+       * an account that has none gets no email at all — the document waits in
+       * the portal instead. Saying it was sent when it was not is how somebody
+       * finds out three weeks later, from the customer.
+       */
       toast.success(
-        `Certificate ${certificate.reference} issued`,
-        `${certificate.tonnesDiverted.toFixed(2)} tonnes diverted, emailed to ${certificate.accountName}.`,
+        `Certificate ${result.reference} issued`,
+        result.issuedTo === null
+          ? `${result.tonnesDiverted.toFixed(2)} tonnes diverted. No certificate email is set on this account — it is in their portal.`
+          : `${result.tonnesDiverted.toFixed(2)} tonnes diverted, emailed to ${result.issuedTo}.`,
       );
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);
     } finally {
       setIssuing(null);
+    }
+  };
+
+  /* Reserved before the await — see `useDocumentTab`. */
+  const view = async (certificate: Certificate) => {
+    const deliver = openTab();
+
+    try {
+      const { url } = await preview.mutateAsync(certificate.id);
+      deliver(url);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  const sendAgain = async (certificate: Certificate) => {
+    try {
+      const { sentTo } = await resend.mutateAsync(certificate.id);
+      if (sentTo === null) {
+        toast.error(
+          'Nowhere to send it',
+          'This account has no certificate email address. Add one on the account, then resend.',
+        );
+        return;
+      }
+      toast.success(`${certificate.reference} sent again`, `Emailed to ${sentTo}.`);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
     }
   };
 
@@ -608,10 +655,33 @@ function CertificatesTab({
     {
       id: 'action',
       header: 'Action',
-      className: 'w-28',
+      className: 'w-48',
       cell: (row) =>
         row.state === 'issued' ? (
-          <span className="text-xs text-muted-foreground">Issued</span>
+          /*
+           * An issued certificate can never be re-issued, so the only two
+           * things left to do with it are look at it and send it again.
+           */
+          <span className="flex gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={preview.isPending}
+              onClick={() => void view(row)}
+            >
+              <FileTextIcon aria-hidden />
+              View
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={resend.isPending}
+              onClick={() => void sendAgain(row)}
+            >
+              <SendIcon aria-hidden />
+              Resend
+            </Button>
+          </span>
         ) : (
           <Button
             size="sm"

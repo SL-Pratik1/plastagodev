@@ -111,6 +111,29 @@ settingsRouter.put(
 
 settingsRouter.delete('/invoicing/logo', ADMIN, asyncHandler(settingsController.removeLogo));
 
+/* ── The certificate signature (M9.5 · F52) ──────────────────────────────── */
+
+/* The same two steps as the logo above, and for the same reason. */
+settingsRouter.post(
+  '/invoicing/certificate-signature',
+  ADMIN,
+  validate({ body: LogoUploadRequestSchema }),
+  asyncHandler(settingsController.presignCertificateSignature),
+);
+
+settingsRouter.put(
+  '/invoicing/certificate-signature',
+  ADMIN,
+  validate({ body: LogoConfirmSchema }),
+  asyncHandler(settingsController.confirmCertificateSignature),
+);
+
+settingsRouter.delete(
+  '/invoicing/certificate-signature',
+  ADMIN,
+  asyncHandler(settingsController.removeCertificateSignature),
+);
+
 /* ── Invoice templates (M7.5) ────────────────────────────────────────────── */
 
 settingsRouter.post(

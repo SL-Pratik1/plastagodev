@@ -1,9 +1,4 @@
-import {
-  IsoDateSchema,
-  RateCardIdSchema,
-  ServiceCodeSchema,
-  ZoneSchema,
-} from '@plastago/shared';
+import { IsoDateSchema, RateCardIdSchema, ServiceCodeSchema, ZoneSchema } from '@plastago/shared';
 import * as z from 'zod';
 
 /**

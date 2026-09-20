@@ -61,3 +61,19 @@ export function useIssueCertificate() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.reports.all }),
   });
 }
+
+/**
+ * The office's own preview of the document.
+ *
+ * Not invalidating anything: minting a link changes nothing about the
+ * certificate, and a refetch here would only flicker the table.
+ */
+export function useCertificatePdf() {
+  const { reports } = useServices();
+  return useMutation({ mutationFn: (id: string) => reports.certificatePdf(id) });
+}
+
+export function useResendCertificate() {
+  const { reports } = useServices();
+  return useMutation({ mutationFn: (id: string) => reports.resendCertificate(id) });
+}

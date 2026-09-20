@@ -144,7 +144,15 @@ export const SETTINGS_OWNER = 'singleton';
  * a caller-supplied name is a path-traversal vector besides.
  */
 export function buildKey(input: {
-  scope: 'jobs' | 'runs' | 'vehicles' | 'invoices' | 'leads' | 'purchase-orders' | 'settings';
+  scope:
+    | 'jobs'
+    | 'runs'
+    | 'vehicles'
+    | 'invoices'
+    | 'certificates'
+    | 'leads'
+    | 'purchase-orders'
+    | 'settings';
   ownerId: string;
   kind: string;
   contentType: string;

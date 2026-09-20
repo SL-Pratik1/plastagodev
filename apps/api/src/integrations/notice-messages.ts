@@ -291,6 +291,108 @@ export function buildInvoiceEmail(to: string, context: InvoiceNoticeContext): Ou
   };
 }
 
+/* ── Diversion certificates (M9.5 · F52) ─────────────────────────────────── */
+
+export interface CertificateNoticeContext {
+  accountName: string;
+  reference: string;
+  tonnesDiverted: number;
+  areaM2: number | null;
+  siteName: string | null;
+  jobNumber: number | null;
+}
+
+/**
+ * "Your Certificate of Recycling is ready" (M9.5).
+ *
+ * ── Why this one DOES attach the PDF, where the invoice does not ──────────
+ * The invoice deliberately links instead of attaching, because an invoice
+ * starts going out of date the moment a credit note is raised against it and
+ * the portal always shows the current position.
+ *
+ * A certificate is the opposite kind of document. Its figures are frozen at
+ * issue and can never move, so a copy in an inbox can never be stale — and the
+ * recipient's whole purpose is to FORWARD it, into a Green Star submission or
+ * to their own sustainability consultant. Making them log in to fetch a file
+ * they need to send to somebody else is friction for no safety.
+ *
+ * The link is there as well, because the attachment is what gets lost.
+ */
+export function buildCertificateEmail(
+  to: string,
+  context: CertificateNoticeContext,
+  pdf: Buffer | null,
+): OutboundEmail {
+  const brand = env.OTP_SENDER_NAME;
+  const url = `${portal()}/portal/certificates`;
+
+  const tonnes = `${String(context.tonnesDiverted)} tonnes`;
+  const where = [
+    context.siteName,
+    context.jobNumber === null ? null : `pickup #${String(context.jobNumber)}`,
+  ]
+    .filter((part): part is string => part !== null && part.trim() !== '')
+    .join(', ');
+
+  const headline =
+    where === ''
+      ? `${tonnes} of plasterboard waste has been diverted from landfill.`
+      : `${tonnes} of plasterboard waste from ${where} has been diverted from landfill.`;
+
+  const text = [
+    'Hello,',
+    '',
+    `Certificate ${context.reference} for ${context.accountName} has been issued.`,
+    '',
+    headline,
+    ...(context.areaM2 === null ? [] : [`Plasterboard collected: ${String(context.areaM2)} m².`]),
+    '',
+    ...(pdf ? ['The certificate is attached as a PDF.'] : []),
+    `You can also download it here: ${url}`,
+    '',
+    'This certificate can be included in Green Star and NABERS submissions and council',
+    'waste management plans. Its figures are fixed and will not change.',
+    '',
+    `— The ${brand} team`,
+  ].join('\n');
+
+  const html = emailShell([
+    `Certificate <strong>${escapeHtml(context.reference)}</strong> for ` +
+      `${escapeHtml(context.accountName)} has been issued.`,
+    escapeHtml(headline) +
+      (context.areaM2 === null
+        ? ''
+        : ` Plasterboard collected: <strong>${escapeHtml(String(context.areaM2))} m²</strong>.`),
+    ...(pdf ? ['The certificate is attached to this email as a PDF.'] : []),
+    emailButton(url, 'Download the certificate'),
+    'This certificate can be included in Green Star and NABERS submissions and council ' +
+      'waste management plans. Its figures are fixed and will not change.',
+  ]);
+
+  return {
+    to,
+    subject: `Certificate of Recycling ${context.reference} — ${tonnes} diverted`,
+    text,
+    html,
+    /*
+     * ⚠️ Omitted entirely rather than sent empty when the render failed. An
+     * empty attachments array makes some clients show a paperclip with nothing
+     * behind it, and the covering text already adapts.
+     */
+    ...(pdf
+      ? {
+          attachments: [
+            {
+              filename: `Certificate of Recycling ${context.reference}.pdf`,
+              contentType: 'application/pdf',
+              content: pdf,
+            },
+          ],
+        }
+      : {}),
+  };
+}
+
 /* ── Job updates (M8.1 · M8.2) ───────────────────────────────────────────── */
 
 export interface JobNoticeContext {

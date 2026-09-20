@@ -58,6 +58,8 @@ import type {
   ExceptionReason,
   InvoiceListItem,
   Job,
+  JobCharge,
+  JobChargeDraft,
   JobComment,
   JobCommentDraft,
   BookablePurchaseOrder,
@@ -306,10 +308,7 @@ export interface CustomerService {
    * account. Resolved at render time and then frozen onto the invoice, so this
    * changes the NEXT invoice and never one already sent.
    */
-  setInvoiceTemplate: (
-    accountId: string,
-    invoiceTemplateId: string | null,
-  ) => Promise<Account>;
+  setInvoiceTemplate: (accountId: string, invoiceTemplateId: string | null) => Promise<Account>;
   /**
    * Builder or contractor — the account's journey (Matt, 21:55).
    *
@@ -363,6 +362,16 @@ export interface JobService {
    * is part of the answer, and the thread has to show it.
    */
   addComment: (jobId: string, draft: JobCommentDraft) => Promise<JobComment>;
+  /**
+   * M6.5 — apply a configured extra to a job.
+   *
+   * The draft names a CODE, never an amount: the price comes from the
+   * additional-services list so the same charge costs the same whoever adds it.
+   * Returns the created charge because its approval state is decided by the
+   * server — a charge configured to need approval lands `pending`, and the
+   * screen has to say so rather than implying it is already billable.
+   */
+  addCharge: (jobId: string, draft: JobChargeDraft) => Promise<JobCharge>;
 }
 
 /**
@@ -467,6 +476,10 @@ export interface ReportService {
   financial: (filters: ReportFilters) => Promise<FinancialReport>;
   certificates: (query: ListQuery) => Promise<ListResult<Certificate>>;
   issueCertificate: (id: string) => Promise<Certificate>;
+  /** A short-lived link to the stored PDF — never the storage key. */
+  certificatePdf: (id: string) => Promise<{ url: string }>;
+  /** Re-sends the stored document. Null where the account has no address. */
+  resendCertificate: (id: string) => Promise<{ sentTo: string | null }>;
 }
 
 /** M9.8 · F53 and M9.9 · F22. */
@@ -554,6 +567,9 @@ export interface SettingsService {
    * the invoices printing whatever logo they had.
    */
   uploadLogo: (file: File) => Promise<string | null>;
+  /** M9.5 — the signature printed on Certificates of Recycling. */
+  uploadCertificateSignature: (file: File) => Promise<string | null>;
+  removeCertificateSignature: () => Promise<void>;
   /** Take the logo off. Invoices fall back to the company name in text. */
   removeLogo: () => Promise<void>;
 
@@ -711,7 +727,7 @@ export interface CustomerPortalService {
 
   /** M5.12 · F52, W84 — download a Certificate of Recycling. */
   certificates: (query: ListQuery) => Promise<ListResult<Certificate>>;
-  requestCertificatePdf: (id: string) => Promise<void>;
+  requestCertificatePdf: (id: string) => Promise<{ url: string }>;
 
   // M5.14 · W70 — the customer manages their own supervisors.
   supervisors: (query: ListQuery) => Promise<ListResult<PortalSupervisor>>;
