@@ -29,7 +29,8 @@
     "seed:demo": "tsx src/scripts/seed-demo.ts",
     "seed:all": "npm run seed:reset && npm run seed:auth && npm run seed:settings && npm run seed:places && npm run seed:demo",
     "migrate:po-review-reasons": "tsx src/scripts/migrate-po-review-reasons.ts",
-    "migrate:call-up-index": "tsx src/scripts/migrate-call-up-index.ts"
+    "migrate:call-up-index": "tsx src/scripts/migrate-call-up-index.ts",
+    "migrate:photo-uploaded-at": "tsx src/scripts/migrate-photo-uploaded-at.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",

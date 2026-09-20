@@ -38,14 +38,23 @@ const defectSchema = new Schema(
     detail: { type: String, required: false, default: '', trim: true },
 
     /**
-     * REFERENCES → `jobphotos._id`.
+     * STORAGE KEYS, not references — same shape as `runs.docketPhotoKey`.
      *
-     * An array of ids rather than embedded photo documents: the photos are
-     * uploaded independently of this report — often before it, from the driver's
-     * offline queue — and they are read back through the same storage path as
-     * every other photo in the system.
+     * ⚠️ These used to be declared as references to `jobphotos._id`, which was
+     * never something they could be. A `JobPhoto` requires a `jobId`, and a
+     * defect is about the TRUCK: it is reported from the pre-start or the defect
+     * screen, with no job in sight, and often before the day's first stop. There
+     * was no job to hang the photo on, so nothing ever wrote one — the repository
+     * filtered out every id that was not a valid ObjectId, and every id the app
+     * sent was a `crypto.randomUUID()` standing in for an upload that had not
+     * been built. Every defect photo a driver believed they had attached was
+     * discarded in silence.
+     *
+     * Keys instead, because the photo is uploaded before the defect exists and
+     * therefore cannot carry its id. The driver presigns, PUTs, and sends back
+     * the keys — the same handshake the weighbridge docket already used.
      */
-    photoIds: [{ type: Schema.Types.ObjectId, ref: 'JobPhoto' }],
+    photoIds: [{ type: String }],
 
     /**
      * When the DRIVER reported it, not when the server heard about it.

@@ -19,6 +19,7 @@ import {
   DateQuerySchema,
   JobIdParamsSchema,
   PhotoParamsSchema,
+  PresignDefectPhotoSchema,
   PresignDocketPhotoSchema,
   PresignPhotoSchema,
   PreviewTipOffSchema,
@@ -108,6 +109,19 @@ driverRouter.post(
   asyncHandler(driverController.presignPhoto),
 );
 
+/**
+ * The phone saying the bytes are in the bucket.
+ *
+ * Separate from the presign because the upload does not go through this API —
+ * only the phone ever learns whether the PUT succeeded, so only the phone can
+ * tell us. Until it does, the photo shows as still sending.
+ */
+driverRouter.post(
+  '/jobs/:jobId/photos/:photoId/uploaded',
+  validate({ params: PhotoParamsSchema }),
+  asyncHandler(driverController.confirmPhotoUpload),
+);
+
 driverRouter.delete(
   '/jobs/:jobId/photos/:photoId',
   validate({ params: PhotoParamsSchema }),
@@ -181,6 +195,19 @@ driverRouter.post(
 );
 
 /* ── M4.9 · vehicle defects ──────────────────────────────────────────────── */
+
+/**
+ * Somewhere to put a defect photo.
+ *
+ * Vehicle-scoped and takes no id: the photo is taken while the form is being
+ * filled in, before the defect record exists, and the truck comes from the
+ * driver's pairing rather than the request.
+ */
+driverRouter.post(
+  '/defect-photo',
+  validate({ body: PresignDefectPhotoSchema }),
+  asyncHandler(driverController.presignDefectPhoto),
+);
 
 driverRouter.post(
   '/defects',

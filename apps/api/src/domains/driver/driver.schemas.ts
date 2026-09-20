@@ -37,6 +37,7 @@ export const RunIdParamsSchema = z
  */
 export {
   PresignPhotoSchema,
+  PresignDefectPhotoSchema,
   PresignDocketPhotoSchema,
   PreviewTipOffSchema,
   DriverMessageSchema as SendMessageSchema,

@@ -551,6 +551,18 @@ const jobPhotoSchema = new Schema(
     longitude: { type: Number, default: null },
     /** Where the bytes live. The API serves a URL; it does not store the image. */
     storageKey: { type: String, default: null },
+    /**
+     * When the phone confirmed the bytes were really in the bucket.
+     *
+     * ⚠️ NOT interchangeable with `storageKey`. The key is assigned while the
+     * upload URL is being signed — before a single byte exists — so a key on its
+     * own proves only that a photo was INTENDED. Treating it as proof of upload
+     * is what made the driver app show a green tick over a shot that had failed
+     * to send, which is the one thing a photo checklist must never do: the
+     * five-shot protocol is what defends a contamination charge, and a driver
+     * who is told it is safe will not retake it.
+     */
+    uploadedAt: { type: Date, default: null },
   },
   { collection: JOB_PHOTOS_COLLECTION, timestamps: true, versionKey: false },
 );

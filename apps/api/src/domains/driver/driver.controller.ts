@@ -17,6 +17,7 @@ import type {
   DateQuerySchema,
   JobIdParamsSchema,
   PhotoParamsSchema,
+  PresignDefectPhotoSchema,
   PresignDocketPhotoSchema,
   PresignPhotoSchema,
   PreviewTipOffSchema,
@@ -44,8 +45,12 @@ function callerFrom(req: { auth?: Express.Request['auth'] }): DriverCaller {
   return {
     userId: req.auth.userId,
     name: req.auth.name,
-    // Populated from the driver's assigned vehicle once the fleet domain lands;
-    // the pre-start carries the rego the driver actually typed either way.
+    /*
+     * Null here on purpose — the auth token says who signed in, not what they
+     * are driving. The service resolves the pairing when a request actually
+     * needs it (`resolveVehicle` in `driver.service.ts`), so the 15 handlers
+     * that do not care about a truck pay nothing for the lookup.
+     */
     vehicleRego: null,
   };
 }
@@ -107,6 +112,24 @@ export const driverController = {
       callerFrom(req),
     );
     res.status(201).json(result);
+  },
+
+  /**
+   * 204 — the phone confirming its PUT landed, so the tick can be honest.
+   *
+   * Idempotent: a retried confirmation after a timeout is the normal case on a
+   * building site, not an error worth telling the driver about.
+   */
+  confirmPhotoUpload: async (
+    req: ValidatedRequest<{ params: typeof PhotoParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    await driverService.confirmPhotoUpload(
+      req.validated.params.jobId,
+      req.validated.params.photoId,
+      callerFrom(req),
+    );
+    res.status(204).send();
   },
 
   removePhoto: async (
@@ -190,6 +213,18 @@ export const driverController = {
       req.validated.body,
       callerFrom(req),
     );
+    res.status(201).json(result);
+  },
+
+  /**
+   * 201 with the upload URL for a defect photo, exactly like the docket one.
+   * The key in `photoId` is what the defect report sends back in `photoIds`.
+   */
+  presignDefectPhoto: async (
+    req: ValidatedRequest<{ body: typeof PresignDefectPhotoSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const result = await driverService.presignDefectPhoto(req.validated.body, callerFrom(req));
     res.status(201).json(result);
   },
 

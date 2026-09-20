@@ -2,8 +2,11 @@ import type {
   Completion,
   ContaminationReport,
   DefectReport,
+  DriverJob,
   FutileReport,
+  GeoFix,
   PreStartSubmission,
+  RunSheetDay,
   SiteRiskAssessment,
   StatusUpdate,
   TipOffEntry,
@@ -128,23 +131,49 @@ export function useAddPhoto() {
       slot,
       caption,
       blob,
+      position,
     }: {
       jobId: string;
       slot: string | null;
       caption: string;
       blob: Blob;
-    }) => run.addPhoto(jobId, { slot, caption, blob }),
+      position: GeoFix | null;
+    }) => run.addPhoto(jobId, { slot, caption, blob, position }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: runKeys.all });
     },
   });
 }
 
+/**
+ * M4.5 — dropping a photo the driver does not want kept.
+ *
+ * ── Why this patches the cache instead of invalidating ────────────────────
+ * Same reason as `useSubmitPreStart`: the delete is QUEUED, so this resolves
+ * while the server still has the photo. Invalidating here asks the API a
+ * question it has not been told the answer to, gets "the photo is still there",
+ * and caches that as fresh — the driver taps the X, the thumbnail disappears
+ * for an instant and then pops back, which reads as the app refusing to delete
+ * it. Reloading did not help either, because the stale answer was cached.
+ *
+ * So the photo is dropped locally and `onOutboxSynced` in the driver shell
+ * re-reads once the DELETE has actually landed.
+ */
 export function useRemovePhoto() {
   const { driverRun: run } = useServices();
-  return useRunMutation(({ jobId, photoId }: { jobId: string; photoId: string }) =>
-    run.removePhoto(jobId, photoId),
-  );
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ jobId, photoId }: { jobId: string; photoId: string }) =>
+      run.removePhoto(jobId, photoId),
+    onSuccess: (_result, { jobId, photoId }) => {
+      queryClient.setQueryData(runKeys.job(jobId), (current: DriverJob | undefined) =>
+        current
+          ? { ...current, photos: current.photos.filter((photo) => photo.id !== photoId) }
+          : current,
+      );
+    },
+  });
 }
 
 export function useMarkFutile() {
@@ -161,9 +190,36 @@ export function useMarkContaminated() {
   );
 }
 
+/**
+ * M4.8a — the pre-start, and the one write that patches the cache itself.
+ *
+ * ── Why this does not use `useRunMutation` ────────────────────────────────
+ * Because invalidating here is actively wrong. The mutation resolves when the
+ * submission is durably on the PHONE, several awaits before the request leaves
+ * it, so a refetch at this moment asks the server a question it has not been
+ * told the answer to and gets back `preStartCompletedAt: null` — the driver taps
+ * "Finish pre-start" and the run sheet still says the check is not done.
+ *
+ * Worse, that null is then cached as fresh for the full `staleTime`, so going
+ * back to the run sheet does not fix it either. Only a reload did.
+ *
+ * So: write what we know locally, and let `onOutboxSynced` in the driver shell
+ * re-read once the server actually has it. `occurredAt` rather than `now`,
+ * because that is the timestamp the record will carry — the screen should not
+ * show one time before the sync and a different one after it.
+ */
 export function useSubmitPreStart() {
   const { driverRun: run } = useServices();
-  return useRunMutation((input: PreStartSubmission) => run.submitPreStart(input));
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: PreStartSubmission) => run.submitPreStart(input),
+    onSuccess: (_result, input) => {
+      queryClient.setQueryData(runKeys.sheet(input.date), (current: RunSheetDay | undefined) =>
+        current ? { ...current, preStartCompletedAt: input.occurredAt } : current,
+      );
+    },
+  });
 }
 
 export function useSubmitRiskAssessment() {
@@ -209,6 +265,20 @@ export function useUploadDocketPhoto() {
 export function useRecordTipOff() {
   const { driverRun: run } = useServices();
   return useRunMutation((input: TipOffEntry) => run.recordTipOff(input));
+}
+
+/**
+ * M4.9 — the defect photo, uploaded for real.
+ *
+ * Not a `useRunMutation`: like the docket, it uploads bytes and resolves to the
+ * storage key the defect report then carries, so there is nothing to invalidate
+ * until the report itself is sent.
+ */
+export function useUploadDefectPhoto() {
+  const { driverRun: run } = useServices();
+  return useMutation({
+    mutationFn: (blob: Blob) => run.uploadDefectPhoto(blob),
+  });
 }
 
 export function useReportDefect() {

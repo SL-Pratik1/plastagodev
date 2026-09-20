@@ -1,6 +1,7 @@
 import type { DriverPhoto, RequiredPhoto } from '@plastago/shared';
 import { Badge, Button, cn } from '@plastago/ui';
 import { CameraIcon, CheckIcon, CloudUploadIcon, ImageIcon, XIcon } from 'lucide-react';
+import { useState } from 'react';
 
 /**
  * The required-photo checklist and what has been taken (M4.5).
@@ -17,6 +18,103 @@ import { CameraIcon, CheckIcon, CloudUploadIcon, ImageIcon, XIcon } from 'lucide
  * A single job-level "syncing" badge would hide which ones are still only on the
  * phone — and on a phone that is the difference between evidence and nothing.
  */
+/**
+ * One taken photo, as a thumbnail you can actually look at.
+ *
+ * ── Why the image matters more than the timestamp ─────────────────────────
+ * This row used to be a time chip and a delete button — the driver was told a
+ * photo existed and shown nothing. On a checklist whose whole purpose is
+ * evidence, a driver cannot tell a good "pile before" from a thumb over the
+ * lens without seeing it, and the office approves the charge "by looking at the
+ * picture" long after the truck has left. The one chance to notice a useless
+ * shot is while still standing on the site.
+ *
+ * ── The three states, and why none of them is a spinner ───────────────────
+ * Sending (no URL yet), visible, and broken. A photo still in the outbox has no
+ * signed URL because the object is not there — it shows the cloud icon rather
+ * than a placeholder that would imply something is wrong. `onError` covers the
+ * narrow case of a URL that expired while the screen sat open: the tile falls
+ * back to an icon instead of the browser's broken-image glyph.
+ */
+function PhotoThumb({
+  photo,
+  label,
+  onRemove,
+}: {
+  photo: DriverPhoto;
+  label: string;
+  onRemove: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  const takenAt = new Date(photo.takenAt).toLocaleTimeString('en-AU', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+
+  return (
+    <div className="relative">
+      <a
+        href={photo.url ?? undefined}
+        target="_blank"
+        rel="noreferrer"
+        // Not a link at all until there is something to open: a dead anchor
+        // that does nothing when tapped reads as the app being broken.
+        aria-disabled={photo.url === null}
+        className={cn(
+          'focus-ring block size-20 overflow-hidden rounded-lg border border-border bg-muted',
+          photo.url === null && 'pointer-events-none',
+        )}
+      >
+        {photo.url !== null && !failed ? (
+          <img
+            src={photo.url}
+            alt={`${label}, taken at ${takenAt}`}
+            loading="lazy"
+            className="size-full object-cover"
+            onError={() => {
+              setFailed(true);
+            }}
+          />
+        ) : (
+          <span className="grid size-full place-items-center text-muted-foreground">
+            {photo.uploaded ? (
+              <ImageIcon aria-hidden className="size-5" />
+            ) : (
+              <CloudUploadIcon aria-hidden className="size-5 text-warning" />
+            )}
+          </span>
+        )}
+      </a>
+
+      {/*
+        Over the image rather than beside it — six thumbnails on a phone is
+        already the full width, and the time is context, not a column.
+      */}
+      <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1 bg-black/60 px-1 py-0.5 text-[10px] text-white">
+        {photo.uploaded ? (
+          <CheckIcon aria-hidden className="size-2.5 text-success" />
+        ) : (
+          <CloudUploadIcon aria-hidden className="size-2.5 text-warning" />
+        )}
+        <span className="tabular-nums">{takenAt}</span>
+      </span>
+
+      <button
+        type="button"
+        aria-label={`Remove the ${label.toLowerCase()} photo taken at ${takenAt}`}
+        // 44px of tappable area on a 20px glyph: this sits on a screen used in
+        // gloves, and a mis-tap deletes evidence.
+        className="focus-ring absolute -top-1.5 -right-1.5 grid size-6 place-items-center rounded-full border border-border bg-card text-muted-foreground shadow-sm hover:text-destructive"
+        onClick={onRemove}
+      >
+        <XIcon aria-hidden className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
 export interface PhotoGridProps {
   photos: readonly DriverPhoto[];
   required: readonly RequiredPhoto[];
@@ -74,33 +172,16 @@ export function PhotoGrid({
                   <p className="mt-0.5 text-xs leading-snug text-muted-foreground">{slot.hint}</p>
 
                   {taken.length > 0 && (
-                    <ul className="mt-2 flex flex-wrap gap-1.5">
+                    <ul className="mt-2 flex flex-wrap gap-2">
                       {taken.map((photo) => (
                         <li key={photo.id}>
-                          <span className="flex items-center gap-1 rounded-full bg-card px-2 py-1 text-[11px]">
-                            {photo.uploaded ? (
-                              <CheckIcon aria-hidden className="size-3 text-success" />
-                            ) : (
-                              <CloudUploadIcon aria-hidden className="size-3 text-warning" />
-                            )}
-                            <span className="tabular-nums">
-                              {new Date(photo.takenAt).toLocaleTimeString('en-AU', {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                                hour12: false,
-                              })}
-                            </span>
-                            <button
-                              type="button"
-                              aria-label={`Remove the ${slot.label.toLowerCase()} photo`}
-                              className="focus-ring rounded-full text-muted-foreground hover:text-destructive"
-                              onClick={() => {
-                                onRemove(photo.id);
-                              }}
-                            >
-                              <XIcon aria-hidden className="size-3" />
-                            </button>
-                          </span>
+                          <PhotoThumb
+                            photo={photo}
+                            label={slot.label}
+                            onRemove={() => {
+                              onRemove(photo.id);
+                            }}
+                          />
                         </li>
                       ))}
                     </ul>
@@ -148,11 +229,24 @@ export function PhotoGrid({
         </div>
 
         {extras.length > 0 && (
-          <p className="mt-2">
+          <div className="mt-3 space-y-2">
             <Badge variant="secondary">
               {extras.length} extra photo{extras.length === 1 ? '' : 's'}
             </Badge>
-          </p>
+            <ul className="flex flex-wrap gap-2">
+              {extras.map((photo) => (
+                <li key={photo.id}>
+                  <PhotoThumb
+                    photo={photo}
+                    label={photo.caption}
+                    onRemove={() => {
+                      onRemove(photo.id);
+                    }}
+                  />
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
       </div>
     </div>

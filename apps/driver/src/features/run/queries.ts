@@ -4,6 +4,7 @@ import type {
   DefectReport,
   FutileReport,
   PreStartSubmission,
+  RunSheetDay,
   SiteRiskAssessment,
   StatusUpdate,
   TipOffEntry,
@@ -130,9 +131,36 @@ export function useMarkContaminated() {
   );
 }
 
+/**
+ * M4.8a — the pre-start, and the one write that patches the cache itself.
+ *
+ * ── Why this does not use `useRunMutation` ────────────────────────────────
+ * Because invalidating here is actively wrong. The mutation resolves when the
+ * submission is durably on the PHONE, several awaits before the request leaves
+ * it, so a refetch at this moment asks the server a question it has not been
+ * told the answer to and gets back `preStartCompletedAt: null` — the driver taps
+ * "Finish pre-start" and the run sheet still says the check is not done.
+ *
+ * Worse, that null is then cached as fresh for the full `staleTime`, so going
+ * back to the run sheet does not fix it either. Only a reload did.
+ *
+ * So: write what we know locally, and let `onOutboxSynced` in the providers
+ * re-read once the server actually has it. `occurredAt` rather than `now`,
+ * because that is the timestamp the record will carry — the screen should not
+ * show one time before the sync and a different one after it.
+ */
 export function useSubmitPreStart() {
   const { run } = useServices();
-  return useRunMutation((input: PreStartSubmission) => run.submitPreStart(input));
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: PreStartSubmission) => run.submitPreStart(input),
+    onSuccess: (_result, input) => {
+      queryClient.setQueryData(runKeys.sheet(input.date), (current: RunSheetDay | undefined) =>
+        current ? { ...current, preStartCompletedAt: input.occurredAt } : current,
+      );
+    },
+  });
 }
 
 export function useSubmitRiskAssessment() {

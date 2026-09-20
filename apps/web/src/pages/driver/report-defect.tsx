@@ -3,7 +3,7 @@ import { Alert, Field, Input, Spinner, Textarea, buttonVariants, cn, useToast } 
 import { CameraIcon, PhoneIcon, WrenchIcon } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { useReportDefect, useRunSheet } from '@/features/driver/queries';
+import { useReportDefect, useRunSheet, useUploadDefectPhoto } from '@/features/driver/queries';
 import { todayInSydney } from '@/lib/geolocation';
 import { currentPosition } from '@/lib/geolocation';
 
@@ -28,6 +28,7 @@ export function DriverReportDefectPage() {
   const navigate = useNavigate();
   const { data: day } = useRunSheet(todayInSydney());
   const report = useReportDefect();
+  const uploadPhoto = useUploadDefectPhoto();
 
   const [severity, setSeverity] = useState<DefectSeverity | null>(null);
   const [summary, setSummary] = useState('');
@@ -35,20 +36,44 @@ export function DriverReportDefectPage() {
   const [photoIds, setPhotoIds] = useState<string[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  /**
+   * ⚠️ This used to upload nothing whatsoever.
+   *
+   * It pushed a `crypto.randomUUID()` into `photoIds` and toasted "Photo saved
+   * on this phone" — and it did so on a 400ms TIMER as well as on `change`, so
+   * on a real phone, where the camera takes seconds to open, the timer always
+   * won. The driver got the confirmation before they had even framed the shot,
+   * cancelling changed nothing, and the API discarded the invented id because it
+   * was not a valid reference. A cracked windscreen photographed three times
+   * reached the workshop as a defect report with no pictures.
+   *
+   * Now it presigns, PUTs the bytes and keeps the storage key the server hands
+   * back. Cancelling the picker does nothing at all, which is the honest
+   * outcome: the driver is asked again rather than handed a receipt for a photo
+   * that does not exist.
+   */
   const takePhoto = () => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*';
     input.capture = 'environment';
-    const accept = () => {
-      setPhotoIds((current) => [...current, crypto.randomUUID()]);
-      toast.success('Photo saved on this phone');
-    };
-    input.addEventListener('change', accept);
+
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) return;
+
+      void (async () => {
+        try {
+          const key = await uploadPhoto.mutateAsync(file);
+          setPhotoIds((current) => [...current, key]);
+          toast.success('Photo uploaded');
+        } catch {
+          toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
+        }
+      })();
+    });
+
     input.click();
-    window.setTimeout(() => {
-      if (photoIds.length === 0) accept();
-    }, 400);
   };
 
   const save = async () => {
@@ -64,6 +89,8 @@ export function DriverReportDefectPage() {
       await report.mutateAsync({
         occurredAt: new Date().toISOString(),
         position,
+        // The server files it against the truck paired with this driver and
+        // ignores what is sent here; this keeps the payload honest either way.
         vehicleRego: day?.vehicleRego ?? 'Unknown',
         severity: severity as DefectSeverity,
         summary: summary.trim(),
@@ -81,6 +108,27 @@ export function DriverReportDefectPage() {
       toast.error('Could not save that', 'Try again — nothing was lost.');
     }
   };
+
+  /*
+   * Same stop as the pre-start: a defect is found again by matching the plate,
+   * so one filed with no truck paired lands where nobody looks. Blocking beats
+   * accepting a report the office will never see.
+   */
+  if (day !== undefined && day.vehicleRego === null) {
+    return (
+      <div className="space-y-4">
+        <header>
+          <h1 className="font-display text-lg font-semibold tracking-tight">Report a problem</h1>
+        </header>
+
+        <Alert variant="destructive" title="No vehicle is assigned to you">
+          A defect is recorded against a truck, so the office has to pair you with yours first.
+          Ring them on the number below — and if it is unsafe to drive, tell them now rather than
+          waiting for this screen.
+        </Alert>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -187,10 +235,11 @@ export function DriverReportDefectPage() {
           <button
             type="button"
             onClick={takePhoto}
+            disabled={uploadPhoto.isPending}
             className={`${buttonVariants({ variant: 'outline' })} min-h-12 shrink-0`}
           >
-            <CameraIcon aria-hidden />
-            Take
+            {uploadPhoto.isPending ? <Spinner aria-hidden /> : <CameraIcon aria-hidden />}
+            {uploadPhoto.isPending ? 'Uploading' : 'Take'}
           </button>
         </div>
       </div>

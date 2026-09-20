@@ -90,15 +90,22 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
     const submit = async (blob: Blob) => {
       setCapturing(true);
       try {
+        // This screen tells the driver the position is part of what makes the
+        // charge stand up, so the photo had better carry one when it can.
+        const position = await currentPosition();
+
         await addPhoto.mutateAsync({
           jobId: job.jobId,
           slot: null,
           caption: 'Contamination — evidence',
           blob,
+          position,
         });
         setError(null);
       } catch {
-        toast.error('Could not save that photo', 'Try again.');
+        // Photos are the one driver action that needs signal — see the note in
+        // the photos screen. Saying so beats a bare "try again".
+        toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
       } finally {
         setCapturing(false);
       }

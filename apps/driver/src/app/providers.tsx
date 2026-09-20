@@ -1,7 +1,8 @@
 import { ApiRequestError } from '@plastago/api-client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useState } from 'react';
-import { startOutboxSync } from '@/offline/outbox';
+import { runKeys } from '@/features/run/queries';
+import { onOutboxSynced, startOutboxSync } from '@/offline/outbox';
 
 export function AppProviders({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -30,6 +31,23 @@ export function AppProviders({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => startOutboxSync(), []);
+
+  /*
+   * Re-read the driver's data once queued work has actually landed on the
+   * server.
+   *
+   * Without this the screens are refreshed at the only moment they cannot be
+   * right — when the write has reached the phone but not the server — and then
+   * never again, so a completed job or a submitted pre-start goes on showing its
+   * old state until the driver reloads.
+   */
+  useEffect(
+    () =>
+      onOutboxSynced(() => {
+        void queryClient.invalidateQueries({ queryKey: runKeys.all });
+      }),
+    [queryClient],
+  );
 
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }

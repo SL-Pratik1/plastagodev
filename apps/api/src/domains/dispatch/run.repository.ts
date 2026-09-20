@@ -58,6 +58,15 @@ interface RawStop {
   readyDate: string;
   targetDate: string;
   expectedAreaM2: number | null;
+  /**
+   * ⚠️ Optional on the RAW row, required on the contract.
+   *
+   * A job written before the field existed simply does not have it, and
+   * `.lean()` returns the stored document rather than the schema's default.
+   * `toStop` coalesces to `suburb`, which is what such a job actually is:
+   * booked before anything was geocoded.
+   */
+  locationSource?: LocationSource;
   bagCount: number;
 }
 
@@ -467,6 +476,8 @@ function toStop(row: RawStop, zones: ReadonlyMap<string, string>): RunStopSummar
     readyDate: row.readyDate,
     targetDate: row.targetDate,
     expectedAreaM2: row.expectedAreaM2,
+    // See the note on `RawStop.locationSource` for why this is coalesced.
+    locationSource: row.locationSource ?? 'suburb',
     atRisk: isAtRisk(row.targetDate, row.status),
   };
 }

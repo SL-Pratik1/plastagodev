@@ -841,7 +841,7 @@
         ],
         "operationId": "registerJobPhoto",
         "summary": "Register a photo and get somewhere to put it",
-        "description": "**The image bytes never travel through this API.** This call creates the photo RECORD and returns a presigned URL; the phone then PUTs the bytes straight to object storage, sending exactly the headers in `upload.headers` — they are signed into the URL, so an altered or missing one fails at the bucket.\n\nThe record is written before the bytes arrive on purpose: it is what lets the photos screen show a pending shot with the cloud-arrow badge. `DriverPhoto.uploaded` stays false until the PUT lands.\n\n`contentLength` is declared up front and signed in, so a phone that asks for a 4 MB slot cannot then push 2 GB. `slot` matches a `RequiredPhoto.key`, or is null for a free-form extra.",
+        "description": "**The image bytes never travel through this API.** This call creates the photo RECORD and returns a presigned URL; the phone then PUTs the bytes straight to object storage, sending exactly the headers in `upload.headers` — they are signed into the URL, so an altered or missing one fails at the bucket.\n\nThe record is written before the bytes arrive on purpose: it is what lets the photos screen show a pending shot with the cloud-arrow badge. `DriverPhoto.uploaded` stays false until the phone calls `confirmJobPhotoUpload` — the bucket does not report back to this API, so only the caller can say the PUT landed.\n\n`contentLength` is declared up front and signed in, so a phone that asks for a 4 MB slot cannot then push 2 GB. `slot` matches a `RequiredPhoto.key`, or is null for a free-form extra.",
         "security": [
           {
             "sessionCookie": []
@@ -878,6 +878,96 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/jobs/{jobId}/photos/{photoId}/uploaded": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "confirmJobPhotoUpload",
+        "summary": "Confirm the bytes reached storage",
+        "description": "Call this once the PUT to `upload.uploadUrl` has returned 2xx. Until it is called, `DriverPhoto.uploaded` is false and `DriverPhoto.url` is null.\n\n⚠️ This exists because the upload does not pass through this API and object storage does not call back — the uploading client is the only party that ever learns whether the PUT succeeded. Inferring it from the record instead put a \"saved\" tick on photos that had never been sent.\n\nIdempotent: safe to replay from an offline queue. The first confirmation wins.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          },
+          {
+            "in": "path",
+            "name": "photoId",
+            "schema": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "required": true,
+            "description": "Mongo ObjectId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Upload confirmed"
           },
           "400": {
             "description": "Malformed request or failed validation",
@@ -1659,6 +1749,93 @@
           },
           "404": {
             "description": "Resource does not exist or is not visible to this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/defect-photo": {
+      "post": {
+        "tags": [
+          "Driver"
+        ],
+        "operationId": "registerDefectPhoto",
+        "summary": "Somewhere to put a defect photo",
+        "description": "Takes no id. The photo is taken while the defect form is being filled in, before the defect record exists, and the truck comes from the pairing rather than the request — a client naming its own vehicle could file a defect, and its evidence, against a truck that is not theirs.\n\nSame two-step shape as the weighbridge docket: there is no photo RECORD to create, so the `photoId` returned **is** the storage key. Send the keys back in `photoIds` on `POST /driver/defects`.\n\n⚠️ Before this existed the defect screen invented a UUID per photo and uploaded nothing; the API then discarded every one as an unparseable reference. Defect photos taken before this endpoint shipped do not exist.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresignDefectPhoto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Upload registered; PUT the bytes to `upload.uploadUrl`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhotoUploadTicket"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
             "content": {
               "application/json": {
                 "schema": {
@@ -2472,6 +2649,24 @@
           "docketPhotoId"
         ]
       },
+      "PresignDefectPhoto": {
+        "type": "object",
+        "properties": {
+          "contentType": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contentLength": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "contentType",
+          "contentLength"
+        ]
+      },
       "DefectReport": {
         "type": "object",
         "properties": {
@@ -3047,8 +3242,12 @@
           "postcode": {
             "type": "string"
           },
-          "zone": {
+          "zoneId": {
             "$ref": "#/components/schemas/Zone"
+          },
+          "zoneLabel": {
+            "type": "string",
+            "minLength": 1
           },
           "latitude": {
             "type": "number"
@@ -3132,7 +3331,8 @@
           "addressLine",
           "suburb",
           "postcode",
-          "zone",
+          "zoneId",
+          "zoneLabel",
           "latitude",
           "longitude",
           "locationSource",
@@ -3165,12 +3365,7 @@
         ]
       },
       "Zone": {
-        "type": "string",
-        "enum": [
-          "sydney",
-          "wollongong",
-          "newcastle"
-        ]
+        "$ref": "#/components/schemas/ObjectId"
       },
       "LocationSource": {
         "type": "string",
@@ -3226,8 +3421,12 @@
           "postcode": {
             "type": "string"
           },
-          "zone": {
+          "zoneId": {
             "$ref": "#/components/schemas/Zone"
+          },
+          "zoneLabel": {
+            "type": "string",
+            "minLength": 1
           },
           "latitude": {
             "type": "number"
@@ -3487,7 +3686,8 @@
           "addressLine",
           "suburb",
           "postcode",
-          "zone",
+          "zoneId",
+          "zoneLabel",
           "latitude",
           "longitude",
           "locationSource",
@@ -3558,6 +3758,12 @@
           },
           "uploaded": {
             "type": "boolean"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3567,7 +3773,8 @@
           "takenAt",
           "latitude",
           "longitude",
-          "uploaded"
+          "uploaded",
+          "url"
         ],
         "additionalProperties": false
       },

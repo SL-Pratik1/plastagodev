@@ -128,7 +128,7 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
             contentType: input.blob.type || 'image/jpeg',
             contentLength: input.blob.size,
             takenAt,
-            position: null,
+            position: input.position,
           },
           schema: PresignPhotoResponseSchema,
         }),
@@ -145,6 +145,26 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
           throw new ServiceError('OFFLINE', 'The photo could not be uploaded — try again');
         }
 
+        /*
+         * Tell the API the bytes actually landed.
+         *
+         * Only this phone ever sees the PUT's response — the bucket does not
+         * report back to the API — so without this the server can only guess,
+         * and it used to guess "uploaded" from the mere existence of the record
+         * it wrote before the upload began. That put a green tick on shots that
+         * had failed to send.
+         *
+         * QUEUED rather than awaited: the confirmation is bookkeeping, and a
+         * driver whose signal dies in the half-second after a successful upload
+         * should not be told the photo failed when it did not. The outbox
+         * retries it; until it drains, the photo reads as still sending, which
+         * is the harmless direction to be wrong in.
+         */
+        await enqueue({
+          method: 'POST',
+          path: `${base}/jobs/${jobId}/photos/${result.photoId}/uploaded`,
+        });
+
         return result;
       });
 
@@ -159,6 +179,12 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
         // resolves, so claiming otherwise would leave a permanent "pending"
         // badge on a photo that is already safe.
         uploaded: true,
+        /*
+         * No URL yet, and not worth inventing one. This value is superseded the
+         * moment the job refetches, and the server signs a real one then; a
+         * placeholder here would only render as a broken image for that instant.
+         */
+        url: null,
       };
     },
 
@@ -221,6 +247,40 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
 
     // Keyed by REGO in the body — the driver reports the truck they are in,
     // which is not necessarily the one on their roster row.
+    /**
+     * ⚠️ This did not exist, and the screen pretended it did.
+     *
+     * The defect form pushed a `crypto.randomUUID()` into `photoIds` and told
+     * the driver the photo was saved. Nothing was ever uploaded, and the API
+     * discarded the id as unparseable — so a cracked windscreen photographed
+     * three times reached the workshop with no pictures at all.
+     */
+    uploadDefectPhoto: async (blob: Blob): Promise<string> => {
+      const result = await viaService(() =>
+        api.request(`${base}/defect-photo`, {
+          method: 'POST',
+          body: {
+            contentType: blob.type || 'image/jpeg',
+            contentLength: blob.size,
+          },
+          schema: PresignPhotoResponseSchema,
+        }),
+      );
+
+      // Straight to storage — not through the API. See `addPhoto`.
+      const stored = await fetch(result.upload.uploadUrl, {
+        method: 'PUT',
+        headers: result.upload.headers,
+        body: blob,
+      }).catch(() => null);
+
+      if (!stored?.ok) {
+        throw new ServiceError('OFFLINE', 'The photo could not be uploaded — try again');
+      }
+
+      return result.photoId;
+    },
+
     reportDefect: (input: DefectReport) => queue('/defects', input),
 
     /* ── M8.6 · W102 · the office ↔ driver thread ─────────────────────────── */

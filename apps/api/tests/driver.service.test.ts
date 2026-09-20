@@ -188,6 +188,34 @@ describe('seeing only your own work', () => {
     expect(sheet.stops).toHaveLength(1);
     expect(sheet.stops[0]?.jobNumber).toBe(61302);
   });
+
+  /*
+   * The run sheet is where the phone learns which truck it is on — the sign-in
+   * token says who the driver is, not what they are driving. Everything that
+   * records something ABOUT the vehicle reads it from here.
+   */
+  it('names the truck the driver is paired with', async () => {
+    driver.addStop({ jobNumber: 61301 });
+    driver.assignVehicle({ rego: 'CD34EF', label: 'Truck 2 — Hino crane' });
+
+    const sheet = await driverService.runSheet('2026-09-10', { ...CALLER, vehicleRego: null });
+
+    expect(sheet.vehicleRego).toBe('CD34EF');
+    expect(sheet.vehicleLabel).toBe('Truck 2 — Hino crane');
+  });
+
+  it('leaves the truck null when the driver is paired with none', async () => {
+    driver.addStop({ jobNumber: 61301 });
+    driver.assignVehicle(null);
+
+    const sheet = await driverService.runSheet('2026-09-10', { ...CALLER, vehicleRego: null });
+
+    // Null rather than a blank string: the driver screens read this as "you
+    // cannot start a pre-start yet" and say so, instead of filing one against
+    // nothing.
+    expect(sheet.vehicleRego).toBeNull();
+    expect(sheet.vehicleLabel).toBeNull();
+  });
 });
 
 describe('status, replayed from the outbox', () => {
@@ -882,6 +910,7 @@ describe('photos (M4.5)', () => {
       stop.id,
       {
         caption: 'Pile before',
+        slot: 'pile-before',
         contentType: 'image/jpeg',
         contentLength: 2_400_000,
         takenAt: '2026-09-10T08:05:00.000Z',
@@ -897,6 +926,114 @@ describe('photos (M4.5)', () => {
     expect(uploads).toHaveLength(1);
   });
 
+  /*
+   * ⚠️ REGRESSION. `slot` was accepted by the schema, carried across the wire
+   * and then dropped on the floor here: the service never passed it to the
+   * repository, so every photo was filed under the model's null default.
+   *
+   * Nothing failed. The driver took "front of site", the app said "4 still
+   * needed", they took it again, and again — each one landing as an anonymous
+   * extra. The checklist that exists to prove the five-shot protocol was
+   * followed could never be satisfied, on any job, by anyone.
+   */
+  it('files the photo under the shot the driver actually took', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    await driverService.presignPhoto(
+      stop.id,
+      {
+        caption: 'Front of site',
+        slot: 'front-of-site',
+        contentType: 'image/jpeg',
+        contentLength: 1000,
+        takenAt: '2026-09-10T08:05:00.000Z',
+        position: null,
+      },
+      CALLER,
+    );
+
+    const job = await driverService.job(stop.id, CALLER);
+    expect(job.photos).toHaveLength(1);
+    expect(job.photos[0]?.slot).toBe('front-of-site');
+  });
+
+  it('keeps a free-form extra unslotted', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    await driverService.presignPhoto(
+      stop.id,
+      {
+        caption: 'Damaged fence',
+        slot: null,
+        contentType: 'image/jpeg',
+        contentLength: 1000,
+        takenAt: '2026-09-10T08:05:00.000Z',
+        position: null,
+      },
+      CALLER,
+    );
+
+    const job = await driverService.job(stop.id, CALLER);
+    expect(job.photos[0]?.slot).toBeNull();
+  });
+
+  /*
+   * ⚠️ REGRESSION. `uploaded` was derived from `storageKey !== null`, but the
+   * key is assigned while the upload URL is being SIGNED — before a byte
+   * exists. So every photo reported itself as safely uploaded the instant it
+   * was registered, including ones whose PUT never happened.
+   */
+  it('does not call a photo uploaded until the phone confirms it', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    const created = await driverService.presignPhoto(
+      stop.id,
+      {
+        caption: 'Pile after',
+        slot: 'pile-after',
+        contentType: 'image/jpeg',
+        contentLength: 1000,
+        takenAt: '2026-09-10T08:05:00.000Z',
+        position: null,
+      },
+      CALLER,
+    );
+
+    const before = await driverService.job(stop.id, CALLER);
+    expect(before.photos[0]?.uploaded).toBe(false);
+    // Nothing to look at yet, and a URL to a missing object renders as a broken
+    // image — which reads as "lost", not "still sending".
+    expect(before.photos[0]?.url).toBeNull();
+
+    await driverService.confirmPhotoUpload(stop.id, created.photoId, CALLER);
+
+    const after = await driverService.job(stop.id, CALLER);
+    expect(after.photos[0]?.uploaded).toBe(true);
+    expect(after.photos[0]?.url).toBeTruthy();
+  });
+
+  it('takes a repeated confirmation without complaint', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+    const created = await driverService.presignPhoto(
+      stop.id,
+      {
+        caption: 'Site closed',
+        slot: 'site-closed',
+        contentType: 'image/jpeg',
+        contentLength: 1000,
+        takenAt: '2026-09-10T08:05:00.000Z',
+        position: null,
+      },
+      CALLER,
+    );
+
+    // The outbox replays on a flaky connection; a retry is the normal case.
+    await driverService.confirmPhotoUpload(stop.id, created.photoId, CALLER);
+    await expect(
+      driverService.confirmPhotoUpload(stop.id, created.photoId, CALLER),
+    ).resolves.toBeUndefined();
+  });
+
   it('refuses a type that would execute when served back', async () => {
     const stop = driver.addStop({ jobNumber: 61301 });
 
@@ -905,6 +1042,7 @@ describe('photos (M4.5)', () => {
         stop.id,
         {
           caption: '',
+          slot: null,
           contentType: 'image/svg+xml',
           contentLength: 1000,
           takenAt: '2026-09-10T08:05:00.000Z',
@@ -923,6 +1061,7 @@ describe('photos (M4.5)', () => {
         stop.id,
         {
           caption: '',
+          slot: null,
           contentType: 'image/jpeg',
           contentLength: 40 * 1024 * 1024,
           takenAt: '2026-09-10T08:05:00.000Z',
@@ -939,6 +1078,7 @@ describe('photos (M4.5)', () => {
       stop.id,
       {
         caption: 'Oops',
+        slot: null,
         contentType: 'image/jpeg',
         contentLength: 1000,
         takenAt: '2026-09-10T08:05:00.000Z',
@@ -1017,6 +1157,59 @@ describe('pre-start (M4.8a)', () => {
         CALLER,
       ),
     ).rejects.toMatchObject({ status: 409 });
+  });
+
+  /*
+   * ── The rego comes from the pairing, never from the phone ───────────────
+   * The run sheet is cached on the handset, so `input.vehicleRego` is whatever
+   * it held when it was last fetched — blank for a driver who had no truck then.
+   * A blank plate does not fail loudly: the record saves, and then never appears
+   * on any vehicle screen, because the office finds defects by matching it.
+   */
+  it('files the pre-start against the truck the driver is paired with, not the one sent', async () => {
+    driver.addStop({ jobNumber: 61301 });
+    driver.assignVehicle({ rego: 'CD34EF', label: 'Truck 2 — Hino crane' });
+
+    await driverService.submitPreStart(
+      {
+        ...envelope(),
+        date: '2026-09-10',
+        // What a phone with a stale run sheet sends.
+        vehicleRego: '',
+        odometerKm: 184_320,
+        items: [{ key: 'brakes', state: 'fail', note: 'Pedal feels soft' }],
+        declaration: true,
+      },
+      { ...CALLER, vehicleRego: null },
+    );
+
+    expect(driver.defects).toHaveLength(1);
+    expect(driver.defects[0]?.rego).toBe('CD34EF');
+  });
+
+  it('refuses when no truck is paired with the driver', async () => {
+    driver.addStop({ jobNumber: 61301 });
+    driver.assignVehicle(null);
+
+    // A pre-start is a record of which VEHICLE was checked. One filed against no
+    // vehicle satisfies nothing, so refusing beats saving it somewhere nobody
+    // will ever look.
+    await expect(
+      driverService.submitPreStart(
+        {
+          ...envelope(),
+          date: '2026-09-10',
+          vehicleRego: '',
+          odometerKm: 184_320,
+          items: [{ key: 'brakes', state: 'fail', note: 'Pedal feels soft' }],
+          declaration: true,
+        },
+        { ...CALLER, vehicleRego: null },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(driver.preStarts).toHaveLength(0);
+    expect(driver.defects).toHaveLength(0);
   });
 });
 
@@ -1110,6 +1303,59 @@ describe('tip-off (M4.4)', () => {
 });
 
 describe('defects and messages', () => {
+  /*
+   * ⚠️ REGRESSION. Defect photos were declared as references to `jobphotos`,
+   * which a defect can never have — it is about the truck, and is often
+   * reported before the day's first job. So the repository filtered `photoIds`
+   * down to valid ObjectIds and the app, having no upload path at all, sent
+   * invented UUIDs. Every id failed the filter. A driver who photographed a
+   * cracked windscreen three times filed a report with no photos, and was told
+   * each time that the photo had been saved.
+   */
+  it('keeps the photo keys attached to a defect', async () => {
+    const keys = [
+      `plastago/defects/${DRIVER}/photos/6f1c6f2e-1b7a-4f19-9a0e-6d6a4b2f0c11.jpg`,
+      `plastago/defects/${DRIVER}/photos/8a2d7e3f-2c8b-4a20-8b1f-7e7b5c3a1d22.jpg`,
+    ];
+
+    await driverService.reportDefect(
+      {
+        ...envelope(),
+        vehicleRego: 'BQ12AB',
+        severity: 'needs-attention',
+        summary: 'Cracked windscreen',
+        detail: '',
+        photoIds: keys,
+      },
+      CALLER,
+    );
+
+    expect(driver.defects[0]?.photoIds).toEqual(keys);
+  });
+
+  it('hands back somewhere to put a defect photo', async () => {
+    const result = await driverService.presignDefectPhoto(
+      { contentType: 'image/jpeg', contentLength: 1_200_000 },
+      CALLER,
+    );
+
+    // The key IS the id the report carries — there is no record to point at,
+    // because the photo is taken before the defect exists.
+    expect(result.photoId).toBe(result.upload.key);
+    // Under the defect scope, not a job's.
+    expect(result.photoId).toContain('defects/');
+    expect(result.photoId).not.toContain('jobs/');
+  });
+
+  it('refuses a defect photo type that would execute when served back', async () => {
+    await expect(
+      driverService.presignDefectPhoto(
+        { contentType: 'image/svg+xml', contentLength: 1000 },
+        CALLER,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
   it('records a defect reported directly', async () => {
     await driverService.reportDefect(
       {
@@ -1131,6 +1377,51 @@ describe('defects and messages', () => {
     expect(urgentAlerts).toHaveLength(1);
     expect(urgentAlerts[0]?.severity).toBe('urgent');
     expect(urgentAlerts[0]?.title).toContain('UNROADWORTHY');
+  });
+
+  /*
+   * The report screen sends the literal string `Unknown` when it has no run
+   * sheet to read a plate off. That files the defect against a truck that does
+   * not exist, where no vehicle screen can ever surface it.
+   */
+  it('files a defect against the paired truck, ignoring what the phone sent', async () => {
+    driver.assignVehicle({ rego: 'EF56GH', label: 'Truck 3 — Isuzu hooklift' });
+
+    await driverService.reportDefect(
+      {
+        ...envelope(),
+        vehicleRego: 'Unknown',
+        severity: 'unroadworthy',
+        summary: 'Brake line weeping',
+        detail: 'Visible fluid at the rear axle',
+        photoIds: [],
+      },
+      { ...CALLER, vehicleRego: null },
+    );
+
+    expect(driver.defects[0]?.rego).toBe('EF56GH');
+    // The alert names the real truck too — an allocator cannot act on "Unknown".
+    expect(urgentAlerts[0]?.title).toContain('EF56GH');
+  });
+
+  it('refuses a defect when no truck is paired with the driver', async () => {
+    driver.assignVehicle(null);
+
+    await expect(
+      driverService.reportDefect(
+        {
+          ...envelope(),
+          vehicleRego: 'Unknown',
+          severity: 'monitor',
+          summary: 'Wiper juddering',
+          detail: '',
+          photoIds: [],
+        },
+        { ...CALLER, vehicleRego: null },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(driver.defects).toHaveLength(0);
   });
 
   it('posts a driver message into the job thread', async () => {

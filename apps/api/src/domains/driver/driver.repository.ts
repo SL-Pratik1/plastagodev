@@ -21,6 +21,7 @@ import {
 } from '../jobs/job.model.js';
 import { RunModel, RunTipOffModel } from '../dispatch/run.model.js';
 import { toDecimal128 } from '../../lib/money.js';
+import { VehicleModel } from '../fleet/vehicle.model.js';
 import { VehicleDefectModel } from './defect.model.js';
 import type { ReconciliationStop } from './tipoff.js';
 
@@ -383,8 +384,18 @@ export const driverRepository = {
    * The BYTES are not here — they go straight to object storage from the phone
    * (§6A.10 #9). This is the record that says one exists and where.
    */
+  /**
+   * ⚠️ `slot` is not optional decoration — it is what the shot IS.
+   *
+   * It used to be absent from this signature while the client faithfully sent
+   * it and the schema faithfully validated it, so every photo was stored under
+   * the model's `null` default. Nothing errored. The five-shot checklist simply
+   * never ticked off: "4 still needed" stayed at four while the driver took
+   * photo after photo, each one filed as an anonymous extra.
+   */
   async addPhoto(input: {
     jobId: string;
+    slot: string | null;
     caption: string;
     takenAt: Date;
     takenBy: string;
@@ -394,6 +405,7 @@ export const driverRepository = {
   }): Promise<string> {
     const created = await JobPhotoModel.create({
       jobId: new mongoose.Types.ObjectId(input.jobId),
+      slot: input.slot,
       caption: input.caption,
       takenAt: input.takenAt,
       takenBy: input.takenBy,
@@ -403,6 +415,29 @@ export const driverRepository = {
     });
 
     return created._id.toHexString();
+  },
+
+  /**
+   * M4.5 — the phone telling us its PUT landed.
+   *
+   * Idempotent on purpose: the confirmation is a separate request from the PUT,
+   * so it can be retried after a timeout that actually succeeded. The first
+   * `uploadedAt` wins, because it is the closest thing we have to when the
+   * bytes arrived and a later retry would drift it forward for no reason.
+   */
+  async markPhotoUploaded(photoId: string, jobId: string, at: Date): Promise<boolean> {
+    if (!mongoose.isValidObjectId(photoId)) return false;
+
+    const result = await JobPhotoModel.updateOne(
+      {
+        _id: new mongoose.Types.ObjectId(photoId),
+        jobId: new mongoose.Types.ObjectId(jobId),
+        uploadedAt: null,
+      },
+      { $set: { uploadedAt: at } },
+    );
+
+    return result.matchedCount > 0;
   },
 
   async findPhoto(
@@ -598,6 +633,37 @@ export const driverRepository = {
     });
   },
 
+  /* ── The driver's truck ────────────────────────────────────────────────── */
+
+  /**
+   * M4.8a · M4.9 — the vehicle this driver is paired with.
+   *
+   * ⚠️ Matched by NAME, because that is how the pairing is stored: a vehicle
+   * carries `assignedDriverName` rather than a user id (see `vehicle.model.ts`),
+   * and the index there exists for exactly this lookup.
+   *
+   * ── Why this is the only source of the rego ──────────────────────────────
+   * A pre-start and a defect are records about a TRUCK, and the office finds
+   * them again by matching the plate exactly. The phone cannot be trusted to
+   * supply it: a run sheet cached before the pairing existed carries a blank,
+   * and a blank files the record against no truck at all — it survives in the
+   * collection but never appears on any vehicle screen, which is worse than
+   * refusing to save it.
+   *
+   * A truck taken off the road has its driver cleared (`vehicle.service.ts`),
+   * so an assignment found here is always a usable one.
+   */
+  async findAssignedVehicle(driverName: string): Promise<{ rego: string; label: string } | null> {
+    const name = driverName.trim();
+    if (name.length === 0) return null;
+
+    const vehicle = await VehicleModel.findOne({ assignedDriverName: name })
+      .select({ rego: 1, label: 1 })
+      .lean<{ rego: string; label: string }>();
+
+    return vehicle ? { rego: vehicle.rego, label: vehicle.label } : null;
+  },
+
   /* ── Compliance (M4.8) ─────────────────────────────────────────────────── */
 
   /**
@@ -720,9 +786,14 @@ export const driverRepository = {
       severity: input.severity,
       summary: input.summary,
       detail: input.detail,
-      photoIds: input.photoIds
-        .filter((id) => mongoose.isValidObjectId(id))
-        .map((id) => new mongoose.Types.ObjectId(id)),
+      /*
+       * ⚠️ Stored as given. This used to be
+       *   .filter((id) => mongoose.isValidObjectId(id)).map(...)
+       * which silently dropped every photo a driver attached to a defect,
+       * because the ids were storage keys and never ObjectIds. A filter that
+       * discards evidence without a word is worse than one that throws.
+       */
+      photoIds: input.photoIds,
       occurredAt: input.occurredAt,
       latitude: input.latitude,
       longitude: input.longitude,
@@ -806,6 +877,8 @@ export interface DriverPhotoRow {
   latitude: number | null;
   longitude: number | null;
   storageKey: string | null;
+  /** Null until the phone confirms its PUT. See the model's own note. */
+  uploadedAt: Date | null;
 }
 
 export interface DriverMessageRow {
@@ -855,6 +928,7 @@ export async function loadJobDetail(jobId: string): Promise<{
       latitude: photo.latitude ?? null,
       longitude: photo.longitude ?? null,
       storageKey: photo.storageKey ?? null,
+      uploadedAt: photo.uploadedAt ?? null,
     })),
     messages: comments.map((comment) => ({
       id: comment._id.toHexString(),

@@ -6,6 +6,7 @@ import {
   type ContaminationReport,
   type DefectReport,
   type DriverJob,
+  type DriverPhoto,
   type FutileReport,
   type GeoFix,
   type PreStartSubmission,
@@ -32,6 +33,7 @@ import {
   addDriverMessage,
   driverRepository,
   loadJobDetail,
+  type DriverPhotoRow,
   type DriverStopRow,
 } from './driver.repository.js';
 import { jobNotices } from '../notifications/job-notices.service.js';
@@ -79,17 +81,23 @@ export const driverService = {
    * nothing has to infer the grouping.
    */
   async runSheet(date: string, caller: DriverCaller): Promise<RunSheetDay> {
-    const [{ runs, stops }, preStart] = await Promise.all([
+    const [{ runs, stops }, preStart, vehicle] = await Promise.all([
       driverRepository.runSheet(caller.userId, date),
       driverRepository.findPreStartForDay(caller.userId, date),
+      resolveVehicle(caller),
     ]);
 
     return {
       date,
       driverId: caller.userId,
       driverName: caller.name,
-      vehicleRego: caller.vehicleRego,
-      vehicleLabel: caller.vehicleRego,
+      /*
+       * Null when no truck is paired with this driver, and the pre-start screen
+       * reads that as "you cannot start" rather than papering over it — see
+       * `submitPreStart`.
+       */
+      vehicleRego: vehicle?.rego ?? null,
+      vehicleLabel: vehicle?.label ?? null,
       runs: runs.map((run) => ({
         runId: run.runId,
         runName: run.runName,
@@ -112,6 +120,7 @@ export const driverService = {
   async job(jobId: string, caller: DriverCaller): Promise<DriverJob> {
     const stop = await requireStop(jobId, caller);
     const detail = await loadJobDetail(jobId);
+    const photos = await toDriverPhotos(detail.photos);
 
     return {
       ...toRunStop(stop),
@@ -125,20 +134,7 @@ export const driverService = {
       readyDate: stop.readyDate,
       arrivedAt: stop.arrivedAt ? stop.arrivedAt.toISOString() : null,
       completedAt: stop.completedAt ? stop.completedAt.toISOString() : null,
-      photos: detail.photos.map((photo) => ({
-        id: photo.id,
-        slot: photo.slot,
-        caption: photo.caption,
-        takenAt: photo.takenAt.toISOString(),
-        latitude: photo.latitude,
-        longitude: photo.longitude,
-        /*
-         * A record with a storage key is one the phone asked us to make, which
-         * only happens as part of handing out an upload URL. The API cannot see
-         * the phone's outbox, so from here anything recorded is on its way.
-         */
-        uploaded: photo.storageKey !== null,
-      })),
+      photos,
       // Their five-shot protocol, sent as DATA so the app prompts for the right
       // ones without hard-coding them. See `REQUIRED_PHOTOS`.
       requiredPhotos: [...REQUIRED_PHOTOS],
@@ -419,7 +415,19 @@ export const driverService = {
    */
   async presignPhoto(
     jobId: string,
-    input: { caption: string; contentType: string; contentLength: number; takenAt: string; position: GeoFix | null },
+    input: {
+      caption: string;
+      /**
+       * ⚠️ Carried all the way to the record. It arrives validated on every
+       * request and was, for a long time, quietly discarded here — see the note
+       * on `driverRepository.addPhoto`.
+       */
+      slot: string | null;
+      contentType: string;
+      contentLength: number;
+      takenAt: string;
+      position: GeoFix | null;
+    },
     caller: DriverCaller,
   ): Promise<{ photoId: string; upload: PresignedUpload }> {
     await requireStop(jobId, caller);
@@ -448,6 +456,7 @@ export const driverService = {
       }),
       driverRepository.addPhoto({
         jobId,
+        slot: input.slot,
         caption: input.caption.trim() || 'Site photo',
         takenAt: new Date(input.takenAt),
         takenBy: caller.name,
@@ -458,6 +467,26 @@ export const driverService = {
     ]);
 
     return { photoId, upload };
+  },
+
+  /**
+   * M4.5 — the phone reporting that the bytes are in the bucket.
+   *
+   * ── Why the phone tells us rather than us checking ────────────────────────
+   * The alternative is a HEAD against storage every time a job is opened, which
+   * is one network round trip per photo per read, on the screen a driver opens
+   * most. The phone already knows — it holds the PUT's response — so it says so
+   * once and we believe it. It has no incentive to lie, and the failure mode if
+   * a confirmation is lost is a photo that reads as "still sending" while being
+   * perfectly safe, which is the harmless direction to be wrong in.
+   */
+  async confirmPhotoUpload(jobId: string, photoId: string, caller: DriverCaller): Promise<void> {
+    await requireStop(jobId, caller);
+
+    const photo = await driverRepository.findPhoto(photoId, jobId);
+    if (!photo) throw AppError.notFound('No such photo on this job');
+
+    await driverRepository.markPhotoUploaded(photoId, jobId, new Date());
   },
 
   async removePhoto(jobId: string, photoId: string, caller: DriverCaller): Promise<void> {
@@ -588,9 +617,17 @@ export const driverService = {
    * ⚠️ A failed item is not a warning to dismiss. Chain of Responsibility makes
    * this an OPERATOR obligation, so each failure becomes a defect report (M4.9)
    * that somebody has to close.
+   *
+   * ⚠️ The rego is resolved HERE, not taken from `input`. `input.vehicleRego` is
+   * whatever the phone had on its cached run sheet, which is blank for any
+   * driver with no truck paired — and a blank plate files both this record and
+   * its defects against no vehicle at all, where the office never sees them.
    */
   async submitPreStart(input: PreStartSubmission, caller: DriverCaller): Promise<void> {
-    const { stops } = await driverRepository.runSheet(caller.userId, input.date);
+    const [{ stops }, vehicle] = await Promise.all([
+      driverRepository.runSheet(caller.userId, input.date),
+      requireVehicle(caller),
+    ]);
     const first = stops[0];
 
     if (!first) {
@@ -612,7 +649,7 @@ export const driverService = {
       driverId: caller.userId,
       driverName: caller.name,
       completedAt: new Date(input.occurredAt),
-      vehicleRego: input.vehicleRego,
+      vehicleRego: vehicle.rego,
       odometerKm: input.odometerKm,
       failedItems: failed,
       // The denominator. A wall of green ticks is noise, but "3 of 14" is not.
@@ -627,7 +664,7 @@ export const driverService = {
      */
     for (const item of failed) {
       await driverRepository.reportDefect({
-        vehicleRego: input.vehicleRego,
+        vehicleRego: vehicle.rego,
         reportedByUserId: caller.userId,
         reportedByName: caller.name,
         severity: 'needs-attention',
@@ -832,10 +869,60 @@ export const driverService = {
     );
   },
 
-  /** M4.9 — a defect reported directly, rather than off a pre-start item. */
+  /**
+   * M4.9 — a defect reported directly, rather than off a pre-start item.
+   *
+   * ⚠️ Same rule as the pre-start: the rego comes from the pairing, not from
+   * `input`. The report screen sends the literal string `Unknown` when it has no
+   * run sheet to read one off, which files the defect against a truck that does
+   * not exist and cannot be found again.
+   */
+  /**
+   * M4.9 — somewhere to put a defect photo.
+   *
+   * ── Why this is scoped to the vehicle and not a defect ────────────────────
+   * The photo is taken while the driver is filling the form, before the defect
+   * record exists — so there is no defect id to file it under. Same shape as
+   * the weighbridge docket: the key comes back, the phone PUTs the bytes, and
+   * the key travels to the server as one of `photoIds` when the report is sent.
+   *
+   * ── Why the rego comes from the pairing ───────────────────────────────────
+   * Same rule as the report itself: a driver photographs the truck they are
+   * signed into, and letting the client name the vehicle would let a defect —
+   * and its evidence — be filed against somebody else's.
+   */
+  async presignDefectPhoto(
+    input: { contentType: string; contentLength: number },
+    caller: DriverCaller,
+  ): Promise<{ photoId: string; upload: PresignedUpload }> {
+    // Called for the pairing check, not the plate: a driver with no truck
+    // should be refused here exactly as they are on the report itself, rather
+    // than uploading bytes that can never be attached to anything.
+    await requireVehicle(caller);
+
+    assertUploadable(input);
+
+    const key = buildKey({
+      scope: 'defects',
+      ownerId: caller.userId,
+      kind: 'photos',
+      contentType: input.contentType,
+    });
+
+    const upload = await getStorage().presignUpload({
+      key,
+      contentType: input.contentType,
+      contentLength: input.contentLength,
+    });
+
+    return { photoId: key, upload };
+  },
+
   async reportDefect(input: DefectReport, caller: DriverCaller): Promise<void> {
+    const vehicle = await requireVehicle(caller);
+
     const defectId = await driverRepository.reportDefect({
-      vehicleRego: input.vehicleRego,
+      vehicleRego: vehicle.rego,
       reportedByUserId: caller.userId,
       reportedByName: caller.name,
       severity: input.severity,
@@ -850,7 +937,7 @@ export const driverService = {
     // An unroadworthy truck is the one report that has to reach somebody today.
     const level = input.severity === 'unroadworthy' ? 'warn' : 'info';
     log[level](
-      { defectId, rego: input.vehicleRego, severity: input.severity, driver: caller.name },
+      { defectId, rego: vehicle.rego, severity: input.severity, driver: caller.name },
       'vehicle defect reported',
     );
 
@@ -863,7 +950,7 @@ export const driverService = {
       await notificationService.notifyOffice({
         category: 'exception',
         severity: 'urgent',
-        title: `${input.vehicleRego} reported UNROADWORTHY`,
+        title: `${vehicle.rego} reported UNROADWORTHY`,
         body: `${caller.name}: ${input.summary}. Do not allocate this vehicle until it is cleared.`,
         href: '/admin/vehicles',
         subjectKey: `unroadworthy:${defectId}`,
@@ -897,6 +984,44 @@ function assertUploadable(input: { contentType: string; contentLength: number })
       },
     ]);
   }
+}
+
+/**
+ * The truck this driver is paired with, or null.
+ *
+ * `caller.vehicleRego` wins when the auth layer already resolved it, so this
+ * stays a single lookup per request rather than one per call site.
+ */
+async function resolveVehicle(
+  caller: DriverCaller,
+): Promise<{ rego: string; label: string } | null> {
+  if (caller.vehicleRego !== null) {
+    return { rego: caller.vehicleRego, label: caller.vehicleRego };
+  }
+
+  return driverRepository.findAssignedVehicle(caller.name);
+}
+
+/**
+ * The truck this driver is paired with, or a 409 they can act on.
+ *
+ * ⚠️ Used by every record that is ABOUT a vehicle rather than about a job.
+ * Chain of Responsibility makes a pre-start a record of which truck was checked;
+ * one filed against an unknown truck satisfies nothing, and — because the office
+ * finds defects by matching the plate — it also disappears from the only screen
+ * anybody would look at. Refusing is the honest outcome, and the message names
+ * the fix rather than the fault.
+ */
+async function requireVehicle(caller: DriverCaller): Promise<{ rego: string; label: string }> {
+  const vehicle = await resolveVehicle(caller);
+
+  if (!vehicle) {
+    throw AppError.conflict(
+      'No vehicle is assigned to you — ring the office so they can pair you with your truck',
+    );
+  }
+
+  return vehicle;
 }
 
 /**
@@ -942,6 +1067,58 @@ async function raiseChargeOnce(input: {
     photoCount: input.photoCount,
     note: input.note,
   });
+}
+
+/**
+ * The stored photo rows, as the driver app needs to see them.
+ *
+ * ── Why a URL is signed here and not stored ───────────────────────────────
+ * The bytes are in a private bucket — that is the whole point of presigning the
+ * upload — so there is no lasting address to keep. A signed read URL expires
+ * (`S3_URL_TTL_SECONDS`), which makes it exactly the wrong thing to persist on a
+ * record: it would work the day it was written and be a dead link forever after.
+ * Signing on read costs no network call (it is a local HMAC over the request)
+ * and is always valid for the screen that asked.
+ *
+ * ── Why an unconfirmed photo gets no URL ──────────────────────────────────
+ * A URL to an object that has not been uploaded is a valid signature over
+ * nothing: the browser renders a broken image. On a photo checklist that reads
+ * as "the evidence is lost" rather than "still sending", which is the more
+ * alarming of the two and the less true.
+ *
+ * ── Why a failure here is not a failure of the screen ─────────────────────
+ * Signing is local, so it realistically only throws if storage is misconfigured
+ * — and a driver standing at a gate should still get their job, their access
+ * notes and their checklist. A missing thumbnail is a degraded screen; an error
+ * page is no screen at all.
+ */
+async function toDriverPhotos(rows: readonly DriverPhotoRow[]): Promise<DriverPhoto[]> {
+  const storage = getStorage();
+
+  return Promise.all(
+    rows.map(async (photo) => {
+      const uploaded = photo.uploadedAt !== null;
+
+      let url: string | null = null;
+      if (uploaded && photo.storageKey !== null) {
+        url = await storage.presignDownload(photo.storageKey).catch((error: unknown) => {
+          log.warn({ err: error, photoId: photo.id }, 'could not sign a photo view URL');
+          return null;
+        });
+      }
+
+      return {
+        id: photo.id,
+        slot: photo.slot,
+        caption: photo.caption,
+        takenAt: photo.takenAt.toISOString(),
+        latitude: photo.latitude,
+        longitude: photo.longitude,
+        uploaded,
+        url,
+      };
+    }),
+  );
 }
 
 function toRunStop(row: DriverStopRow): RunStop {

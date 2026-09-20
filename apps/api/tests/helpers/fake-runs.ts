@@ -122,6 +122,9 @@ export function createFakeRunRepository() {
         readyDate: '2026-03-02',
         targetDate: '2026-03-09',
         expectedAreaM2: 500,
+        // Geocoded, so the fake board is a run that CAN be routed — the tests
+        // that care about the suburb-pinned case set it themselves.
+        locationSource: 'geocoded' as const,
         atRisk: false,
       };
     });

@@ -18,6 +18,7 @@ import {
   TriangleAlertIcon,
   type LucideIcon,
 } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
@@ -25,7 +26,8 @@ import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
 import { SessionExpiry } from '@/features/auth/session-expiry';
-import { startOutboxSync } from '@/offline/outbox';
+import { runKeys } from '@/features/driver/queries';
+import { onOutboxSynced, startOutboxSync } from '@/offline/outbox';
 
 /**
  * The driver shell (M4) — one layout, two shapes.
@@ -79,6 +81,7 @@ export function DriverShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const toast = useToast();
+  const queryClient = useQueryClient();
 
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -94,6 +97,25 @@ export function DriverShell() {
    * until a driver session picks it up.
    */
   useEffect(() => startOutboxSync(), []);
+
+  /*
+   * Re-read the driver's data once queued work has actually landed on the
+   * server.
+   *
+   * Without this the screens are refreshed at the only moment they cannot be
+   * right — when the write has reached the phone but not the server — and then
+   * never again, so a completed job or a submitted pre-start goes on showing its
+   * old state until the driver reloads. Mounted here rather than per-page
+   * because it has to survive the navigation the driver makes straight after
+   * submitting.
+   */
+  useEffect(
+    () =>
+      onOutboxSynced(() => {
+        void queryClient.invalidateQueries({ queryKey: runKeys.all });
+      }),
+    [queryClient],
+  );
 
   const confirmSignOut = async () => {
     setSigningOut(true);

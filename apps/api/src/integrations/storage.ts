@@ -144,7 +144,23 @@ export const SETTINGS_OWNER = 'singleton';
  * a caller-supplied name is a path-traversal vector besides.
  */
 export function buildKey(input: {
-  scope: 'jobs' | 'runs' | 'vehicles' | 'invoices' | 'leads' | 'purchase-orders' | 'settings';
+  /*
+   * `defects` is owned by the DRIVER's user id rather than the truck's, and
+   * that is not an oversight. A defect photo is taken while the form is being
+   * filled in — before the defect record exists — and the driver's pairing
+   * gives a plate, not an id, so there is no vehicle id in hand at that moment.
+   * The reporting driver is the one real id available, and grouping by it still
+   * gives a lifecycle rule and a bulk delete something to match on.
+   */
+  scope:
+    | 'jobs'
+    | 'runs'
+    | 'vehicles'
+    | 'defects'
+    | 'invoices'
+    | 'leads'
+    | 'purchase-orders'
+    | 'settings';
   ownerId: string;
   kind: string;
   contentType: string;

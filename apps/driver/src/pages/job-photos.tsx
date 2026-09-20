@@ -69,9 +69,20 @@ export function JobPhotosPage() {
       setBusySlot(slot ?? 'extra');
       try {
         await addPhoto.mutateAsync({ jobId: job.jobId, slot, caption, blob });
-        toast.success('Photo saved on this phone', 'It uploads when you have signal.');
+        /*
+         * ⚠️ "Saved on this phone, uploads when you have signal" is what every
+         * other driver write can honestly say, and it is the one thing this one
+         * cannot. Photos do not go through the outbox: `addPhoto` presigns,
+         * PUTs the bytes to storage and only then resolves, so by the time this
+         * line runs the photo is already off the phone. Telling a driver with
+         * full signal that their evidence is sitting in a queue invites them to
+         * go back and retake it.
+         */
+        toast.success('Photo uploaded');
       } catch {
-        toast.error('Could not save that photo', 'Try again.');
+        // The honest failure, and the only driver action that genuinely needs
+        // signal — worth saying so rather than a bare "try again".
+        toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
       } finally {
         setBusySlot(null);
       }

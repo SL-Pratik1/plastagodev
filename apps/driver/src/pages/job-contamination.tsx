@@ -98,7 +98,9 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
         });
         setError(null);
       } catch {
-        toast.error('Could not save that photo', 'Try again.');
+        // Photos are the one driver action that needs signal — see the note in
+        // the photos screen. Saying so beats a bare "try again".
+        toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
       } finally {
         setCapturing(false);
       }

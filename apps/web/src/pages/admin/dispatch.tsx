@@ -49,7 +49,7 @@ import {
   RouteIcon,
   TruckIcon,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { AtRiskBadge, JobStatusBadge, UrgentBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
@@ -642,9 +642,43 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
                           return;
                         }
 
+                        /*
+                         * The fallback names the stops that caused it.
+                         *
+                         * It used to say only "its stops need exact addresses",
+                         * which states the rule and withholds the one fact the
+                         * allocator needs: WHICH stop. With three stops that is
+                         * a guessing game; with twelve the run is simply stuck,
+                         * and the honest grouping reads as a broken button.
+                         *
+                         * `optimiseRun` refuses on ANY stop pinned to a suburb
+                         * centre, so every offender is worth naming — capped at
+                         * three so a whole unrouted run does not fill the
+                         * screen, with a count for the rest.
+                         */
+                        const pinned = updated.stops.filter(
+                          (stop) => stop.locationSource !== 'geocoded',
+                        );
+                        const named = pinned
+                          .slice(0, 3)
+                          .map((stop) => `#${String(stop.jobNumber)} ${stop.suburb}`)
+                          .join(', ');
+                        const rest = pinned.length - Math.min(pinned.length, 3);
+
                         toast.info(
                           'Grouped by suburb',
-                          `${run.name} was tidied, but no route was calculated — its stops need exact addresses.`,
+                          pinned.length === 0
+                            ? /*
+                               * No offending stop, so the address pins were not
+                               * the reason — Google was unreachable or returned
+                               * nothing usable. Saying "needs exact addresses"
+                               * here would send the allocator to edit addresses
+                               * that are already fine.
+                               */
+                              `${run.name} was tidied, but Google did not return a route. Try again shortly.`
+                            : `${run.name} was tidied, but ${named}${
+                                rest > 0 ? ` and ${String(rest)} more` : ''
+                              } ${pinned.length === 1 ? 'sits' : 'sit'} on a suburb pin, not a street address — so no route was calculated.`,
                         );
                       }),
                     'Could not optimise that run',
@@ -766,6 +800,26 @@ function RunCard({ run, board }: { run: Run; board: AllocationBoard }) {
                     {stop.serviceLevel === 'urgent' && <UrgentBadge />}
                     <Badge variant="outline">Ready {formatDate(stop.readyDate)}</Badge>
                     <Badge variant="outline">{formatArea(stop.expectedAreaM2)}</Badge>
+                    {/*
+                      ⚠️ Why a stop says so on the card, not just in a toast.
+
+                      `optimiseRun` refuses to route a run in which ANY stop is
+                      pinned to its suburb's centre rather than a real address.
+                      The refusal used to arrive as one sentence that named no
+                      stop — "its stops need exact addresses" — so the allocator
+                      knew the run would not route and had no way to find out
+                      which card was the reason, or that a card was the reason
+                      at all. Marked here, it is visible BEFORE they try.
+                    */}
+                    {stop.locationSource !== 'geocoded' && (
+                      <Badge
+                        variant="warning"
+                        title="This stop sits on the centre of its suburb, not a street address. Google cannot route a run that contains one."
+                      >
+                        <MapPinIcon aria-hidden className="size-3" />
+                        Suburb pin only
+                      </Badge>
+                    )}
                   </div>
                 </div>
 
@@ -862,11 +916,23 @@ function NewRunDialog({
 }) {
   // Seeded from the job that opened the dialog: naming a run after the suburb
   // it serves is what Matt actually does ("Newcastle run 1").
+  //
+  // The suggestion is written into state *once*, when the dialog opens,
+  // rather than applied as a fallback on every render. As a fallback
+  // (`name || suggested`) an empty field is impossible: clearing the box
+  // back to '' simply puts the suggestion straight back, so the allocator
+  // can never backspace it away.
   const [name, setName] = useState('');
   const [driverId, setDriverId] = useState('');
+  const wasOpen = useRef(false);
 
-  const suggested = seedJob ? `${seedJob.suburb} run 1` : '';
-  const value = name || suggested;
+  useEffect(() => {
+    if (open && !wasOpen.current) {
+      setName(seedJob ? `${seedJob.suburb} run 1` : '');
+      setDriverId('');
+    }
+    wasOpen.current = open;
+  }, [open, seedJob]);
 
   return (
     <Dialog
@@ -881,11 +947,9 @@ function NewRunDialog({
           </Button>
           <Button
             onClick={() => {
-              onCreate(value, driverId || null);
-              setName('');
-              setDriverId('');
+              onCreate(name, driverId || null);
             }}
-            disabled={pending || value.trim().length === 0}
+            disabled={pending || name.trim().length === 0}
           >
             {pending ? <Spinner label="Creating" /> : 'Create run'}
           </Button>
@@ -901,7 +965,7 @@ function NewRunDialog({
           {(control) => (
             <Input
               {...control}
-              value={value}
+              value={name}
               placeholder="Newcastle run 1"
               onChange={(event) => {
                 setName(event.target.value);

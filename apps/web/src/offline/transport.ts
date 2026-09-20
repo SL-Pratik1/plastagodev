@@ -33,7 +33,24 @@ export const httpTransport: OutboxTransport = async (request) => {
   await api.request(request.path, {
     method: request.method,
     schema: AnyResponseSchema,
-    body: request.body,
+    /*
+     * ⚠️ `undefined`, never `null` — the difference is a 400 on every bodyless
+     * operation in the queue.
+     *
+     * `enqueue()` normalises a missing body to `null` so the stored row has a
+     * value, and the api client sends anything that is not `undefined`: it sets
+     * `content-type: application/json` and puts the literal text `null` in the
+     * body. `express.json()` is strict by default — it accepts only objects and
+     * arrays — so the server rejected the request before it reached a route,
+     * with `entity.parse.failed`.
+     *
+     * 400 is not retryable, so nothing surfaced and nothing recovered: the
+     * operation sat in the queue failing quietly until it ran out of attempts.
+     * Deleting a photo was the visible casualty — the driver tapped the X, the
+     * row vanished, the next refetch brought it straight back, and the DELETE
+     * never once reached the API.
+     */
+    body: request.body ?? undefined,
     idempotencyKey: request.idempotencyKey,
   });
 };

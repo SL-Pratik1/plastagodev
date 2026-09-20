@@ -6,7 +6,7 @@ import {
   ObjectIdSchema,
 } from './primitives.js';
 import { ZoneSchema } from './party.js';
-import { JobStatusSchema, ServiceLevelSchema } from './jobs.js';
+import { JobStatusSchema, LocationSourceSchema, ServiceLevelSchema } from './jobs.js';
 
 /**
  * Allocation and dispatch (M3).
@@ -126,6 +126,22 @@ export const RunStopSummarySchema = z
      * their share to everybody else.
      */
     expectedAreaM2: z.number().nonnegative().nullable(),
+    /**
+     * Whether this stop sits on a real address or on its suburb's centre.
+     *
+     * ── Why the board needs it, and not just the optimiser ────────────────
+     * `optimiseRun` refuses to route a run in which ANY stop is pinned to a
+     * suburb centre, because a route computed from a suburb centroid is a
+     * plausible-looking drive nobody verified. That refusal was reported as one
+     * sentence — *"its stops need exact addresses"* — which named no stop: with
+     * three stops an allocator can guess, with twelve they cannot, and the run
+     * simply stays unroutable with no way to find out why.
+     *
+     * So the pin quality travels with the stop and the board marks the
+     * offending cards directly. `geocoded` is the good case; anything else is
+     * the suburb centre the job was booked with.
+     */
+    locationSource: LocationSourceSchema,
     atRisk: z.boolean(),
   })
   .meta({ id: 'RunStopSummary' });

@@ -84,8 +84,25 @@ export const DriverPhotoSchema = z
     takenAt: IsoDateTimeSchema,
     latitude: z.number().nullable(),
     longitude: z.number().nullable(),
-    /** False until the upload queue has drained this one (M4.12). */
+    /**
+     * False until the phone has confirmed the bytes reached storage.
+     *
+     * ⚠️ This is NOT "a record exists". The record is written while the upload
+     * URL is being signed, so it exists before any byte does — deriving this
+     * from the record's presence put a green tick on shots that never sent.
+     */
     uploaded: z.boolean(),
+    /**
+     * A short-lived URL for looking at the photo, or null when there is nothing
+     * to look at yet.
+     *
+     * Signed per read rather than stored, because it expires (`S3_URL_TTL_SECONDS`)
+     * — a URL persisted anywhere would be a link that works in testing and is
+     * dead by the time anyone needs it. Null while `uploaded` is false: the
+     * object does not exist, and a URL to it would render as a broken image,
+     * which reads as "your photo is lost" rather than "still sending".
+     */
+    url: z.string().nullable(),
   })
   .meta({ id: 'DriverPhoto' });
 
@@ -713,6 +730,13 @@ export const DefectReportSchema = DriverActionEnvelopeSchema.extend({
   severity: DefectSeveritySchema,
   summary: z.string().trim().min(1, 'Say what is wrong').max(120),
   detail: z.string().trim().max(500),
+  /**
+   * STORAGE KEYS handed back by `presignDefectPhoto`, once their bytes are up.
+   *
+   * ⚠️ Not record ids, despite the name. A defect photo is uploaded before the
+   * defect exists, so it has nothing to be a reference to — see the note on the
+   * defect model.
+   */
   photoIds: z.array(z.string()),
 }).meta({ id: 'DefectReport' });
 
@@ -822,6 +846,20 @@ export const PresignDocketPhotoSchema = z
   })
   .meta({ id: 'PresignDocketPhoto' });
 
+/**
+ * M4.9 — asking for somewhere to put a defect photo.
+ *
+ * Carries no owner: a defect is about the truck the driver is signed into, and
+ * the server takes the rego from that pairing rather than the request. The key
+ * that comes back is what `DefectReport.photoIds` carries.
+ */
+export const PresignDefectPhotoSchema = z
+  .object({
+    contentType: z.string().trim().min(1),
+    contentLength: z.number().int().positive(),
+  })
+  .meta({ id: 'PresignDefectPhoto' });
+
 /** M4.4 — the preview the driver sees before committing a docket. */
 export const PreviewTipOffSchema = z
   .object({
@@ -860,5 +898,6 @@ export type PresignPhoto = z.infer<typeof PresignPhotoSchema>;
 export type PresignedUpload = z.infer<typeof PresignedUploadSchema>;
 export type PhotoUploadTicket = z.infer<typeof PhotoUploadTicketSchema>;
 export type PresignDocketPhoto = z.infer<typeof PresignDocketPhotoSchema>;
+export type PresignDefectPhoto = z.infer<typeof PresignDefectPhotoSchema>;
 export type PreviewTipOff = z.infer<typeof PreviewTipOffSchema>;
 export type DriverMessage = z.infer<typeof DriverMessageSchema>;

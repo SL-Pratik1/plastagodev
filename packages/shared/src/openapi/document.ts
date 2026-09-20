@@ -18,6 +18,7 @@ import {
   FutileReportSchema,
   PhotoUploadTicketSchema,
   PresignDocketPhotoSchema,
+  PresignDefectPhotoSchema,
   PresignPhotoSchema,
   PreStartSubmissionSchema,
   PreviewTipOffSchema,
@@ -407,7 +408,8 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
             'into the URL, so an altered or missing one fails at the bucket.\n\n' +
             'The record is written before the bytes arrive on purpose: it is what lets the ' +
             'photos screen show a pending shot with the cloud-arrow badge. `DriverPhoto.' +
-            'uploaded` stays false until the PUT lands.\n\n' +
+            'uploaded` stays false until the phone calls `confirmJobPhotoUpload` — the bucket ' +
+            'does not report back to this API, so only the caller can say the PUT landed.\n\n' +
             '`contentLength` is declared up front and signed in, so a phone that asks for a ' +
             '4 MB slot cannot then push 2 GB. `slot` matches a `RequiredPhoto.key`, or is ' +
             'null for a free-form extra.',
@@ -416,6 +418,28 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           requestBody: jsonBody(PresignPhotoSchema),
           responses: {
             '201': jsonResponse('Photo registered; PUT the bytes to `upload.uploadUrl`', PhotoUploadTicketSchema),
+            ...errorResponses('400', '422', '401', '403', '404'),
+          },
+        },
+      },
+
+      [`${API_PREFIX}/driver/jobs/{jobId}/photos/{photoId}/uploaded`]: {
+        post: {
+          tags: ['Driver'],
+          operationId: 'confirmJobPhotoUpload',
+          summary: 'Confirm the bytes reached storage',
+          description:
+            'Call this once the PUT to `upload.uploadUrl` has returned 2xx. Until it is ' +
+            'called, `DriverPhoto.uploaded` is false and `DriverPhoto.url` is null.\n\n' +
+            '⚠️ This exists because the upload does not pass through this API and object ' +
+            'storage does not call back — the uploading client is the only party that ever ' +
+            'learns whether the PUT succeeded. Inferring it from the record instead put a ' +
+            '"saved" tick on photos that had never been sent.\n\n' +
+            'Idempotent: safe to replay from an offline queue. The first confirmation wins.',
+          security: signedIn,
+          requestParams: { path: PhotoPathSchema },
+          responses: {
+            '204': { description: 'Upload confirmed' },
             ...errorResponses('400', '422', '401', '403', '404'),
           },
         },
@@ -571,6 +595,34 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
         body: TipOffEntrySchema,
         success: 'Tip-off recorded and the run reconciled',
       }),
+
+      [`${API_PREFIX}/driver/defect-photo`]: {
+        post: {
+          tags: ['Driver'],
+          operationId: 'registerDefectPhoto',
+          summary: 'Somewhere to put a defect photo',
+          description:
+            'Takes no id. The photo is taken while the defect form is being filled in, before ' +
+            'the defect record exists, and the truck comes from the pairing rather than the ' +
+            'request — a client naming its own vehicle could file a defect, and its evidence, ' +
+            'against a truck that is not theirs.\n\n' +
+            'Same two-step shape as the weighbridge docket: there is no photo RECORD to ' +
+            'create, so the `photoId` returned **is** the storage key. Send the keys back in ' +
+            '`photoIds` on `POST /driver/defects`.\n\n' +
+            '⚠️ Before this existed the defect screen invented a UUID per photo and uploaded ' +
+            'nothing; the API then discarded every one as an unparseable reference. Defect ' +
+            'photos taken before this endpoint shipped do not exist.',
+          security: signedIn,
+          requestBody: jsonBody(PresignDefectPhotoSchema),
+          responses: {
+            '201': jsonResponse(
+              'Upload registered; PUT the bytes to `upload.uploadUrl`',
+              PhotoUploadTicketSchema,
+            ),
+            ...errorResponses('400', '422', '401', '403', '409'),
+          },
+        },
+      },
 
       [`${API_PREFIX}/driver/defects`]: driverAction({
         operationId: 'reportDefect',

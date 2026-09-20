@@ -64,6 +64,8 @@ export function ReportDefectPage() {
       await report.mutateAsync({
         occurredAt: new Date().toISOString(),
         position,
+        // The server files it against the truck paired with this driver and
+        // ignores what is sent here; this keeps the payload honest either way.
         vehicleRego: day?.vehicleRego ?? 'Unknown',
         severity: severity as DefectSeverity,
         summary: summary.trim(),
@@ -81,6 +83,27 @@ export function ReportDefectPage() {
       toast.error('Could not save that', 'Try again — nothing was lost.');
     }
   };
+
+  /*
+   * Same stop as the pre-start: a defect is found again by matching the plate,
+   * so one filed with no truck paired lands where nobody looks. Blocking beats
+   * accepting a report the office will never see.
+   */
+  if (day !== undefined && day.vehicleRego === null) {
+    return (
+      <div className="space-y-4">
+        <header>
+          <h1 className="font-display text-lg font-semibold tracking-tight">Report a problem</h1>
+        </header>
+
+        <Alert variant="destructive" title="No vehicle is assigned to you">
+          A defect is recorded against a truck, so the office has to pair you with yours first.
+          Ring them on the number below — and if it is unsafe to drive, tell them now rather than
+          waiting for this screen.
+        </Alert>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

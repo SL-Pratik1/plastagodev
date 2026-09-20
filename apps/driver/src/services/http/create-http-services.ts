@@ -173,6 +173,17 @@ function createHttpDriverRunService(api: ApiClient): DriverRunService {
 
       if (!stored?.ok) throw new Error('The photo could not be uploaded — try again');
 
+      /*
+       * Tell the API the bytes landed — only this phone ever sees the PUT's
+       * response, so without this the server cannot honestly say a photo is
+       * safe. Queued rather than awaited: losing signal in the half-second
+       * after a successful upload must not report the photo as failed.
+       */
+      await enqueue({
+        method: 'POST',
+        path: `${base}/jobs/${jobId}/photos/${result.photoId}/uploaded`,
+      });
+
       return {
         id: result.photoId,
         slot: input.slot,
@@ -183,6 +194,9 @@ function createHttpDriverRunService(api: ApiClient): DriverRunService {
         // True, unlike the queued writes: the bytes are in S3 by the time this
         // resolves, so a "pending" badge would be permanently wrong.
         uploaded: true,
+        // Superseded the moment the job refetches, when the server signs a real
+        // one. A placeholder would only render as a broken image until then.
+        url: null,
       };
     },
 

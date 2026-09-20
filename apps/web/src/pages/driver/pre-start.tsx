@@ -53,6 +53,18 @@ export function DriverPreStartPage() {
   const failures = PRE_START_ITEMS.filter((item) => states[item.key] === 'fail');
   const answered = PRE_START_ITEMS.filter((item) => states[item.key] !== undefined).length;
 
+  /*
+   * ── No truck paired, no pre-start ────────────────────────────────────────
+   * A pre-start is a record of which VEHICLE was checked, and the office finds
+   * defects again by matching that plate. With no pairing there is no plate, so
+   * the record would satisfy nothing and its defects would never surface on any
+   * vehicle screen. The server refuses it too — this is here so the driver
+   * learns it before filling in fourteen checks, not after.
+   *
+   * `day !== undefined` because an unloaded run sheet is not an unpaired one.
+   */
+  const noVehicle = day !== undefined && day.vehicleRego === null;
+
   const setState = (key: string, state: PreStartItemState) => {
     setStates((current) => ({ ...current, [key]: state }));
     setErrors(({ [key]: _drop, items: _items, ...rest }) => rest);
@@ -112,6 +124,35 @@ export function DriverPreStartPage() {
       toast.error('Could not save that', 'Try again — nothing was lost.');
     }
   };
+
+  /*
+   * A full stop, not a disabled button at the foot of the form. There is
+   * nothing useful to fill in without a truck to fill it in against, and a
+   * driver who works through fourteen checks before being told is a driver who
+   * has to do them all again.
+   */
+  if (noVehicle) {
+    return (
+      <div className="space-y-4">
+        <Link
+          to="/driver"
+          className="focus-ring inline-block rounded text-sm text-muted-foreground"
+        >
+          ← Run sheet
+        </Link>
+
+        <header>
+          <h1 className="font-display text-lg font-semibold tracking-tight">Pre-start check</h1>
+        </header>
+
+        <Alert variant="destructive" title="No vehicle is assigned to you">
+          A pre-start is a record of which truck was checked, so the office has to pair you with
+          yours before you can do one. Ring them and they can set it in a moment — then come back
+          to this screen.
+        </Alert>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

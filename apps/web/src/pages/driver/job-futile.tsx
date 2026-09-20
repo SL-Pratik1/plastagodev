@@ -95,15 +95,23 @@ function FutileForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>[
     const submit = async (blob: Blob) => {
       setCapturing(true);
       try {
+        // "The photo, position and the time are what make the charge stand up"
+        // is printed on this very screen — so the photo carries a fix when the
+        // phone has one.
+        const position = await currentPosition();
+
         await addPhoto.mutateAsync({
           jobId: job.jobId,
           slot: null,
           caption: 'Could not collect — evidence',
           blob,
+          position,
         });
         setError(null);
       } catch {
-        toast.error('Could not save that photo', 'Try again.');
+        // Photos are the one driver action that needs signal — see the note in
+        // the photos screen. Saying so beats a bare "try again".
+        toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
       } finally {
         setCapturing(false);
       }

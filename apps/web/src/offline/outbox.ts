@@ -37,6 +37,32 @@ export async function enqueue(input: EnqueueInput): Promise<string> {
   return idempotencyKey;
 }
 
+/**
+ * Told when queued work has actually reached the server.
+ *
+ * ── Why this exists ───────────────────────────────────────────────────────
+ * A queued write resolves the moment it is durably on the phone, which is
+ * several `await`s before the request is even sent. So a screen that refetches
+ * on a resolved mutation asks the server a question it has not yet been told the
+ * answer to, gets the OLD answer, and caches it as fresh — the driver submits a
+ * pre-start and the run sheet still says "not done" until they reload.
+ *
+ * Nothing else can close that gap: only the drain knows when the server has it.
+ * Listeners are told once per successful drain rather than once per operation,
+ * because the only useful reaction is "re-read everything", and a burst of
+ * queued stops draining at the same traffic light should cost one refetch.
+ */
+type SyncedListener = () => void;
+
+const syncedListeners = new Set<SyncedListener>();
+
+export function onOutboxSynced(listener: SyncedListener): () => void {
+  syncedListeners.add(listener);
+  return () => {
+    syncedListeners.delete(listener);
+  };
+}
+
 let flushing = false;
 
 /**
@@ -58,9 +84,25 @@ export async function flushOutbox(): Promise<{ sent: number; failed: number }> {
 
   try {
     const pending = await db.outbox.where('status').anyOf('pending', 'failed').sortBy('createdAt');
+    const now = Date.now();
 
     for (const operation of pending) {
       if (operation.attempts >= MAX_ATTEMPTS) continue;
+
+      /*
+       * ⚠️ The backoff has to be READ, not just written.
+       *
+       * `nextAttemptAt` was computed on every failure and never consulted, so
+       * the 15-second sweep retried a failing operation every 15 seconds and
+       * burned all eight attempts in about two minutes. Any outage longer than
+       * that — a tunnel, a dead cell, an API restart — permanently killed every
+       * queued write, and nothing ever retried them again. The backoff exists
+       * precisely so a driver who loses signal for ten minutes does not lose
+       * the run they recorded during it.
+       */
+      if (operation.nextAttemptAt !== undefined && Date.parse(operation.nextAttemptAt) > now) {
+        continue;
+      }
 
       await db.outbox.update(operation.id, { status: 'syncing' });
 
@@ -102,6 +144,21 @@ export async function flushOutbox(): Promise<{ sent: number; failed: number }> {
     }
   } finally {
     flushing = false;
+  }
+
+  /*
+   * After `flushing` is cleared, so a listener that reacts by writing is not
+   * refused the flush its own write asks for. Each listener is isolated: a
+   * throwing subscriber must not strand the queue or the ones after it.
+   */
+  if (sent > 0) {
+    for (const listener of syncedListeners) {
+      try {
+        listener();
+      } catch {
+        // A screen failing to refresh is not a reason to stop syncing.
+      }
+    }
   }
 
   return { sent, failed };

@@ -5,6 +5,7 @@ import type {
   DriverJob,
   DriverPhoto,
   FutileReport,
+  GeoFix,
   PreStartSubmission,
   RunSheetDay,
   SiteRiskAssessment,
@@ -54,7 +55,23 @@ export interface DriverRunService {
    */
   addPhoto: (
     jobId: string,
-    input: { slot: string | null; caption: string; blob: Blob },
+    input: {
+      slot: string | null;
+      caption: string;
+      blob: Blob;
+      /**
+       * Where the driver was standing, when the phone will say.
+       *
+       * ⚠️ Evidence, not telemetry. The futile and contamination screens tell
+       * the driver in as many words that "the photo, position and the time are
+       * what make the charge stand up" — and this was hard-coded null for every
+       * photo ever taken, so the coordinates on the record were always empty
+       * while every other driver write carried a fix. Null stays legitimate: a
+       * phone in a half-built house often has no fix, and a photo is never held
+       * back waiting for one.
+       */
+      position: GeoFix | null;
+    },
   ) => Promise<DriverPhoto>;
   removePhoto: (jobId: string, photoId: string) => Promise<void>;
 
@@ -65,6 +82,16 @@ export interface DriverRunService {
   // ── M4.8 · pre-start and site risk ─────────────────────────────────────
   submitPreStart: (input: PreStartSubmission) => Promise<void>;
   submitRiskAssessment: (input: SiteRiskAssessment) => Promise<void>;
+
+  /**
+   * M4.9 — uploads a defect photo and resolves to its storage key.
+   *
+   * Direct, not queued, for the same reason as the docket: the server hands
+   * back a key the defect report has to carry, and a queued write has no reply
+   * to read. A defect is reported from the yard or the depot, where there is
+   * signal.
+   */
+  uploadDefectPhoto: (blob: Blob) => Promise<string>;
 
   // ── M4.4 · tip-off reconciliation ──────────────────────────────────────
   /**

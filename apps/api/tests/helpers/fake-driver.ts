@@ -101,10 +101,26 @@ export function createFakeDriverRepository(driverId: string) {
   const messages: Array<DriverMessageRow & { jobId: string }> = [];
   const preStarts: Array<{ jobId: string; date: string; completedAt: Date; failed: number }> = [];
   const assessments = new Map<string, DriverRiskAssessmentRow>();
-  const defects: Array<{ rego: string; severity: string; summary: string; preStartItemKey: string | null }> = [];
+  const defects: Array<{
+    rego: string;
+    severity: string;
+    summary: string;
+    preStartItemKey: string | null;
+    photoIds: string[];
+  }> = [];
   const tipOffs: Array<{ runId: string; totalKg: number; docketReference: string }> = [];
   const imputed: Array<{ jobId: string; imputedKg: number }> = [];
   const runs = new Map<string, { name: string; date: string; driverId: string }>();
+
+  /*
+   * The truck this driver is paired with. Seeded, because the pairing is what
+   * decides whether a pre-start or a defect can be filed at all — a driver with
+   * none is refused, and that refusal is the rule under test.
+   */
+  let assignedVehicle: { rego: string; label: string } | null = {
+    rego: 'BQ12AB',
+    label: 'Truck 1 — Isuzu crane',
+  };
 
   const toRow = (stop: StoredStop): DriverStopRow =>
     ({
@@ -218,8 +234,16 @@ export function createFakeDriverRepository(driverId: string) {
     photoCount() {
       return photos.size;
     },
+    /** Pair this driver with a truck, or leave them with none. */
+    assignVehicle(vehicle: { rego: string; label: string } | null) {
+      assignedVehicle = vehicle;
+    },
 
     repository: {
+      findAssignedVehicle(driverName: string) {
+        return Promise.resolve(driverName.trim().length === 0 ? null : assignedVehicle);
+      },
+
       async runSheet(caller: string, date: string) {
         const mine = [...stops.values()].filter((stop) => stop.driverId === caller);
         const runIds = [...new Set(mine.map((stop) => stop.runId).filter(Boolean))] as string[];
@@ -332,8 +356,14 @@ export function createFakeDriverRepository(driverId: string) {
         });
       },
 
+      /*
+       * `slot` is stored, not hard-coded to null. The fake used to pin it to
+       * null, which meant it agreed with the bug in the real repository and the
+       * tests could not tell the two apart.
+       */
       addPhoto(input: {
         jobId: string;
+        slot: string | null;
         caption: string;
         takenAt: Date;
         storageKey: string;
@@ -342,14 +372,23 @@ export function createFakeDriverRepository(driverId: string) {
         photos.set(id, {
           id,
           jobId: input.jobId,
-          slot: null,
+          slot: input.slot,
           caption: input.caption,
           takenAt: input.takenAt,
           latitude: null,
           longitude: null,
           storageKey: input.storageKey,
+          uploadedAt: null,
         });
         return Promise.resolve(id);
+      },
+
+      markPhotoUploaded(photoId: string, jobId: string, at: Date) {
+        const photo = photos.get(photoId);
+        if (!photo || photo.jobId !== jobId) return Promise.resolve(false);
+        // First confirmation wins, as in the real repository.
+        photo.uploadedAt ??= at;
+        return Promise.resolve(true);
       },
 
       findPhoto(photoId: string, jobId: string) {
@@ -493,12 +532,14 @@ export function createFakeDriverRepository(driverId: string) {
         severity: string;
         summary: string;
         preStartItemKey?: string | null;
+        photoIds?: string[];
       }) {
         defects.push({
           rego: input.vehicleRego,
           severity: input.severity,
           summary: input.summary,
           preStartItemKey: input.preStartItemKey ?? null,
+          photoIds: input.photoIds ?? [],
         });
         return Promise.resolve(nextId());
       },
