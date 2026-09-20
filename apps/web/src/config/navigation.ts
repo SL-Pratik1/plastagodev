@@ -21,7 +21,6 @@ import {
   WalletIcon,
   WrenchIcon,
   type LucideIcon,
-  MapPinIcon,
 } from 'lucide-react';
 import type { Capability } from '@/features/auth/permissions';
 
@@ -277,19 +276,21 @@ export const ADMIN_NAV: readonly NavGroup[] = [
         scope:
           'I1 · M7.8 — connect the accounting books, then invoices and payment status sync on their own',
       },
-      {
-        to: '/admin/suburbs',
-        label: 'Suburbs',
-        icon: MapPinIcon,
-        capability: 'settings:manage',
-        scope: 'M6.3 — the suburbs the picker offers, and the zone each one prices in',
-      },
+      /*
+       * ⚠️ Suburbs is deliberately NOT a link here any more.
+       *
+       * It is M6.3 — the suburbs the picker offers and the zone each one prices
+       * in — and it now lives as a tab under Settings → Pricing, beside the zone
+       * register and the rate cards it feeds. Splitting it out put one third of a
+       * single decision ("what does a job here cost?") in a different navigation
+       * group. `/admin/suburbs` still resolves; it redirects to that tab.
+       */
       {
         to: '/admin/settings',
         label: 'Settings',
         icon: SettingsIcon,
         capability: 'settings:manage',
-        scope: 'W3 · M1.1 · W7 — zones, SLA, sequences, brands, integrations',
+        scope: 'W3 · M1.1 · W7 — zones, suburbs, rate cards, brands, invoicing',
       },
     ],
   },

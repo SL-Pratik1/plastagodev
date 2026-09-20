@@ -1,11 +1,14 @@
 import type {
   Certificate,
   CertificateScope,
+  CertificateWeightBasis,
   PageMeta,
   ReportFilters,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
+import { startOfSydneyDay, todayInSydney } from '../../lib/business-day.js';
 import { UNKNOWN_ZONE_LABEL, orderedZones, toObjectId } from '../settings/zone-lookup.js';
+import { RunTipOffModel } from '../dispatch/run.model.js';
 import { JobChargeModel, JobModel } from '../jobs/job.model.js';
 import { CertificateModel } from './certificate.model.js';
 
@@ -25,7 +28,11 @@ import { CertificateModel } from './certificate.model.js';
  * certificate that never left a site.
  */
 
-const COMPLETED = ['completed', 'admin-complete'];
+/**
+ * `as const` so Mongoose's typed `find()` accepts it as a status union rather
+ * than as a widened `string[]`, which it refuses.
+ */
+const COMPLETED = ['completed', 'admin-complete'] as const;
 
 export interface VolumeAggregate {
   key: string;
@@ -393,12 +400,25 @@ export const reportRepository = {
     jobId?: string | null;
     siteName?: string | null;
   }): Promise<{ jobs: number; areaM2: number | null; weightKg: number; siteName: string | null }> {
+    /*
+     * ⚠️ SYDNEY day boundaries, not UTC ones.
+     *
+     * `completedAt` is an instant and the period is a pair of calendar dates.
+     * `new Date(\`${from}T00:00:00.000Z\`)` reads like the start of the day and
+     * is not — it is 10am in Sydney, so a pickup completed at 8am would fall
+     * outside its own day. That matters twice here: the certificate would omit
+     * the morning's work, and the automatic draft asks for exactly one day,
+     * so a morning pickup would find nothing at all and never be certified.
+     *
+     * Upper bound is EXCLUSIVE against the start of the next day, which is the
+     * only form that cannot drop the last millisecond of an evening job.
+     */
     const match: Record<string, unknown> = {
       accountId: new mongoose.Types.ObjectId(input.accountId),
       status: { $in: COMPLETED },
       completedAt: {
-        $gte: new Date(`${input.from}T00:00:00.000Z`),
-        $lte: new Date(`${input.to}T23:59:59.999Z`),
+        $gte: startOfSydneyDay(input.from),
+        $lt: startOfSydneyDay(dayAfter(input.to)),
       },
     };
 
@@ -406,6 +426,24 @@ export const reportRepository = {
       match._id = new mongoose.Types.ObjectId(input.jobId);
     }
     if (input.siteName) match.siteName = input.siteName;
+
+    /*
+     * ⚠️ ACTUALLY WEIGHED jobs only, and this line is the compliance rule.
+     *
+     * Matt, 32:11: *"this is only for weighed jobs. If it's an estimated job,
+     * we're unable to provide a certificate because it's an estimated weight and
+     * it doesn't meet compliance regulation."*
+     *
+     * `actual` means a crane-scale reading taken as the bags went on the truck.
+     * A hand load's `estimated` figure is its share of the weighbridge remainder
+     * apportioned by m² (M4.4) — a defensible number for a report, but not a
+     * measurement of THIS job, and a Green Star assessor is entitled to reject it.
+     *
+     * Excluding them here rather than in the service is deliberate: the figures
+     * and the eligibility have to come from one query, or a certificate could be
+     * prepared from a job count that includes work its tonnage does not.
+     */
+    match.recoveredWeightBasis = 'actual';
 
     const rows = await JobModel.aggregate<{
       jobs: number;
@@ -444,19 +482,125 @@ export const reportRepository = {
     };
   },
 
+  /**
+   * What a job-scoped certificate prints besides its figures.
+   *
+   * ── Why the docket is fetched through the run ─────────────────────────────
+   * The crane scale evidences what left the SITE; the weighbridge docket
+   * evidences what reached the FACILITY. A Green Star assessor wants both, and
+   * only the second one proves the diversion actually happened. A job carries
+   * `runId`, the docket hangs off the run (one docket, one run — see
+   * `run.model.ts`), so this is the join that puts them on one page.
+   *
+   * Returns null for a job that does not exist. Every field is separately
+   * nullable: a run with no docket recorded yet still produces a valid
+   * certificate, it just prints one fewer line.
+   */
+  async certificateJobContext(jobId: string): Promise<{
+    jobNumber: number | null;
+    siteName: string | null;
+    siteAddress: string | null;
+    collectedOn: string | null;
+    docketNumber: string | null;
+    tippedOffAt: Date | null;
+  } | null> {
+    if (!mongoose.isValidObjectId(jobId)) return null;
+
+    const job = await JobModel.findById(jobId)
+      .select({ jobNumber: 1, siteName: 1, addressLine: 1, suburb: 1, completedAt: 1, runId: 1 })
+      .lean<{
+        jobNumber: number | null;
+        siteName: string | null;
+        addressLine: string | null;
+        suburb: string | null;
+        completedAt: Date | null;
+        runId: mongoose.Types.ObjectId | null;
+      }>();
+
+    if (!job) return null;
+
+    const docket = job.runId
+      ? await RunTipOffModel.findOne({ runId: job.runId })
+          .select({ docketNumber: 1, tippedOffAt: 1 })
+          .lean<{ docketNumber: string | null; tippedOffAt: Date | null }>()
+      : null;
+
+    return {
+      jobNumber: job.jobNumber,
+      siteName: job.siteName,
+      // One line, the way an address is read off a page — not two fields.
+      siteAddress:
+        [job.addressLine, job.suburb].filter((part) => (part ?? '').trim() !== '').join(', ') ||
+        null,
+      // ⚠️ The SYDNEY date. A pickup at 8am on the 3rd is 22:00 UTC on the
+      // 2nd, and this date is printed on the document as "Collected".
+      collectedOn: job.completedAt ? todayInSydney(job.completedAt) : null,
+      docketNumber: docket?.docketNumber ?? null,
+      tippedOffAt: docket?.tippedOffAt ?? null,
+    };
+  },
+
+  /**
+   * The jobs on a run that a certificate could be prepared for (M9.5).
+   *
+   * Used by the automatic draft after a tip-off is reconciled. Applies the same
+   * two rules the figures query does — completed, and ACTUALLY weighed — plus
+   * one more: no certificate already exists for the job. That last check is why
+   * this returns a list rather than the caller looping: the office may have
+   * prepared one by hand before the truck reached the tip.
+   */
+  async certifiableJobsOnRun(runId: string): Promise<
+    Array<{ jobId: string; accountId: string; completedOn: string }>
+  > {
+    if (!mongoose.isValidObjectId(runId)) return [];
+
+    const jobs = await JobModel.find({
+      runId: new mongoose.Types.ObjectId(runId),
+      status: { $in: COMPLETED },
+      recoveredWeightBasis: 'actual',
+      recoveredWeightKg: { $gt: 0 },
+      completedAt: { $ne: null },
+    })
+      .select({ accountId: 1, completedAt: 1 })
+      .lean<Array<{ _id: mongoose.Types.ObjectId; accountId: mongoose.Types.ObjectId; completedAt: Date }>>();
+
+    if (jobs.length === 0) return [];
+
+    const existing = await CertificateModel.find({ jobId: { $in: jobs.map((job) => job._id) } })
+      .select({ jobId: 1 })
+      .lean<Array<{ jobId: mongoose.Types.ObjectId }>>();
+
+    const taken = new Set(existing.map((row) => row.jobId.toHexString()));
+
+    return jobs
+      .filter((job) => !taken.has(job._id.toHexString()))
+      .map((job) => ({
+        jobId: job._id.toHexString(),
+        accountId: job.accountId.toHexString(),
+        // Sydney again — this becomes the certificate's period, and the
+        // figures query below resolves it back to the same Sydney day.
+        completedOn: todayInSydney(job.completedAt),
+      }));
+  },
+
   async createCertificate(input: {
     reference: string;
     scope: CertificateScope;
     accountId: string;
     accountName: string;
     siteName: string | null;
+    siteAddress: string | null;
     jobId: string | null;
     jobNumber: number | null;
+    collectedOn: string | null;
     periodFrom: string;
     periodTo: string;
     jobs: number;
     areaM2: number | null;
     tonnesDiverted: number;
+    weightBasis: CertificateWeightBasis;
+    docketNumber: string | null;
+    tippedOffAt: Date | null;
   }): Promise<string> {
     const created = await CertificateModel.create({
       ...input,
@@ -466,6 +610,43 @@ export const reportRepository = {
     });
 
     return created._id.toHexString();
+  },
+
+  /**
+   * Point an issued certificate at its rendered PDF.
+   *
+   * ⚠️ Writes ONLY `storageKey`. Everything else froze at issue, and a render
+   * that could touch a figure would defeat the freeze — the whole reason the
+   * document is stored rather than recomputed.
+   */
+  /**
+   * The stored PDF's key, scoped the same way `findCertificate` is.
+   *
+   * Separate from the certificate itself because the key never crosses the API
+   * boundary — this is for the download endpoint, which turns it into a
+   * short-lived link and returns that instead.
+   */
+  async certificateStorageKey(id: string, accountId: string | null): Promise<string | null> {
+    if (!mongoose.isValidObjectId(id)) return null;
+
+    const filter: Record<string, unknown> = { _id: new mongoose.Types.ObjectId(id) };
+    if (accountId) filter.accountId = new mongoose.Types.ObjectId(accountId);
+
+    const row = await CertificateModel.findOne(filter)
+      .select({ storageKey: 1 })
+      .lean<{ storageKey: string | null }>();
+
+    const key = row?.storageKey ?? '';
+    return key.trim() === '' ? null : key;
+  },
+
+  async recordCertificatePdf(id: string, storageKey: string): Promise<void> {
+    if (!mongoose.isValidObjectId(id)) return;
+
+    await CertificateModel.updateOne(
+      { _id: new mongoose.Types.ObjectId(id) },
+      { $set: { storageKey } },
+    );
   },
 
   /**
@@ -525,14 +706,34 @@ interface RawCertificate {
   accountId: mongoose.Types.ObjectId;
   accountName: string;
   siteName: string | null;
+  siteAddress: string | null;
   jobNumber: number | null;
+  collectedOn: string | null;
   periodFrom: string;
   periodTo: string;
   jobs: number;
   areaM2: number | null;
   tonnesDiverted: number;
+  weightBasis: CertificateWeightBasis | null;
+  docketNumber: string | null;
+  tippedOffAt: Date | null;
   issuedAt: Date | null;
   issuedTo: string | null;
+  issuedByName: string | null;
+  storageKey: string | null;
+}
+
+/**
+ * The calendar day after this one — `2026-09-30` → `2026-10-01`.
+ *
+ * Pure calendar arithmetic on a plain date, so UTC is the right frame here:
+ * there is no instant involved, and month and year rollovers come free. The
+ * result is handed to `startOfSydneyDay`, which is what applies the timezone.
+ */
+function dayAfter(isoDate: string): string {
+  const next = new Date(`${isoDate}T00:00:00.000Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next.toISOString().slice(0, 10);
 }
 
 function toCertificate(row: RawCertificate): Certificate {
@@ -544,14 +745,31 @@ function toCertificate(row: RawCertificate): Certificate {
     accountId: row.accountId.toHexString(),
     accountName: row.accountName,
     siteName: row.siteName,
+    siteAddress: row.siteAddress ?? null,
     jobNumber: row.jobNumber,
+    collectedOn: row.collectedOn ?? null,
     periodFrom: row.periodFrom,
     periodTo: row.periodTo,
     jobs: row.jobs,
     areaM2: row.areaM2,
     tonnesDiverted: row.tonnesDiverted,
+    /*
+     * Defaulted for rows written before the basis was recorded. `weighed` is
+     * the safe direction: every certificate that existed then was prepared
+     * under the same rule this column now makes explicit.
+     */
+    weightBasis: row.weightBasis ?? 'weighed',
+    docketNumber: row.docketNumber ?? null,
+    tippedOffAt: row.tippedOffAt ? row.tippedOffAt.toISOString() : null,
     issuedAt: row.issuedAt ? row.issuedAt.toISOString() : null,
     issuedTo: row.issuedTo,
+    issuedByName: row.issuedByName ?? null,
+    /*
+     * A boolean, never the key. The key is a bucket path, and the client's only
+     * legitimate question is whether there is something to download — the link
+     * itself is minted per request and expires.
+     */
+    hasPdf: (row.storageKey ?? '').trim() !== '',
   };
 }
 

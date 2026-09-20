@@ -1,4 +1,4 @@
-import type { Place, PlaceWrite } from '@plastago/shared';
+import type { LocatedPlaceWrite, Place } from '@plastago/shared';
 import { Types } from 'mongoose';
 import { JobModel } from '../jobs/job.model.js';
 import { ZONES_COLLECTION } from '../settings/settings.model.js';
@@ -202,7 +202,7 @@ export const placeRepository = {
     return row ? toPlace(row) : null;
   },
 
-  async create(draft: PlaceWrite): Promise<Place> {
+  async create(draft: LocatedPlaceWrite): Promise<Place> {
     const created = await PlaceModel.create({
       ...draft,
       label: labelFor(draft),
@@ -215,7 +215,7 @@ export const placeRepository = {
     return place;
   },
 
-  async update(id: string, draft: PlaceWrite): Promise<void> {
+  async update(id: string, draft: LocatedPlaceWrite): Promise<void> {
     await PlaceModel.updateOne(
       { _id: new Types.ObjectId(id) },
       {

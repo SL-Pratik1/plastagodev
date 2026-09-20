@@ -76,6 +76,9 @@ const FULL = {
   bankAccount: '12345678',
   bankAccountName: 'PlastaGo Group Pty Ltd',
   showGbcaBadge: true,
+  certificateSignatureName: 'Matt Ryan',
+  certificateSignatureTitle: 'Director',
+  certificateSignatureKey: '',
   /*
    * Deliberately not `as const`: that makes `templates` a `readonly []`, which
    * the repository's mutable parameter rejects at every call site below. The
@@ -97,7 +100,14 @@ describe('saving the invoicing block', () => {
      * objects and leaving the reader to diff them.
      */
     for (const [field, expected] of Object.entries(FULL)) {
+      /*
+       * `certificateSignatureKey` is skipped for the same reason as
+       * `logoKey`: both are held out of this write on purpose and set by
+       * their own endpoints once the bytes have landed, so neither one
+       * round-trips through `saveInvoicing`.
+       */
       if (field === 'templates' || field === 'logoKey') continue;
+      if (field === 'certificateSignatureKey') continue;
       expect({ [field]: stored.invoicing[field as keyof typeof FULL] }).toEqual({
         [field]: expected,
       });

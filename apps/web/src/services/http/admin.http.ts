@@ -12,6 +12,7 @@ import {
   InvoiceDownloadsSchema,
   InvoiceListItemSchema,
   InvoiceSchema,
+  JobChargeSchema,
   JobCommentSchema,
   JobListItemSchema,
   JobSchema,
@@ -27,6 +28,7 @@ import {
   type AccountType,
   type CreateRunInput,
   type ExceptionReason,
+  type JobChargeDraft,
   type JobCommentDraft,
   type JobDraft,
   type ReportFilters,
@@ -45,7 +47,7 @@ import type {
   ReportService,
   VehicleService,
 } from '../types.js';
-import { NoContentSchema, listParams, pageOf } from './list-params.js';
+import { NoContentSchema, SignedUrlSchema, listParams, pageOf } from './list-params.js';
 import { viaService } from './to-service-error.js';
 
 /**
@@ -252,6 +254,17 @@ export function createHttpJobService(api: ApiClient): JobService {
           // Returns the created comment because the delivery state is part of
           // the answer, and the thread has to show it.
           schema: JobCommentSchema,
+        }),
+      ),
+
+    addCharge: (jobId: string, draft: JobChargeDraft) =>
+      viaService(() =>
+        api.request(`${base}/${jobId}/charges`, {
+          method: 'POST',
+          body: draft,
+          // Returns the created charge: the server decides its approval state
+          // from the configured service, and the screen has to show which.
+          schema: JobChargeSchema,
         }),
       ),
   };
@@ -495,8 +508,29 @@ export function createHttpReportService(api: ApiClient): ReportService {
           schema: CertificateSchema,
         }),
       ),
+
+    /** A link to the stored PDF, for the office's own preview. */
+    certificatePdf: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/certificates/${id}/pdf`, {
+          method: 'POST',
+          schema: SignedUrlSchema,
+        }),
+      ),
+
+    /** Sends the stored document again, to the account's certificate address. */
+    resendCertificate: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/certificates/${id}/resend`, {
+          method: 'POST',
+          schema: ResentSchema,
+        }),
+      ),
   };
 }
+
+/** What a resend reports back: the address it actually went to, or null. */
+const ResentSchema = z.object({ sentTo: z.string().nullable() });
 
 /* ── M9.7 · F43 · fleet ──────────────────────────────────────────────────── */
 

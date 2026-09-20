@@ -128,6 +128,21 @@ const settingsSchema = new Schema(
     bankAccountName: { type: String, required: false, default: '', trim: true },
     showGbcaBadge: { type: Boolean, required: true, default: false },
 
+    /*
+     * ── The certificate signature block (M9.5 · F52) ────────────────────
+     *
+     * Here rather than in a section of its own because it is the same kind of
+     * decision as the logo and the ABN above — the company as it appears on a
+     * document it puts its name to. The Settings screen presents these under
+     * "Invoicing & certificates" for that reason.
+     *
+     * ⚠️ `certificateSignatureKey` is a STORAGE KEY, not a URL, exactly like
+     * `logoKey` and for the same reason.
+     */
+    certificateSignatureName: { type: String, required: false, default: '', trim: true },
+    certificateSignatureTitle: { type: String, required: false, default: '', trim: true },
+    certificateSignatureKey: { type: String, required: false, default: '', trim: true },
+
     /**
      * M6.8 — the flat per-job cost the margin figure assumes today.
      *

@@ -7,7 +7,7 @@
  * these APIs enabled, able to do the two things the platform needs?" — and it
  * spends at most two requests doing it.
  *
- *   npm run probe:maps                                   # geocode + routes
+ *   npm run probe:maps                                   # all three
  *   npm run probe:maps -- "2 Macquarie St|Sydney|2000"   # one geocode only
  *
  * ⚠️ Deliberately prints the pin and Google's own rendering of the address.
@@ -39,6 +39,17 @@ async function main(): Promise<void> {
   console.log(point ?? 'null — the warning logged above says why');
 
   if (line) return;
+
+  /*
+   * The suburb lookup is what the admin Suburbs tab runs on every save, so it
+   * is the one to check before telling anybody the form no longer needs a
+   * coordinate. It fails DIFFERENTLY from the address geocode above — the
+   * locality centroid is the wanted answer here — so a passing address probe
+   * does not vouch for it.
+   */
+  console.log('\n── 1 suburb lookup (what Settings → Pricing → Suburbs uses) ──');
+  const pin = await maps.geocodeSuburb({ suburb: 'Kellyville', postcode: '2155', state: 'NSW' });
+  console.log(pin ?? 'null — the warning logged above says why');
 
   console.log('\n── 1 routes request (5 stops around north-west Sydney) ──────');
   const ordered = await maps.optimiseStopOrder([

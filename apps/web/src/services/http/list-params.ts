@@ -57,3 +57,12 @@ export function pageOf<TItem extends z.ZodType>(
  */
 export const NoContentSchema = z.null();
 export const AcceptedSchema = z.unknown();
+
+/**
+ * A short-lived link to something in object storage.
+ *
+ * The endpoints that mint these return the URL and never the storage key —
+ * the key is a bucket path, and the browser's only legitimate question is
+ * where to send the user next.
+ */
+export const SignedUrlSchema = z.object({ url: z.string() });

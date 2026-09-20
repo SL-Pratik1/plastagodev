@@ -129,6 +129,39 @@ const EnvSchema = z
      */
     AUTH_SESSION_TTL_HOURS: z.coerce.number().int().positive().max(720).default(8),
 
+    /**
+     * Send the session cookie on cross-SITE requests.
+     *
+     * ── When this has to be on ────────────────────────────────────────────
+     * When the app and the API are not the same site. A `SameSite=Lax` cookie
+     * — the default, and the right one — is simply not sent on a cross-site
+     * request, so the browser accepts the sign-in, drops the cookie on the
+     * next call, and the app reports the session as ended. It looks like an
+     * auth bug and is a cookie-scope one.
+     *
+     * Development never needs it: Vite proxies /api, so the browser sees one
+     * origin. Neither does a deployment whose surfaces and API are subdomains
+     * of one registrable domain — console./api.plastago.com.au share a site,
+     * and Lax covers them.
+     *
+     * It is needed for hosts like `*.onrender.com`, where the platform domain
+     * is a public suffix: every subdomain is its OWN site, so the API is a
+     * third party to the app that calls it.
+     *
+     * ⚠️ WHAT THIS CANNOT FIX. `SameSite=None` makes the cookie a third-party
+     * cookie, and a browser is free to refuse it: Chrome does in Incognito
+     * already, and is removing them generally. So this is what makes a
+     * split-domain deployment work, not what makes it correct. One domain with
+     * subdomains is the fix; this is the bridge until there is one.
+     *
+     * Forces `Secure` with it, because a browser rejects `SameSite=None`
+     * without it — which is why this is not simply tied to NODE_ENV.
+     */
+    AUTH_CROSS_SITE_COOKIE: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+
     /** Code lifetime. The sign-in screen's copy says "only valid for 5 minutes". */
     OTP_TTL_SECONDS: z.coerce.number().int().positive().default(300),
 

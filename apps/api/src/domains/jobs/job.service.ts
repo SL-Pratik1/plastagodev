@@ -1,6 +1,8 @@
 import type {
   ExceptionReason,
   Job,
+  JobCharge,
+  JobChargeDraft,
   JobComment,
   JobCommentDraft,
   JobDraft,
@@ -13,6 +15,7 @@ import type {
 import { env } from '../../config/env.js';
 import { AppError } from '../../lib/app-error.js';
 import { distanceKm } from '../../lib/geo.js';
+import { centsToMoney, moneyToCents } from '../../lib/money.js';
 import { getMapsProvider, isPrecise, type MapsProvider } from '../../integrations/maps.js';
 import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
 import { logger } from '../../lib/logger.js';
@@ -284,7 +287,13 @@ export const jobService = {
     });
 
     log.info(
-      { originalJobId, originalJobNumber: original.jobNumber, jobId: rebooked.id, jobNumber: rebooked.jobNumber, newReadyDate },
+      {
+        originalJobId,
+        originalJobNumber: original.jobNumber,
+        jobId: rebooked.id,
+        jobNumber: rebooked.jobNumber,
+        newReadyDate,
+      },
       'futile pickup rebooked',
     );
 
@@ -358,131 +367,133 @@ export const jobService = {
 
     const created = await withTransaction(
       async () =>
-        jobRepository.create({
-          jobNumber,
-          accountId: account.id,
-          accountName: account.name,
-          brandId: account.brandId,
-          builderName: draft.builderName.trim(),
-          siteName: draft.siteName.trim(),
-          lotNumber: draft.lotNumber.trim() || null,
-          addressLine: draft.addressLine.trim(),
-          // From the PICKED suburb, never from typed text. The zone prices the
-          // job (M6.3) and the pin plots it, and neither can be guessed.
-          suburb: place.suburb,
-          postcode: place.postcode,
-          zoneId: place.zoneId,
-          latitude: location.latitude,
-          longitude: location.longitude,
-          locationSource: location.locationSource,
-          accessNotes: draft.accessNotes.trim(),
-          gateHours: draft.gateHours.trim() || null,
-          inductionRequired: draft.inductionRequired,
-          craneAvailable: draft.craneAvailable,
-          siteContactName: draft.siteContactName.trim() || null,
-          siteContactMobile: draft.siteContactMobile.trim() || null,
-          siteContactEmail: draft.siteContactEmail.trim() || null,
-          // The order's own number wins where there is one: that is the string
-          // the builder's accounts system matches, and a typed copy can differ
-          // from it by a character (Matt, 9:56).
-          poNumber: purchaseOrder ? purchaseOrder.poNumber : draft.poNumber.trim() || null,
-          purchaseOrderId: purchaseOrder?.id ?? null,
-          // Who actually keyed it in. Stays the office user even where the
-          // scoping id below belongs to somebody else — the two answer different
-          // questions, and the model says so.
-          bookedByName: caller.name,
-          /*
-           * Who may SEE this job (an authorisation field — see the model).
-           *
-           * A portal booking scopes to whoever made it. An office booking has
-           * no such person, and a null is invisible to every supervisor — the
-           * safe direction, and still the answer for a phone booking.
-           *
-           * ⚠️ The exception is an order that named a supervisor. Matt, 33:57:
-           * *"that job should get assigned to that site supervisor… they get an
-           * email and able to log in in the system and see all these job
-           * details."* Without this the office confirms the order, the job is
-           * created, and the one person who needs to see it cannot — which is
-           * indistinguishable from the feature not existing.
-           */
-          bookedByUserId: isCustomer(caller)
-            ? caller.userId
-            : (purchaseOrder?.siteSupervisorUserId ?? null),
-          bookedBySource: isCustomer(caller) ? 'portal' : 'office',
-          readyDate: draft.readyDate,
-          // M2.4a — the SLA is in BUSINESS days, from the customer's ready date.
-          targetDate: addBusinessDays(draft.readyDate, slaBusinessDays),
-          serviceLevel: draft.serviceLevel,
-          freightItem: draft.freightItem,
-          /*
-           * Frozen from the order, exactly like the zone above. Not re-read
-           * through `purchaseOrderId` at invoice time: an order corrected next
-           * year must not re-price a job already collected and invoiced.
-           */
-          expectedAreaM2: quantities.expectedAreaM2,
-          bagCount: quantities.bagCount,
-          notes: draft.notes.trim(),
-          totalExGst: quote.subtotalExGst,
-          gst: quote.gst,
-          totalIncGst: quote.totalIncGst,
-          /*
-           * ⚠️ M6.2 — the rates that produced those totals, frozen on the job
-           * for exactly the same reason as the zone and the area above.
-           *
-           * This is what lets a rate be changed at all. A credit note or a
-           * reprint reads these figures instead of asking the rate tables
-           * again, so a schedule issued next March cannot move a line on an
-           * invoice the customer has already paid — and a retired rate card
-           * does not take its history with it.
-           */
-          appliedRate,
-          /*
-           * M4.8b — the account's rule, resolved NOW and frozen on the job.
-           *
-           * Never read live from the account afterwards: a job booked today
-           * under today's rule must still show today's rule when it is audited
-           * next year. Re-deriving it would let a settings change rewrite the
-           * past and make a compliant job look like a gap.
-           */
-          riskAssessmentRequired: account.riskAssessmentRequired,
-        }).then(async (job) => {
-          // Remembered so `compensate` can find the job if the event write below
-          // fails on a deployment with no transactions.
-          createdId = job.id;
+        jobRepository
+          .create({
+            jobNumber,
+            accountId: account.id,
+            accountName: account.name,
+            brandId: account.brandId,
+            builderName: draft.builderName.trim(),
+            siteName: draft.siteName.trim(),
+            lotNumber: draft.lotNumber.trim() || null,
+            addressLine: draft.addressLine.trim(),
+            // From the PICKED suburb, never from typed text. The zone prices the
+            // job (M6.3) and the pin plots it, and neither can be guessed.
+            suburb: place.suburb,
+            postcode: place.postcode,
+            zoneId: place.zoneId,
+            latitude: location.latitude,
+            longitude: location.longitude,
+            locationSource: location.locationSource,
+            accessNotes: draft.accessNotes.trim(),
+            gateHours: draft.gateHours.trim() || null,
+            inductionRequired: draft.inductionRequired,
+            craneAvailable: draft.craneAvailable,
+            siteContactName: draft.siteContactName.trim() || null,
+            siteContactMobile: draft.siteContactMobile.trim() || null,
+            siteContactEmail: draft.siteContactEmail.trim() || null,
+            // The order's own number wins where there is one: that is the string
+            // the builder's accounts system matches, and a typed copy can differ
+            // from it by a character (Matt, 9:56).
+            poNumber: purchaseOrder ? purchaseOrder.poNumber : draft.poNumber.trim() || null,
+            purchaseOrderId: purchaseOrder?.id ?? null,
+            // Who actually keyed it in. Stays the office user even where the
+            // scoping id below belongs to somebody else — the two answer different
+            // questions, and the model says so.
+            bookedByName: caller.name,
+            /*
+             * Who may SEE this job (an authorisation field — see the model).
+             *
+             * A portal booking scopes to whoever made it. An office booking has
+             * no such person, and a null is invisible to every supervisor — the
+             * safe direction, and still the answer for a phone booking.
+             *
+             * ⚠️ The exception is an order that named a supervisor. Matt, 33:57:
+             * *"that job should get assigned to that site supervisor… they get an
+             * email and able to log in in the system and see all these job
+             * details."* Without this the office confirms the order, the job is
+             * created, and the one person who needs to see it cannot — which is
+             * indistinguishable from the feature not existing.
+             */
+            bookedByUserId: isCustomer(caller)
+              ? caller.userId
+              : (purchaseOrder?.siteSupervisorUserId ?? null),
+            bookedBySource: isCustomer(caller) ? 'portal' : 'office',
+            readyDate: draft.readyDate,
+            // M2.4a — the SLA is in BUSINESS days, from the customer's ready date.
+            targetDate: addBusinessDays(draft.readyDate, slaBusinessDays),
+            serviceLevel: draft.serviceLevel,
+            freightItem: draft.freightItem,
+            /*
+             * Frozen from the order, exactly like the zone above. Not re-read
+             * through `purchaseOrderId` at invoice time: an order corrected next
+             * year must not re-price a job already collected and invoiced.
+             */
+            expectedAreaM2: quantities.expectedAreaM2,
+            bagCount: quantities.bagCount,
+            notes: draft.notes.trim(),
+            totalExGst: quote.subtotalExGst,
+            gst: quote.gst,
+            totalIncGst: quote.totalIncGst,
+            /*
+             * ⚠️ M6.2 — the rates that produced those totals, frozen on the job
+             * for exactly the same reason as the zone and the area above.
+             *
+             * This is what lets a rate be changed at all. A credit note or a
+             * reprint reads these figures instead of asking the rate tables
+             * again, so a schedule issued next March cannot move a line on an
+             * invoice the customer has already paid — and a retired rate card
+             * does not take its history with it.
+             */
+            appliedRate,
+            /*
+             * M4.8b — the account's rule, resolved NOW and frozen on the job.
+             *
+             * Never read live from the account afterwards: a job booked today
+             * under today's rule must still show today's rule when it is audited
+             * next year. Re-deriving it would let a settings change rewrite the
+             * past and make a compliant job look like a gap.
+             */
+            riskAssessmentRequired: account.riskAssessmentRequired,
+          })
+          .then(async (job) => {
+            // Remembered so `compensate` can find the job if the event write below
+            // fails on a deployment with no transactions.
+            createdId = job.id;
 
-          /*
-           * The quote is PERSISTED as the job's own charge lines.
-           *
-           * Not recomputed at invoice time: rates are effective-dated (M6.2), so
-           * a re-quote months later would silently re-price history the first
-           * time somebody edits a rate card — and the invoice has to reproduce
-           * what the customer was quoted, to the cent (Risk 1). Storing them
-           * here makes the job the single source of truth and the invoice a
-           * straight copy of it.
-           */
-          await writeQuotedCharges(
-            job.id,
-            quote.lines.map((line) => ({
-              code: line.code,
-              description: line.description,
-              quantity: line.quantity,
-              unitRate: line.unitRate,
-              amount: line.amount,
-            })),
-          );
+            /*
+             * The quote is PERSISTED as the job's own charge lines.
+             *
+             * Not recomputed at invoice time: rates are effective-dated (M6.2), so
+             * a re-quote months later would silently re-price history the first
+             * time somebody edits a rate card — and the invoice has to reproduce
+             * what the customer was quoted, to the cent (Risk 1). Storing them
+             * here makes the job the single source of truth and the invoice a
+             * straight copy of it.
+             */
+            await writeQuotedCharges(
+              job.id,
+              quote.lines.map((line) => ({
+                code: line.code,
+                description: line.description,
+                quantity: line.quantity,
+                unitRate: line.unitRate,
+                amount: line.amount,
+              })),
+            );
 
-          await jobRepository.appendEvent({
-            jobId: job.id,
-            label: 'Job created',
-            actor: caller.name,
-            status: 'booked',
-            detail: isCustomer(caller)
-              ? 'Booked in the customer portal'
-              : 'Created in the admin console',
-          });
+            await jobRepository.appendEvent({
+              jobId: job.id,
+              label: 'Job created',
+              actor: caller.name,
+              status: 'booked',
+              detail: isCustomer(caller)
+                ? 'Booked in the customer portal'
+                : 'Created in the admin console',
+            });
 
-          return job;
-        }),
+            return job;
+          }),
       {
         label: 'create-job',
         compensate: async () => {
@@ -501,7 +512,11 @@ export const jobService = {
      * is re-read rather than assembled from `created` because a notice needs
      * the site contact, which the grid row does not carry.
      */
-    const forNotice = await jobRepository.findById(created.id, { accountId: null, bookedByUserId: null, driverId: null });
+    const forNotice = await jobRepository.findById(created.id, {
+      accountId: null,
+      bookedByUserId: null,
+      driverId: null,
+    });
     if (forNotice) await jobNotices.booked(forNotice);
 
     log.info(
@@ -519,12 +534,7 @@ export const jobService = {
    * cannot. "How many jobs did we lose to access problems last quarter" is a
    * question the office should be able to answer without reading notes.
    */
-  async cancel(
-    id: string,
-    reason: ExceptionReason,
-    note: string,
-    caller: Caller,
-  ): Promise<void> {
+  async cancel(id: string, reason: ExceptionReason, note: string, caller: Caller): Promise<void> {
     const job = await jobRepository.findSummary(id, scopeFor(caller));
     if (!job) throw AppError.notFound('No such job');
 
@@ -575,9 +585,7 @@ export const jobService = {
     assertMayChange(caller);
 
     if (!isCancellable(job.status)) {
-      throw AppError.conflict(
-        'That job is finished, so there is nothing left to reschedule',
-      );
+      throw AppError.conflict('That job is finished, so there is nothing left to reschedule');
     }
 
     assertPlausibleReadyDate(readyDate);
@@ -620,9 +628,7 @@ export const jobService = {
     }
 
     if (draft.visibility === 'driver' && job.driverId === null) {
-      throw AppError.conflict(
-        'This job has no allocated driver, so there is nobody to send it to',
-      );
+      throw AppError.conflict('This job has no allocated driver, so there is nobody to send it to');
     }
 
     const now = new Date();
@@ -639,6 +645,85 @@ export const jobService = {
       deliveredAt: draft.visibility === 'driver' ? now : null,
       fromDriver: false,
     });
+  },
+
+  /**
+   * Add a configured extra to a job (M6.5).
+   *
+   * ── The gap this closes ───────────────────────────────────────────────────
+   * Charges reached a job only through something a driver did or the system
+   * derived. Everything on the additional-services price list that the office
+   * decides — an out-of-area fee, a fuel levy on a one-off — had a price and no
+   * way of ever being applied. The settings dialog promised otherwise.
+   *
+   * ── Why the office cannot name its own amount ─────────────────────────────
+   * The draft carries a CODE and a quantity, never a figure. The price comes
+   * from the configured service, exactly as it does for a driver-raised one, so
+   * the same charge costs the same whoever adds it and changing it stays one
+   * edit on one screen. A free-typed amount here would be a second, invisible
+   * price list.
+   */
+  async addCharge(jobId: string, draft: JobChargeDraft, caller: Caller): Promise<JobCharge> {
+    /*
+     * ⚠️ Office only, and deliberately not `scopeFor(caller)`. A customer
+     * administrator can read their own job; letting them add a billable line to
+     * it would let them invoice themselves.
+     */
+    if (isCustomer(caller)) throw AppError.forbidden('Your role does not allow that');
+
+    // Unscoped: the only callers that reach here are office roles, which the
+    // guard above has already established.
+    const job = await jobRepository.findSummary(jobId, scopeFor(caller));
+    if (!job) throw AppError.notFound('No such job');
+
+    if (job.status === 'cancelled') {
+      throw AppError.conflict('This job was cancelled, so nothing can be billed against it');
+    }
+
+    /*
+     * A percentage service is a proportion OF THE JOB, so it needs the job's
+     * own ex-GST total to apply to. A fixed one ignores it.
+     */
+    const priced = await pricingService.priceAdditionalService(draft.code, {
+      quantity: draft.quantity,
+      baseAmount: job.totalExGst,
+    });
+
+    /*
+     * The unit rate is what one of them costs, so the invoice line can read
+     * "2 × $30.00 = $60.00" — Matt's own example. Derived by division rather
+     * than read from the service, because a percentage charge has no unit price
+     * of its own and would otherwise print its percentage as a dollar figure.
+     */
+    const unitCents = Math.round(moneyToCents(priced.amountExGst) / draft.quantity);
+
+    const chargeId = await jobRepository.addOfficeCharge({
+      jobId,
+      code: draft.code,
+      description: priced.label,
+      quantity: draft.quantity,
+      unitRate: centsToMoney(unitCents),
+      amount: priced.amountExGst,
+      /*
+       * ⚠️ The configured `requiresApproval` decides this, NOT the fact that the
+       * office added it. A contamination charge is approved before it can be
+       * invoiced whoever raised it — that rule is about the money, not about who
+       * typed it — and an office user approving their own charge in one click
+       * would be the same person on both sides of the decision.
+       */
+      approvalState: priced.requiresApproval ? 'pending' : 'not-required',
+      raisedBy: caller.name,
+      note: draft.note?.trim() === '' ? null : (draft.note ?? null),
+    });
+
+    log.info(
+      { jobId, chargeId, code: draft.code, amount: priced.amountExGst, by: caller.name },
+      'office charge added to job',
+    );
+
+    const charge = (await jobRepository.findCharge(chargeId)) ?? null;
+    if (!charge) throw new Error('charge vanished immediately after it was created');
+    return charge;
   },
 };
 

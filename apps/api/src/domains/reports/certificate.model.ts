@@ -1,4 +1,8 @@
-import { CERTIFICATE_SCOPES, CERTIFICATE_STATES } from '@plastago/shared';
+import {
+  CERTIFICATE_SCOPES,
+  CERTIFICATE_STATES,
+  CERTIFICATE_WEIGHT_BASES,
+} from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
 export const CERTIFICATES_COLLECTION = 'certificates';
@@ -46,9 +50,19 @@ const certificateSchema = new Schema(
 
     /** Set when the scope narrows to one site or one job. */
     siteName: { type: String, default: null, trim: true },
+    /**
+     * Frozen copy of the site address.
+     *
+     * An auditor matches a certificate to a development by its address; the site
+     * NAME is whatever the builder nicknamed the job, and two of them are called
+     * "Stage 2". Copied rather than joined, like `accountName` above.
+     */
+    siteAddress: { type: String, default: null, trim: true },
     /** REFERENCE → `jobs._id`, on a single-job certificate. */
     jobId: { type: Schema.Types.ObjectId, default: null, ref: 'Job' },
     jobNumber: { type: Number, default: null, min: 1 },
+    /** `YYYY-MM-DD` — the day the material left the site. Job scope only. */
+    collectedOn: { type: String, default: null },
 
     periodFrom: { type: String, required: true },
     periodTo: { type: String, required: true },
@@ -73,6 +87,34 @@ const certificateSchema = new Schema(
      * figures appear; only this one is auditable.
      */
     tonnesDiverted: { type: Number, required: true, min: 0, default: 0 },
+
+    /* ── The audit trail, frozen with the figures ─────────────────────── */
+
+    /**
+     * How that tonnage was arrived at — `weighed` or `apportioned`.
+     *
+     * ⚠️ Only `weighed` is ever issued (Matt, 32:11: an estimated weight
+     * *"doesn't meet compliance regulation"*). Stored anyway rather than
+     * inferred at read time, because the job it came from can be re-reconciled
+     * later and the document must keep saying what it was based on.
+     */
+    weightBasis: {
+      type: String,
+      required: true,
+      enum: CERTIFICATE_WEIGHT_BASES,
+      default: 'weighed',
+    },
+
+    /**
+     * The weighbridge docket the load was tipped against.
+     *
+     * Null where the run carries none. It is the half of "diverted from
+     * landfill" the crane scale cannot evidence: the scale says what left the
+     * site, the docket says what reached the facility.
+     */
+    docketNumber: { type: String, default: null, trim: true },
+    /** When it was tipped — a different moment from when it was collected. */
+    tippedOffAt: { type: Date, default: null },
 
     /* ── Issue ───────────────────────────────────────────────────────── */
     issuedAt: { type: Date, default: null },

@@ -32,6 +32,29 @@ let storedCertificate: Record<string, unknown> | null = null;
 let issueMatches = true;
 let accountFound = true;
 
+/** The site, pickup and docket a job-scoped certificate freezes. */
+let jobContext: Record<string, unknown> | null = {
+  jobNumber: 10_482,
+  siteName: 'Lot 214',
+  siteAddress: '42 Wattle St, Riverstone',
+  collectedOn: '2026-09-02',
+  docketNumber: 'WB-884213',
+  tippedOffAt: new Date('2026-09-02T15:20:00.000Z'),
+};
+
+/** What the automatic path finds on a run. */
+let certifiableJobs: Array<{ jobId: string; accountId: string; completedOn: string }> = [];
+
+/** Null means the issued certificate has no rendered PDF yet. */
+let storedPdfKey: string | null = 'certificates/cert1/pdf.pdf';
+/** Makes the bucket refuse a write, so the "no PDF" path is real. */
+let storageFails = false;
+/** Makes the eligibility lookup blow up, so the never-throws claim is real. */
+let certifiableJobsThrows = false;
+let recordedPdfs: Array<{ id: string; key: string }> = [];
+let storagePuts: string[] = [];
+let sentEmails: Array<{ to: string; subject: string; attachments: number }> = [];
+
 vi.mock('../src/domains/reports/report.repository.js', () => ({
   reportRepository: {
     volume: (filters: ReportFilters) => {
@@ -96,6 +119,16 @@ vi.mock('../src/domains/reports/report.repository.js', () => ({
     },
     certificateExistsForJob: () => Promise.resolve(certificateExists),
     nextReferenceNumber: () => Promise.resolve(41),
+    certificateJobContext: () => Promise.resolve(jobContext),
+    certifiableJobsOnRun: () =>
+      certifiableJobsThrows
+        ? Promise.reject(new Error('mongo unavailable'))
+        : Promise.resolve(certifiableJobs),
+    certificateStorageKey: () => Promise.resolve(storedPdfKey),
+    recordCertificatePdf: (id: string, key: string) => {
+      recordedPdfs.push({ id, key });
+      return Promise.resolve();
+    },
   },
 }));
 
@@ -116,8 +149,59 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
 
 vi.mock('../src/domains/settings/settings.repository.js', () => ({
   settingsRepository: {
-    get: () => Promise.resolve({ pricing: { assumedCostPerJob: '100.00' } }),
+    get: () =>
+      Promise.resolve({
+        pricing: { assumedCostPerJob: '100.00' },
+        /*
+         * The branding block a certificate prints. Real enough that the
+         * renderer runs for real in these tests — the PDF is drawn, not
+         * stubbed, so a layout change that throws is caught here.
+         */
+        invoicing: {
+          logoKey: '',
+          companyName: 'PlastaGo Pty Ltd',
+          companyAbn: '51 824 753 556',
+          companyAddress: '12 Example Rd, Sydney NSW 2000',
+          companyPhone: '1300 395 438',
+          companyEmail: 'info@plastago.com.au',
+          termsText: '',
+          footerText: '',
+          bankBsb: '',
+          bankAccount: '',
+          bankAccountName: '',
+          showGbcaBadge: true,
+          certificateSignatureName: 'Matt Ryan',
+          certificateSignatureTitle: 'Director',
+          certificateSignatureKey: '',
+        },
+      }),
   },
+}));
+
+vi.mock('../src/integrations/storage.js', () => ({
+  buildKey: (input: { ownerId: string }) => `certificates/${input.ownerId}/pdf.pdf`,
+  getStorage: () => ({
+    put: (key: string) => {
+      if (storageFails) return Promise.reject(new Error('bucket unavailable'));
+      storagePuts.push(key);
+      return Promise.resolve();
+    },
+    get: () => Promise.resolve([Buffer.from('%PDF-1.7 stored')]),
+    presignDownload: (key: string) => Promise.resolve(`https://storage.test/${key}?signed`),
+  }),
+}));
+
+vi.mock('../src/integrations/messaging.js', () => ({
+  getMailer: () => ({
+    send: (email: { to: string; subject: string; attachments?: unknown[] }) => {
+      sentEmails.push({
+        to: email.to,
+        subject: email.subject,
+        attachments: email.attachments?.length ?? 0,
+      });
+      return Promise.resolve();
+    },
+  }),
 }));
 
 const { reportService } = await import('../src/domains/reports/report.service.js');
@@ -170,8 +254,15 @@ function certificate(overrides: Record<string, unknown> = {}) {
     jobs: 3,
     areaM2: 2400,
     tonnesDiverted: 4.3,
+    weightBasis: 'weighed',
+    siteAddress: null,
+    collectedOn: null,
+    docketNumber: null,
+    tippedOffAt: null,
     issuedAt: null,
     issuedTo: null,
+    issuedByName: null,
+    hasPdf: false,
     ...overrides,
   };
 }
@@ -186,6 +277,21 @@ beforeEach(() => {
   storedCertificate = certificate();
   issueMatches = true;
   accountFound = true;
+  jobContext = {
+    jobNumber: 10_482,
+    siteName: 'Lot 214',
+    siteAddress: '42 Wattle St, Riverstone',
+    collectedOn: '2026-09-02',
+    docketNumber: 'WB-884213',
+    tippedOffAt: new Date('2026-09-02T15:20:00.000Z'),
+  };
+  certifiableJobs = [];
+  storedPdfKey = 'certificates/cert1/pdf.pdf';
+  recordedPdfs = [];
+  storagePuts = [];
+  sentEmails = [];
+  storageFails = false;
+  certifiableJobsThrows = false;
 });
 
 describe('volume (M9.1)', () => {
@@ -459,5 +565,264 @@ describe('issuing freezes it', () => {
     await expect(reportService.issueCertificate('cert1', OFFICE)).rejects.toMatchObject({
       status: 404,
     });
+  });
+});
+
+/**
+ * M9.5 — what the document itself carries.
+ *
+ * These are the fields that make a certificate checkable by somebody who does
+ * not work here: the docket the load was tipped against, the site as an
+ * assessor would recognise it, and the statement that the tonnage was weighed
+ * rather than worked out.
+ */
+describe('the frozen audit trail', () => {
+  it('freezes the pickup, the site address and the docket onto the draft', async () => {
+    await reportService.prepareCertificate(
+      { scope: 'job', accountId: 'acc1', from: '2026-09-02', to: '2026-09-02', jobId: 'job1' },
+      OFFICE,
+    );
+
+    expect(created[0]).toMatchObject({
+      jobNumber: 10_482,
+      siteAddress: '42 Wattle St, Riverstone',
+      collectedOn: '2026-09-02',
+      docketNumber: 'WB-884213',
+      weightBasis: 'weighed',
+    });
+  });
+
+  /*
+   * The bug this pins: `jobNumber` was hard-coded to null on every certificate
+   * ever created, so the portal printed "Pickup #—" on all of them.
+   */
+  it('never writes a null pickup number when the job has one', async () => {
+    await reportService.prepareCertificate(
+      { scope: 'job', accountId: 'acc1', from: '2026-09-02', to: '2026-09-02', jobId: 'job1' },
+      OFFICE,
+    );
+
+    expect(created[0]?.jobNumber).not.toBeNull();
+  });
+
+  it('still prepares one where the run carries no docket', async () => {
+    jobContext = {
+      jobNumber: 10_482,
+      siteName: 'Lot 214',
+      siteAddress: '42 Wattle St, Riverstone',
+      collectedOn: '2026-09-02',
+      docketNumber: null,
+      tippedOffAt: null,
+    };
+
+    await reportService.prepareCertificate(
+      { scope: 'job', accountId: 'acc1', from: '2026-09-02', to: '2026-09-02', jobId: 'job1' },
+      OFFICE,
+    );
+
+    // A missing docket costs the certificate one line, never the certificate.
+    expect(created).toHaveLength(1);
+    expect(created[0]?.docketNumber).toBeNull();
+  });
+});
+
+/**
+ * Issuing is what puts the document in front of the customer.
+ *
+ * The PDF is rendered for REAL in these tests — `pdf-lib` draws it and the
+ * bytes are stored — so a layout change that throws on a null area or an
+ * unusual figure fails here rather than on a builder's submission.
+ */
+describe('issuing delivers the document', () => {
+  it('renders the PDF, stores it and emails the certificate address', async () => {
+    storedPdfKey = null; // Nothing rendered yet — issuing is what produces it.
+    storedCertificate = certificate({ issuedTo: 'sustainability@clarendon.com.au' });
+
+    await reportService.issueCertificate('cert1', OFFICE);
+
+    expect(storagePuts).toHaveLength(1);
+    expect(recordedPdfs[0]).toMatchObject({ id: 'cert1' });
+    expect(sentEmails[0]).toMatchObject({
+      to: 'sustainability@clarendon.com.au',
+      attachments: 1,
+    });
+  });
+
+  /*
+   * Matt, 31:04 — certificates go to a different team from invoices. With no
+   * address on the account the document waits in the portal; it must never
+   * fall back to accounts payable, which is where it goes to be ignored.
+   */
+  it('issues without emailing when the account has no certificate address', async () => {
+    storedCertificate = certificate({ issuedTo: null });
+
+    await reportService.issueCertificate('cert1', OFFICE);
+
+    expect(issued).toHaveLength(1);
+    expect(sentEmails).toHaveLength(0);
+  });
+
+  /*
+   * ⚠️ The transition is already written and the office has been told about
+   * it. Storage being unavailable cannot be allowed to undo that.
+   */
+  it('still issues and still writes when the render fails outright', async () => {
+    storedPdfKey = null;
+    storageFails = true;
+    storedCertificate = certificate({ issuedTo: 'sustainability@clarendon.com.au' });
+
+    await expect(reportService.issueCertificate('cert1', OFFICE)).resolves.toBeTruthy();
+
+    expect(issued).toHaveLength(1);
+
+    /*
+     * The email still goes, carrying no attachment — the covering text adapts
+     * and the portal link still works. Silence would leave the customer
+     * knowing nothing about a certificate that has in fact been issued.
+     */
+    expect(sentEmails[0]).toMatchObject({ attachments: 0 });
+  });
+
+  /*
+   * ⚠️ The fixed-price builder's case (Matt, 31:04): their purchase orders
+   * carry no area at all. The document must still render — it prints "Not
+   * supplied" rather than a zero, which would claim they installed no
+   * plasterboard — and this is the input that would throw if it did not.
+   */
+  it('renders a certificate for a job with no recorded area', async () => {
+    storedPdfKey = null;
+    storedCertificate = certificate({
+      areaM2: null,
+      issuedTo: 'sustainability@clarendon.com.au',
+    });
+
+    await reportService.issueCertificate('cert1', OFFICE);
+
+    expect(storagePuts).toHaveLength(1);
+    expect(sentEmails[0]).toMatchObject({ attachments: 1 });
+  });
+
+  it('refuses to resend one that was never issued', async () => {
+    storedCertificate = certificate({ state: 'draft' });
+
+    await expect(reportService.resendCertificate('cert1', OFFICE)).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
+  /*
+   * A resend must put the SAME file in front of the customer. Rendering a new
+   * one would defeat the freeze the document itself claims.
+   */
+  it('resends the stored document rather than rendering a new one', async () => {
+    storedCertificate = certificate({
+      state: 'issued',
+      issuedTo: 'sustainability@clarendon.com.au',
+    });
+
+    await reportService.resendCertificate('cert1', OFFICE);
+
+    expect(storagePuts).toHaveLength(0);
+    expect(sentEmails).toHaveLength(1);
+  });
+});
+
+/** The download link, and who is allowed one. */
+describe('downloading the PDF', () => {
+  it('mints a short-lived link for an issued certificate', async () => {
+    storedCertificate = certificate({ state: 'issued' });
+
+    const result = await reportService.certificatePdfUrl('cert1', OFFICE);
+
+    expect(result.url).toContain('signed');
+  });
+
+  /*
+   * A draft's figures are still allowed to move. Handing somebody a document
+   * drawn from them would produce a certificate that disagrees with the one
+   * eventually issued.
+   */
+  it('refuses a draft', async () => {
+    storedCertificate = certificate({ state: 'draft' });
+
+    await expect(reportService.certificatePdfUrl('cert1', OFFICE)).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
+  /*
+   * Issued while storage was down: the figures are frozen and valid, so the
+   * first download renders the missing document rather than refusing it.
+   */
+  it('renders on demand when an issued certificate has no stored PDF', async () => {
+    storedCertificate = certificate({ state: 'issued' });
+    storedPdfKey = null;
+
+    const result = await reportService.certificatePdfUrl('cert1', OFFICE);
+
+    expect(storagePuts).toHaveLength(1);
+    expect(result.url).toContain('signed');
+  });
+
+  it('404s a certificate belonging to another customer', async () => {
+    storedCertificate = null;
+
+    await expect(reportService.certificatePdfUrl('cert1', CUSTOMER)).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+});
+
+/**
+ * The automatic path (M9.5), fired by a driver's tip-off.
+ *
+ * ⚠️ The rule it must never break: it cannot throw. It runs on the back of a
+ * reconciliation that is already written, and a driver at a weighbridge must
+ * not see a failure because a certificate could not be drafted.
+ */
+describe('automatic drafts from a tip-off', () => {
+  it('prepares one draft per eligible job on the run', async () => {
+    certifiableJobs = [
+      { jobId: 'job1', accountId: 'acc1', completedOn: '2026-09-02' },
+      { jobId: 'job2', accountId: 'acc1', completedOn: '2026-09-02' },
+    ];
+
+    const result = await reportService.autoPrepareForRun('run1');
+
+    expect(result.prepared).toBe(2);
+    expect(created).toHaveLength(2);
+    // Job-scoped and bounded to the collection day, not to a month.
+    expect(created[0]).toMatchObject({ scope: 'job', periodFrom: '2026-09-02' });
+  });
+
+  it('prepares nothing when no stop was crane-weighed', async () => {
+    certifiableJobs = [];
+
+    const result = await reportService.autoPrepareForRun('run1');
+
+    expect(result.prepared).toBe(0);
+    expect(created).toHaveLength(0);
+  });
+
+  /*
+   * One bad stop must not cost the others theirs — the loop catches per job.
+   */
+  it('skips a job that cannot be certified and keeps going', async () => {
+    certifiableJobs = [
+      { jobId: 'job1', accountId: 'acc1', completedOn: '2026-09-02' },
+      { jobId: 'job2', accountId: 'acc1', completedOn: '2026-09-02' },
+    ];
+    certificateExists = true; // Every one of them already has a certificate.
+
+    const result = await reportService.autoPrepareForRun('run1');
+
+    expect(result.prepared).toBe(0);
+    expect(created).toHaveLength(0);
+  });
+
+  it('never throws when the lookup itself fails', async () => {
+    certifiableJobsThrows = true;
+
+    await expect(reportService.autoPrepareForRun('run1')).resolves.toEqual({ prepared: 0 });
   });
 });

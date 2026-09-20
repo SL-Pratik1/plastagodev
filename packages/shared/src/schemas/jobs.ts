@@ -310,7 +310,11 @@ export const JobCommentSchema = z
 /** What the comment box submits. */
 export const JobCommentDraftSchema = z
   .object({
-    body: z.string().trim().min(1, 'Write something before posting').max(2000, 'Keep a comment under 2000 characters'),
+    body: z
+      .string()
+      .trim()
+      .min(1, 'Write something before posting')
+      .max(2000, 'Keep a comment under 2000 characters'),
     visibility: CommentVisibilitySchema,
   })
   .meta({ id: 'JobCommentDraft' });
@@ -671,9 +675,17 @@ export const JobDraftSchema = z
     accountId: ObjectIdSchema,
 
     /* ── The address ──────────────────────────────────────────────────── */
-    siteName: z.string().trim().min(1, 'Name the place — drivers navigate by it').max(120, 'Keep the site name under 120 characters'),
+    siteName: z
+      .string()
+      .trim()
+      .min(1, 'Name the place — drivers navigate by it')
+      .max(120, 'Keep the site name under 120 characters'),
     lotNumber: z.string().trim().max(30, 'A lot number is at most 30 characters'),
-    addressLine: z.string().trim().min(1, 'Enter the street address').max(160, 'Keep the address under 160 characters'),
+    addressLine: z
+      .string()
+      .trim()
+      .min(1, 'Enter the street address')
+      .max(160, 'Keep the address under 160 characters'),
     /** From the suburb picker. Supplies suburb, postcode, zone and the pin. */
     placeId: z.string().trim().min(1, 'Choose the suburb from the list'),
     builderName: z.string().trim().max(120, 'Keep the builder name under 120 characters'),
@@ -812,6 +824,41 @@ export type JobPhoto = z.infer<typeof JobPhotoSchema>;
 export type JobDocument = z.infer<typeof JobDocumentSchema>;
 export type JobComment = z.infer<typeof JobCommentSchema>;
 export type JobCommentDraft = z.infer<typeof JobCommentDraftSchema>;
+
+/**
+ * An extra the OFFICE adds to a job (M6.5).
+ *
+ * ── Why this exists ───────────────────────────────────────────────────────
+ * Every other charge on a job is raised by something that happened: a driver
+ * reports contamination, a futile is confirmed, bags run over the order. The
+ * settings screen has always let the office configure a price list, and the
+ * dialog there says *"a charge created here is one the office applies to a
+ * job"* — but nothing could apply one. A charge like an out-of-area fee had a
+ * price, a code and no way of ever reaching an invoice.
+ *
+ * ⚠️ `code` is a `ChargeCode`, not a free slug. `jobcharges.code` is an enum in
+ * Mongo and in this schema, so a code outside that list cannot be stored — a
+ * charge configured under a name the application does not know is unusable, and
+ * the settings screen refuses to create one rather than letting it be
+ * discovered here.
+ */
+export const JobChargeDraftSchema = z
+  .object({
+    code: ChargeCodeSchema,
+    /**
+     * How many. `2 bags at $30 each, equalling $60` is the line Matt asked for,
+     * and it is the only way a fixed charge varies.
+     *
+     * ⚠️ Ignored for a percentage charge, which is a proportion of the job and
+     * has nothing to multiply.
+     */
+    quantity: z.number().int().positive('At least one').max(999, 'That is too many').default(1),
+    /** Why it was added. Read by whoever approves it, and by the customer. */
+    note: z.string().trim().max(500, 'Keep the note under 500 characters').optional(),
+  })
+  .meta({ id: 'JobChargeDraft' });
+
+export type JobChargeDraft = z.infer<typeof JobChargeDraftSchema>;
 export type JobListItem = z.infer<typeof JobListItemSchema>;
 export type Job = z.infer<typeof JobSchema>;
 export type JobCompliance = z.infer<typeof JobComplianceSchema>;

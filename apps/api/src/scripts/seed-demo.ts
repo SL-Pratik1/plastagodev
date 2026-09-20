@@ -3563,13 +3563,22 @@ async function seedCertificates(
       accountId: job.account.id,
       accountName: job.account.name,
       siteName: String(job.doc.siteName),
+      siteAddress: String(job.doc.addressLine),
       jobId: job.id,
       jobNumber: job.jobNumber,
+      collectedOn: job.readyDate,
       periodFrom: job.readyDate,
       periodTo: job.readyDate,
       jobs: 1,
       areaM2: job.expectedAreaM2,
       tonnesDiverted: Math.round(((job.recoveredWeightKg ?? 0) / 1_000) * 100) / 100,
+      /*
+       * Only crane-weighed pickups produce a certificate at all (M9.5), so a
+       * seeded one carries the same basis the real path is the only source of.
+       */
+      weightBasis: 'weighed',
+      docketNumber: `D${String(int(100_000, 999_999))}`,
+      tippedOffAt: at(job.readyDate, 15, int(0, 59)),
       issuedAt: at(shiftDays(job.readyDate, 1), 11, int(0, 59)),
       issuedTo: job.account.certificateEmail ?? 'site@builder.com.au',
       issuedByName: 'Priya Raman',

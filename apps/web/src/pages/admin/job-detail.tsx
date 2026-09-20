@@ -1,10 +1,12 @@
 import {
   CHARGE_CODE_LABELS,
+  CHARGE_CODES,
   EXCEPTION_REASON_LABELS,
   EXCEPTION_REASONS,
   FREIGHT_ITEM_LABELS,
   WEIGHT_BASIS_HINTS,
   WEIGHT_BASIS_LABELS,
+  type ChargeCode,
   type ExceptionReason,
 } from '@plastago/shared';
 import {
@@ -13,6 +15,7 @@ import {
   Button,
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
   DatePicker,
@@ -20,8 +23,10 @@ import {
   EmptyState,
   ErrorState,
   Field,
+  Input,
   Select,
   Skeleton,
+  Spinner,
   Tabs,
   TabsList,
   TabsPanel,
@@ -35,6 +40,7 @@ import {
   FileIcon,
   ImageIcon,
   MapPinIcon,
+  PlusIcon,
   ReceiptIcon,
   TriangleAlertIcon,
 } from 'lucide-react';
@@ -53,7 +59,8 @@ import { PageHeader } from '@/components/page-header';
 import { useAuth } from '@/features/auth/auth-context';
 import { JobCommentThreads } from '@/features/jobs/components/comment-thread';
 import { useRaiseInvoiceForJob } from '@/features/invoices/queries';
-import { useCancelJob, useJob, useRescheduleJob } from '@/features/jobs/queries';
+import { useAddJobCharge, useCancelJob, useJob, useRescheduleJob } from '@/features/jobs/queries';
+import { useSettings } from '@/features/settings/queries';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatDateTime, formatMoney, formatWeight } from '@/lib/format';
 
@@ -117,6 +124,7 @@ export function AdminJobDetailPage() {
   const [cancelNote, setCancelNote] = useState('');
   const [rescheduleOpen, setRescheduleOpen] = useState(false);
   const [newReadyDate, setNewReadyDate] = useState('');
+  const [addingCharge, setAddingCharge] = useState(false);
 
   const visibleTabs: readonly TabKey[] = seesPricing
     ? TABS
@@ -454,8 +462,7 @@ export function AdminJobDetailPage() {
                        * of jobs they match, and a row repeating the figure above
                        * would just be noise on every screen.
                        */
-                      ...(job.collectedBagCount !== null &&
-                      job.collectedBagCount !== job.bagCount
+                      ...(job.collectedBagCount !== null && job.collectedBagCount !== job.bagCount
                         ? [
                             {
                               label:
@@ -586,14 +593,36 @@ export function AdminJobDetailPage() {
         {/* ── Charges ──────────────────────────────────────────────────── */}
         <TabsPanel value="charges">
           <Card>
-            <CardHeader>
-              <CardTitle>Itemised charges</CardTitle>
+            <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+              <span>
+                <CardTitle>Itemised charges</CardTitle>
+                <CardDescription>
+                  Drivers raise contamination and futile pickups from their own screens. Anything
+                  the office decides is added here.
+                </CardDescription>
+              </span>
+              {/*
+                ⚠️ Hidden on a cancelled job rather than disabled-with-a-tooltip.
+                Nothing can be billed against one, and the server refuses it — a
+                button that is always there and never works reads as broken.
+              */}
+              {job.status !== 'cancelled' && (
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setAddingCharge(true);
+                  }}
+                >
+                  <PlusIcon aria-hidden />
+                  Add charge
+                </Button>
+              )}
             </CardHeader>
             <CardContent>
               {job.charges.length === 0 ? (
                 <EmptyState
                   title="No charges yet"
-                  description="Charges are raised on completion."
+                  description="Drivers raise theirs on completion. Add one here for anything the office decides."
                 />
               ) : (
                 <div className="overflow-x-auto">
@@ -729,6 +758,14 @@ export function AdminJobDetailPage() {
               )}
             </CardContent>
           </Card>
+
+          <AddChargeDialog
+            jobId={job.id}
+            open={addingCharge}
+            onClose={() => {
+              setAddingCharge(false);
+            }}
+          />
         </TabsPanel>
 
         {/* ── Photos ───────────────────────────────────────────────────── */}
@@ -1002,5 +1039,189 @@ export function AdminJobDetailPage() {
         </div>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * Apply a configured extra to this job (M6.5).
+ *
+ * ── Why this dialog offers a LIST and not a form ──────────────────────────
+ * It picks a code from the additional-services price list; it never asks for an
+ * amount. The price belongs to the charge, on one screen, so the same fee costs
+ * the same whoever adds it and repricing it stays a single edit. A free-typed
+ * amount here would be a second, invisible price list that nobody maintains.
+ *
+ * ⚠️ Filtered to codes the application can actually store. `jobcharges.code` is
+ * an enum, so a service configured under a code outside `CHARGE_CODES` cannot
+ * reach a job — offering it here would produce a 422 nobody could act on. The
+ * settings screen now refuses to create one, but rows predating that check can
+ * still exist.
+ */
+function AddChargeDialog({
+  jobId,
+  open,
+  onClose,
+}: {
+  jobId: string;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const add = useAddJobCharge();
+  const settings = useSettings();
+
+  const [code, setCode] = useState('');
+  const [quantity, setQuantity] = useState('1');
+  const [note, setNote] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const applicable = (settings.data?.pricing.additionalServices ?? []).filter((service) =>
+    (CHARGE_CODES as readonly string[]).includes(service.code),
+  );
+  const chosen = applicable.find((service) => service.code === code);
+
+  const submit = async () => {
+    if (code === '') return setError('Choose a charge');
+
+    const count = Number(quantity);
+    if (!Number.isInteger(count) || count < 1 || count > 999) {
+      return setError('How many? A whole number from 1 to 999');
+    }
+    setError(null);
+
+    try {
+      const charge = await add.mutateAsync({
+        id: jobId,
+        draft: {
+          code: code as ChargeCode,
+          quantity: count,
+          ...(note.trim() === '' ? {} : { note: note.trim() }),
+        },
+      });
+
+      /*
+       * The toast says which of the two happened, because they mean different
+       * things to the person who just clicked. `pending` is not on an invoice
+       * yet and somebody has to approve it; `not-required` is billable now.
+       */
+      toast.success(
+        `${charge.description} added`,
+        charge.approvalState === 'pending'
+          ? 'It needs approval before it can be invoiced — it is in the Approvals queue.'
+          : `${formatMoney(charge.amount)} ex GST, ready to invoice.`,
+      );
+
+      setCode('');
+      setQuantity('1');
+      setNote('');
+      onClose();
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+
+    return undefined;
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Add charge"
+      description="An extra from the price list, applied to this job. The amount comes from Settings → Pricing."
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={add.isPending} onClick={() => void submit()}>
+            {add.isPending && <Spinner className="text-current" />}
+            Add charge
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error && <Alert variant="destructive" title={error} />}
+
+        {applicable.length === 0 ? (
+          <Alert variant="neutral" title="No charges are configured">
+            Add one under Settings → Pricing → Additional services first.
+          </Alert>
+        ) : (
+          <>
+            <Field id="charge-code" label="Charge" required>
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={code}
+                  onChange={(event) => {
+                    setCode(event.target.value);
+                    setError(null);
+                  }}
+                >
+                  <option value="">Choose a charge…</option>
+                  {applicable.map((service) => (
+                    <option key={service.code} value={service.code}>
+                      {service.label}
+                      {service.kind === 'fixed'
+                        ? ` — ${formatMoney(service.value)}`
+                        : ` — ${service.value}% of the job`}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+
+            {/*
+              Hidden for a percentage charge, which is a proportion of the whole
+              job and has nothing to multiply. A quantity box there would accept
+              a number the server then ignores.
+            */}
+            {chosen?.kind === 'fixed' && (
+              <div className="sm:max-w-[10rem]">
+                <Field id="charge-quantity" label="How many" required hint="Prints as 2 × $30.00.">
+                  {(aria) => (
+                    <Input
+                      {...aria}
+                      value={quantity}
+                      inputMode="numeric"
+                      onChange={(event) => {
+                        setQuantity(event.target.value);
+                      }}
+                    />
+                  )}
+                </Field>
+              </div>
+            )}
+
+            <Field
+              id="charge-note"
+              label="Note"
+              hint="Why it was added. Read by whoever approves it."
+            >
+              {(aria) => (
+                <Textarea
+                  {...aria}
+                  rows={2}
+                  value={note}
+                  placeholder="Site could only be reached through the neighbouring lot."
+                  onChange={(event) => {
+                    setNote(event.target.value);
+                  }}
+                />
+              )}
+            </Field>
+
+            {chosen?.requiresApproval === true && (
+              <Alert variant="neutral" title="This one needs approving first">
+                It lands in the Approvals queue rather than straight on the invoice — the same route
+                a driver-raised charge takes.
+              </Alert>
+            )}
+          </>
+        )}
+      </div>
+    </Dialog>
   );
 }

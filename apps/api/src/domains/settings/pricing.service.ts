@@ -88,11 +88,7 @@ export const pricingService = {
    * other caller wants `quote` above.
    */
   async quoteWithAppliedRate(input: QuoteInput): Promise<QuoteResult> {
-    const rate = await settingsRepository.resolveRate(
-      input.rateCardId,
-      input.zoneId,
-      input.onDate,
-    );
+    const rate = await settingsRepository.resolveRate(input.rateCardId, input.zoneId, input.onDate);
 
     if (!rate) {
       /*
@@ -247,9 +243,7 @@ export const pricingService = {
 
 function applyPercentage(percentage: Money, base: Money | undefined, code: string): number {
   if (base === undefined) {
-    throw AppError.badRequest(
-      `"${code}" is a percentage service and needs an amount to apply to`,
-    );
+    throw AppError.badRequest(`"${code}" is a percentage service and needs an amount to apply to`);
   }
   // Percent → cents: base × pct ÷ 100, done in integers throughout.
   return Math.round((moneyToCents(base) * moneyToCents(percentage)) / 10_000);

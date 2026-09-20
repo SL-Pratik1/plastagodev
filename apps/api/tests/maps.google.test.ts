@@ -151,7 +151,9 @@ describe('geocoding an address', () => {
     fetchMock.mockResolvedValueOnce(
       ok({
         status: 'OK',
-        results: [{ geometry: { location: { lat: -33.7, lng: 150.9 }, location_type: 'NEW_THING' } }],
+        results: [
+          { geometry: { location: { lat: -33.7, lng: 150.9 }, location_type: 'NEW_THING' } },
+        ],
       }),
     );
 
@@ -159,6 +161,104 @@ describe('geocoding an address', () => {
     // approximate — an unfamiliar value must never open the gate.
     const point = await createGoogleMapsProvider().geocode(ADDRESS);
     expect(point?.precision).toBe('approximate');
+  });
+});
+
+/**
+ * The suburb lookup (M6.3) — what replaced two fields on the admin form.
+ *
+ * ── Why this is not just `geocode` with a blank address line ──────────────
+ * The two ask different questions and disagree about what a good answer is.
+ * `geocode` DISCARDS an approximate result, because a locality centroid tells a
+ * driver nothing the job did not already know. Here the locality centroid is
+ * the entire point, and rejecting it would mean no suburb could ever be added
+ * without somebody typing a coordinate — which is the thing this removed.
+ */
+describe('geocoding a suburb', () => {
+  const SUBURB = { suburb: 'Kellyville', postcode: '2155', state: 'NSW' };
+
+  /** The real shape of Google's answer for a locality, trimmed to what is read. */
+  function locality(lat: number, lng: number) {
+    return ok({
+      status: 'OK',
+      results: [
+        {
+          formatted_address: 'Kellyville NSW 2155, Australia',
+          geometry: { location: { lat, lng }, location_type: 'APPROXIMATE' },
+        },
+      ],
+    });
+  }
+
+  it('accepts an approximate result, because that is what a suburb is', async () => {
+    fetchMock.mockResolvedValueOnce(locality(-33.7111451, 150.9550731));
+
+    await expect(createGoogleMapsProvider().geocodeSuburb(SUBURB)).resolves.toEqual({
+      latitude: -33.7111451,
+      longitude: 150.9550731,
+      formattedAddress: 'Kellyville NSW 2155, Australia',
+    });
+  });
+
+  /*
+   * ⚠️ The guard that stops "Richmond" meaning the one in Victoria. Suburb
+   * names repeat across the country — it is why this table is keyed on
+   * {suburb, postcode} — so the postcode has to be a constraint on the lookup
+   * and not merely part of a string Google is free to reinterpret.
+   */
+  it('constrains the lookup to the country, postcode and suburb', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ status: 'ZERO_RESULTS' }));
+
+    await createGoogleMapsProvider().geocodeSuburb(SUBURB);
+
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(url.searchParams.get('components')).toBe(
+      'country:AU|postal_code:2155|locality:Kellyville',
+    );
+    expect(url.searchParams.get('address')).toBe('Kellyville NSW 2155, Australia');
+    expect(url.searchParams.get('key')).toBe(KEY);
+  });
+
+  /*
+   * `components` is a filter Google relaxes on a near miss, not a promise. This
+   * is the one path where a coordinate is stored without a human ever reading
+   * the number, so a pin off the continent is discarded rather than saved.
+   */
+  it.each([
+    ['the northern hemisphere', 33.7111451, 150.9550731],
+    ['a longitude off the west coast', -33.7111451, 35.5],
+  ])('discards a pin outside Australia — %s', async (_label, lat, lng) => {
+    fetchMock.mockResolvedValueOnce(locality(lat, lng));
+
+    await expect(createGoogleMapsProvider().geocodeSuburb(SUBURB)).resolves.toBeNull();
+  });
+
+  it.each([
+    ['ZERO_RESULTS', { status: 'ZERO_RESULTS' }],
+    ['REQUEST_DENIED', { status: 'REQUEST_DENIED', error_message: 'API key not authorized' }],
+    ['OVER_QUERY_LIMIT', { status: 'OVER_QUERY_LIMIT' }],
+  ])('answers null on %s', async (_label, body) => {
+    fetchMock.mockResolvedValueOnce(ok(body));
+
+    await expect(createGoogleMapsProvider().geocodeSuburb(SUBURB)).resolves.toBeNull();
+  });
+
+  it('answers null on an OK response carrying no coordinates', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ status: 'OK', results: [{ geometry: {} }] }));
+
+    await expect(createGoogleMapsProvider().geocodeSuburb(SUBURB)).resolves.toBeNull();
+  });
+
+  it('answers null on an HTTP error', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: () => Promise.resolve({}) });
+
+    await expect(createGoogleMapsProvider().geocodeSuburb(SUBURB)).resolves.toBeNull();
+  });
+
+  it('answers null when the request fails outright', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('The operation was aborted due to timeout'));
+
+    await expect(createGoogleMapsProvider().geocodeSuburb(SUBURB)).resolves.toBeNull();
   });
 });
 

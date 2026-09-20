@@ -27,7 +27,10 @@ async function signIn(page) {
 
   const before = fs.readFileSync(DEV_LOG, 'utf8').length;
   await page.locator('#identifier').fill('matt@plastago.com.au');
-  await page.getByRole('button', { name: /send code/i }).first().click();
+  await page
+    .getByRole('button', { name: /send code/i })
+    .first()
+    .click();
 
   await page.waitForTimeout(2500);
   const tail = fs.readFileSync(DEV_LOG, 'utf8').slice(before);
@@ -80,19 +83,69 @@ async function signIn(page) {
     check('it shows the immutable slug', body.includes('central-coast'));
     check('zone rows show their suburb and job counts', /\d+ suburbs? · \d+ jobs?/.test(body));
     check('each zone links to where its suburbs are managed', /Manage suburbs/.test(body));
-    check('rate grids name zones, not ids', !/[0-9a-f]{24}/.test(body), (body.match(/[0-9a-f]{24}/) ?? [''])[0]);
+    check(
+      'rate grids name zones, not ids',
+      !/[0-9a-f]{24}/.test(body),
+      (body.match(/[0-9a-f]{24}/) ?? [''])[0],
+    );
 
     await page.screenshot({ path: `${SHOTS}/01-settings-zones.png`, fullPage: false });
 
-    console.log('\n── The Suburbs screen ─────────────────────────────────────────');
-    await page.goto(`${ADMIN_URL}/admin/suburbs`, { waitUntil: 'networkidle' });
+    /*
+      Each panel is one sub-tab now, so only one of them is in the DOM at a
+      time. Pricing stacked zones, suburbs, rate cards and additional services;
+      Invoicing stacked five cards. Checking that a tab shows its own section
+      AND hides its siblings is what proves the split, rather than a page that
+      happens to contain all the words.
+    */
+    console.log('\n── Settings: one section per tab, not one long scroll ─────────');
+    check('the Zones tab does not also render the rate cards', !/Resolution order is/.test(body));
+    check('the Zones tab does not also render the suburb table', !/All zones/.test(body));
+
+    for (const [label, section, expected, absent] of [
+      ['Rate cards', 'cards', /Resolution order is/, /Service zones/],
+      ['Additional services', 'services', /Additional services/, /Service zones/],
+    ]) {
+      await page.goto(`${ADMIN_URL}/admin/settings?tab=pricing&section=${section}`, {
+        waitUntil: 'networkidle',
+      });
+      await page.waitForTimeout(1200);
+      const text = await page.locator('body').innerText();
+      check(`the ${label} tab shows its own section`, expected.test(text));
+      check(`the ${label} tab hides the others`, !absent.test(text));
+    }
+
+    for (const [label, section, expected] of [
+      ['Workflow', 'workflow', /Invoice number prefix/],
+      ['Your business', 'business', /as it prints/],
+      ['Payment details', 'payment', /Account name/],
+      ['Templates', 'templates', /template/i],
+    ]) {
+      await page.goto(`${ADMIN_URL}/admin/settings?tab=invoicing&section=${section}`, {
+        waitUntil: 'networkidle',
+      });
+      await page.waitForTimeout(1200);
+      check(
+        `Invoicing → ${label} opens on its own section`,
+        expected.test(await page.locator('body').innerText()),
+      );
+    }
+
+    console.log('\n── The Suburbs tab ────────────────────────────────────────────');
+    await page.goto(`${ADMIN_URL}/admin/settings?tab=pricing&section=suburbs`, {
+      waitUntil: 'networkidle',
+    });
     await page.waitForTimeout(1500);
 
     const subBody = await page.locator('body').innerText();
-    check('the Suburbs page loads', /Suburbs/.test(subBody));
+    check('the Suburbs tab loads', /Suburbs/.test(subBody));
     check('rows show a suburb', /Kellyville|Oran Park|Gosford/.test(subBody));
     check('rows show the zone NAME', /Sydney|Central Coast/.test(subBody));
-    check('no raw ObjectId leaks into the table', !/[0-9a-f]{24}/.test(subBody), (subBody.match(/[0-9a-f]{24}/) ?? [''])[0]);
+    check(
+      'no raw ObjectId leaks into the table',
+      !/[0-9a-f]{24}/.test(subBody),
+      (subBody.match(/[0-9a-f]{24}/) ?? [''])[0],
+    );
 
     await page.screenshot({ path: `${SHOTS}/02-suburbs.png`, fullPage: false });
 
@@ -104,10 +157,37 @@ async function signIn(page) {
       ),
     );
     const sydney = zones.find((z) => z.label === 'Sydney');
-    await page.goto(`${ADMIN_URL}/admin/suburbs?zoneId=${sydney.value}`, { waitUntil: 'networkidle' });
+    await page.goto(
+      `${ADMIN_URL}/admin/settings?tab=pricing&section=suburbs&zoneId=${sydney.value}`,
+      { waitUntil: 'networkidle' },
+    );
     await page.waitForTimeout(1200);
     const filtered = await page.locator('body').innerText();
-    check('the zone deep-link filters the table', /10 of/.test(filtered), (filtered.match(/\d+ of \d+/) ?? [''])[0]);
+    check(
+      'the zone deep-link filters the table',
+      /10 of/.test(filtered),
+      (filtered.match(/\d+ of \d+/) ?? [''])[0],
+    );
+
+    /*
+      The old address, which is in bookmarks and in the client's notes. It has
+      to land on the Suburbs tab AND keep the zone filter — a redirect that
+      drops the parameter looks like a working link and silently answers a
+      different question.
+    */
+    await page.goto(`${ADMIN_URL}/admin/suburbs?zoneId=${sydney.value}`, {
+      waitUntil: 'networkidle',
+    });
+    await page.waitForTimeout(1200);
+    check(
+      'the old /admin/suburbs link still lands on the tab',
+      /section=suburbs/.test(page.url()),
+      page.url(),
+    );
+    check(
+      '…and carries its zone filter across',
+      /10 of/.test(await page.locator('body').innerText()),
+    );
 
     console.log('\n── Screens that render a zone ─────────────────────────────────');
     for (const [label, path] of [

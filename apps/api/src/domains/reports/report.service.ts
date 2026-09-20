@@ -12,8 +12,12 @@ import type {
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { centsToMoney, moneyToCents } from '../../lib/money.js';
+import { getMailer } from '../../integrations/messaging.js';
+import { buildCertificateEmail } from '../../integrations/notice-messages.js';
+import { getStorage } from '../../integrations/storage.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { settingsRepository } from '../settings/settings.repository.js';
+import { certificateRenderService } from './certificate-render.service.js';
 import { reportRepository } from './report.repository.js';
 
 const log = logger.child({ module: 'reports' });
@@ -263,20 +267,42 @@ export const reportService = {
 
     const reference = await nextReference();
 
+    /*
+     * The site, the pickup number and the docket, on a job-scoped certificate.
+     *
+     * ⚠️ Fetched ONCE, here, and frozen onto the record — never joined at read
+     * time. A late reconciliation can move the job underneath us, and the copy
+     * an assessor is holding must not start disagreeing with ours because of it.
+     */
+    const jobContext = input.jobId
+      ? await reportRepository.certificateJobContext(input.jobId)
+      : null;
+
     const id = await reportRepository.createCertificate({
       reference,
       scope: input.scope,
       accountId: account.id,
       accountName: account.name,
       siteName: input.siteName ?? (input.scope === 'job' ? figures.siteName : null),
+      siteAddress: jobContext?.siteAddress ?? null,
       jobId: input.jobId ?? null,
-      jobNumber: null,
+      jobNumber: jobContext?.jobNumber ?? null,
+      collectedOn: jobContext?.collectedOn ?? null,
       periodFrom: input.from,
       periodTo: input.to,
       jobs: figures.jobs,
       areaM2: figures.areaM2 === null ? null : round(figures.areaM2),
       // Kilograms to tonnes, one decimal — the unit a certificate is read in.
       tonnesDiverted: Math.round(figures.weightKg / 100) / 10,
+      /*
+       * Always `weighed`, because the figures query admits nothing else — see
+       * the compliance note on `recoveredWeightBasis` in the repository. Stated
+       * as a value rather than left to a schema default so the one place that
+       * decides eligibility is the same place that records what was decided.
+       */
+      weightBasis: 'weighed',
+      docketNumber: jobContext?.docketNumber ?? null,
+      tippedOffAt: jobContext?.tippedOffAt ?? null,
     });
 
     const certificate = await reportRepository.findCertificate(id, null);
@@ -333,9 +359,200 @@ export const reportService = {
       'certificate issued',
     );
 
-    return certificate;
+    /*
+     * ⚠️ AFTER the issue is written, and unable to undo it.
+     *
+     * The record is the certificate; the PDF and the email are how it reaches
+     * somebody. A mail server that is down, or a storage bucket that refuses a
+     * write, must not roll back a state transition the office has already been
+     * told about — they can resend, and the portal carries it either way.
+     */
+    await deliver(certificate);
+
+    // Re-read so the caller learns the PDF now exists (`hasPdf`).
+    return (await reportRepository.findCertificate(id, null)) ?? certificate;
+  },
+
+  /**
+   * Re-send an issued certificate to the customer.
+   *
+   * Reuses the STORED PDF rather than rendering a new one — see
+   * `certificateRenderService.bytesForSending`. A resend that produced a
+   * different file from the one already in a submission would defeat the point
+   * of freezing the figures.
+   */
+  async resendCertificate(id: string, caller: Caller): Promise<{ sentTo: string | null }> {
+    assertReader(caller);
+
+    const certificate = await reportRepository.findCertificate(id, null);
+    if (!certificate) throw AppError.notFound('No such certificate');
+
+    if (certificate.state !== 'issued') {
+      throw AppError.conflict('That certificate has not been issued yet');
+    }
+
+    const sentTo = await deliver(certificate);
+
+    log.info({ certificateId: id, sentTo, by: caller.name }, 'certificate resent');
+    return { sentTo };
+  },
+
+  /**
+   * A short-lived link to the stored PDF.
+   *
+   * ⚠️ Scoped by the caller, and 404 rather than 403 on somebody else's — a 403
+   * confirms that a certificate with that id exists, which is a small leak but
+   * a free one to avoid.
+   */
+  async certificatePdfUrl(id: string, caller: Caller): Promise<{ url: string }> {
+    assertReader(caller);
+
+    const scope = scopeAccount(caller);
+    const certificate = await reportRepository.findCertificate(id, scope);
+    if (!certificate) throw AppError.notFound('No such certificate');
+
+    /*
+     * A draft has no PDF and must not get one. The document is rendered at
+     * issue precisely so what is downloaded cannot disagree with what was
+     * frozen — rendering a draft on demand would hand somebody a figure that is
+     * still allowed to move.
+     */
+    if (certificate.state !== 'issued') {
+      throw AppError.conflict('That certificate has not been issued yet');
+    }
+
+    let key = await reportRepository.certificateStorageKey(id, scope);
+
+    /*
+     * Repair rather than refuse. A certificate issued while storage was
+     * unavailable is still a valid certificate — its figures are frozen — so
+     * the first download renders the missing document from them.
+     */
+    if (key === null) {
+      log.warn({ certificateId: id }, 'issued certificate has no stored pdf — rendering now');
+      const context = await certificateRenderService.context();
+      key = await certificateRenderService.render(certificate, context);
+    }
+
+    return { url: await getStorage().presignDownload(key) };
+  },
+
+  /**
+   * M9.5 — prepare drafts for every eligible job on a run, automatically.
+   *
+   * ── Why this fires at TIP-OFF and not at job completion ───────────────────
+   * Because at completion the document is not yet knowable. The driver tips off
+   * at the END of the run, and that is the moment the weighbridge docket number
+   * and the tip date exist — the two things that let somebody else check the
+   * tonnage. A draft cut at completion would carry a permanently empty audit
+   * block.
+   *
+   * ⚠️ Never throws. This runs on the back of a driver's tip-off, and a
+   * certificate that could not be prepared must not fail a reconciliation that
+   * is already written. The office can still prepare one by hand.
+   */
+  async autoPrepareForRun(runId: string): Promise<{ prepared: number }> {
+    let prepared = 0;
+
+    try {
+      const jobs = await reportRepository.certifiableJobsOnRun(runId);
+
+      for (const job of jobs) {
+        try {
+          await this.prepareCertificate(
+            {
+              scope: 'job',
+              accountId: job.accountId,
+              from: job.completedOn,
+              to: job.completedOn,
+              jobId: job.jobId,
+            },
+            SYSTEM_CALLER,
+          );
+          prepared += 1;
+        } catch (error) {
+          /*
+           * Per job, not per run. One account that has been deleted, or one job
+           * whose certificate the office prepared by hand a minute ago, must not
+           * stop the other stops on the run getting theirs.
+           */
+          log.warn({ err: error, jobId: job.jobId, runId }, 'auto certificate skipped');
+        }
+      }
+
+      if (prepared > 0) log.info({ runId, prepared }, 'certificates prepared from tip-off');
+    } catch (error) {
+      log.error({ err: error, runId }, 'auto certificate preparation failed');
+    }
+
+    return { prepared };
   },
 };
+
+/**
+ * The caller the automatic path acts as.
+ *
+ * Not a real user, and deliberately visible as such: a draft prepared by the
+ * system should not carry an office worker's name, because none of them made
+ * the decision. Whoever presses Issue is the name that reaches the document.
+ */
+const SYSTEM_CALLER: Caller = {
+  userId: 'system',
+  name: 'PlastaGo',
+  roles: ['super-admin'],
+  accountId: null,
+};
+
+/**
+ * Render if needed, store, and email the customer. Returns the address used.
+ *
+ * ⚠️ Swallows its own failures. Both callers have already written a state
+ * change the office has been told about, and neither can be undone by a mail
+ * server being down.
+ */
+async function deliver(certificate: Certificate): Promise<string | null> {
+  try {
+    const context = await certificateRenderService.context();
+    const pdf = await certificateRenderService.bytesForSending(certificate, context);
+
+    /*
+     * Matt, 31:04 — certificates often go to a different team from invoices:
+     * *"I need a section where we could say that certificates are sent to this
+     * specific email address."* No address means no email, rather than a
+     * fallback to accounts payable, which is where a sustainability document
+     * goes to be ignored.
+     */
+    const to = certificate.issuedTo;
+    if (to === null || to.trim() === '') {
+      log.info(
+        { certificateId: certificate.id },
+        'no certificate email on the account — portal only',
+      );
+      return null;
+    }
+
+    await getMailer().send(
+      buildCertificateEmail(
+        to,
+        {
+          accountName: certificate.accountName,
+          reference: certificate.reference,
+          tonnesDiverted: certificate.tonnesDiverted,
+          areaM2: certificate.areaM2,
+          siteName: certificate.siteName,
+          jobNumber: certificate.jobNumber,
+        },
+        pdf,
+      ),
+    );
+
+    log.info({ certificateId: certificate.id, to }, 'certificate emailed');
+    return to;
+  } catch (error) {
+    log.error({ err: error, certificateId: certificate.id }, 'certificate delivery failed');
+    return null;
+  }
+}
 
 /* ── Access and validation ───────────────────────────────────────────────── */
 

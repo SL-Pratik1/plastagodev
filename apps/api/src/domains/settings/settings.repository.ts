@@ -7,6 +7,7 @@ import type {
   BrandId,
   InvoiceTemplate,
   InvoiceTemplateWrite,
+  Money,
   RateCardId,
   RateCardSummary,
   RateSchedule,
@@ -18,7 +19,7 @@ import type {
 import { Types } from 'mongoose';
 import { startOfSydneyDay, todayInSydney } from '../../lib/business-day.js';
 import { getStorage } from '../../integrations/storage.js';
-import { fromDecimal128, toDecimal128 } from '../../lib/money.js';
+import { fromDecimal128, shiftMoney, toDecimal128 } from '../../lib/money.js';
 import { withTransaction } from '../../lib/transaction.js';
 import { AccountModel } from '../accounts/account.model.js';
 import { PlaceModel } from '../places/place.model.js';
@@ -92,6 +93,9 @@ interface RawSettings {
   termsText?: string;
   bankAccountName?: string;
   showGbcaBadge?: boolean;
+  certificateSignatureName?: string;
+  certificateSignatureTitle?: string;
+  certificateSignatureKey?: string;
 }
 
 interface RawRateCard {
@@ -106,7 +110,16 @@ interface RawZoneRate {
   zoneId: Types.ObjectId;
   serviceCharge: Types.Decimal128;
   ratePerM2: Types.Decimal128;
-  effectiveFrom: Date;
+  /**
+   * ⚠️ OPTIONAL, and the type says so deliberately.
+   *
+   * Every row written before effective dating (M6.2) has no window at all, and
+   * `.lean()` does not apply schema defaults — so on a database the migration
+   * has not reached, this really is `undefined`. Declaring it `Date` let one
+   * caller pass it straight into a write, where Mongoose rejected it as a
+   * missing required field and "Add zone" answered 500 on every attempt.
+   */
+  effectiveFrom?: Date | undefined;
   effectiveTo: Date | null;
 }
 
@@ -138,9 +151,15 @@ function isObjectId(value: string): boolean {
  * never be retired — which is every zone anybody would want to retire.
  */
 async function zoneSummaries(filter: Record<string, unknown> = {}): Promise<ZoneSummary[]> {
-  const zones = await ZoneModel.find(filter)
-    .sort({ displayOrder: 1 })
-    .lean<Array<{ _id: Types.ObjectId; slug: string; label: string; displayOrder: number; archived: boolean }>>();
+  const zones = await ZoneModel.find(filter).sort({ displayOrder: 1 }).lean<
+    Array<{
+      _id: Types.ObjectId;
+      slug: string;
+      label: string;
+      displayOrder: number;
+      archived: boolean;
+    }>
+  >();
 
   if (zones.length === 0) return [];
 
@@ -198,9 +217,37 @@ async function zoneSummaries(filter: Record<string, unknown> = {}): Promise<Zone
   });
 }
 
-/** `YYYY-MM-DD` from a stored date, read in Sydney rather than UTC. */
-function isoDay(value: Date): string {
+/**
+ * `YYYY-MM-DD` from a stored date, read in Sydney rather than UTC.
+ *
+ * ⚠️ Takes `undefined`, and answers TODAY for it. That is not laxity — it is
+ * the documented reading of a rate row written before effective dating (M6.2),
+ * which has no window at all and is in force right now. Every caller here was
+ * already passing one through on an unmigrated database; typing it truthfully
+ * is what makes that visible instead of a lie the compiler was helping tell.
+ */
+function isoDay(value: Date | undefined): string {
   return todayInSydney(value);
+}
+
+/**
+ * A stored figure moved by a signed adjustment, or left exactly as it was.
+ *
+ * ⚠️ Returns the ORIGINAL `Decimal128` when there is nothing to shift, rather
+ * than a round-tripped one. `0.1625` through a string and back is a value a
+ * careless formatter can round, and the copy path's whole contract is that an
+ * unadjusted rate is byte-for-byte what the source zone charges.
+ */
+function shift(value: Types.Decimal128, delta: Money | undefined): Types.Decimal128 {
+  if (delta === undefined || delta === '' || Number(delta) === 0) return value;
+
+  /*
+   * ⚠️ `value.toString()`, NOT `fromDecimal128`. That helper normalises to two
+   * decimal places, which is right at the wire boundary and catastrophic here:
+   * a rate of `0.1625` would arrive at `shiftMoney` as `0.16` and every job
+   * priced in the new zone would be short by a sixteenth of a cent per m².
+   */
+  return toDecimal128(shiftMoney(value.toString() as Money, delta));
 }
 
 /**
@@ -239,6 +286,23 @@ export interface ResolvedRate {
    */
   scheduleFrom: string;
 }
+
+/**
+ * The options every write to the settings singleton needs.
+ *
+ * ⚠️ Without `upsert` these were silent no-ops on a database whose singleton
+ * had not been created yet: `updateOne` matched nothing, reported success and
+ * changed nothing — so the settings screen saved with a 200 and came back
+ * empty, and an uploaded logo was accepted and then never appeared. Nothing
+ * reported an error at any layer, because a zero-match update is not one.
+ *
+ * `assumedCostPerJob` rides along on INSERT only. It is `required` with no
+ * schema default, so an upsert that did not supply it would create a document
+ * the model rejects on the next save. Zero reads as "not set yet", which is
+ * what the read path's own fallback defaults already say.
+ */
+const SINGLETON_UPSERT = { upsert: true } as const;
+const ON_FIRST_WRITE = { assumedCostPerJob: toDecimal128('0') };
 
 export const settingsRepository = {
   /**
@@ -368,9 +432,7 @@ export const settingsRepository = {
              */
             .map((schedule) => ({
               ...schedule,
-              zones: [...schedule.zones].sort(
-                (a, b) => orderOf(a.zoneId) - orderOf(b.zoneId),
-              ),
+              zones: [...schedule.zones].sort((a, b) => orderOf(a.zoneId) - orderOf(b.zoneId)),
             }))
             // Newest first: the schedule somebody needs to see is the current
             // one, and history reads downwards from it.
@@ -487,6 +549,9 @@ export const settingsRepository = {
         bankAccount: resolved.bankAccount ?? '',
         bankAccountName: resolved.bankAccountName ?? '',
         showGbcaBadge: resolved.showGbcaBadge ?? false,
+        certificateSignatureName: resolved.certificateSignatureName ?? '',
+        certificateSignatureTitle: resolved.certificateSignatureTitle ?? '',
+        certificateSignatureKey: resolved.certificateSignatureKey ?? '',
         /*
          * A link to the stored mark, so the screen can show what the invoices
          * actually print rather than the storage key, which tells a person
@@ -494,6 +559,8 @@ export const settingsRepository = {
          * `InvoicingSettingsReadSchema`.
          */
         logoUrl: await logoUrlFor(resolved.logoKey ?? ''),
+        /** The same arrangement for the certificate signature (M9.5). */
+        certificateSignatureUrl: await logoUrlFor(resolved.certificateSignatureKey ?? ''),
       },
     };
   },
@@ -629,6 +696,17 @@ export const settingsRepository = {
   },
 
   /** One past the highest, so a new zone lands at the end of every list. */
+  /**
+   * How many zones exist, archived included.
+   *
+   * ⚠️ Counts RETIRED zones too, and must. A retired zone still owns its rate
+   * rows, so a register that looks empty but is not is precisely the case where
+   * a second unpriced zone must still be refused.
+   */
+  async countZones(): Promise<number> {
+    return ZoneModel.countDocuments({});
+  },
+
   async nextZoneDisplayOrder(): Promise<number> {
     const last = await ZoneModel.findOne({}, { displayOrder: 1 })
       .sort({ displayOrder: -1 })
@@ -679,7 +757,11 @@ export const settingsRepository = {
     slug: string;
     label: string;
     displayOrder: number;
-    copyRatesFromZoneId: string;
+    /** Null for the very first zone — there is nothing to copy. */
+    copyRatesFromZoneId: string | null;
+    /** Signed shifts applied to every copied row. See `ZoneCreateSchema`. */
+    adjustServiceCharge?: Money | undefined;
+    adjustRatePerM2?: Money | undefined;
   }): Promise<{ id: string; rowsCopied: number }> {
     const id = new Types.ObjectId();
 
@@ -698,23 +780,54 @@ export const settingsRepository = {
           session ? { session } : {},
         );
 
-        const source = await ZoneRateModel.find({
-          zoneId: new Types.ObjectId(input.copyRatesFromZoneId),
-        })
-          .session(session ?? null)
-          .lean<RawZoneRate[]>();
+        // No source means the first zone on an empty register: nothing to copy,
+        // and no card that could be left half-priced by the absence.
+        const source =
+          input.copyRatesFromZoneId === null
+            ? []
+            : await ZoneRateModel.find({
+                zoneId: new Types.ObjectId(input.copyRatesFromZoneId),
+              })
+                .session(session ?? null)
+                .lean<RawZoneRate[]>();
 
         if (source.length > 0) {
           await ZoneRateModel.insertMany(
             source.map((row) => ({
               rateCardId: row.rateCardId,
               zoneId: id,
-              // Verbatim Decimal128 — see the warning above.
-              serviceCharge: row.serviceCharge,
-              ratePerM2: row.ratePerM2,
-              // The window, unchanged. This is what makes the new zone's history
-              // tile exactly as the source's does.
-              effectiveFrom: row.effectiveFrom,
+              /*
+               * Verbatim Decimal128 when nothing is being shifted — see the
+               * warning above. A shift is the one reason to touch the figure,
+               * and it goes through `shiftMoney`, which works in
+               * ten-thousandths so a four-decimal rate survives it.
+               *
+               * ⚠️ Applied to EVERY copied row, history included. The shift is
+               * a statement about the relationship between two zones — "the
+               * Central Coast runs $30 dearer than Sydney" — so a history that
+               * tiles the source's shape is the only one that can be true. The
+               * alternative, shifting only the current row, invents a price
+               * change on a date when this zone did not exist.
+               */
+              serviceCharge: shift(row.serviceCharge, input.adjustServiceCharge),
+              ratePerM2: shift(row.ratePerM2, input.adjustRatePerM2),
+              /*
+               * The window, unchanged. This is what makes the new zone's
+               * history tile exactly as the source's does.
+               *
+               * ⚠️ Except on an UNMIGRATED row, which has no window at all —
+               * every rate written before M6.2 predates effective dating, and a
+               * lean read hands those back with `effectiveFrom` undefined. It
+               * is required on the model, so passing it through failed the
+               * whole insert and "Add zone" answered 500 on a database the
+               * migration had not reached.
+               *
+               * Today, because that is precisely what the READ already reports
+               * for the same row — `isoDay(undefined)` resolves to today — so
+               * the copy says the same thing the settings screen does rather
+               * than inventing a second answer.
+               */
+              effectiveFrom: row.effectiveFrom ?? startOfSydneyDay(todayInSydney()),
               effectiveTo: row.effectiveTo,
             })),
             session ? { session, ordered: true } : { ordered: true },
@@ -1214,6 +1327,7 @@ export const settingsRepository = {
     await SettingsModel.updateOne(
       { _id: SETTINGS_SINGLETON_ID },
       {
+        $setOnInsert: ON_FIRST_WRITE,
         $set: {
           invoiceNumberPrefix: input.invoiceNumberPrefix,
           splitAdditionalCharges: input.splitAdditionalCharges,
@@ -1229,8 +1343,19 @@ export const settingsRepository = {
           bankAccount: input.bankAccount,
           bankAccountName: input.bankAccountName,
           showGbcaBadge: input.showGbcaBadge,
+          /*
+           * ⚠️ The signature KEY is absent from this write on purpose.
+           *
+           * It follows the logo's arrangement exactly: the browser PUTs the
+           * image to storage first, and only a successful upload changes what
+           * the certificates print. Including it here would let a stale form
+           * post blank the signature of a document already being issued.
+           */
+          certificateSignatureName: input.certificateSignatureName,
+          certificateSignatureTitle: input.certificateSignatureTitle,
         },
       },
+      SINGLETON_UPSERT,
     );
   },
 
@@ -1242,7 +1367,11 @@ export const settingsRepository = {
    * a successful upload should change what the invoices print.
    */
   async setLogoKey(key: string): Promise<void> {
-    await SettingsModel.updateOne({ _id: SETTINGS_SINGLETON_ID }, { $set: { logoKey: key } });
+    await SettingsModel.updateOne(
+      { _id: SETTINGS_SINGLETON_ID },
+      { $setOnInsert: ON_FIRST_WRITE, $set: { logoKey: key } },
+      SINGLETON_UPSERT,
+    );
   },
 
   /** The stored logo key, or an empty string. */
@@ -1251,6 +1380,23 @@ export const settingsRepository = {
       .select({ logoKey: 1 })
       .lean<{ logoKey?: string }>();
     return row?.logoKey ?? '';
+  },
+
+  /** M9.5 — point the certificates at a signature image, or take it away. */
+  async setCertificateSignatureKey(key: string): Promise<void> {
+    await SettingsModel.updateOne(
+      { _id: SETTINGS_SINGLETON_ID },
+      { $setOnInsert: ON_FIRST_WRITE, $set: { certificateSignatureKey: key } },
+      SINGLETON_UPSERT,
+    );
+  },
+
+  /** The stored signature key, or an empty string. */
+  async certificateSignatureKey(): Promise<string> {
+    const row = await SettingsModel.findById(SETTINGS_SINGLETON_ID)
+      .select({ certificateSignatureKey: 1 })
+      .lean<{ certificateSignatureKey?: string }>();
+    return row?.certificateSignatureKey ?? '';
   },
 
   /**

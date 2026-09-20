@@ -480,15 +480,46 @@ export const ZoneCreateSchema = z
       .min(1, 'Name the zone — it appears on every rate card and quote')
       .max(60, 'Keep the name under 60 characters'),
     /**
-     * ⚠️ Required, with no default.
+     * The zone whose prices this one starts from.
      *
      * A zone created with no prices prices NOTHING on any card, and the first
      * sign of it is a 503 on a booking form weeks later. Making the caller
      * nominate a source is what turns "add a zone" into a complete act — and
      * copying per card preserves each customer's negotiated discount instead of
      * flattening every card to one number.
+     *
+     * ⚠️ NULLABLE only for the FIRST zone, and the service enforces that.
+     *
+     * It used to be required outright, which made the very first zone
+     * impossible to create: the form disabled its own button because there was
+     * nothing to copy from, and a system with no zones could never gain one. On
+     * an empty register there is also nothing to break — no card prices
+     * anything yet — so the safety this field provides is exactly as strong
+     * with the exception as without it.
      */
-    copyRatesFromZoneId: ZoneSchema,
+    copyRatesFromZoneId: ZoneSchema.nullable().default(null),
+    /*
+     * ── What turns "add a zone" from eight steps into one ─────────────────
+     * A copied zone is rarely priced identically to its source. Without these,
+     * getting Central Coast to $250 when Sydney is $220 meant issuing a NEW
+     * SCHEDULE on every rate card the business has — seven saves to correct one
+     * number, each one a dated schedule nobody wanted.
+     *
+     * A SHIFT rather than a price, and that is the point: each card keeps its
+     * own negotiated figure and moves by the same amount, so a customer on a
+     * discount stays on it. An absolute price would flatten every card to one
+     * number and quietly undo years of negotiation.
+     *
+     * Signed — a cheaper zone is `-15.00`. Omitted means copy verbatim, which
+     * is the behaviour this had before and still the one-click default.
+     *
+     * ⚠️ The two are separate because they are different KINDS of number. A
+     * service charge is dollars; a rate per m² is a few cents carried to four
+     * decimals. One "+30" box would have to mean $30 on one and 30× on the
+     * other.
+     */
+    adjustServiceCharge: MoneySchema.optional(),
+    adjustRatePerM2: MoneySchema.optional(),
   })
   .meta({ id: 'ZoneCreate' });
 
@@ -693,6 +724,33 @@ export const InvoicingSettingsSchema = z
     /** The account NAME the payment goes to. A BSB and number alone are not enough. */
     bankAccountName: z.string(),
     showGbcaBadge: z.boolean(),
+
+    /*
+     * ── The certificate signature block (M9.5 · F52) ──────────────────────
+     *
+     * Lives here rather than in its own settings section because it is the same
+     * branding decision as the logo and the ABN — the company as it appears on
+     * a document it puts its name to. The Settings screen presents it under
+     * "Invoicing & certificates" for that reason.
+     *
+     * A diversion certificate is evidence in somebody else's audit, so it is
+     * signed. Both halves are optional and degrade the same way everything else
+     * here does: no name prints no signature block at all, rather than a rule
+     * with nothing above it.
+     */
+
+    /** Who signs — "Matt Ryan". Empty prints no signature block. */
+    certificateSignatureName: z.string(),
+    /** Their title, under the name. "Director". */
+    certificateSignatureTitle: z.string(),
+    /**
+     * Storage key for a scanned signature image — NOT a URL, exactly like
+     * `logoKey`, and for the same reason.
+     *
+     * Optional even when a name is set: with no image the name prints over a
+     * rule, which is what most of these documents carry anyway.
+     */
+    certificateSignatureKey: z.string(),
   })
   .meta({ id: 'InvoicingSettings' });
 
@@ -712,6 +770,8 @@ export const InvoicingSettingsSchema = z
 export const InvoicingSettingsReadSchema = InvoicingSettingsSchema.extend({
   /** Null when no logo has been uploaded, or when the stored one cannot be read. */
   logoUrl: z.string().nullable(),
+  /** The same arrangement for the certificate signature image. */
+  certificateSignatureUrl: z.string().nullable(),
 }).meta({ id: 'InvoicingSettingsRead' });
 
 export const SettingsSchema = z

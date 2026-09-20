@@ -26,14 +26,7 @@ export const JobIdParamsSchema = z.object({ id: ObjectIdSchema }).meta({ id: 'Jo
  * the question being asked — and a client computing its own boundaries would
  * disagree with the server about when today ends.
  */
-export const READY_WINDOWS = [
-  'overdue',
-  'today',
-  'next-3',
-  'next-7',
-  'last-7',
-  'last-30',
-] as const;
+export const READY_WINDOWS = ['overdue', 'today', 'next-3', 'next-7', 'last-7', 'last-30'] as const;
 
 /**
  * The jobs grid.

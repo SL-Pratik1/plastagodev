@@ -1,6 +1,13 @@
 import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
-import type { GeocodeRequest, GeocodedPoint, MapsProvider, RouteStop } from './maps.js';
+import type {
+  GeocodeRequest,
+  GeocodedPoint,
+  MapsProvider,
+  RouteStop,
+  SuburbGeocodeRequest,
+  SuburbPin,
+} from './maps.js';
 
 const log = logger.child({ module: 'google-maps' });
 
@@ -56,8 +63,77 @@ interface GeocodeResponse {
   }[];
 }
 
+type GeocodeResult = NonNullable<GeocodeResponse['results']>[number];
+
 interface ComputeRoutesResponse {
   routes?: { optimizedIntermediateWaypointIndex?: number[] }[];
+}
+
+/**
+ * One Geocoding call, with every way of not getting an answer collapsed to
+ * `null`.
+ *
+ * Shared by both geocoding methods so the failure handling — the timeout, the
+ * HTTP error, and the four statuses below — is written once. What the two do
+ * with the RESULT differs; what counts as no result at all does not.
+ */
+async function firstResult(
+  url: URL,
+  context: Record<string, unknown>,
+): Promise<GeocodeResult | null> {
+  let body: GeocodeResponse;
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(GEOCODE_TIMEOUT_MS) });
+    if (!response.ok) {
+      log.warn({ ...context, status: response.status }, 'geocode HTTP error');
+      return null;
+    }
+    body = (await response.json()) as GeocodeResponse;
+  } catch (error) {
+    // Includes the timeout. Never rethrown: a booking does not fail because
+    // Google was slow — see the note on `MapsProvider`.
+    log.warn({ ...context, err: error }, 'geocode request failed');
+    return null;
+  }
+
+  /*
+   * ZERO_RESULTS is an ANSWER, not a fault, and it is the common one in a
+   * brand-new estate where the street is younger than Google's data. It is
+   * logged at debug so it does not read as an incident; everything else is
+   * a real problem worth seeing.
+   *
+   *   REQUEST_DENIED     — key not authorised for Geocoding, or restricted
+   *                        to an IP this server does not have
+   *   OVER_QUERY_LIMIT   — the daily cap is doing its job
+   */
+  if (body.status !== 'OK') {
+    const level = body.status === 'ZERO_RESULTS' ? 'debug' : 'warn';
+    log[level](
+      { ...context, status: body.status, detail: body.error_message },
+      'geocode returned no usable result',
+    );
+    return null;
+  }
+
+  return body.results?.[0] ?? null;
+}
+
+/** The pin off a result, or null when Google answered without one. */
+function coordinatesOf(result: GeocodeResult): { latitude: number; longitude: number } | null {
+  const latitude = result.geometry?.location?.lat;
+  const longitude = result.geometry?.location?.lng;
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') return null;
+  return { latitude, longitude };
+}
+
+/**
+ * The same envelope `PlaceWriteSchema` enforces on a hand-typed pin.
+ *
+ * Generous enough for every state, tight enough that a wrong-hemisphere answer
+ * cannot be stored.
+ */
+function isInAustralia({ latitude, longitude }: { latitude: number; longitude: number }): boolean {
+  return latitude >= -44 && latitude <= -9 && longitude >= 112 && longitude <= 154;
 }
 
 /**
@@ -100,54 +176,75 @@ export function createGoogleMapsProvider(): MapsProvider {
       );
       url.searchParams.set('key', key);
 
-      let body: GeocodeResponse;
-      try {
-        const response = await fetch(url, { signal: AbortSignal.timeout(GEOCODE_TIMEOUT_MS) });
-        if (!response.ok) {
-          log.warn({ status: response.status }, 'geocode HTTP error');
-          return null;
-        }
-        body = (await response.json()) as GeocodeResponse;
-      } catch (error) {
-        // Includes the timeout. Never rethrown: a booking does not fail because
-        // Google was slow — see the note on `MapsProvider`.
-        log.warn({ err: error }, 'geocode request failed');
-        return null;
-      }
+      const first = await firstResult(url, { suburb: request.suburb });
+      if (!first) return null;
 
-      /*
-       * ZERO_RESULTS is an ANSWER, not a fault, and it is the common one in a
-       * brand-new estate where the street is younger than Google's data. It is
-       * logged at debug so it does not read as an incident; everything else is
-       * a real problem worth seeing.
-       *
-       *   REQUEST_DENIED     — key not authorised for Geocoding, or restricted
-       *                        to an IP this server does not have
-       *   OVER_QUERY_LIMIT   — the daily cap is doing its job
-       */
-      if (body.status !== 'OK') {
-        const level = body.status === 'ZERO_RESULTS' ? 'debug' : 'warn';
-        log[level](
-          { status: body.status, detail: body.error_message, suburb: request.suburb },
-          'geocode returned no usable result',
-        );
-        return null;
-      }
-
-      const first = body.results?.[0];
-      const latitude = first?.geometry?.location?.lat;
-      const longitude = first?.geometry?.location?.lng;
-      if (typeof latitude !== 'number' || typeof longitude !== 'number') {
-        log.warn({ status: body.status }, 'geocode OK but carried no coordinates');
+      const point = coordinatesOf(first);
+      if (!point) {
+        log.warn({ suburb: request.suburb }, 'geocode OK but carried no coordinates');
         return null;
       }
 
       return {
-        latitude,
-        longitude,
-        precision: PRECISION_BY_LOCATION_TYPE[first?.geometry?.location_type ?? ''] ?? 'approximate',
-        formattedAddress: first?.formatted_address ?? '',
+        ...point,
+        precision: PRECISION_BY_LOCATION_TYPE[first.geometry?.location_type ?? ''] ?? 'approximate',
+        formattedAddress: first.formatted_address ?? '',
       };
+    },
+
+    async geocodeSuburb(request: SuburbGeocodeRequest): Promise<SuburbPin | null> {
+      /*
+       * Here the components filter is doing nearly all of the work, and the
+       * address string is only there to break ties within it.
+       *
+       * `postal_code` plus `locality` is what makes "Richmond" mean the one in
+       * 2753 rather than the one in Victoria. Suburb names repeat across the
+       * country — which is why this table's own unique key is {suburb,
+       * postcode} and not the name — so an unconstrained lookup would answer
+       * confidently and interstate.
+       */
+      const url = new URL(GEOCODE_URL);
+      url.searchParams.set(
+        'address',
+        `${request.suburb} ${request.state} ${request.postcode}, Australia`,
+      );
+      url.searchParams.set(
+        'components',
+        `country:AU|postal_code:${request.postcode}|locality:${request.suburb}`,
+      );
+      url.searchParams.set('key', key);
+
+      const first = await firstResult(url, { suburb: request.suburb });
+      if (!first) return null;
+
+      const point = coordinatesOf(first);
+      if (!point) {
+        log.warn({ suburb: request.suburb }, 'suburb geocode OK but carried no coordinates');
+        return null;
+      }
+
+      /*
+       * ⚠️ Deliberately NO `isPrecise` check.
+       *
+       * This lookup asks for a suburb, so `APPROXIMATE` — the locality centroid
+       * — is the correct answer, not a degraded one. That is the whole reason
+       * this is a separate method; see the note on `geocodeSuburb` in `maps.ts`.
+       *
+       * The bounds check stays, and matters more here than anywhere else.
+       * `components` is a filter Google relaxes on a near miss rather than a
+       * guarantee, and this is the one path where a returned coordinate is
+       * stored without a human ever reading the number — so a pin outside
+       * Australia is discarded rather than saved and wondered about later.
+       */
+      if (!isInAustralia(point)) {
+        log.warn(
+          { suburb: request.suburb, ...point, matched: first.formatted_address },
+          'suburb geocode landed outside Australia — discarded',
+        );
+        return null;
+      }
+
+      return { ...point, formattedAddress: first.formatted_address ?? '' };
     },
 
     async optimiseStopOrder(stops: readonly RouteStop[]): Promise<string[] | null> {

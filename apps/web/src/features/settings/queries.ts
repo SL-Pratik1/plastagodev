@@ -75,6 +75,18 @@ export function useRemoveLogo() {
   return useSettingsMutation(() => settings.removeLogo());
 }
 
+/* ── The certificate signature (M9.5 · F52) ──────────────────────────────── */
+
+export function useUploadCertificateSignature() {
+  const { settings } = useServices();
+  return useSettingsMutation((file: File) => settings.uploadCertificateSignature(file));
+}
+
+export function useRemoveCertificateSignature() {
+  const { settings } = useServices();
+  return useSettingsMutation(() => settings.removeCertificateSignature());
+}
+
 /**
  * A rendered sample of one template.
  *

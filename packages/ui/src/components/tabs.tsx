@@ -12,10 +12,19 @@ import {
 } from 'react';
 import { cn } from '../lib/utils.js';
 
+/**
+ * `underline` is the page-level tab set — a rule across the content with the
+ * active tab sitting on it. `pill` is a segmented control for tabs NESTED
+ * inside a panel that already has an underlined set above it: two underlines
+ * stacked read as two competing page sections rather than a whole and its part.
+ */
+export type TabsVariant = 'underline' | 'pill';
+
 interface TabsContextValue {
   value: string;
   select: (value: string) => void;
   baseId: string;
+  variant: TabsVariant;
 }
 
 const TabsContext = createContext<TabsContextValue | null>(null);
@@ -31,6 +40,8 @@ export interface TabsProps {
   value?: string;
   defaultValue?: string;
   onValueChange?: (value: string) => void;
+  /** `pill` for a tab set nested inside another tab's panel. */
+  variant?: TabsVariant;
   children: ReactNode;
   className?: string;
 }
@@ -47,7 +58,14 @@ export interface TabsProps {
  * user might link to or reload. A dropped tab selection on refresh is a small
  * annoyance the tenth time and an obvious rough edge in a demo.
  */
-export function Tabs({ value, defaultValue, onValueChange, children, className }: TabsProps) {
+export function Tabs({
+  value,
+  defaultValue,
+  onValueChange,
+  variant = 'underline',
+  children,
+  className,
+}: TabsProps) {
   const baseId = useId();
   const [internal, setInternal] = useState(defaultValue ?? '');
   const isControlled = value !== undefined;
@@ -62,8 +80,8 @@ export function Tabs({ value, defaultValue, onValueChange, children, className }
   );
 
   const context = useMemo<TabsContextValue>(
-    () => ({ value: current, select, baseId }),
-    [current, select, baseId],
+    () => ({ value: current, select, baseId, variant }),
+    [current, select, baseId, variant],
   );
 
   return (
@@ -79,6 +97,7 @@ export interface TabsListProps extends Omit<ComponentProps<'div'>, 'role'> {
 }
 
 export function TabsList({ label, className, children, ...props }: TabsListProps) {
+  const { variant } = useTabsContext('TabsList');
   const listRef = useRef<HTMLDivElement>(null);
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -115,7 +134,12 @@ export function TabsList({ label, className, children, ...props }: TabsListProps
       aria-label={label}
       onKeyDown={onKeyDown}
       className={cn(
-        'flex gap-1 overflow-x-auto border-b border-border',
+        'flex gap-1 overflow-x-auto',
+        variant === 'underline'
+          ? 'border-b border-border'
+          : // A tray the selected pill sits inside, so the set reads as one
+            // control rather than as four loose buttons.
+            'w-fit max-w-full rounded-lg border border-border bg-muted/40 p-1',
         // Scrollable on a phone without a visible scrollbar eating the underline.
         '[scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
         className,
@@ -134,7 +158,7 @@ export interface TabsTriggerProps extends Omit<ComponentProps<'button'>, 'value'
 }
 
 export function TabsTrigger({ value, badge, className, children, ...props }: TabsTriggerProps) {
-  const { value: active, select, baseId } = useTabsContext('TabsTrigger');
+  const { value: active, select, baseId, variant } = useTabsContext('TabsTrigger');
   const selected = active === value;
 
   return (
@@ -149,10 +173,20 @@ export function TabsTrigger({ value, badge, className, children, ...props }: Tab
         select(value);
       }}
       className={cn(
-        'focus-ring -mb-px flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors',
-        selected
-          ? 'border-primary text-foreground'
-          : 'border-transparent text-muted-foreground hover:border-border hover:text-foreground',
+        'focus-ring flex shrink-0 items-center gap-2 whitespace-nowrap text-sm font-medium transition-colors',
+        variant === 'underline'
+          ? cn(
+              '-mb-px border-b-2 px-3 py-2',
+              selected
+                ? 'border-primary text-foreground'
+                : 'border-transparent text-muted-foreground hover:border-border hover:text-foreground',
+            )
+          : cn(
+              'rounded-md px-3 py-1.5',
+              selected
+                ? 'bg-card text-foreground shadow-[0_1px_2px_0_rgb(16_24_16/0.06)] dark:bg-accent dark:shadow-none'
+                : 'text-muted-foreground hover:text-foreground',
+            ),
         'disabled:pointer-events-none disabled:opacity-50',
         className,
       )}

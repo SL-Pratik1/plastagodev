@@ -164,8 +164,15 @@ export type Place = z.infer<typeof PlaceSchema>;
  */
 export const PlaceWriteSchema = z
   .object({
-    suburb: z.string().trim().min(1, 'Name the suburb').max(80, 'Keep the suburb under 80 characters'),
-    postcode: z.string().trim().regex(/^\d{4}$/, 'Four digits, e.g. 2155'),
+    suburb: z
+      .string()
+      .trim()
+      .min(1, 'Name the suburb')
+      .max(80, 'Keep the suburb under 80 characters'),
+    postcode: z
+      .string()
+      .trim()
+      .regex(/^\d{4}$/, 'Four digits, e.g. 2155'),
     state: z
       .string()
       .trim()
@@ -174,6 +181,16 @@ export const PlaceWriteSchema = z
     /** Checked against the zones that exist, in the service. Mongo will not. */
     zoneId: ZoneSchema,
     /*
+     * ── OPTIONAL, because an administrator does not know a coordinate ──────
+     * The pin is still REQUIRED on the stored row — it is what puts a job on
+     * the dispatch map and what a geocoded street address is sanity-checked
+     * against. It is simply not something a human should be typing: omit both
+     * and the service geocodes the suburb and fills them in (I3).
+     *
+     * They stay accepted because geocoding can answer "no" — Google has never
+     * heard of a brand-new estate, or the key is not configured — and a suburb
+     * that cannot be added at all is a worse outcome than one typed by hand.
+     *
      * ⚠️ Bounded to Australia, not to the globe.
      *
      * `latitude: 33.7118` instead of `-33.7118` is one keystroke and it is a
@@ -185,15 +202,35 @@ export const PlaceWriteSchema = z
     latitude: z
       .number()
       .min(-44, 'That latitude is not in Australia — check the sign')
-      .max(-9, 'That latitude is not in Australia — check the sign'),
+      .max(-9, 'That latitude is not in Australia — check the sign')
+      .optional(),
     longitude: z
       .number()
       .min(112, 'That longitude is not in Australia')
-      .max(154, 'That longitude is not in Australia'),
+      .max(154, 'That longitude is not in Australia')
+      .optional(),
+  })
+  /*
+   * Both or neither. Half a pin is not a location, and the half that arrived
+   * would otherwise be silently dropped in favour of a geocode — leaving
+   * somebody who corrected one number wondering why nothing moved.
+   */
+  .refine((place) => (place.latitude === undefined) === (place.longitude === undefined), {
+    path: ['longitude'],
+    message: 'Give both the latitude and the longitude, or neither',
   })
   .meta({ id: 'PlaceWrite' });
 
 export type PlaceWrite = z.infer<typeof PlaceWriteSchema>;
+
+/**
+ * A suburb whose pin has been resolved — what actually reaches the database.
+ *
+ * The service turns a `PlaceWrite` into one of these by geocoding when the
+ * coordinates were left out, so nothing below it has to consider the absent
+ * case. See `place.service.ts`.
+ */
+export type LocatedPlaceWrite = PlaceWrite & { latitude: number; longitude: number };
 
 /**
  * M2.3 / M4.3 — per-account capture configuration.

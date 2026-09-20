@@ -53,7 +53,6 @@ import {
   ReportsPage,
   ExtractorPage,
   SettingsPage,
-  SuburbsPage,
   XeroPage,
   UserDetailPage,
   UsersPage,
@@ -72,6 +71,7 @@ import { PlainLayout } from '@/layouts/plain-layout';
 import { PortalLayout } from '@/layouts/portal-layout';
 import { ForbiddenPage } from '@/pages/auth/forbidden';
 import { RootRedirect } from '@/pages/auth/root-redirect';
+import { SuburbsRedirect } from '@/pages/admin/suburbs-redirect';
 import { SignInPage } from '@/pages/auth/sign-in';
 import { SurfaceElsewhere } from '@/pages/auth/surface-elsewhere';
 import { VerifyOtpPage } from '@/pages/auth/verify-otp';
@@ -346,11 +346,15 @@ export const router = createBrowserRouter([
                       { path: 'settings', element: load(<SettingsPage />) },
                       /*
                        * M6.3 — the suburbs that decide a job's zone, and the
-                       * zone decides the rate. Same capability as Settings
-                       * because it is the same act: changing what the platform
-                       * charges, for everybody, from the next booking on.
+                       * zone decides the rate.
+                       *
+                       * ⚠️ No longer a screen of its own: it is a tab under
+                       * Settings → Pricing, beside the zones it feeds. This
+                       * route stays as a redirect because the old link is in
+                       * bookmarks and in the client's notes, and a 404 there
+                       * reads as the feature having been removed.
                        */
-                      { path: 'suburbs', element: load(<SuburbsPage />) },
+                      { path: 'suburbs', element: <SuburbsRedirect /> },
                     ],
                   },
                 ],

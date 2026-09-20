@@ -29,6 +29,27 @@ export interface GeocodedPoint {
   formattedAddress: string;
 }
 
+/**
+ * A suburb as an administrator names it (M6.3).
+ *
+ * No `addressLine`, because there is not one. This asks "where is Kellyville?",
+ * not "where is 18 Ashworth Bvd, Kellyville?" — a different question with a
+ * different right answer.
+ */
+export interface SuburbGeocodeRequest {
+  suburb: string;
+  postcode: string;
+  state: string;
+}
+
+/** The centre of a suburb, for the row the whole pricing chain hangs off. */
+export interface SuburbPin {
+  latitude: number;
+  longitude: number;
+  /** Google's own rendering of the suburb it matched. Logged, not stored. */
+  formattedAddress: string;
+}
+
 /** A stop as the optimiser sees it: an id and a point, nothing else. */
 export interface RouteStop {
   id: string;
@@ -55,6 +76,21 @@ export interface MapsProvider {
   readonly name: string;
   /** Null when Google declined, failed, or answered no better than the suburb. */
   geocode: (request: GeocodeRequest) => Promise<GeocodedPoint | null>;
+  /**
+   * The centre of a suburb, so an administrator never types a coordinate.
+   *
+   * ⚠️ A SECOND method, not a flag on `geocode`, and the difference is the
+   * whole reason it exists. `geocode` discards an `approximate` result because
+   * a locality centroid is no better than the suburb pin the job already holds
+   * — see `isPrecise`. Here that centroid IS the answer being asked for. One
+   * method serving both would have to mean opposite things about the same
+   * result, and `isPrecise` would stop being safe to read at a glance.
+   *
+   * Null when Google has no answer, or when no provider is configured. The
+   * caller decides what that means; for the suburb register it means falling
+   * back to asking for the pin, never to a guess.
+   */
+  geocodeSuburb: (request: SuburbGeocodeRequest) => Promise<SuburbPin | null>;
   /**
    * The same stop ids, in driving order. Null when no route was computed.
    *
@@ -89,6 +125,10 @@ function createOffProvider(): MapsProvider {
     name: 'off',
     geocode() {
       log.debug('geocode skipped (MAPS_PROVIDER=off)');
+      return Promise.resolve(null);
+    },
+    geocodeSuburb() {
+      log.debug('suburb geocode skipped (MAPS_PROVIDER=off)');
       return Promise.resolve(null);
     },
     optimiseStopOrder() {

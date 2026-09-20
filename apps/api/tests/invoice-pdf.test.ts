@@ -35,6 +35,13 @@ const BRANDING: Settings['invoicing'] = {
   bankAccount: '45 327 0863',
   bankAccountName: 'PlastaGo Pty Ltd',
   showGbcaBadge: true,
+  // No signature configured: this fixture exercises the INVOICE, and the
+  // signature block only ever prints on a certificate.
+  certificateSignatureName: '',
+  certificateSignatureTitle: '',
+  certificateSignatureKey: '',
+  // Derived from the key above, exactly as `logoUrl` is.
+  certificateSignatureUrl: null,
 };
 
 function template(overrides: Partial<InvoiceTemplate> = {}): InvoiceTemplate {

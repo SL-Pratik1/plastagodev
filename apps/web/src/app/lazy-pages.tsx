@@ -153,10 +153,6 @@ export const XeroPage = lazy(async () => ({
   default: (await import('@/pages/admin/xero')).AdminXeroPage,
 }));
 
-export const SuburbsPage = lazy(async () => ({
-  default: (await import('@/pages/admin/suburbs')).AdminSuburbsPage,
-}));
-
 export const SettingsPage = lazy(async () => ({
   default: (await import('@/pages/admin/settings')).AdminSettingsPage,
 }));

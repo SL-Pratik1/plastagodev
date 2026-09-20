@@ -170,6 +170,34 @@ export const CERTIFICATE_STATES = ['draft', 'issued'] as const;
 export const CertificateStateSchema = z.enum(CERTIFICATE_STATES).meta({ id: 'CertificateState' });
 export type CertificateState = z.infer<typeof CertificateStateSchema>;
 
+/**
+ * How the tonnage on a certificate was arrived at.
+ *
+ * ⚠️ Only `weighed` is ever issued today, and that is a COMPLIANCE decision,
+ * not an oversight. Matt, 32:11: *"this is only for weighed jobs. If it's an
+ * estimated job, we're unable to provide a certificate because it's an
+ * estimated weight and it doesn't meet compliance regulation."*
+ *
+ * `apportioned` — a hand-load's share of the weighbridge remainder, split by m²
+ * (M4.4) — is named here anyway, for two reasons. It is the value the certificate
+ * would carry if that rule is ever relaxed, and naming it is what lets the
+ * eligibility filter be a comparison against a documented enum rather than a bare
+ * string nobody can look up. The basis is FROZEN onto the certificate rather than
+ * read back off the job, so a reprint in five years still says what it was based
+ * on even after a late reconciliation has moved the job.
+ */
+export const CERTIFICATE_WEIGHT_BASES = ['weighed', 'apportioned'] as const;
+export const CertificateWeightBasisSchema = z
+  .enum(CERTIFICATE_WEIGHT_BASES)
+  .meta({ id: 'CertificateWeightBasis' });
+export type CertificateWeightBasis = z.infer<typeof CertificateWeightBasisSchema>;
+
+/** What the method line on the document reads. */
+export const CERTIFICATE_WEIGHT_BASIS_LABELS: Record<CertificateWeightBasis, string> = {
+  weighed: 'Weighed — calibrated crane scale on collection',
+  apportioned: 'Apportioned from the weighbridge docket by area',
+};
+
 export const CertificateSchema = z
   .object({
     id: ObjectIdSchema,
@@ -180,7 +208,14 @@ export const CertificateSchema = z
     accountName: NonEmptyStringSchema,
     /** Set when the scope is a single site or job. */
     siteName: z.string().nullable(),
+    /**
+     * The site as it is printed — an auditor matches the certificate to a
+     * development by its address, not by whatever the site was nicknamed.
+     */
+    siteAddress: z.string().nullable(),
     jobNumber: z.number().int().positive().nullable(),
+    /** The day the material left the site. Null on a multi-job certificate. */
+    collectedOn: IsoDateSchema.nullable(),
     periodFrom: IsoDateSchema,
     periodTo: IsoDateSchema,
     jobs: z.number().int().nonnegative(),
@@ -192,8 +227,34 @@ export const CertificateSchema = z
     areaM2: z.number().nonnegative().nullable(),
     /** From the tip-off reconciliation, not from the priced m². */
     tonnesDiverted: z.number().nonnegative(),
+
+    /* ── The audit trail, frozen at preparation ─────────────────────────── */
+
+    /** How the tonnage was measured. See `CertificateWeightBasisSchema`. */
+    weightBasis: CertificateWeightBasisSchema,
+    /**
+     * The weighbridge docket the load was tipped against.
+     *
+     * Null where the run has no docket recorded yet. It is evidence the material
+     * reached a facility, which is the half of "diverted from landfill" the
+     * crane scale on its own cannot show.
+     */
+    docketNumber: z.string().nullable(),
+    /** When the load was tipped, as distinct from when it was collected. */
+    tippedOffAt: IsoDateTimeSchema.nullable(),
+
     issuedAt: IsoDateTimeSchema.nullable(),
     issuedTo: z.string().nullable(),
+    /** Who pressed Issue. Printed on the document, so the office owns it. */
+    issuedByName: z.string().nullable(),
+    /**
+     * Whether the rendered PDF exists in storage.
+     *
+     * A boolean rather than the key: the key is an internal storage path, and a
+     * customer's browser has no business knowing the bucket layout. Downloads go
+     * through an endpoint that mints a short-lived link.
+     */
+    hasPdf: z.boolean(),
   })
   .meta({ id: 'Certificate' });
 

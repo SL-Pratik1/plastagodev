@@ -39,6 +39,7 @@ import {
 import { jobNotices } from '../notifications/job-notices.service.js';
 import { notificationService } from '../notifications/notification.service.js';
 import { queueRepository } from '../queues/queue.repository.js';
+import { reportService } from '../reports/report.service.js';
 import { reconcileTipOff } from './tipoff.js';
 
 const log = logger.child({ module: 'driver' });
@@ -867,6 +868,23 @@ export const driverService = {
       },
       'tip-off recorded and reconciled',
     );
+
+    /*
+     * M9.5 — draft a Certificate of Recycling for every crane-weighed stop.
+     *
+     * ── Why here, and not when the job was completed ─────────────────────
+     * This is the first moment the certificate is fully knowable. The docket
+     * number and the tip date only exist once the truck has been over the
+     * weighbridge, and they are what let an assessor check the tonnage against
+     * the facility rather than take our word for it. A draft cut at completion
+     * would carry an empty audit block for ever.
+     *
+     * ⚠️ Last, and it cannot throw — `autoPrepareForRun` swallows its own
+     * failures. A driver standing at a weighbridge must never see a
+     * reconciliation refused because a certificate could not be drafted, and
+     * the docket is already written.
+     */
+    await reportService.autoPrepareForRun(input.runId);
   },
 
   /**

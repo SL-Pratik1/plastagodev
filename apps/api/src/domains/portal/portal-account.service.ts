@@ -499,22 +499,44 @@ export const portalCertificateService = {
     );
   },
 
-  /** Queues the PDF for one of their own certificates. */
-  async requestCertificatePdf(id: string, caller: Caller): Promise<{ queued: number }> {
+  /**
+   * A short-lived download link for one of their own certificates.
+   *
+   * ── Why this delegates rather than presigning here ────────────────────────
+   * The reporting service owns the rule that a draft has no downloadable
+   * document, and the repair path that renders one for a certificate issued
+   * while storage was unavailable. Duplicating either here would give the
+   * portal its own opinion about what a customer may download, and the two
+   * would drift.
+   *
+   * What this layer owns is WHO: the caller must be an administrator, and the
+   * certificate must belong to their account. Both are enforced before the id
+   * reaches the reporting service, which scopes the read again from the caller.
+   */
+  async requestCertificatePdf(id: string, caller: Caller): Promise<{ url: string }> {
     const accountId = assertAdministrator(caller);
 
     const certificate = await reportRepository.findCertificate(id, accountId);
     // 404, not 403 — a 403 confirms another customer's certificate exists.
     if (!certificate) throw AppError.notFound('No such certificate');
 
-    if (certificate.state !== 'issued') {
-      throw AppError.conflict('That certificate has not been issued yet');
-    }
+    /*
+     * No state check here on purpose. Whether a draft may be downloaded is the
+     * reporting service's rule, and it enforces it below — repeating it would
+     * be a second copy of a compliance decision, free to drift from the first.
+     */
+    const result = await reportService.certificatePdfUrl(id, {
+      userId: caller.userId,
+      name: caller.name,
+      roles: caller.roles,
+      accountId,
+    });
 
     log.info(
       { certificateId: id, accountId, by: caller.name },
-      'customer requested a certificate PDF',
+      'customer downloaded a certificate PDF',
     );
-    return { queued: 1 };
+
+    return result;
   },
 };

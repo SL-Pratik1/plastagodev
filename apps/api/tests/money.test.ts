@@ -4,6 +4,7 @@ import {
   centsToMoney,
   fromDecimal128,
   moneyToCents,
+  shiftMoney,
   toDecimal128,
 } from '../src/lib/money.js';
 
@@ -97,5 +98,52 @@ describe('applying a per-m² rate', () => {
     expect(centsToMoney(applyRate('0.16', 0))).toBe('0.00');
     expect(() => applyRate('abc', 100)).toThrow();
     expect(() => applyRate('0.16', Number.NaN)).toThrow();
+  });
+});
+
+/**
+ * Shifting a figure when a new zone copies an existing one's prices (M6.3).
+ *
+ * ── Why this is not just addition ─────────────────────────────────────────
+ * It is addition that must not round. The service charge is dollars and the
+ * rate per m² is four decimals, and the same function handles both — so the
+ * arithmetic happens in ten-thousandths. Doing it in cents, as every other
+ * helper here does, would quietly turn a `0.1625` rate into `0.16` and shave a
+ * sixteenth of a cent off every square metre in the new zone, for ever.
+ */
+describe('shifting a figure', () => {
+  it('moves a service charge by whole dollars', () => {
+    expect(shiftMoney('220.00', '30.00')).toBe('250.0000');
+    expect(shiftMoney('220.00', '-15.50')).toBe('204.5000');
+  });
+
+  it('keeps a rate at four decimals', () => {
+    expect(shiftMoney('0.1625', '0.0200')).toBe('0.1825');
+    expect(shiftMoney('0.1600', '-0.0025')).toBe('0.1575');
+  });
+
+  /*
+   * ⚠️ The regression this exists for. Through `moneyToCents` the base would
+   * arrive as 16 cents and the answer would be 0.1800 — a quarter of a cent per
+   * m² lost on every job, on a figure nobody re-reads.
+   */
+  it('does not round the base to cents first', () => {
+    expect(shiftMoney('0.1625', '0.0175')).toBe('0.1800');
+    expect(shiftMoney('0.1699', '0.0001')).toBe('0.1700');
+  });
+
+  it('clamps at zero rather than writing a negative price', () => {
+    expect(shiftMoney('220.00', '-500.00')).toBe('0.0000');
+    expect(shiftMoney('0.1600', '-1.0000')).toBe('0.0000');
+  });
+
+  it('is a no-op for a zero shift', () => {
+    expect(shiftMoney('220.00', '0')).toBe('220.0000');
+    expect(shiftMoney('0.1625', '0.0000')).toBe('0.1625');
+  });
+
+  it('refuses anything that is not a decimal string', () => {
+    expect(() => shiftMoney('abc', '1.00')).toThrow();
+    expect(() => shiftMoney('220.00', '1e3')).toThrow();
   });
 });

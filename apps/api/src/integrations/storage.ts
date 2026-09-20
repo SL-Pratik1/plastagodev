@@ -158,6 +158,7 @@ export function buildKey(input: {
     | 'vehicles'
     | 'defects'
     | 'invoices'
+    | 'certificates'
     | 'leads'
     | 'purchase-orders'
     | 'settings';

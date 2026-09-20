@@ -1069,11 +1069,16 @@ function baseSettings(): Settings {
       bankAccount: '45 327 0863',
       bankAccountName: 'PlastaGo Pty Ltd',
       showGbcaBadge: true,
+      certificateSignatureName: 'Matt Ryan',
+      certificateSignatureTitle: 'Director',
+      certificateSignatureKey: '',
       /*
        * Derived on read from `logoKey`, so the fake states it directly. Null is
        * the honest default: no logo has been uploaded in a test.
        */
       logoUrl: null,
+      /** The same, for the certificate signature image (M9.5). */
+      certificateSignatureUrl: null,
     },
   };
 }
