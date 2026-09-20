@@ -112,7 +112,7 @@ async function main(): Promise<void> {
 
     const stored = await db.collection('zones').findOne({ slug });
     if (!stored) throw new Error(`zone "${slug}" was not written`);
-    zoneId.set(slug, stored._id as mongoose.Types.ObjectId);
+    zoneId.set(slug, stored._id);
   }
 
   console.log('  zones');
@@ -227,10 +227,17 @@ async function main(): Promise<void> {
   let snapshots = 0;
   for (const [slug, id] of zoneId) {
     const zone = await db.collection('zones').findOne({ slug });
+    /*
+     * The driver hands back an untyped document, so the label is narrowed
+     * rather than trusted: this value is FROZEN onto every job it touches,
+     * and a non-string reaching the snapshot would be stored as one.
+     */
+    const storedLabel: unknown = zone?.label;
+    const zoneLabel = typeof storedLabel === 'string' ? storedLabel : titleCase(slug);
     const result = await db.collection('jobs').updateMany(
       { 'appliedRate.zone': slug },
       {
-        $set: { 'appliedRate.zoneId': id, 'appliedRate.zoneLabel': zone?.label ?? titleCase(slug) },
+        $set: { 'appliedRate.zoneId': id, 'appliedRate.zoneLabel': zoneLabel },
         $unset: { 'appliedRate.zone': '' },
       },
     );
@@ -298,7 +305,16 @@ async function main(): Promise<void> {
       .toArray();
     const bad = rows.filter((row) => {
       const value = row[field] as unknown;
-      return value != null && !ids.has(String(value));
+      if (value == null) return false;
+      /*
+       * An ObjectId once the migration has re-pointed the row, or the old
+       * slug string on one it has not reached. Anything else cannot name a
+       * zone, so it counts as dangling rather than being stringified into a
+       * lookup that would never match anyway.
+       */
+      if (value instanceof mongoose.Types.ObjectId) return !ids.has(value.toHexString());
+      if (typeof value === 'string') return !ids.has(value);
+      return true;
     }).length;
 
     const stale = await db.collection(coll).countDocuments({ [old]: { $exists: true } });

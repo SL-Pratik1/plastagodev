@@ -247,7 +247,7 @@ function shift(value: Types.Decimal128, delta: Money | undefined): Types.Decimal
    * a rate of `0.1625` would arrive at `shiftMoney` as `0.16` and every job
    * priced in the new zone would be short by a sixteenth of a cent per m².
    */
-  return toDecimal128(shiftMoney(value.toString() as Money, delta));
+  return toDecimal128(shiftMoney(value.toString(), delta));
 }
 
 /**
