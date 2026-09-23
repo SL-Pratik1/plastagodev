@@ -31,7 +31,11 @@
     "migrate:po-review-reasons": "tsx src/scripts/migrate-po-review-reasons.ts",
     "migrate:call-up-index": "tsx src/scripts/migrate-call-up-index.ts",
     "migrate:photo-uploaded-at": "tsx src/scripts/migrate-photo-uploaded-at.ts",
-    "migrate:run-stop-drivers": "tsx src/scripts/migrate-run-stop-drivers.ts"
+    "migrate:run-stop-drivers": "tsx src/scripts/migrate-run-stop-drivers.ts",
+    "migrate:tv-reference-data": "tsx src/scripts/migrate-tv-reference-data.ts",
+    "migrate:tv-accounts": "tsx src/scripts/migrate-tv-accounts.ts",
+    "migrate:tv-fleet-staff": "tsx src/scripts/migrate-tv-fleet-staff.ts",
+    "migrate:tv-jobs-invoices": "tsx src/scripts/migrate-tv-jobs-invoices.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",
