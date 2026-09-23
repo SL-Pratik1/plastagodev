@@ -3,6 +3,7 @@ import {
   extractorClient,
   meansNotAMember,
   meansStaleToken,
+  setOwnerCredentialsResolver,
   type ExtractorResult,
 } from '../../integrations/extractor.js';
 import { AppError } from '../../lib/app-error.js';
@@ -69,6 +70,36 @@ export interface BrokeredSession {
 export interface Caller {
   userId: string;
   name: string;
+}
+
+/**
+ * Points the vendor client at the embed-token collection.
+ *
+ * ── Why every entry point calls this ──────────────────────────────────────
+ * The token is stored, not configured (see `extractor.model.ts`), and
+ * `integrations/extractor.ts` must not read Mongo itself (§6A.3). So the store
+ * is handed in, and it has to be handed in by whoever starts the process:
+ * `index.ts` for the API, `worker.ts` for the background queues, and
+ * `setup-extractor.ts` for the one script that talks to the vendor directly.
+ *
+ * Safe to call more than once, and cheap — it installs a closure, it does not
+ * read anything. A process that forgets falls back to env rather than breaking.
+ */
+export function wireExtractor(): void {
+  setOwnerCredentialsResolver(async () => {
+    const stored = await extractorRepository.findToken(TENANT_ID, APP_NAME);
+    if (!stored) return null;
+
+    /*
+     * Rows written before `ownerEmail` existed carry none, and env is the only
+     * place left that knows who the tenant was onboarded as. Returning null
+     * rather than guessing lets the client raise its own named error.
+     */
+    const userEmail = stored.ownerEmail ?? env.EXTRACTOR_USER_EMAIL ?? null;
+    if (!userEmail) return null;
+
+    return { embedToken: stored.token, userEmail };
+  });
 }
 
 export const extractorService = {
@@ -200,6 +231,7 @@ async function currentToken(): Promise<{ token: string }> {
       tokenId: null,
       organizationId: null,
       appId: env.EXTRACTOR_APP_ID ?? null,
+      ownerEmail: env.EXTRACTOR_USER_EMAIL ?? null,
     });
 
     log.info('adopted EXTRACTOR_EMBED_TOKEN into the embed-token cache');
@@ -207,41 +239,26 @@ async function currentToken(): Promise<{ token: string }> {
   }
 
   /*
-   * Nothing configured and nothing stored: onboard.
+   * Nothing stored and nothing in env.
    *
-   * ⚠️ Onboarded as `EXTRACTOR_USER_EMAIL`, never as whoever happened to open
-   * the tab. Onboarding makes its subject the extractor tenant's OWNER, so
-   * onboarding as a passing office-staff member would hand them ownership and
-   * leave the platform account a non-member — which then fails every
-   * provisioning call this file depends on.
+   * ⚠️ This REFUSES; it used to onboard. Onboarding creates a tenant, and a
+   * tenant is not a thing to create as a side effect of somebody opening a tab.
+   *
+   * The branch existed when `EXTRACTOR_EMBED_TOKEN` was mandatory at boot,
+   * which made it unreachable in practice — the process could not start
+   * without the very value whose absence it handled. Now that the token lives
+   * in the database and boot no longer demands it, the branch is reachable,
+   * and what it would do is the one irreversible mistake available here: a
+   * SECOND PlastaGo tenant, empty, with the real one's mailbox and templates
+   * stranded behind a credential nobody holds.
+   *
+   * Onboarding stays where it can be done deliberately and once:
+   * `npm run setup:extractor -- --onboard`.
    */
-  const ownerEmail = env.EXTRACTOR_USER_EMAIL;
-
-  if (!ownerEmail) {
-    throw AppError.dependencyUnavailable(
-      'The document extractor has no embed token and no owner address to onboard with',
-    );
-  }
-
-  log.warn({ ownerEmail }, 'no embed token on file — onboarding the tenant');
-
-  const onboarded = await extractorClient.onboard({
-    organizationName: 'PlastaGo',
-    firstName: 'PlastaGo',
-    lastName: 'Platform',
-    email: ownerEmail,
-  });
-
-  await extractorRepository.saveToken({
-    tenantId: TENANT_ID,
-    appName: APP_NAME,
-    token: onboarded.embedToken,
-    tokenId: onboarded.tokenId,
-    organizationId: onboarded.tenantId,
-    appId: env.EXTRACTOR_APP_ID ?? null,
-  });
-
-  return { token: onboarded.embedToken };
+  throw AppError.dependencyUnavailable(
+    'The document extractor has no embed token on file. Restore the token for the ' +
+      'existing tenant — do not onboard again, which would create a second one.',
+  );
 }
 
 /**

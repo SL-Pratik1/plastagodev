@@ -1,6 +1,7 @@
 import { env } from './config/env.js';
 import { connectMongo, disconnectMongo } from './db/mongo.js';
 import { disconnectRedis, getRedis } from './db/redis.js';
+import { wireExtractor } from './domains/extractor/extractor.service.js';
 import { logger } from './lib/logger.js';
 import { createSystemWorker } from './queues/workers/system.worker.js';
 
@@ -14,6 +15,10 @@ const log = logger.child({ module: 'worker-bootstrap' });
  */
 async function main(): Promise<void> {
   await connectMongo();
+
+  // Jobs in this process can reach the extractor, and its credentials are in
+  // Mongo — so the store is installed here too, not only in the web process.
+  wireExtractor();
 
   if (!env.ENABLE_QUEUES) {
     /*

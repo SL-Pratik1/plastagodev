@@ -130,8 +130,16 @@ export interface CreateJobInput {
   totalExGst: string;
   gst: string;
   totalIncGst: string;
-  /** M6.2 — the rates as applied, frozen so nothing can reprice this job. */
-  appliedRate: AppliedRate;
+  /**
+   * M6.2 — the rates as applied, frozen so nothing can reprice this job.
+   *
+   * ⚠️ Nullable, matching the Mongoose model exactly (`job.model.ts` defaults
+   * this to `null` and documents that as the correct state for "jobs created
+   * before rate snapshots existed"). The historical-backfill migration is
+   * the first caller that legitimately needs to pass `null` — every
+   * interactive booking path always has a real applied rate.
+   */
+  appliedRate: AppliedRate | null;
   riskAssessmentRequired: boolean;
 }
 
@@ -596,15 +604,17 @@ export const jobRepository = {
        * string is a rate that can be compared with `>` and get the wrong
        * answer, and these are the figures a credit note is derived from.
        */
-      appliedRate: {
-        rateCardId: input.appliedRate.rateCardId,
-        rateCardLabel: input.appliedRate.rateCardLabel,
-        zoneId: new mongoose.Types.ObjectId(input.appliedRate.zoneId),
-        zoneLabel: input.appliedRate.zoneLabel,
-        scheduleFrom: input.appliedRate.scheduleFrom,
-        serviceCharge: toDecimal128(input.appliedRate.serviceCharge),
-        ratePerM2: toDecimal128(input.appliedRate.ratePerM2),
-      },
+      appliedRate: input.appliedRate
+        ? {
+            rateCardId: input.appliedRate.rateCardId,
+            rateCardLabel: input.appliedRate.rateCardLabel,
+            zoneId: new mongoose.Types.ObjectId(input.appliedRate.zoneId),
+            zoneLabel: input.appliedRate.zoneLabel,
+            scheduleFrom: input.appliedRate.scheduleFrom,
+            serviceCharge: toDecimal128(input.appliedRate.serviceCharge),
+            ratePerM2: toDecimal128(input.appliedRate.ratePerM2),
+          }
+        : null,
       invoiceStatus: 'not-invoiced',
       notes: input.notes,
       riskAssessmentRequired: input.riskAssessmentRequired,

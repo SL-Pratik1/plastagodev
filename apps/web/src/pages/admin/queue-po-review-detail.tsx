@@ -21,7 +21,14 @@ import {
   Textarea,
   useToast,
 } from '@plastago/ui';
-import { CheckCircle2Icon, FileTextIcon, PaperclipIcon, XIcon } from 'lucide-react';
+import {
+  CheckCircle2Icon,
+  FileTextIcon,
+  MaximizeIcon,
+  MinimizeIcon,
+  PaperclipIcon,
+  XIcon,
+} from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
@@ -53,10 +60,57 @@ import { formatDateTime, formatMoney } from '@/lib/format';
  * of an empty grey box, so the reviewer gets a link rather than something that
  * looks broken.
  */
-function SourceDocument({ extraction }: { extraction: PoExtraction }): React.JSX.Element {
+function SourceDocument({
+  extraction,
+  wide,
+  onToggleWide,
+}: {
+  extraction: PoExtraction;
+  wide: boolean;
+  onToggleWide: () => void;
+}): React.JSX.Element {
   const [showText, setShowText] = useState(false);
 
+  /*
+   * ── Why the viewer is sized against the VIEWPORT ──────────────────────────
+   * It was a fixed 32rem in a half-width column, which on a laptop renders an
+   * A4 page about 380px wide — small enough that a lot number in eight-point
+   * type is genuinely unreadable, which is the one thing this pane exists for.
+   * The reviewer's only recourse was "Open full size", i.e. leaving the screen
+   * that holds the form they are filling in.
+   *
+   * Capped so it cannot outgrow a tall monitor and leave the toggle offscreen.
+   */
+  const viewerHeight = wide
+    ? 'h-[min(calc(100vh-13rem),64rem)]'
+    : 'h-[min(calc(100vh-17rem),48rem)]';
+
   const url = extraction.documentUrl;
+
+  /**
+   * The browser's PDF viewer, with its own furniture turned off.
+   *
+   * ── Why ───────────────────────────────────────────────────────────────────
+   * Chrome renders an embedded PDF with a thumbnail rail down the left and a
+   * toolbar across the top — page number, zoom, rotate, and its own summarise
+   * button. In a full window that is helpful. In this pane it consumes about a
+   * third of the width, so the page the reviewer came to read is squeezed into
+   * what is left and every figure needs zooming in to check. The reviewer is
+   * comparing two things side by side; the viewer's controls are not one of
+   * them.
+   *
+   * `navpanes=0` drops the thumbnail rail, `toolbar=0` the strip above it, and
+   * `view=FitH` makes the page fill the width it just got back. The buttons
+   * that matter — widen, and open in a real window — are ours, above.
+   *
+   * ⚠️ A FRAGMENT, not a query parameter. The URL is presigned, and anything
+   * added to its query string changes the signature and returns a 403. A
+   * fragment never leaves the browser, so S3 never sees it.
+   *
+   * Support is the browser's to give: Firefox ignores these and shows its own
+   * viewer, which is a cosmetic difference, not a broken pane.
+   */
+  const embedUrl = url === null ? null : `${url}#toolbar=0&navpanes=0&view=FitH`;
 
   /*
    * Images are stored alongside PDFs — a supervisor photographs an order as
@@ -66,7 +120,7 @@ function SourceDocument({ extraction }: { extraction: PoExtraction }): React.JSX
   const isImage = /\.(jpe?g|png|heic|heif|webp)$/i.test(extraction.attachmentName);
 
   const textPane = (
-    <pre className="max-h-[32rem] overflow-auto rounded-md bg-muted p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap">
+    <pre className="max-h-[min(calc(100vh-17rem),48rem)] overflow-auto rounded-md bg-muted p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap">
       {extraction.documentText.trim() === ''
         ? 'The extractor returned no text for this document.'
         : extraction.documentText}
@@ -95,19 +149,48 @@ function SourceDocument({ extraction }: { extraction: PoExtraction }): React.JSX
         <Button type="button" variant="ghost" size="sm" onClick={() => setShowText(!showText)}>
           {showText ? 'Show the document' : 'Show the extracted text'}
         </Button>
-        {/*
-          A single-window embed is no way to read a four-page order. The link
-          hands it to the browser's own viewer, where it can be zoomed, searched
-          and printed.
-        */}
-        <a
-          href={url}
-          target="_blank"
-          rel="noreferrer"
-          className="focus-ring rounded text-xs text-muted-foreground underline underline-offset-4"
-        >
-          Open full size ↗
-        </a>
+
+        <div className="flex items-center gap-1">
+          {/*
+            Widening drops the form below the document rather than beside it.
+            Checking a figure and typing a correction are separate moments, and
+            the half-width column was sized for neither.
+          */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onToggleWide}
+            aria-pressed={wide}
+            className="hidden lg:inline-flex"
+          >
+            {wide ? (
+              <>
+                <MinimizeIcon aria-hidden className="size-4" />
+                Side by side
+              </>
+            ) : (
+              <>
+                <MaximizeIcon aria-hidden className="size-4" />
+                Widen
+              </>
+            )}
+          </Button>
+
+          {/*
+            A single-window embed is no way to read a four-page order. The link
+            hands it to the browser's own viewer, where it can be zoomed, searched
+            and printed.
+          */}
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="focus-ring rounded px-2 text-xs text-muted-foreground underline underline-offset-4"
+          >
+            Open full size ↗
+          </a>
+        </div>
       </div>
 
       {showText ? (
@@ -116,14 +199,14 @@ function SourceDocument({ extraction }: { extraction: PoExtraction }): React.JSX
         <img
           src={url}
           alt={`Purchase order ${extraction.attachmentName}`}
-          className="max-h-[32rem] w-full rounded-md border border-border bg-muted object-contain"
+          className={`${viewerHeight} w-full rounded-md border border-border bg-muted object-contain`}
         />
       ) : (
         <object
-          data={url}
+          data={embedUrl ?? url}
           type="application/pdf"
           aria-label={`Purchase order ${extraction.attachmentName}`}
-          className="h-[32rem] w-full rounded-md border border-border bg-muted"
+          className={`${viewerHeight} w-full rounded-md border border-border bg-muted`}
         >
           <div className="p-4 text-sm">
             <p className="mb-2">This browser will not display the PDF inline.</p>
@@ -235,6 +318,13 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState('');
   const [rejectError, setRejectError] = useState<string | null>(null);
+
+  /*
+   * Which of the two panes gets the room. Not persisted: the choice belongs to
+   * the document in front of you — a dense four-page order wants the width, the
+   * one-page order after it does not.
+   */
+  const [wide, setWide] = useState(false);
 
   const decided = extraction.state !== 'needs-review';
   const busy = confirm.isPending || reject.isPending;
@@ -388,8 +478,23 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
         Side-by-side above `lg`, stacked below. `items-start` so the two cards do
         not stretch to a shared height — the document is long and the form is not.
       */}
-      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
-        <Card>
+      {/*
+        3:2, not 1:1. The two panes are not equal work: one is an A4 page that
+        has to be legible, the other is a column of short inputs that was
+        already comfortable at half width and is more comfortable narrower. An
+        even split was sized for the form.
+      */}
+      <div
+        className={`grid grid-cols-1 items-start gap-6 ${wide ? '' : 'lg:grid-cols-[3fr_2fr]'}`}
+      >
+        {/*
+          Sticky above `lg`, so the document stays put while the reviewer works
+          down the form. Without it the page scrolls as one: by the time you
+          reach the order value, the figure you are checking it against has gone
+          off the top of the screen — and checking against memory is exactly the
+          failure this screen exists to prevent.
+        */}
+        <Card className={wide ? undefined : 'lg:sticky lg:top-6'}>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <FileTextIcon aria-hidden className="size-4 text-muted-foreground" />
@@ -404,7 +509,11 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
             </p>
           </CardHeader>
           <CardContent>
-            <SourceDocument extraction={extraction} />
+            <SourceDocument
+              extraction={extraction}
+              wide={wide}
+              onToggleWide={() => setWide(!wide)}
+            />
           </CardContent>
         </Card>
 

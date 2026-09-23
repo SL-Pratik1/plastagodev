@@ -76,7 +76,7 @@ export const poReviewService = {
 
     return {
       ...extraction,
-      documentUrl: stored ? await getStorage().presignDownload(stored) : null,
+      documentUrl: await presignIfPresent(stored),
     };
   },
 
@@ -422,6 +422,41 @@ export const poReviewService = {
 };
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
+
+/**
+ * A download URL for the stored original — but only if the bytes are still there.
+ *
+ * ── Why the existence check is worth the round trip ───────────────────────
+ * Presigning is arithmetic: it signs a key whether or not anything lives at it,
+ * and a URL over a missing object is indistinguishable from a working one until
+ * the browser asks for it. The review screen then renders an embed that fails
+ * silently — a grey panel, or "this browser will not display the PDF inline",
+ * both of which read as a broken app rather than a missing file.
+ *
+ * `documentUrl: null` is already handled on the screen, and says the honest
+ * thing: the text is all we have, check the source email. So the check converts
+ * a confusing failure into an explained one.
+ *
+ * A storage outage returns null too. That is the right way round — telling a
+ * reviewer the document is unavailable is better than handing them a link that
+ * will not open.
+ */
+async function presignIfPresent(key: string | null): Promise<string | null> {
+  if (!key) return null;
+
+  try {
+    const storage = getStorage();
+    if (!(await storage.exists(key))) {
+      log.warn({ key }, 'the stored purchase order is gone — showing the extracted text only');
+      return null;
+    }
+
+    return await storage.presignDownload(key);
+  } catch (error) {
+    log.warn({ key, error: (error as Error).message }, 'could not presign the stored document');
+    return null;
+  }
+}
 
 /**
  * Why this extraction needs a human, decided server-side.

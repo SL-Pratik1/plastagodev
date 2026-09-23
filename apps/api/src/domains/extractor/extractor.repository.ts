@@ -15,6 +15,8 @@ export interface StoredEmbedToken {
   tokenId: string | null;
   organizationId: string | null;
   appId: string | null;
+  /** The identity server-side sessions are minted as. See the model. */
+  ownerEmail: string | null;
 }
 
 export interface CachedExtractorSession {
@@ -40,6 +42,7 @@ export const extractorRepository = {
       tokenId: row.tokenId ?? null,
       organizationId: row.organizationId ?? null,
       appId: row.appId ?? null,
+      ownerEmail: row.ownerEmail ?? null,
     };
   },
 
@@ -50,6 +53,7 @@ export const extractorRepository = {
     tokenId: string | null;
     organizationId: string | null;
     appId: string | null;
+    ownerEmail: string | null;
   }): Promise<void> {
     const { tenantId, appName, ...rest } = input;
 

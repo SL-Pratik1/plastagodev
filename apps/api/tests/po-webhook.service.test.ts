@@ -156,6 +156,7 @@ vi.mock('../src/domains/queues/call-up.service.js', () => ({
 }));
 
 const { poReviewService } = await import('../src/domains/queues/po-review.service.js');
+const { ExtractorWebhookSchema } = await import('../src/domains/queues/po-review.schemas.js');
 
 const COMPLETED = {
   id: '6aa1296322fa384a1165608d',
@@ -373,5 +374,77 @@ describe('what the extractor still may not decide', () => {
     await poReviewService.ingestFromExtractor('6aa1296322fa384a1165608d');
 
     expect(queued[0]?.reason).toBe('no-job-match');
+  });
+});
+
+/**
+ * The vendor has TWO webhook kinds and they do not agree on shape.
+ *
+ * One registered against the tenant (what `setup-extractor` creates) posts the
+ * id at the top level. One registered in the Admin Dashboard against the
+ * Application wraps it in `data`. The vendor's own integration guide documents
+ * only the first, and the second failed with a 422 naming `body.extractionId`
+ * the first time a real callback arrived — which is the whole reason these
+ * cases exist.
+ *
+ * Which kind is registered is decided in someone else's UI, so the handler
+ * accepts either rather than depending on that choice staying as it is today.
+ */
+describe('both of the vendor\'s callback envelopes', () => {
+  it('reads the tenant webhook, which puts the id at the top level', () => {
+    const parsed = ExtractorWebhookSchema.parse({
+      extractionId: '6aa1296322fa384a1165608d',
+      event: 'extraction.completed',
+    });
+
+    expect(parsed.extractionId).toBe('6aa1296322fa384a1165608d');
+    expect(parsed.event).toBe('extraction.completed');
+  });
+
+  it('reads the application webhook, which nests the id under data', () => {
+    const parsed = ExtractorWebhookSchema.parse({
+      data: {
+        type: 'extraction-created',
+        tenantId: '665f00000000000000000c21',
+        documentId: '664a000000000000000008f1',
+        extractionId: '6aa1296322fa384a1165608d',
+        fileUrl: 'https://example.invalid/po.pdf',
+        // The extracted fields ride along and are deliberately not read.
+        data: { invoiceNumber: 'INV-1024', total: '1,250.00' },
+      },
+      error: null,
+    });
+
+    expect(parsed.extractionId).toBe('6aa1296322fa384a1165608d');
+    expect(parsed.event).toBe('extraction-created');
+  });
+
+  /*
+   * `data: null` is what the envelope carries when the vendor is reporting a
+   * failure rather than an extraction. It must be refused for want of an id,
+   * not crash on a null dereference.
+   */
+  it('refuses an envelope whose data is null', () => {
+    expect(() => ExtractorWebhookSchema.parse({ data: null, error: 'something broke' })).toThrow();
+  });
+
+  it('names extractionId when neither envelope carries one', () => {
+    const result = ExtractorWebhookSchema.safeParse({ data: { type: 'extraction-created' } });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.path).toEqual(['extractionId']);
+  });
+
+  /*
+   * The payload will grow, and a callback rejected for an unrecognised field is
+   * a purchase order that never reaches the queue.
+   */
+  it('tolerates fields it has never seen', () => {
+    const parsed = ExtractorWebhookSchema.parse({
+      extractionId: '6aa1296322fa384a1165608d',
+      somethingAddedNextQuarter: { nested: true },
+    });
+
+    expect(parsed.extractionId).toBe('6aa1296322fa384a1165608d');
   });
 });

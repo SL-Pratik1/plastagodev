@@ -2,6 +2,7 @@ import { CALL_UP_REVIEW_REASON_LABELS, type AwaitingCallUp } from '@plastago/sha
 import {
   Alert,
   Button,
+  Card,
   Dialog,
   Field,
   Input,
@@ -13,6 +14,7 @@ import {
 import { CalendarClockIcon, CalendarPlusIcon, MapPinOffIcon } from 'lucide-react';
 import { useState } from 'react';
 import { DataTable } from '@/components/data-table/data-table';
+import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
 import type { DataTableColumn } from '@/components/data-table/types';
 import { useListQuery } from '@/components/data-table/use-list-query';
 import { PageHeader } from '@/components/page-header';
@@ -220,43 +222,55 @@ export function AdminQueueCallUpsPage(): React.JSX.Element {
   ];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader
         title="Waiting for a call-up"
         description="Purchase orders we have confirmed and nobody has given us a date for. A call-up email normally books these; this is where you do it by hand when one does not arrive."
       />
 
-      <DataTable
-        caption="Purchase orders waiting for a call-up date"
-        columns={columns}
-        rows={data?.data ?? []}
-        getRowId={(row) => row.purchaseOrderId}
-        isPending={isPending}
-        isFetching={isFetching && !isPending}
-        error={error}
-        onRetry={() => void refetch()}
-        sort={controller.sort}
-        onToggleSort={controller.toggleSort}
-        isFiltered={controller.isFiltered}
-        onClearFilters={controller.clearFilters}
-        empty={{
-          icon: CalendarClockIcon,
-          title: 'Nothing waiting',
-          description:
-            'Every confirmed purchase order has a job against it. New orders appear here once they are confirmed in PO review.',
-        }}
-      />
-
-      {data && (
-        <Pagination
-          page={data.meta.page}
-          pageSize={data.meta.pageSize}
-          total={data.meta.total}
-          onPageChange={controller.setPage}
-          onPageSizeChange={controller.setPageSize}
-          disabled={isFetching}
+      {/*
+        Toolbar, table and pagination share ONE card, as they do on every other
+        queue. This screen used to render a bare table and read as a different
+        product from the queue beside it in the same sidebar group.
+      */}
+      <Card className="overflow-hidden p-0">
+        <DataTableToolbar
+          controller={controller}
+          searchPlaceholder="Search PO number or customer…"
         />
-      )}
+
+        <DataTable
+          caption="Purchase orders waiting for a call-up date"
+          columns={columns}
+          rows={data?.data ?? []}
+          getRowId={(row) => row.purchaseOrderId}
+          isPending={isPending}
+          isFetching={isFetching && !isPending}
+          error={error}
+          onRetry={() => void refetch()}
+          sort={controller.sort}
+          onToggleSort={controller.toggleSort}
+          isFiltered={controller.isFiltered}
+          onClearFilters={controller.clearFilters}
+          empty={{
+            icon: CalendarClockIcon,
+            title: 'Nothing waiting',
+            description:
+              'Every confirmed purchase order has a job against it. New orders appear here once they are confirmed in PO review.',
+          }}
+        />
+
+        {data && (
+          <Pagination
+            page={data.meta.page}
+            pageSize={data.meta.pageSize}
+            total={data.meta.total}
+            onPageChange={controller.setPage}
+            onPageSizeChange={controller.setPageSize}
+            disabled={isFetching}
+          />
+        )}
+      </Card>
 
       <Dialog
         open={target !== null}

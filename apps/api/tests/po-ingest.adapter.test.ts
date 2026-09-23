@@ -373,6 +373,58 @@ describe('deciding which customer an order belongs to', () => {
     expect(input.suggestedAccountId).toBeNull();
     expect(diagnostics.matchedBy).toBe('none');
   });
+
+  /*
+   * ⚠️ The bug these three exist for, seen on a real order.
+   *
+   * A Domaine Homes PO matched "Hunter Valley Homes Pty Ltd" — the only account
+   * in the book carrying the word "Homes" — and because it was the ONLY hit it
+   * was treated as an identification and pre-filled into the reviewer's form.
+   * Two such accounts would have been caught by the ambiguous branch above, so
+   * the failure needs a short account book, which is exactly when nobody is
+   * looking for it.
+   */
+  it('does not identify an account that shares only a generic word', async () => {
+    accounts = [{ id: 'hvh', name: 'Hunter Valley Homes Pty Ltd', code: 'HUN001' }];
+
+    const { input, diagnostics } = await adaptExtraction(
+      extraction(DOMAINE, { email: 'bob@gmail.com' }),
+      context,
+    );
+
+    expect(input.suggestedAccountId).toBeNull();
+    expect(diagnostics.matchedBy).toBe('none');
+  });
+
+  /*
+   * Demoted, not discarded. A near miss is the most useful thing to put in
+   * front of somebody who has to choose an account by hand — and it is the
+   * right answer when a builder trades under a shortened name.
+   */
+  it('still offers the near miss as a candidate to choose from', async () => {
+    accounts = [{ id: 'hvh', name: 'Hunter Valley Homes Pty Ltd', code: 'HUN001' }];
+
+    const { input } = await adaptExtraction(
+      extraction(DOMAINE, { email: 'bob@gmail.com' }),
+      context,
+    );
+
+    expect(input.accountCandidates).toHaveLength(1);
+    expect(input.accountCandidates[0]?.label).toBe('Hunter Valley Homes Pty Ltd');
+  });
+
+  /* The check must not break the case it was built around. */
+  it('still identifies when every word on the page is in the account name', async () => {
+    accounts = [{ id: 'acc1', name: 'Domaine Homes Pty Ltd', code: 'DOM001' }];
+
+    const { input, diagnostics } = await adaptExtraction(
+      extraction(DOMAINE, { email: 'bob@gmail.com' }),
+      context,
+    );
+
+    expect(diagnostics.matchedBy).toBe('document-name');
+    expect(input.suggestedAccountId).toBe('acc1');
+  });
 });
 
 /* ── Suburb and zone ──────────────────────────────────────────────────────── */

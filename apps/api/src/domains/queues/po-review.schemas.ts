@@ -48,11 +48,57 @@ export const RejectExtractionSchema = z
  * grow, and a callback rejected for carrying an extra field is a purchase order
  * that never reaches the queue.
  */
+const ExtractionIdSchema = z.string().trim().min(1).max(64);
+
 export const ExtractorWebhookSchema = z
   .looseObject({
     /** The vendor's Mongo id for the extraction. The only field acted upon. */
-    extractionId: z.string().trim().min(1).max(64),
+    extractionId: ExtractionIdSchema.optional(),
     event: z.string().trim().max(60).optional(),
+
+    /**
+     * The APPLICATION webhook's envelope.
+     *
+     * ⚠️ The vendor has two webhook kinds and they do not agree on shape. One
+     * registered against the tenant posts `{ extractionId }` at the top level;
+     * one registered in the Admin Dashboard against the Application posts
+     * `{ data: { extractionId, type, … }, error }`. The same extraction, the
+     * same handler, two envelopes — and nothing in the vendor's own guide says
+     * so, because it documents only the first.
+     *
+     * Both are accepted because which kind is registered is an operational
+     * choice made in someone else's UI, months from now, by somebody who will
+     * not think to check which shape this file expects.
+     *
+     * `nullish` rather than `optional`: the envelope carries a sibling `error`
+     * field, and a failed notification sends `data: null`.
+     */
+    data: z
+      .looseObject({
+        extractionId: ExtractionIdSchema.optional(),
+        type: z.string().trim().max(60).optional(),
+      })
+      .nullish(),
+  })
+  .transform((body, ctx) => {
+    const extractionId = body.extractionId ?? body.data?.extractionId;
+
+    if (!extractionId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['extractionId'],
+        message: 'Expected extractionId, either at the top level or inside data',
+      });
+      return z.NEVER;
+    }
+
+    /*
+     * Normalised here so the controller sees one shape. `type` is the
+     * application envelope's name for what the tenant envelope calls `event`;
+     * both are accepted and ignored, for the same reason as before — a vendor
+     * adding an event kind must not start failing a route it retries.
+     */
+    return { extractionId, event: body.event ?? body.data?.type };
   })
   .meta({ id: 'ExtractorWebhook' });
 

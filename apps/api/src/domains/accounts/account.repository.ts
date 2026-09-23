@@ -585,16 +585,18 @@ function toContact(contact: RawContact): Contact {
 /**
  * Where certificates go, with a deliberate fallback chain.
  *
- * Explicit setting → sustainability contact → accounts contact → null.
+ * Explicit setting → sustainability contact → null.
  *
- * Matt, 31:04 asked for the explicit field. The fallbacks exist because a
- * certificate reaching the wrong internal team is recoverable, and one that
- * goes nowhere is not.
+ * Matt, 31:04 asked for the explicit field: *"I need a section where we could
+ * say that certificates are sent to this specific email address."* It falls
+ * back to null rather than the accounts contact's address, because sending a
+ * sustainability document to accounts payable is how it gets ignored — and
+ * because that fallback also made a cleared certificate email reappear on the
+ * edit form whenever it happened to match the accounts contact's address,
+ * making the field look like it never saved.
  */
 function resolveCertificateEmail(account: RawAccount, contacts: RawContact[]): string | null {
   if (account.certificateEmail) return account.certificateEmail;
   const sustainability = contacts.find((c) => c.role === 'sustainability' && c.email);
-  if (sustainability?.email) return sustainability.email;
-  const accounts = contacts.find((c) => c.role === 'accounts' && c.email);
-  return accounts?.email ?? null;
+  return sustainability?.email ?? null;
 }

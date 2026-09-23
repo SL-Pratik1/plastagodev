@@ -365,11 +365,24 @@ export const callUpRepository = {
    */
   async listAwaiting(query: {
     accountId?: string | null;
+    q?: string | null;
     page: number;
     pageSize: number;
   }): Promise<{ data: Omit<AwaitingCallUp, 'serviceable'>[]; meta: PageMeta }> {
     const match: Record<string, unknown> = {};
     if (query.accountId) match.accountId = new mongoose.Types.ObjectId(query.accountId);
+
+    /*
+     * Anchored nowhere and case-insensitive, because a PO number is quoted in
+     * fragments — "79904106" for an order printed "79904106/082". Escaped
+     * because the input is a person's, and a stray `(` would otherwise throw a
+     * regex error out of a search box.
+     */
+    const needle = query.q?.trim();
+    if (needle) {
+      const pattern = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      match.$or = [{ poNumber: pattern }, { accountName: pattern }];
+    }
 
     const pipeline: mongoose.PipelineStage[] = [
       { $match: match },

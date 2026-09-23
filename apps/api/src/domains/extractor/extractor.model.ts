@@ -64,6 +64,23 @@ const embedTokenSchema = new Schema(
 
     /** The vendor application this token was minted against. */
     appId: { type: String, default: null },
+
+    /**
+     * The tenant OWNER's address — the identity server-side sessions are minted
+     * as, when no person is signed in.
+     *
+     * ── Why this belongs beside the token and not in env ──────────────────
+     * The vendor requires a `userEmail` on every session, including the ones
+     * the purchase-order webhook mints at 6am with nobody logged in. That
+     * identity is a property OF THIS TENANT — it was fixed the moment
+     * onboarding named an owner — so it belongs on the row that holds the
+     * tenant's credential, not in a variable a second deployment can set to
+     * something else.
+     *
+     * Nullable because rows written before this field existed have none;
+     * `EXTRACTOR_USER_EMAIL` remains the fallback for exactly that case.
+     */
+    ownerEmail: { type: String, default: null, trim: true },
   },
   { collection: EMBED_TOKENS_COLLECTION, timestamps: true, versionKey: false },
 );

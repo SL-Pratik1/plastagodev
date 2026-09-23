@@ -619,16 +619,25 @@ const EnvSchema = z
      * purchase order arrives — silently, in a background handler nobody is
      * watching. Fail at boot instead.
      *
-     * `EXTRACTOR_DOCUMENT_ID` is absent from this list on purpose: it is produced
-     * by `seed-extractor`, which cannot run until the app is already booted with
-     * the credentials below.
+     * Three values are absent from this list on purpose.
+     *
+     * `EXTRACTOR_DOCUMENT_ID` is produced by `seed-extractor`, which cannot run
+     * until the app is already booted with the credentials below.
+     *
+     * `EXTRACTOR_EMBED_TOKEN` and `EXTRACTOR_USER_EMAIL` are properties of the
+     * TENANT, not of this deployment, and they live in the `embedtokens`
+     * collection — see `domains/extractor/extractor.model.ts`. Demanding them
+     * here was what forced a redeploy to rotate a revoked token, and what made
+     * every environment carry its own copy of the same credential. They remain
+     * readable from env as a fallback for a process with no database.
+     *
+     * What stays required is what genuinely belongs to the deployment: the
+     * application identity, and the secret on our own callback URL.
      */
     if (value.EXTRACTOR_PROVIDER === 'threepm') {
       for (const key of [
         'EXTRACTOR_APP_ID',
         'EXTRACTOR_APP_SECRET',
-        'EXTRACTOR_EMBED_TOKEN',
-        'EXTRACTOR_USER_EMAIL',
         'EXTRACTOR_WEBHOOK_SECRET',
       ] as const) {
         if (!value[key]) {

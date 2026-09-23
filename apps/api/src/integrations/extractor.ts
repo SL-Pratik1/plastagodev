@@ -130,6 +130,48 @@ let cached: CachedSession | null = null;
 /** In-flight mint, so ten concurrent callers create one session and not ten. */
 let minting: Promise<CachedSession> | null = null;
 
+/**
+ * The tenant's own credentials — the embed token and the identity to mint the
+ * owner session as.
+ */
+export interface ExtractorOwnerCredentials {
+  embedToken: string;
+  userEmail: string;
+}
+
+export type OwnerCredentialsResolver = () => Promise<ExtractorOwnerCredentials | null>;
+
+let resolveOwner: OwnerCredentialsResolver | null = null;
+
+/**
+ * Installs the store this file should read the tenant's credentials from.
+ *
+ * ── Why injected rather than imported ─────────────────────────────────────
+ * The embed token lives in Mongo, and Mongoose lives in repositories (§6A.3).
+ * Importing `extractor.repository` here would make `integrations/` depend on
+ * `domains/` — an edge that exists nowhere else in this folder, and one that
+ * points the wrong way: `integrations` is the outside world, `domains` is
+ * PlastaGo. `xero.ts` settles the same problem by taking credentials as
+ * arguments; this file cannot, because its session cache is shared by six
+ * methods and threading a token through all of them would put a credential in
+ * every call site.
+ *
+ * So the domain hands the store in, once, at startup. `wireExtractor()` in
+ * `domains/extractor` is the only caller.
+ *
+ * ⚠️ Unwired, this file falls back to `EXTRACTOR_EMBED_TOKEN` and
+ * `EXTRACTOR_USER_EMAIL`. That is what keeps the setup script and the tests
+ * working, and it is why a forgotten `wireExtractor()` degrades to the old
+ * behaviour rather than failing mysteriously.
+ */
+export function setOwnerCredentialsResolver(resolver: OwnerCredentialsResolver | null): void {
+  resolveOwner = resolver;
+  // A resolver swap invalidates the cached session: it was minted as whatever
+  // the previous source named, which may be a different identity entirely.
+  cached = null;
+  minting = null;
+}
+
 export const extractorClient = {
   /** Whether the pipeline is switched on. Callers branch on this, never on env. */
   get enabled(): boolean {
@@ -577,12 +619,44 @@ async function currentSession(): Promise<CachedSession> {
   return minting;
 }
 
+/**
+ * The tenant's credentials, from the store if one is wired and from env if not.
+ *
+ * ⚠️ Read on every mint rather than captured once. A token rotated at the
+ * vendor is repaired by writing the new one to the store, and a process holding
+ * a value it read at boot would keep failing until somebody restarted it.
+ */
+async function ownerCredentials(): Promise<ExtractorOwnerCredentials> {
+  const stored = await resolveOwner?.();
+  if (stored) return stored;
+
+  /*
+   * No store, or a store with nothing in it. Env is the fallback, and its
+   * absence is a configuration fault worth naming precisely — "onboard" is the
+   * wrong advice here, because a tenant that already exists must not be
+   * onboarded twice.
+   */
+  const embedToken = env.EXTRACTOR_EMBED_TOKEN;
+  const userEmail = env.EXTRACTOR_USER_EMAIL;
+
+  if (!embedToken || !userEmail) {
+    throw AppError.dependencyUnavailable(
+      'The document extractor has no credentials on file. Expected an embed-token row ' +
+        'for this tenant, or EXTRACTOR_EMBED_TOKEN and EXTRACTOR_USER_EMAIL in the environment.',
+    );
+  }
+
+  return { embedToken, userEmail };
+}
+
 async function mintSession(): Promise<CachedSession> {
+  const owner = await ownerCredentials();
+
   const data = await post<Record<string, unknown>>('/sessions', {
     appId: required(env.EXTRACTOR_APP_ID, 'EXTRACTOR_APP_ID'),
     appSecret: required(env.EXTRACTOR_APP_SECRET, 'EXTRACTOR_APP_SECRET'),
-    embedToken: required(env.EXTRACTOR_EMBED_TOKEN, 'EXTRACTOR_EMBED_TOKEN'),
-    userEmail: required(env.EXTRACTOR_USER_EMAIL, 'EXTRACTOR_USER_EMAIL'),
+    embedToken: owner.embedToken,
+    userEmail: owner.userEmail,
   });
 
   const sessionId = str(data.sessionId);

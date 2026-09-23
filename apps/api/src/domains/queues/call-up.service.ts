@@ -569,7 +569,7 @@ export const callUpService = {
    * know that BEFORE the email arrives, not from a queue item afterwards.
    */
   async listAwaiting(
-    query: { accountId?: string | null; page: number; pageSize: number },
+    query: { accountId?: string | null; q?: string | null; page: number; pageSize: number },
     caller: Caller,
   ): Promise<{ data: AwaitingCallUp[]; meta: PageMeta }> {
     /*

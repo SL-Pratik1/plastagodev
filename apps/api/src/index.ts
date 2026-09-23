@@ -4,6 +4,7 @@ import { initAuth } from './auth/better-auth.js';
 import { env } from './config/env.js';
 import { connectMongo, disconnectMongo, isMongoConnected } from './db/mongo.js';
 import { authRepository } from './domains/auth/auth.repository.js';
+import { wireExtractor } from './domains/extractor/extractor.service.js';
 import { disconnectRedis } from './db/redis.js';
 import { logger } from './lib/logger.js';
 import { closeQueues } from './queues/index.js';
@@ -15,6 +16,10 @@ async function main(): Promise<void> {
   await connectMongo();
   await prepareDatabase();
   await initAuth();
+
+  // The extractor's credentials live in Mongo, so this has to follow the
+  // connection and precede the first request that could reach the vendor.
+  wireExtractor();
 
   const app = createServer();
   const server: Server = app.listen(env.PORT, () => {

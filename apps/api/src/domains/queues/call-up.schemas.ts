@@ -42,6 +42,14 @@ export const RejectCallUpSchema = z
 export const ListAwaitingQuerySchema = z
   .object({
     accountId: ObjectIdSchema.optional(),
+    /**
+     * Free text over the PO number and the customer's name.
+     *
+     * The office arrives here holding a PO number off an email, and paging
+     * through a list to find it is not a search. Deliberately narrow: those are
+     * the two things anybody knows about an order that has no date yet.
+     */
+    q: z.string().trim().max(120).optional(),
     page: z.coerce.number().int().min(1).default(1),
     pageSize: z.coerce.number().int().min(1).max(100).default(20),
   })

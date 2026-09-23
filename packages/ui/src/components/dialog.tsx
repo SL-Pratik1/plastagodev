@@ -94,11 +94,6 @@ export function Dialog({
         event.preventDefault();
         if (dismissible) onClose();
       }}
-      onClick={(event) => {
-        // The dialog box is a child, so a click landing on the element itself
-        // is a click on the backdrop.
-        if (dismissible && event.target === ref.current) onClose();
-      }}
       className={cn(
         'group m-auto max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-visible rounded-xl border border-border bg-card p-0 text-card-foreground shadow-2xl',
         'backdrop:bg-brand-900/50 backdrop:backdrop-blur-[2px]',
@@ -107,7 +102,6 @@ export function Dialog({
         className,
       )}
     >
-      {/* Inner wrapper: the click-outside check above needs a child to hit. */}
       <div className="flex max-h-[calc(100dvh-2rem)] flex-col">
         {/*
           Header and footer are separated from the scrolling body by real rules.

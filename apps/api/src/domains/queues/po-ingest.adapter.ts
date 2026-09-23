@@ -315,13 +315,48 @@ async function matchAccount(input: {
 
   const best = found[0];
   if (found.length === 1 && best) {
+    /*
+     * ⚠️ One hit is not the same as one ANSWER.
+     *
+     * The search is a text index, so it scores on any shared word — and the
+     * most common word in an Australian builder's name is "Homes". A PO from
+     * Domaine Homes matched "Hunter Valley Homes Pty Ltd", alone, and was
+     * therefore treated as an identification and pre-filled into the reviewer's
+     * form. It was the only account carrying the word; had there been two, the
+     * ambiguous branch below would have caught it. So the bug only appears on a
+     * SHORT account book, which is exactly when it is least likely to be
+     * noticed and most likely to be confirmed by somebody clicking through.
+     *
+     * The rule: every identifying word read off the page must appear in the
+     * account's name. "domaine homes" ⊄ "hunter valley homes" — "domaine" is
+     * missing — so it is not the same company.
+     *
+     * Deliberately NOT a list of generic words to ignore. That list is never
+     * finished (Living, Projects, Estates, Constructions…), and each word
+     * missing from it is this same bug again.
+     */
+    if (nameAgrees(needle, best.name)) {
+      return {
+        accountId: best.id,
+        accountName: best.name,
+        // Deliberately below the service's 0.95 auto-accept line: a name read off
+        // a scan is a good guess, not an identification.
+        candidates: [toCandidate(best)],
+        matchedBy: 'document-name',
+      };
+    }
+
+    /*
+     * Demoted, not discarded. The reviewer still sees it — a near miss is the
+     * most useful thing to show somebody who has to pick an account, and it is
+     * genuinely the right answer when a builder trades under a shortened name.
+     * What it no longer does is fill the field in on its own.
+     */
     return {
-      accountId: best.id,
-      accountName: best.name,
-      // Deliberately below the service's 0.95 auto-accept line: a name read off
-      // a scan is a good guess, not an identification.
+      accountId: null,
+      accountName: null,
       candidates: [toCandidate(best)],
-      matchedBy: 'document-name',
+      matchedBy: 'none',
     };
   }
 
@@ -381,19 +416,51 @@ function domainNeedle(domain: string): string | null {
 }
 
 /** A legal name reduced to its identifying words. See `NOISE_WORDS`. */
-function nameNeedle(name: string | null): string | null {
-  if (!name) return null;
-
-  const words = name
+function nameWords(name: string): string[] {
+  return name
     .toLowerCase()
     // Bracketed qualifiers are pure noise: "(NSW)", "(Australia)".
     .replace(/\([^)]*\)/g, ' ')
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter((word) => word.length > 1 && !NOISE_WORDS.has(word));
+}
 
-  const needle = words.join(' ').trim();
+function nameNeedle(name: string | null): string | null {
+  if (!name) return null;
+
+  const needle = nameWords(name).join(' ').trim();
   return needle === '' ? null : needle;
+}
+
+/**
+ * Whether an account's name accounts for EVERY identifying word on the page.
+ *
+ * Subset, not overlap, and in that direction on purpose. The page is the
+ * evidence; the account book is what we are searching. A builder that prints
+ * more of its name than we store ("Domaine Homes" where the account is
+ * "Domaine") is a near miss worth showing a human, not an identification — and
+ * the caller demotes it to a candidate rather than throwing it away.
+ */
+function nameAgrees(needle: string, accountName: string): boolean {
+  const accountWords = nameWords(accountName);
+  const words = needle.split(' ').filter(Boolean);
+  if (words.length === 0) return false;
+
+  const inAccount = new Set(accountWords);
+  if (words.every((word) => inAccount.has(word))) return true;
+
+  /*
+   * ⚠️ Word-for-word is too strict across a space that only one side prints.
+   * "Plasta-Go Pty Ltd" on a page splits to `plasta` + `go`, and the account
+   * stored as "PlastaGo" is one word — so the subset test fails on a name that
+   * is plainly the same company.
+   *
+   * Compared as one run of letters, and only for EQUALITY. Containment would
+   * re-open the hole this function was written to close: "homes" sits inside
+   * "huntervalleyhomes" just as neatly as "plasta" sits inside "plastago".
+   */
+  return words.join('') === accountWords.join('');
 }
 
 /* ── Suburb and zone ─────────────────────────────────────────────────────── */

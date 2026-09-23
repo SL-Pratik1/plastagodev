@@ -291,13 +291,13 @@ export function AdminQueueCallUpReviewPage(): React.JSX.Element {
   ];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader
         title="Call-ups to check"
         description="Dates builders have sent us that the system could not act on by itself. Fix what is missing — usually the purchase order or its suburb — then try again."
       />
 
-      <Card className="p-0">
+      <Card className="overflow-hidden p-0">
         <DataTableToolbar
           controller={controller}
           searchPlaceholder="Search PO number or customer…"

@@ -1635,6 +1635,20 @@ function emptyZoneRates(zones: readonly ZoneOption[]): ZoneRateInput[] {
 }
 
 /**
+ * Strips everything but digits and a single decimal point as the person types.
+ *
+ * `inputMode="decimal"` is only a mobile-keyboard hint — it does not stop a
+ * physical keyboard (or a paste) from putting a space or a second `.` into the
+ * middle of the amount, which then only surfaces as a rejected submit.
+ */
+function sanitizeAmountInput(raw: string): string {
+  const digitsAndDot = raw.replace(/[^\d.]/g, '');
+  const firstDot = digitsAndDot.indexOf('.');
+  if (firstDot === -1) return digitsAndDot;
+  return digitsAndDot.slice(0, firstDot + 1) + digitsAndDot.slice(firstDot + 1).replace(/\./g, '');
+}
+
+/**
  * The zone rate grid, shared by "new card" and "new schedule".
  *
  * One component because the two forms ask for exactly the same thing, and a
@@ -1679,7 +1693,7 @@ function ZoneRateFields({
               className="mt-1 font-mono"
               aria-label={`Service charge for ${labels.get(zone.zoneId) ?? 'this zone'}`}
               onChange={(event) => {
-                setZone(index, { serviceCharge: event.target.value });
+                setZone(index, { serviceCharge: sanitizeAmountInput(event.target.value) });
               }}
             />
           </label>
@@ -1694,7 +1708,7 @@ function ZoneRateFields({
               className="mt-1 font-mono"
               aria-label={`Rate per square metre for ${labels.get(zone.zoneId) ?? 'this zone'}`}
               onChange={(event) => {
-                setZone(index, { ratePerM2: event.target.value });
+                setZone(index, { ratePerM2: sanitizeAmountInput(event.target.value) });
               }}
             />
           </label>

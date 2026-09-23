@@ -1,4 +1,6 @@
 import { env } from '../config/env.js';
+import { connectMongo, disconnectMongo } from '../db/mongo.js';
+import { wireExtractor } from '../domains/extractor/extractor.service.js';
 import { extractorClient } from '../integrations/extractor.js';
 import { logger } from '../lib/logger.js';
 import { FIELD_KEYS } from '../domains/queues/po-ingest.adapter.js';
@@ -194,6 +196,19 @@ async function main(): Promise<void> {
     return;
   }
 
+  /*
+   * Everything past this point talks to the vendor as the tenant, and the
+   * tenant's embed token lives in Mongo rather than in env. Connect before
+   * wiring, and tolerate a failure: a laptop with no Mongo can still run this
+   * against `EXTRACTOR_EMBED_TOKEN`, which is the client's own fallback.
+   */
+  try {
+    await connectMongo();
+    wireExtractor();
+  } catch {
+    log.warn('no database connection — falling back to EXTRACTOR_EMBED_TOKEN from env');
+  }
+
   if (!extractorClient.enabled) {
     throw new Error(
       'EXTRACTOR_PROVIDER is not "threepm". Onboard first:\n\n' +
@@ -276,6 +291,7 @@ await main()
     console.error(`\n${(error as Error).message}\n`);
     process.exitCode = 1;
   })
-  .finally(() => {
+  .finally(async () => {
+    await disconnectMongo().catch(() => {});
     process.exit(process.exitCode ?? 0);
   });
