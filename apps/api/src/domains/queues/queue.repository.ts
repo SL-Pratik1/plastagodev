@@ -1,22 +1,35 @@
-import type {
-  ChangeRequestItem,
-  AwaitingPoItem,
-  ChargeApprovalDetail,
-  ChargeApprovalItem,
-  ExceptionReason,
-  FutileOutcome,
-  FutileReview,
-  FutileReviewItem,
-  JobPhoto,
-  PageMeta,
-  QueueCounts,
+import type { QueueAge } from './queue.schemas.js';
+import {
+  EVIDENCE_PHOTO_CAPTIONS,
+  EVIDENCE_PHOTO_SLOTS,
+  evidencePurposeForCharge,
+  photoPurpose,
+  type ChangeRequestItem,
+  type AwaitingPoItem,
+  type ChargeApprovalDetail,
+  type ChargeApprovalItem,
+  type ChargeApprovalState,
+  type ExceptionReason,
+  type FutileOutcome,
+  type FutileReview,
+  type FutileReviewItem,
+  type PageMeta,
+  type PhotoPurpose,
+  type QueueCounts,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { UNKNOWN_ZONE_LABEL, zoneLabels } from '../settings/zone-lookup.js';
+import { startOfToday } from '../../lib/business-day.js';
 import { fromDecimal128 } from '../../lib/money.js';
 import { AccountModel, ContactModel } from '../accounts/account.model.js';
 import { InvoiceLineModel, InvoiceModel } from '../invoices/invoice.model.js';
-import { JobChargeModel, JobModel, JobPhotoModel } from '../jobs/job.model.js';
+import { toJobPhotoViews } from '../jobs/job-photo.view.js';
+import {
+  JOB_CHARGES_COLLECTION,
+  JobChargeModel,
+  JobModel,
+  JobPhotoModel,
+} from '../jobs/job.model.js';
 /*
  * Read from the queues domain, written by the portal. The collection is the
  * seam between the two: the customer raises the request, the office works it.
@@ -41,6 +54,54 @@ import { PoExtractionModel, PurchaseOrderModel } from './purchase-order.model.js
  * the office's DECISION is new information that lives nowhere else.
  */
 
+/**
+ * The charge code a futile pickup raises (M2.6 · M6.5).
+ *
+ * Exported so the service's fallback price lookup and this file's join cannot
+ * drift apart — they must name the same row in the price list or the queue
+ * would fall back to the price of something else entirely.
+ */
+export const FUTILE_CHARGE_CODE = 'futile-pickup';
+
+/**
+ * Joins the `futile-pickup` charge this job actually carries.
+ *
+ * ── Why the queue may not read the price list ─────────────────────────────
+ * The fee is configurable (Settings → Pricing → Additional services), and
+ * `raiseChargeOnce` resolves it ONCE — at the moment the driver marks the
+ * pickup futile — then freezes it onto the job as a charge line. That frozen
+ * figure is what the invoice copies and what the customer pays.
+ *
+ * This queue used to render the price list's CURRENT value instead, on every
+ * row. The two agree until somebody edits the fee, and then every historical
+ * row silently restates itself: a review of a pickup charged $120 last month
+ * reads $150 beside a job and an invoice that both still say $120. Nothing was
+ * mis-billed, but the screen the office decides on stopped matching the money.
+ *
+ * ⚠️ The charge's `approvalState` comes back with it, and a REJECTED one reads
+ * as $0.00. Every driver-raised charge starts `pending` — the futile fee
+ * included — so it goes through the approvals queue, and the office can reject
+ * it as a goodwill waiver. The lookup used to ignore the state, so a waived fee
+ * went on showing $120 here beside a job and an invoice that charged nothing.
+ * Not filtered out in the `$match`, because a missing charge falls back to
+ * today's price (see `toFutileItem`) — that would put the $120 straight back.
+ *
+ * `raiseChargeOnce` refuses to raise a second one, so `futileCharge` holds at
+ * most one element and there is nothing to disambiguate.
+ */
+const FUTILE_CHARGE_LOOKUP = {
+  $lookup: {
+    from: JOB_CHARGES_COLLECTION,
+    localField: 'jobId',
+    foreignField: 'jobId',
+    as: 'futileCharge',
+    pipeline: [
+      { $match: { code: FUTILE_CHARGE_CODE } },
+      { $project: { _id: 0, amount: 1, approvalState: 1 } },
+    ],
+  },
+} satisfies mongoose.PipelineStage;
+
 export interface QueueScope {
   /** Non-null narrows every read to one account. Queues are internal, so this
    *  is normally null — it exists so a portal view cannot be added carelessly. */
@@ -56,6 +117,87 @@ export interface DecidedCharge {
   amountExGst: string;
 }
 
+/**
+ * The approvals queue's own query — everything a list takes, plus the decision.
+ *
+ * `'any'` means actioned and not, matching the futile queue's default label.
+ * Omitted means `pending`, which is what the queue is for.
+ */
+export interface ApprovalListQuery extends QueueListQuery {
+  approvalState?: 'pending' | 'approved' | 'rejected' | 'any' | undefined;
+  code?: ChargeApprovalItem['code'] | undefined;
+  driver?: string | undefined;
+  po?: 'required' | 'not-required' | undefined;
+  evidence?: 'with-photos' | 'no-photos' | undefined;
+  age?: QueueAge | undefined;
+}
+
+/** The awaiting-PO queue's query — the shared one plus its own facets. */
+export interface AwaitingPoListQuery extends QueueListQuery {
+  chased?: 'yes' | 'no' | undefined;
+  age?: QueueAge | undefined;
+}
+
+/** A job is finished — and billable — once it is completed, closed by the office, or futile. */
+const FINISHED_JOB_STATUSES: ReadonlySet<string> = new Set([
+  'completed',
+  'admin-complete',
+  'futile',
+]);
+
+/**
+ * `photoPurpose` (in `@plastago/shared`) as an aggregation expression, over a
+ * `jobphotos` document.
+ *
+ * ⚠️ Two spellings of ONE rule — the JS one for photos already in hand, this
+ * one for counting and filtering inside a pipeline, where the evidence filter
+ * has to run before the page is cut. They are held to each other by
+ * `photo-purpose.integration.test.ts`; change one and that test says so.
+ */
+const PHOTO_PURPOSE_EXPR = {
+  $switch: {
+    branches: [
+      { case: { $eq: ['$slot', EVIDENCE_PHOTO_SLOTS.futile] }, then: 'futile' },
+      { case: { $eq: ['$slot', EVIDENCE_PHOTO_SLOTS.contamination] }, then: 'contamination' },
+      {
+        case: {
+          $and: [
+            { $eq: [{ $ifNull: ['$slot', null] }, null] },
+            { $eq: ['$caption', EVIDENCE_PHOTO_CAPTIONS.futile] },
+          ],
+        },
+        then: 'futile',
+      },
+      {
+        case: {
+          $and: [
+            { $eq: [{ $ifNull: ['$slot', null] }, null] },
+            { $eq: ['$caption', EVIDENCE_PHOTO_CAPTIONS.contamination] },
+          ],
+        },
+        then: 'contamination',
+      },
+    ],
+    default: 'job',
+  },
+} as const;
+
+/** `evidencePurposeForCharge` as an expression over a charge code. Same pairing as above. */
+function chargeEvidencePurposeExpr(code: string): Record<string, unknown> {
+  return {
+    $switch: {
+      branches: [
+        { case: { $eq: [code, 'contamination'] }, then: 'contamination' },
+        { case: { $eq: [code, FUTILE_CHARGE_CODE] }, then: 'futile' },
+      ],
+      default: 'job',
+    },
+  };
+}
+
+/** Exported for the test that holds the two spellings of the rule together. */
+export const photoPurposeExpressions = { PHOTO_PURPOSE_EXPR, chargeEvidencePurposeExpr };
+
 export interface QueueListQuery {
   page: number;
   pageSize: number;
@@ -64,6 +206,41 @@ export interface QueueListQuery {
   account?: string | undefined;
   /** Rows older than this many days — how the office finds what is rotting. */
   agedOverDays?: number | undefined;
+}
+
+/** The futile queue's query — the shared one plus its own facets. */
+export interface FutileListQuery extends QueueListQuery {
+  outcome?: 'pending' | 'rescheduled' | 'cancelled' | 'any' | undefined;
+  reason?: ExceptionReason | undefined;
+  driver?: string | undefined;
+  zoneId?: string | undefined;
+  age?: QueueAge | undefined;
+}
+
+/**
+ * The "Waiting" filter, as a `markedAt` bound.
+ *
+ * ⚠️ Today is the SYDNEY day, not a UTC one. A review marked at 9am Sydney is
+ * the previous date in UTC for most of the working day, so a UTC midnight would
+ * drop the morning's rows out of "Today" — on a queue whose whole point is what
+ * came in today.
+ */
+function ageWindow(age: QueueAge | undefined): Record<string, Date> {
+  if (age === undefined) return {};
+
+  const now = Date.now();
+  const week = new Date(now - 7 * 86_400_000);
+
+  switch (age) {
+    case 'today':
+      return { $gte: startOfToday() };
+    case 'this-week':
+      return { $gte: week };
+    case 'over-week':
+      return { $lte: week };
+    case 'over-month':
+      return { $lte: new Date(now - 30 * 86_400_000) };
+  }
 }
 
 function pageMeta(query: QueueListQuery, total: number): PageMeta {
@@ -75,23 +252,12 @@ function pageMeta(query: QueueListQuery, total: number): PageMeta {
   };
 }
 
-function toJobPhoto(row: {
-  _id: mongoose.Types.ObjectId;
-  caption: string;
-  takenAt: Date;
-  takenBy?: string | null;
-  latitude?: number | null;
-  longitude?: number | null;
-}): JobPhoto {
-  return {
-    id: row._id.toHexString(),
-    caption: row.caption,
-    takenAt: row.takenAt.toISOString(),
-    takenBy: row.takenBy ?? '',
-    latitude: row.latitude ?? null,
-    longitude: row.longitude ?? null,
-  };
-}
+/*
+ * Photo rows are mapped by `toJobPhotoViews` (../jobs/job-photo.view.ts), which
+ * signs a read URL for each one. This file used to carry its own copy that
+ * dropped the storage key, so both decision screens showed the office a caption
+ * and a grey box on charges they were about to make billable.
+ */
 
 export const queueRepository = {
   /**
@@ -167,15 +333,34 @@ export const queueRepository = {
    * one query per row is one that gets slower as it gets more urgent.
    */
   async futileList(
-    query: QueueListQuery,
+    query: FutileListQuery,
     feeExGst: string,
   ): Promise<{ data: FutileReviewItem[]; meta: PageMeta }> {
-    const match: Record<string, unknown> = { outcome: 'pending' };
+    /*
+     * Pending unless asked otherwise. This used to be hardcoded, so the
+     * "Decision" filter could be set to Rescheduled and the grid would answer
+     * with the pending rows anyway — the office could never see what had been
+     * decided, on the one screen that decides it.
+     */
+    const match: Record<string, unknown> = {};
+    const outcome = query.outcome ?? 'pending';
+    if (outcome !== 'any') match.outcome = outcome;
 
-    if (query.agedOverDays !== undefined) {
-      const cutoff = new Date(Date.now() - query.agedOverDays * 86_400_000);
-      match.markedAt = { $lte: cutoff };
-    }
+    if (query.reason !== undefined) match.reason = query.reason;
+
+    /*
+     * Age. `agedOverDays` stays supported because other callers pass it, but
+     * the filter bar speaks in windows — and two of them have a near edge that
+     * a single "older than" bound cannot express.
+     */
+    const ageBound = ageWindow(query.age);
+    const agedOver =
+      query.agedOverDays === undefined
+        ? undefined
+        : { $lte: new Date(Date.now() - query.agedOverDays * 86_400_000) };
+
+    const markedAt = { ...ageBound, ...agedOver };
+    if (Object.keys(markedAt).length > 0) match.markedAt = markedAt;
 
     const pipeline: mongoose.PipelineStage[] = [
       { $match: match },
@@ -186,6 +371,23 @@ export const queueRepository = {
     if (query.account && mongoose.isValidObjectId(query.account)) {
       pipeline.push({
         $match: { 'job.accountId': new mongoose.Types.ObjectId(query.account) },
+      });
+    }
+
+    /*
+     * Driver and zone live on the JOB, so they have to be matched after the
+     * lookup rather than in the first `$match` — which is why they were easy to
+     * leave out and why the two dropdowns did nothing.
+     */
+    if (query.driver && mongoose.isValidObjectId(query.driver)) {
+      pipeline.push({
+        $match: { 'job.driverId': new mongoose.Types.ObjectId(query.driver) },
+      });
+    }
+
+    if (query.zoneId && mongoose.isValidObjectId(query.zoneId)) {
+      pipeline.push({
+        $match: { 'job.zoneId': new mongoose.Types.ObjectId(query.zoneId) },
       });
     }
 
@@ -212,12 +414,20 @@ export const queueRepository = {
         { $sort: { markedAt: 1 } },
         { $skip: (query.page - 1) * query.pageSize },
         { $limit: query.pageSize },
+        // ⚠️ AFTER the page is cut, not before. The fee is display data, so it
+        // is joined for the twenty rows being shown rather than for every
+        // futile pickup that ever matched the filter.
+        FUTILE_CHARGE_LOOKUP,
       ]),
       FutileReviewModel.aggregate<{ total: number }>([...pipeline, { $count: 'total' }]),
     ]);
 
     const [photoCounts, zones] = await Promise.all([
-      countPhotos(rows.map((row) => row.job._id)),
+      // The photos of what stopped the pickup, not every shot on the job.
+      countEvidencePhotos(
+        rows.map((row) => row.job._id),
+        'futile',
+      ),
       zoneLabels(),
     ]);
 
@@ -235,18 +445,27 @@ export const queueRepository = {
       { $match: { _id: new mongoose.Types.ObjectId(id) } },
       { $lookup: { from: 'jobs', localField: 'jobId', foreignField: '_id', as: 'job' } },
       { $unwind: '$job' },
+      FUTILE_CHARGE_LOOKUP,
     ]);
 
     const row = rows[0];
     if (!row) return null;
 
-    const photos = await JobPhotoModel.find({ jobId: row.job._id }).sort({ takenAt: 1 }).lean();
+    /*
+     * The photos the driver took ON the could-not-collect screen — what the
+     * decision rests on. This used to be every photo on the job, so the office
+     * judged a locked gate from a "pile before" shot of a pickup that never got
+     * that far.
+     */
+    const photos = (
+      await JobPhotoModel.find({ jobId: row.job._id }).sort({ takenAt: 1 }).lean()
+    ).filter((photo) => photoPurpose(photo) === 'futile');
 
     const counts = new Map([[row.job._id.toHexString(), photos.length]]);
 
     return {
       ...toFutileItem(row, feeExGst, counts, await zoneLabels()),
-      photos: photos.map(toJobPhoto),
+      photos: await toJobPhotoViews(photos),
       decisionNote: row.decisionNote ?? null,
       decidedAt: row.decidedAt ? row.decidedAt.toISOString() : null,
       decidedBy: row.decidedBy ?? null,
@@ -260,15 +479,25 @@ export const queueRepository = {
     reason: ExceptionReason;
     note: string | null;
     markedAt: Date;
+    /** M4.2 — where the driver stood. Null when the phone had no fix. */
+    latitude: number | null;
+    longitude: number | null;
   }): Promise<void> {
     await FutileReviewModel.updateOne(
       { jobId: new mongoose.Types.ObjectId(input.jobId) },
       {
+        /*
+         * `$setOnInsert`, so a replayed offline report does not overwrite the
+         * first one's position with a later, wronger fix — the driver has
+         * usually left the site by the time the queue drains.
+         */
         $setOnInsert: {
           jobId: new mongoose.Types.ObjectId(input.jobId),
           reason: input.reason,
           note: input.note,
           markedAt: input.markedAt,
+          latitude: input.latitude,
+          longitude: input.longitude,
           outcome: 'pending',
         },
       },
@@ -321,13 +550,42 @@ export const queueRepository = {
    * on both would make the queue useless.
    */
   async approvalList(
-    query: QueueListQuery,
+    query: ApprovalListQuery,
   ): Promise<{ data: ChargeApprovalItem[]; meta: PageMeta }> {
-    const match: Record<string, unknown> = { approvalState: 'pending' };
+    /*
+     * ── Why the state is a parameter and not a constant ───────────────────
+     * It used to be hard-coded to `pending`, which made approving a charge
+     * erase it from the only screen that lists charges: no filter here offered
+     * a decision, so "what did we approve last week, and on what evidence?" had
+     * no answer short of opening each job. That question gets asked precisely
+     * when a builder is disputing money already committed.
+     *
+     * `pending` remains the DEFAULT, because this is a worklist first and the
+     * nav badge counts the same thing — and because the table supports bulk
+     * approve, where silently including already-decided rows would be a poor
+     * idea. Asking for the others is now possible; it is just not the default.
+     */
+    const match: Record<string, unknown> =
+      query.approvalState === 'any'
+        ? { approvalState: { $in: ['pending', 'approved', 'rejected'] } }
+        : { approvalState: query.approvalState ?? 'pending' };
 
-    if (query.agedOverDays !== undefined) {
-      match.raisedAt = { $lte: new Date(Date.now() - query.agedOverDays * 86_400_000) };
-    }
+    if (query.code !== undefined) match.code = query.code;
+
+    // The "Waiting" filter speaks in windows; `agedOverDays` stays for other callers.
+    const raisedAt = {
+      ...ageWindow(query.age),
+      ...(query.agedOverDays === undefined
+        ? {}
+        : { $lte: new Date(Date.now() - query.agedOverDays * 86_400_000) }),
+    };
+    if (Object.keys(raisedAt).length > 0) match.raisedAt = raisedAt;
+
+    /*
+     * "Raised by" lists drivers, and a driver raises charges from the phone on
+     * their own job — so it is the job's driver on a driver-raised charge.
+     */
+    if (query.driver && mongoose.isValidObjectId(query.driver)) match.source = 'driver';
 
     const pipeline: mongoose.PipelineStage[] = [
       { $match: match },
@@ -348,6 +606,21 @@ export const queueRepository = {
       pipeline.push({ $match: { 'job.accountId': new mongoose.Types.ObjectId(query.account) } });
     }
 
+    if (query.driver && mongoose.isValidObjectId(query.driver)) {
+      pipeline.push({ $match: { 'job.driverId': new mongoose.Types.ObjectId(query.driver) } });
+    }
+
+    if (query.po !== undefined) {
+      pipeline.push({
+        $match: {
+          'account.poPolicy':
+            query.po === 'required'
+              ? 'required-before-invoice'
+              : { $ne: 'required-before-invoice' },
+        },
+      });
+    }
+
     if (query.q) {
       const term = escapeRegex(query.q);
       pipeline.push({
@@ -363,20 +636,51 @@ export const queueRepository = {
       });
     }
 
+    /*
+     * The evidence count, per CHARGE: a contamination charge counts the
+     * contamination photos, a futile fee the futile ones, anything else the
+     * ordinary job photos. It used to count every photo on the job, so a charge
+     * with no photo of its own read "5 photos" off the five-shot checklist.
+     *
+     * Before the page is cut when the Evidence filter needs it; otherwise only
+     * for the rows being shown.
+     */
+    const evidence: mongoose.PipelineStage[] = [
+      {
+        $lookup: {
+          from: 'jobphotos',
+          let: { jobId: '$jobId', code: '$code' },
+          pipeline: [
+            { $match: { $expr: { $eq: ['$jobId', '$$jobId'] } } },
+            { $project: { purpose: PHOTO_PURPOSE_EXPR } },
+            { $match: { $expr: { $eq: ['$purpose', chargeEvidencePurposeExpr('$$code')] } } },
+            { $count: 'count' },
+          ],
+          as: 'evidence',
+        },
+      },
+      { $addFields: { evidenceCount: { $ifNull: [{ $first: '$evidence.count' }, 0] } } },
+    ];
+
+    if (query.evidence !== undefined) {
+      pipeline.push(...evidence, {
+        $match: { evidenceCount: query.evidence === 'with-photos' ? { $gt: 0 } : 0 },
+      });
+    }
+
     const [rows, totals] = await Promise.all([
-      JobChargeModel.aggregate<RawApprovalRow>([
+      JobChargeModel.aggregate<RawApprovalRow & { evidenceCount: number }>([
         ...pipeline,
-        { $sort: { raisedAt: 1 } },
+        { $sort: approvalSort(query.sort) },
         { $skip: (query.page - 1) * query.pageSize },
         { $limit: query.pageSize },
+        ...(query.evidence === undefined ? evidence : []),
       ]),
       JobChargeModel.aggregate<{ total: number }>([...pipeline, { $count: 'total' }]),
     ]);
 
-    const photoCounts = await countPhotos(rows.map((row) => row.job._id));
-
     return {
-      data: rows.map((row) => toApprovalItem(row, photoCounts)),
+      data: rows.map((row) => toApprovalItem(row, row.evidenceCount)),
       meta: pageMeta(query, totals[0]?.total ?? 0),
     };
   },
@@ -403,12 +707,19 @@ export const queueRepository = {
     const row = rows[0];
     if (!row) return null;
 
-    const photos = await JobPhotoModel.find({ jobId: row.job._id }).sort({ takenAt: 1 }).lean();
-    const counts = new Map([[row.job._id.toHexString(), photos.length]]);
+    /*
+     * The photos of THIS charge's evidence — a contamination charge is approved
+     * by looking at the contamination, not at every shot on the job. See
+     * `evidencePurposeForCharge`.
+     */
+    const purpose = evidencePurposeForCharge(row.code);
+    const photos = (
+      await JobPhotoModel.find({ jobId: row.job._id }).sort({ takenAt: 1 }).lean()
+    ).filter((photo) => photoPurpose(photo) === purpose);
 
     return {
-      ...toApprovalItem(row, counts),
-      photos: photos.map(toJobPhoto),
+      ...toApprovalItem(row, photos.length),
+      photos: await toJobPhotoViews(photos),
       jobStatus: row.job.status,
       expectedAreaM2: row.job.expectedAreaM2,
       onSiteMinutes: row.job.onSiteMinutes,
@@ -566,7 +877,13 @@ export const queueRepository = {
     outcome: 'actioned' | 'declined';
     note: string | null;
     decidedBy: string;
-  }): Promise<{ jobId: string; jobNumber: number; accountId: string } | null> {
+  }): Promise<{
+    jobId: string;
+    jobNumber: number;
+    accountId: string;
+    /** Who besides the administrators may see the pickup — and so be told. */
+    bookedByUserId: string | null;
+  } | null> {
     if (!mongoose.isValidObjectId(input.id)) return null;
 
     const row = await ChangeRequestModel.findOneAndUpdate(
@@ -584,14 +901,16 @@ export const queueRepository = {
 
     if (!row) return null;
 
-    const job = await JobModel.findById(row.jobId, { jobNumber: 1 }).lean<{
+    const job = await JobModel.findById(row.jobId, { jobNumber: 1, bookedByUserId: 1 }).lean<{
       jobNumber: number;
+      bookedByUserId?: mongoose.Types.ObjectId | null;
     }>();
 
     return {
       jobId: row.jobId.toHexString(),
       jobNumber: job?.jobNumber ?? 0,
       accountId: row.accountId.toHexString(),
+      bookedByUserId: job?.bookedByUserId ? job.bookedByUserId.toHexString() : null,
     };
   },
 
@@ -618,16 +937,30 @@ export const queueRepository = {
    * row — a chaser who has to open another screen to find the email address is
    * a chaser who makes fewer calls.
    */
-  async awaitingPoList(query: QueueListQuery): Promise<{ data: AwaitingPoItem[]; meta: PageMeta }> {
+  async awaitingPoList(
+    query: AwaitingPoListQuery,
+  ): Promise<{ data: AwaitingPoItem[]; meta: PageMeta }> {
     const filter: Record<string, unknown> = { status: 'awaiting-po' };
 
     if (query.account && mongoose.isValidObjectId(query.account)) {
       filter.accountId = new mongoose.Types.ObjectId(query.account);
     }
 
-    if (query.agedOverDays !== undefined) {
-      filter.createdAt = { $lte: new Date(Date.now() - query.agedOverDays * 86_400_000) };
-    }
+    /*
+     * "Waiting" and "Chased" were drawn in this screen's filter bar and dropped
+     * by the query schema, so both did nothing. An invoice older than the
+     * chase-count field has none, which is "never chased" — `null` matches it.
+     */
+    const createdAt = {
+      ...ageWindow(query.age),
+      ...(query.agedOverDays === undefined
+        ? {}
+        : { $lte: new Date(Date.now() - query.agedOverDays * 86_400_000) }),
+    };
+    if (Object.keys(createdAt).length > 0) filter.createdAt = createdAt;
+
+    if (query.chased === 'yes') filter.chaseCount = { $gt: 0 };
+    if (query.chased === 'no') filter.chaseCount = { $in: [0, null] };
 
     /*
      * The search box on this screen did nothing at all.
@@ -747,6 +1080,102 @@ export const queueRepository = {
   },
 
   /**
+   * The chosen invoices still waiting on a purchase order, with who to ask.
+   *
+   * For "Send reminder": each comes with what the PO is FOR (its lines) and the
+   * account's billing contacts — `accounts`-role contacts with an email and
+   * email notices on. Nobody else: a request for a purchase order that lands
+   * with the site foreman is a request nobody raises.
+   */
+  async awaitingPoForChase(ids: readonly string[]): Promise<
+    Array<{
+      id: string;
+      invoiceNumber: number;
+      accountId: string;
+      accountName: string;
+      jobId: string | null;
+      jobNumber: number | null;
+      siteName: string | null;
+      totalIncGst: string;
+      chargeSummary: string;
+      chaseCount: number;
+      billingContacts: Array<{ id: string; name: string; email: string }>;
+    }>
+  > {
+    const objectIds = ids
+      .filter((id) => mongoose.isValidObjectId(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    if (objectIds.length === 0) return [];
+
+    const rows = await InvoiceModel.find({ _id: { $in: objectIds }, status: 'awaiting-po' }).lean<
+      RawAwaitingPoRow[]
+    >();
+
+    if (rows.length === 0) return [];
+
+    const jobIds = rows
+      .map((row) => row.jobId)
+      .filter((id): id is mongoose.Types.ObjectId => id !== null);
+
+    const [lines, jobs, contacts] = await Promise.all([
+      InvoiceLineModel.find(
+        { invoiceId: { $in: rows.map((row) => row._id) } },
+        { invoiceId: 1, description: 1 },
+      )
+        .sort({ position: 1 })
+        .lean<Array<{ invoiceId: mongoose.Types.ObjectId; description: string }>>(),
+      JobModel.find({ _id: { $in: jobIds } }, { siteName: 1 }).lean<
+        Array<{ _id: mongoose.Types.ObjectId; siteName: string }>
+      >(),
+      ContactModel.find({
+        accountId: { $in: [...new Set(rows.map((row) => row.accountId.toHexString()))].map(
+          (id) => new mongoose.Types.ObjectId(id),
+        ) },
+        role: 'accounts',
+        email: { $nin: [null, ''] },
+        notifyByEmail: true,
+      }).lean(),
+    ]);
+
+    const linesByInvoice = new Map<string, string[]>();
+    for (const line of lines) {
+      const key = line.invoiceId.toHexString();
+      linesByInvoice.set(key, [...(linesByInvoice.get(key) ?? []), line.description]);
+    }
+
+    const siteByJob = new Map(jobs.map((job) => [job._id.toHexString(), job.siteName]));
+
+    const contactsByAccount = new Map<string, Array<{ id: string; name: string; email: string }>>();
+    for (const contact of contacts) {
+      if (!contact.email) continue;
+      const key = contact.accountId.toHexString();
+      contactsByAccount.set(key, [
+        ...(contactsByAccount.get(key) ?? []),
+        { id: contact._id.toHexString(), name: contact.name, email: contact.email },
+      ]);
+    }
+
+    return rows.map((row) => {
+      const descriptions = linesByInvoice.get(row._id.toHexString()) ?? [];
+
+      return {
+        id: row._id.toHexString(),
+        invoiceNumber: row.invoiceNumber,
+        accountId: row.accountId.toHexString(),
+        accountName: row.accountName,
+        jobId: row.jobId ? row.jobId.toHexString() : null,
+        jobNumber: row.jobNumber ?? null,
+        siteName: (row.jobId && siteByJob.get(row.jobId.toHexString())) || null,
+        totalIncGst: fromDecimal128(row.totalIncGst),
+        chargeSummary: descriptions.length > 0 ? descriptions.join(', ') : 'Additional charges',
+        chaseCount: row.chaseCount ?? 0,
+        billingContacts: contactsByAccount.get(row.accountId.toHexString()) ?? [],
+      };
+    });
+  },
+
+  /**
    * Records that a chase went out.
    *
    * `$inc` and a timestamp, so ageing is measured against the last CONTACT.
@@ -795,12 +1224,23 @@ interface RawFutileRow {
   reason: ExceptionReason;
   note: string | null;
   markedAt: Date;
+  latitude?: number | null;
+  longitude?: number | null;
   outcome: FutileOutcome;
   decisionNote?: string | null;
   decidedAt?: Date | null;
   decidedBy?: string | null;
   newReadyDate?: string | null;
   job: RawJobJoin;
+  /**
+   * The fee this job was ACTUALLY charged, joined by `FUTILE_CHARGE_LOOKUP`.
+   *
+   * Empty where the charge could not be found — see the note on the lookup.
+   */
+  futileCharge?: Array<{
+    amount: mongoose.Types.Decimal128;
+    approvalState?: ChargeApprovalState | null;
+  }>;
 }
 
 interface RawApprovalRow {
@@ -813,6 +1253,9 @@ interface RawApprovalRow {
   raisedBy: string | null;
   raisedAt: Date;
   note: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  approvalState: ChargeApprovalItem['approvalState'];
   job: RawJobJoin;
   account: { poPolicy: string };
 }
@@ -856,11 +1299,35 @@ function toFutileItem(
     markedAt: row.markedAt.toISOString(),
     readyDate: row.job.readyDate,
     photoCount: photoCounts.get(row.job._id.toHexString()) ?? 0,
-    // The position is on the event, not the review. Surfaced as null here rather
-    // than joined: the detail screen shows the photos, which carry their own.
-    latitude: null,
-    longitude: null,
-    feeExGst,
+    /*
+     * The driver's own fix, now that the review stores one.
+     *
+     * This was hard-coded null, on the argument that the photos carry their own
+     * position — which they do, but the row and the dialog both offer a
+     * "Position when marked" field, and that field read "Not captured" on every
+     * futile ever reviewed. The screen the driver fills in says their position
+     * is part of what makes the $120 stand up; telling the office it was never
+     * taken is the opposite of that.
+     *
+     * Still null for reviews opened before the field existed, which is honest:
+     * that position really was thrown away.
+     */
+    latitude: row.latitude ?? null,
+    longitude: row.longitude ?? null,
+    /*
+     * What this job was charged, not what a futile costs today — see
+     * `FUTILE_CHARGE_LOOKUP`. The argument is the fallback, for a review whose
+     * charge line is missing: one opened before the charge existed, or a job
+     * whose charges were cleared. Showing today's price there is better than
+     * showing nothing, and it is what every row used to do.
+     *
+     * A charge the office REJECTED was waived, and nothing is charged for it.
+     */
+    feeExGst: row.futileCharge?.[0]
+      ? row.futileCharge[0].approvalState === 'rejected'
+        ? '0.00'
+        : fromDecimal128(row.futileCharge[0].amount)
+      : feeExGst,
     outcome: row.outcome,
   };
 }
@@ -905,7 +1372,7 @@ function toChangeRequestItem(row: RawChangeRequestRow): ChangeRequestItem {
   };
 }
 
-function toApprovalItem(row: RawApprovalRow, photoCounts: Map<string, number>): ChargeApprovalItem {
+function toApprovalItem(row: RawApprovalRow, evidenceCount: number): ChargeApprovalItem {
   return {
     id: row._id.toHexString(),
     jobId: row.job._id.toHexString(),
@@ -922,28 +1389,70 @@ function toApprovalItem(row: RawApprovalRow, photoCounts: Map<string, number>): 
     raisedBy: row.raisedBy,
     raisedAt: row.raisedAt.toISOString(),
     note: row.note,
-    photoCount: photoCounts.get(row.job._id.toHexString()) ?? 0,
+    // Photos of this charge's evidence — see `evidencePurposeForCharge`.
+    photoCount: evidenceCount,
     /*
      * M2.7's closing rule, surfaced on the ROW: approving this on a PO-required
-     * account does not release money, it moves the charge to the awaiting-PO
-     * queue. The approver should know that before clicking, not after.
+     * account does not release money, it bills the charge on an invoice that
+     * waits in the awaiting-PO queue. The approver should know that before
+     * clicking, not after.
      */
     poRequired: row.account.poPolicy === 'required-before-invoice',
-    latitude: null,
-    longitude: null,
+    // Approving bills a finished job at once; one still under way is billed with the job.
+    jobFinished: FINISHED_JOB_STATUSES.has(row.job.status),
+    /*
+     * Where the driver was standing, now that the charge stores it. Hard-coded
+     * null before, so "Position when raised" said "Not captured" on every charge
+     * — including ones raised with a perfectly good fix, on the screen that told
+     * the driver their position is what makes the charge stand up.
+     */
+    latitude: row.latitude ?? null,
+    longitude: row.longitude ?? null,
+    approvalState: row.approvalState,
   };
 }
 
-/** Photo counts for a page of rows, in one query rather than one per row. */
-async function countPhotos(jobIds: mongoose.Types.ObjectId[]): Promise<Map<string, number>> {
+/**
+ * Evidence photo counts for a page of rows, in one query rather than one per
+ * row — only the photos that are evidence of `purpose` (see `photoPurpose`).
+ */
+async function countEvidencePhotos(
+  jobIds: mongoose.Types.ObjectId[],
+  purpose: PhotoPurpose,
+): Promise<Map<string, number>> {
   if (jobIds.length === 0) return new Map();
 
   const counts = await JobPhotoModel.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
     { $match: { jobId: { $in: jobIds } } },
+    { $project: { jobId: 1, purpose: PHOTO_PURPOSE_EXPR } },
+    { $match: { purpose } },
     { $group: { _id: '$jobId', count: { $sum: 1 } } },
   ]);
 
   return new Map(counts.map((row) => [row._id.toHexString(), row.count]));
+}
+
+/**
+ * The approvals grid's column sort.
+ *
+ * An allow-list, not a pass-through: `sort` arrives from a querystring, and an
+ * arbitrary field name handed to Mongo sorts by anything in the document. The
+ * headers offered these four, and every click on them used to be ignored —
+ * the grid stayed oldest-first whatever it said. `_id` breaks ties, so paging
+ * through equal values neither repeats nor skips a row.
+ */
+const APPROVAL_SORTS: Record<string, string> = {
+  jobNumber: 'job.jobNumber',
+  accountName: 'job.accountName',
+  raisedAt: 'raisedAt',
+  amountExGst: 'amount',
+};
+
+function approvalSort(sort: string | undefined): Record<string, 1 | -1> {
+  const key = sort?.replace(/^-/, '') ?? '';
+  const field = APPROVAL_SORTS[key];
+  if (!field) return { raisedAt: 1, _id: 1 };
+  return { [field]: sort?.startsWith('-') ? -1 : 1, _id: 1 };
 }
 
 /**

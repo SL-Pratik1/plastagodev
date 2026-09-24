@@ -98,6 +98,58 @@ vi.mock('../src/domains/notifications/notification.repository.js', () => ({
   notificationRepository: makeFakeNotificationRepository(),
 }));
 
+/*
+ * The portal login the welcome email tells them to use — created alongside it,
+ * because nothing used to create one and the sign-in code never arrived.
+ */
+const logins = {
+  /** Addresses that already sign in to something. */
+  taken: new Set<string>(),
+  created: [] as Array<Record<string, unknown>>,
+};
+
+vi.mock('../src/domains/users/user.repository.js', () => ({
+  userRepository: {
+    identifierTaken: (input: { email: string | null }) =>
+      Promise.resolve(input.email !== null && logins.taken.has(input.email)),
+    create: (input: Record<string, unknown>) => {
+      logins.created.push(input);
+      return Promise.resolve(`usr${String(logins.created.length).padStart(21, '0')}`);
+    },
+  },
+}));
+
+/*
+ * M4.8b — the risk assessment rule reaches the account's OPEN jobs.
+ *
+ * Faked to a recorder: which statuses the service asks for, and what it writes
+ * on each changed job's trail, are the rules under test here. How Mongo applies
+ * the filter is covered against a real database in
+ * `risk-assessment-and-messages.integration.test.ts`.
+ */
+const openJobSync = {
+  calls: [] as Array<{ accountId: string; required: boolean; statuses: readonly string[] }>,
+  changed: [] as Array<{ id: string; jobNumber: number }>,
+  events: [] as Array<{ jobId: string; label: string; actor: string; detail?: string | null }>,
+};
+
+vi.mock('../src/domains/jobs/job.repository.js', () => ({
+  jobRepository: {
+    setRiskAssessmentOnOpenJobs: (
+      accountId: string,
+      required: boolean,
+      statuses: readonly string[],
+    ) => {
+      openJobSync.calls.push({ accountId, required, statuses: [...statuses] });
+      return Promise.resolve(openJobSync.changed);
+    },
+    appendEvent: (input: { jobId: string; label: string; actor: string; detail?: string | null }) => {
+      openJobSync.events.push(input);
+      return Promise.resolve();
+    },
+  },
+}));
+
 const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
 
 const { accountService } = await import('../src/domains/accounts/account.service.js');
@@ -128,6 +180,8 @@ function draft(overrides: Partial<AccountDraft> = {}): AccountDraft {
 beforeEach(() => {
   repo = createFakeAccountRepository();
   liveSupervisors = 0;
+  logins.taken.clear();
+  logins.created.length = 0;
   clearOutbound();
   setMessagingProvidersForTests(recordingProviders());
 });
@@ -244,6 +298,55 @@ describe('the welcome email', () => {
       'accountsContactEmail',
     );
     expect(repo.lastCreate).toBeNull();
+  });
+
+  /*
+   * ⚠️ The email says "sign in here with this address" — and nothing created a
+   * login for it, so the code never came. The login is made with the email now.
+   */
+  it('creates the portal login the email tells them to sign in with', async () => {
+    const { account } = await accountService.create(
+      draft({ accountsContactEmail: 'Jo@Acme.com.au', sendInvitation: true }),
+      { name: 'Renee Alvarez' },
+    );
+
+    expect(logins.created).toEqual([
+      expect.objectContaining({
+        email: 'jo@acme.com.au',
+        name: 'Jo Bloggs',
+        role: 'customer-administrator',
+        roles: ['customer-administrator'],
+        accountId: account.id,
+        invitedBy: 'Renee Alvarez',
+      }),
+    ]);
+    expect(sentMessages[0]?.to).toBe('jo@acme.com.au');
+  });
+
+  it('creates no login when no invitation was asked for', async () => {
+    await accountService.create(draft({ sendInvitation: false }));
+    expect(logins.created).toHaveLength(0);
+  });
+
+  /*
+   * A login belongs to one person. An address that already signs in — staff,
+   * or another customer — would have the welcome open THEIR login, so it is
+   * refused while the form can still be corrected.
+   */
+  it('refuses an invitation to an email that already signs in', async () => {
+    logins.taken.add('jo@acme.com.au');
+
+    const error = await accountService
+      .create(draft({ sendInvitation: true }))
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ status: 422, code: 'VALIDATION_FAILED' });
+    expect((error as { issues?: { path: string }[] }).issues?.[0]?.path).toBe(
+      'accountsContactEmail',
+    );
+    expect(repo.lastCreate).toBeNull();
+    expect(sentMessages).toHaveLength(0);
   });
 });
 
@@ -387,10 +490,71 @@ describe('changing the account type (builder ↔ contractor)', () => {
 });
 
 describe('the risk assessment rule', () => {
+  beforeEach(() => {
+    openJobSync.calls.length = 0;
+    openJobSync.events.length = 0;
+    openJobSync.changed = [];
+  });
+
   it('lets the office turn it on', async () => {
     const id = repo.seedAccount({ code: 'CLA001' });
     const account = await accountService.setRiskAssessmentRequired(id, true, OFFICE);
     expect(account.riskAssessmentRequired).toBe(true);
+  });
+
+  /*
+   * The bug this fixes: a job copied the rule when it was booked, so switching
+   * it on left every job already booked on "optional" — including the one the
+   * driver was standing on.
+   */
+  it('carries the rule onto open jobs, including one a driver is on now', async () => {
+    const id = repo.seedAccount({ code: 'WBH001' });
+
+    await accountService.setRiskAssessmentRequired(id, true, OFFICE);
+
+    expect(openJobSync.calls).toHaveLength(1);
+    expect(openJobSync.calls[0]).toMatchObject({ accountId: id, required: true });
+    expect(openJobSync.calls[0]?.statuses).toContain('arrived');
+  });
+
+  // An audit next year must see the rule the job was actually done under.
+  it('leaves finished jobs on the rule they were done under', async () => {
+    const id = repo.seedAccount({ code: 'WBH002' });
+
+    await accountService.setRiskAssessmentRequired(id, true, OFFICE);
+
+    for (const finished of ['completed', 'admin-complete', 'futile', 'cancelled']) {
+      expect(openJobSync.calls[0]?.statuses).not.toContain(finished);
+    }
+  });
+
+  it('notes the change on each job it changed, naming who changed it', async () => {
+    const id = repo.seedAccount({ code: 'WBH003' });
+    openJobSync.changed = [
+      { id: 'job0000000000000000000001', jobNumber: 61_304 },
+      { id: 'job0000000000000000000002', jobNumber: 61_306 },
+    ];
+
+    await accountService.setRiskAssessmentRequired(id, true, { ...OFFICE, name: 'Renee Alvarez' });
+
+    expect(openJobSync.events.map((event) => event.jobId)).toEqual([
+      'job0000000000000000000001',
+      'job0000000000000000000002',
+    ]);
+    expect(openJobSync.events[0]).toMatchObject({
+      label: 'Site risk assessment now required',
+      actor: 'Renee Alvarez',
+    });
+  });
+
+  it('says so on the trail when it is switched off', async () => {
+    const id = repo.seedAccount({ code: 'WBH004' });
+    openJobSync.changed = [{ id: 'job0000000000000000000003', jobNumber: 61_300 }];
+
+    await accountService.setRiskAssessmentRequired(id, false, OFFICE);
+
+    expect(openJobSync.calls[0]).toMatchObject({ required: false });
+    expect(openJobSync.events[0]?.label).toBe('Site risk assessment no longer required');
   });
 
   // It changes what a DRIVER is made to do at a fence. Not a customer's call.
@@ -399,11 +563,16 @@ describe('the risk assessment rule', () => {
     await expect(
       accountService.setRiskAssessmentRequired(id, true, CUSTOMER),
     ).rejects.toMatchObject({ status: 403 });
+
+    // Refused before anything was written — no job was touched either.
+    expect(openJobSync.calls).toHaveLength(0);
   });
 
   it('404s an account that does not exist', async () => {
     await expect(
       accountService.setRiskAssessmentRequired('c'.repeat(24), true, OFFICE),
     ).rejects.toMatchObject({ status: 404 });
+
+    expect(openJobSync.calls).toHaveLength(0);
   });
 });

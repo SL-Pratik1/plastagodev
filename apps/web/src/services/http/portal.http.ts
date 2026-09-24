@@ -12,6 +12,7 @@ import {
   PortalDashboardSchema,
   PortalInvoiceSchema,
   PortalJobListItemSchema,
+  PortalJobMessageSchema,
   PortalJobSchema,
   PortalScopeSchema,
   PortalSupervisorSchema,
@@ -148,6 +149,18 @@ export function createHttpPortalService(api: ApiClient): CustomerPortalService {
           method: 'POST',
           body: input,
           schema: PortalJobListItemSchema,
+        }),
+      ),
+
+    /* ── M2.11 · the pickup's thread with the office ──────────────────────── */
+
+    postMessage: (id: string, body: string) =>
+      viaService(() =>
+        api.request(`${base}/jobs/${id}/messages`, {
+          method: 'POST',
+          // Only the words go up. Which thread it lands on is the server's call.
+          body: { body },
+          schema: PortalJobMessageSchema,
         }),
       ),
 

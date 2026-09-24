@@ -48,12 +48,12 @@ vi.mock('../src/domains/notifications/notification.service.js', () => ({
   notificationService: {
     notifyOffice: (input: { severity: string; title: string; subjectKey: string }) => {
       urgentAlerts.push(input);
-      return Promise.resolve();
+      return Promise.resolve([]);
     },
     /** M8.2 — the customer's own inbox, raised when a job completes. */
-    notifyAccount: (input: { severity: string; title: string; subjectKey: string }) => {
+    notifyJobAudience: (input: { severity: string; title: string; subjectKey: string }) => {
       accountAlerts.push(input);
-      return Promise.resolve();
+      return Promise.resolve([]);
     },
   },
 }));
@@ -63,8 +63,14 @@ const futileReviews: Array<{ jobId: string; reason: string }> = [];
 
 vi.mock('../src/domains/queues/queue.repository.js', () => ({
   queueRepository: {
+    /*
+     * Idempotent on the job, exactly as the real `$setOnInsert` upsert is. A
+     * replay now reaches this call again — that is how a half-saved report gets
+     * its review — so a fake that recorded every call would count a second
+     * review the database would never have written.
+     */
     openFutileReview: (input: { jobId: string; reason: string }) => {
-      futileReviews.push(input);
+      if (!futileReviews.some((review) => review.jobId === input.jobId)) futileReviews.push(input);
       return Promise.resolve();
     },
   },
@@ -438,6 +444,59 @@ describe('weights (M4.3)', () => {
     // enter the reconciliation as "we collected nothing".
     expect(driver.stop(stop.id)?.recoveredWeightKg).toBeNull();
     expect(driver.stop(stop.id)?.recoveredWeightBasis).toBeNull();
+  });
+
+  /*
+   * ⚠️ The deadlock these two guard against.
+   *
+   * `weightsRecordedAt` used to be derived as
+   * `recoveredWeightBasis !== null && completedAt !== null`. Completion is
+   * blocked until weights are recorded, so that expression could not become
+   * true until the job was already complete — and no job could be finished on
+   * the phone at all. It is a stored fact now, stamped when the driver saves.
+   */
+  it('stamps the weights as recorded when the driver saves, not when the job completes', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, craneAvailable: true });
+
+    await driverService.captureWeights(
+      stop.id,
+      { ...envelope(), bagCount: 4, loadType: 'bagged', craneScaleKg: 820 },
+      CALLER,
+    );
+
+    expect(driver.stop(stop.id)?.weightsRecordedAt).not.toBeNull();
+    // Still on site — the stamp must not wait for the job to finish.
+    expect(driver.stop(stop.id)?.completedAt).toBeNull();
+  });
+
+  it('stamps a hand load as recorded too, though it carries no kilograms', async () => {
+    const stop = driver.addStop({ jobNumber: 61302 });
+
+    await driverService.captureWeights(
+      stop.id,
+      { ...envelope(), bagCount: 0, loadType: 'hand-load', craneScaleKg: null },
+      CALLER,
+    );
+
+    // "Recorded" means the driver answered the question. Gating it on a weight
+    // basis would leave every hand load permanently uncompletable.
+    expect(driver.stop(stop.id)?.weightsRecordedAt).not.toBeNull();
+    expect(driver.stop(stop.id)?.recoveredWeightBasis).toBeNull();
+  });
+
+  it('keeps the load type the driver chose, over the office booking guess', async () => {
+    // Booked with no crane, so the office's guess is "hand load".
+    const stop = driver.addStop({ jobNumber: 61303, craneAvailable: false });
+
+    await driverService.captureWeights(
+      stop.id,
+      { ...envelope(), bagCount: 3, loadType: 'bagged', craneScaleKg: 600 },
+      CALLER,
+    );
+
+    // The driver found bags. The run sheet used to keep saying "hand load"
+    // because the stored answer was never persisted and never read.
+    expect(driver.stop(stop.id)?.loadType).toBe('bagged');
   });
 
   it('refuses a crane weight on a hand load', async () => {
@@ -815,6 +874,28 @@ describe('bags beyond the purchase order (M6.5, Matt 07:37)', () => {
     expect(entry?.detail).toContain('needs its own purchase order');
   });
 
+  /*
+   * ⚠️ With no extra-bag price set, the overage used to be a log line and a
+   * timeline note — money silently not charged unless somebody opened the job.
+   */
+  it('tells the office when no extra-bag price is set', async () => {
+    await settings.repository.deleteAdditionalService('extra-bags');
+    const stop = driver.addStop({ jobNumber: 61413, bagCount: 2, craneAvailable: true });
+
+    await driverService.captureWeights(stop.id, collected(4), CALLER);
+
+    expect(extraBagCharge()).toBeUndefined();
+    expect(urgentAlerts).toEqual([
+      expect.objectContaining({
+        title: 'Extra bags not charged — #61413',
+        subjectKey: `extra-bags-unpriced:${stop.id}`,
+        href: `/admin/jobs/${stop.id}?tab=charges`,
+      }),
+    ]);
+    // Money: the office roles only, never the allocator.
+    expect((urgentAlerts[0] as { audience?: string }).audience).toBeUndefined();
+  });
+
   /* A hand load has no bags at all, so there is nothing to exceed. */
   it('ignores hand loads entirely', async () => {
     const stop = driver.addStop({ jobNumber: 61412, bagCount: 2 });
@@ -868,10 +949,132 @@ describe('charges raised from the phone', () => {
     expect(driver.stop(stop.id)?.status).toBe('futile');
 
     // M2.6 — and ONE review is opened for the office, not one per replay: the
-    // second call sees the job is already futile and returns early. Somebody
-    // still has to ring the customer, but only once.
+    // second call finds the job futile and everything already recorded, so it
+    // adds nothing. Somebody still has to ring the customer, but only once.
     expect(futileReviews).toHaveLength(1);
     expect(futileReviews[0]?.jobId).toBe(stop.id);
+    expect(driver.events.filter((event) => event.status === 'futile')).toHaveLength(1);
+  });
+
+  /*
+   * ⚠️ A futile pickup told nobody: the office heard only through a sweep that
+   * never ran, and the customer first learned of it on the invoice.
+   */
+  it('tells the office and the allocator straight away', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, siteName: 'Lot 77 Britannia Road' });
+
+    await driverService.markFutile(
+      stop.id,
+      { ...envelope(), reason: 'site-not-ready', note: 'Board still on the walls', photoIds: ['p1'] },
+      CALLER,
+    );
+
+    expect(urgentAlerts).toEqual([
+      expect.objectContaining({
+        audience: 'dispatch',
+        severity: 'action',
+        subjectKey: `futile:${stop.id}`,
+        href: '/admin/queues/futile',
+        // The allocator cannot open the queues, so theirs goes to the job.
+        allocatorHref: `/admin/jobs/${stop.id}`,
+      }),
+    ]);
+    expect(urgentAlerts[0]?.title).toContain('#61301');
+  });
+
+  it('tells the customer the same day — once, however often the phone replays it', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+    const report = {
+      ...envelope(),
+      reason: 'access-blocked' as const,
+      note: '',
+      photoIds: ['p1'],
+    };
+
+    await driverService.markFutile(stop.id, report, CALLER);
+    await driverService.markFutile(stop.id, report, CALLER);
+
+    // The job read by the notice carries a mobile and no email — so a text.
+    const texts = sentMessages.filter((message) => message.channel === 'sms');
+    expect(texts).toHaveLength(1);
+    expect(texts[0]?.to).toBe('0466778899');
+    expect(texts[0]?.body).toContain('could not collect');
+    expect(texts[0]?.body).toContain('Truck access blocked');
+    // No fee in it — whether it stands is the office's decision.
+    expect(texts[0]?.body).not.toMatch(/\$\d/);
+    expect(accountAlerts.at(-1)?.title).toContain('Pickup not collected');
+  });
+
+  /*
+   * ⚠️ REGRESSION. The status change's result was ignored, so a report queued
+   * offline that reached a job the office had cancelled in the meantime still
+   * raised the $120 fee and opened a review — against a job nobody was to
+   * collect.
+   */
+  it('refuses to mark a cancelled job futile, and charges nothing', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, status: 'in-transit' });
+    driver.setStatus(stop.id, 'cancelled');
+
+    await expect(
+      driverService.markFutile(
+        stop.id,
+        { ...envelope(), reason: 'site-closed', note: '', photoIds: ['p1'] },
+        CALLER,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(driver.charges).toHaveLength(0);
+    expect(futileReviews).toHaveLength(0);
+    expect(driver.events).toHaveLength(0);
+    expect(driver.stop(stop.id)?.status).toBe('cancelled');
+  });
+
+  it('refuses a job the office has already closed', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+    driver.setStatus(stop.id, 'admin-complete');
+
+    await expect(
+      driverService.markFutile(
+        stop.id,
+        { ...envelope(), reason: 'site-closed', note: '', photoIds: ['p1'] },
+        CALLER,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(driver.charges).toHaveLength(0);
+    expect(futileReviews).toHaveLength(0);
+  });
+
+  /*
+   * ⚠️ REGRESSION — the half-saved report. The status moved first and a replay
+   * used to return straight away on "already futile", so a first attempt that
+   * failed on the charge could never be finished: no fee, no review, and the
+   * office never heard the truck was turned away.
+   */
+  it('finishes a futile report that was half-saved the first time', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, status: 'arrived' });
+    const report = {
+      ...envelope(),
+      reason: 'nobody-on-site' as const,
+      note: 'Gate padlocked',
+      photoIds: ['p1'],
+    };
+
+    driver.failNextCharge();
+    await expect(driverService.markFutile(stop.id, report, CALLER)).rejects.toThrow();
+
+    // The status moved; nothing after it did.
+    expect(driver.stop(stop.id)?.status).toBe('futile');
+    expect(driver.charges).toHaveLength(0);
+    expect(futileReviews).toHaveLength(0);
+
+    // The phone's retry completes it — once.
+    await driverService.markFutile(stop.id, report, CALLER);
+    await driverService.markFutile(stop.id, report, CALLER);
+
+    expect(driver.charges.filter((charge) => charge.code === 'futile-pickup')).toHaveLength(1);
+    expect(futileReviews).toHaveLength(1);
+    expect(driver.events.filter((event) => event.status === 'futile')).toHaveLength(1);
   });
 
   it('records how many photos back the charge', async () => {
@@ -899,6 +1102,133 @@ describe('charges raised from the phone', () => {
         CALLER,
       ),
     ).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+/*
+ * M4.7 — ONE contamination report per job.
+ *
+ * Nothing told the phone a report had been made, so the button stayed on the
+ * job and a driver filed the same load eleven times. The job now says it was
+ * reported, and a further report changes nothing.
+ */
+describe('contamination — one report per job (M4.7)', () => {
+  function report(overrides: Partial<{ type: 'timber' | 'metal'; note: string }> = {}) {
+    return {
+      ...envelope(),
+      type: overrides.type ?? ('timber' as const),
+      extent: 'heavy' as const,
+      note: overrides.note ?? 'Offcuts through the second bag',
+      photoIds: ['p1'],
+    };
+  }
+
+  it('tells the phone the job has been reported', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, status: 'arrived' });
+
+    expect((await driverService.job(stop.id, CALLER)).contamination).toBeNull();
+
+    await driverService.markContaminated(stop.id, report(), CALLER);
+
+    expect((await driverService.job(stop.id, CALLER)).contamination).toEqual({
+      reportedAt: '2026-09-10T08:00:00.000Z',
+      type: 'timber',
+      extent: 'heavy',
+    });
+  });
+
+  it('records a second report as nothing at all', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, status: 'arrived' });
+
+    await expect(driverService.markContaminated(stop.id, report(), CALLER)).resolves.toEqual({
+      chargeRaised: true,
+    });
+    await expect(
+      driverService.markContaminated(stop.id, report({ type: 'metal' }), CALLER),
+    ).resolves.toEqual({ chargeRaised: false });
+
+    expect(driver.events.filter((event) => event.label === 'Contamination reported')).toHaveLength(
+      1,
+    );
+    expect(driver.charges.filter((charge) => charge.code === 'contamination')).toHaveLength(1);
+    // The first report stands; the second did not overwrite what was reported.
+    expect(driver.contaminationReport(stop.id)?.type).toBe('timber');
+  });
+
+  /*
+   * A job reported before the report record existed carries only the charge.
+   * Reading that as the report is what stops it offering the form again the
+   * day this ships.
+   */
+  it('treats a report made before the record existed as made', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, status: 'arrived' });
+    driver.addCharge({
+      jobId: stop.id,
+      code: 'contamination',
+      amount: '90.00',
+      photoCount: 1,
+      note: 'metal · light — Screws in the pile',
+      source: 'driver',
+      raisedAt: new Date('2026-09-09T02:00:00.000Z'),
+    });
+
+    expect((await driverService.job(stop.id, CALLER)).contamination).toEqual({
+      reportedAt: '2026-09-09T02:00:00.000Z',
+      type: 'metal',
+      extent: 'light',
+    });
+
+    await driverService.markContaminated(stop.id, report(), CALLER);
+
+    expect(driver.events).toHaveLength(0);
+    expect(driver.charges).toHaveLength(1);
+  });
+
+  /*
+   * ⚠️ The report is stored first. A failure after it must be finished by the
+   * phone's retry — not taken as "already reported" and dropped, which would
+   * leave a recorded contamination that nobody is ever charged for.
+   */
+  it('finishes a report that was half-saved the first time', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, status: 'arrived' });
+
+    driver.failNextCharge();
+    await expect(driverService.markContaminated(stop.id, report(), CALLER)).rejects.toThrow();
+
+    expect(driver.contaminationReport(stop.id)).toBeDefined();
+    expect(driver.charges).toHaveLength(0);
+
+    await expect(driverService.markContaminated(stop.id, report(), CALLER)).resolves.toEqual({
+      chargeRaised: true,
+    });
+    await driverService.markContaminated(stop.id, report(), CALLER);
+
+    expect(driver.charges.filter((charge) => charge.code === 'contamination')).toHaveLength(1);
+    expect(driver.charges[0]?.note).toBe('timber · heavy — Offcuts through the second bag');
+    expect(driver.events.filter((event) => event.label === 'Contamination reported')).toHaveLength(
+      1,
+    );
+  });
+
+  it('refuses a report on a job the office cancelled', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+    driver.setStatus(stop.id, 'cancelled');
+
+    await expect(driverService.markContaminated(stop.id, report(), CALLER)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(driver.contaminationReport(stop.id)).toBeUndefined();
+    expect(driver.charges).toHaveLength(0);
+  });
+
+  it('refuses a report on a job marked as could not collect', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+    driver.setStatus(stop.id, 'futile');
+
+    await expect(driverService.markContaminated(stop.id, report(), CALLER)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(driver.charges).toHaveLength(0);
   });
 });
 
@@ -1432,6 +1762,27 @@ describe('defects and messages', () => {
     expect(driver.messages).toHaveLength(1);
     expect(driver.messages[0]?.body).toBe('Gate is locked, no answer');
     expect(driver.messages[0]?.fromDriver).toBe(true);
+  });
+
+  /*
+   * ⚠️ A driver's message used to sit on the job until somebody opened it —
+   * while the driver waited at a locked gate.
+   */
+  it('tells the office and the allocator when a driver writes', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    await driverService.sendMessage(stop.id, 'Gate is locked, no answer', CALLER);
+
+    expect(urgentAlerts).toEqual([
+      expect.objectContaining({
+        audience: 'dispatch',
+        category: 'message',
+        severity: 'action',
+        body: 'Troy Holm: Gate is locked, no answer',
+        href: `/admin/jobs/${stop.id}?tab=comments&thread=driver`,
+        subjectKey: `driver-message:${driver.messages[0]?.id ?? ''}`,
+      }),
+    ]);
   });
 
   it('refuses a message on someone else’s job', async () => {

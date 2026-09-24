@@ -57,3 +57,13 @@ apps/api/migration-data/
 # still needed. Name them `tmp-*` and they stay local.
 apps/*/src/scripts/tmp-*.ts
 scripts/tmp-*.mjs
+
+# Playwright — the end-to-end suite stays local, by request. The specs drive a
+# real browser against a seeded database and a running API, which is a thing to
+# run on a laptop rather than to publish alongside four deploy repos.
+# ⚠️ package.json still declares @playwright/test and the e2e:* scripts, so a
+# fresh clone installs the runner and finds no specs. Remove those too if the
+# suite is meant to be gone rather than merely unpublished.
+e2e/
+playwright.config.ts
+scripts/e2e.mjs

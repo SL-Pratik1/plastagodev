@@ -3,7 +3,7 @@ import { CheckCircle2Icon } from 'lucide-react';
 import { Link, useParams } from 'react-router';
 import { useState } from 'react';
 import { PhotoGrid } from '@/components/driver/photo-grid';
-import { missingRequiredPhotos } from '@/components/driver/photo-rules';
+import { jobPhotos, missingRequiredPhotos } from '@/components/driver/photo-rules';
 import { currentPosition } from '@/lib/geolocation';
 import { useAddPhoto, useDriverJob, useRemovePhoto } from '@/features/driver/queries';
 
@@ -133,6 +133,14 @@ export function DriverJobPhotosPage() {
 
   const missing = missingRequiredPhotos(job.photos, job.requiredPhotos);
 
+  /*
+   * The pickup's own photos. The could-not-collect and contamination screens
+   * keep their evidence to themselves — it used to appear here under "anything
+   * else", where it read as a stray extra and could be deleted from the one
+   * screen the report's author never looks at again.
+   */
+  const photos = jobPhotos(job.photos);
+
   return (
     <div className="space-y-4">
       <Link
@@ -145,8 +153,8 @@ export function DriverJobPhotosPage() {
       <header>
         <h1 className="font-display text-lg font-semibold tracking-tight">Photos</h1>
         <p className="text-sm text-muted-foreground">
-          {job.photos.length} taken. These are what defend the charges, so the standard shots are
-          listed rather than left to memory.
+          {photos.length} taken. These are what defend the charges, so the standard shots are listed
+          rather than left to memory.
         </p>
       </header>
 
@@ -161,10 +169,18 @@ export function DriverJobPhotosPage() {
       )}
 
       <PhotoGrid
-        photos={job.photos}
+        photos={photos}
         required={job.requiredPhotos}
         onCapture={capture}
         onRemove={(photoId) => void remove(photoId)}
+        /*
+         * A thumbnail that will not load has almost certainly outlived its
+         * signature — this screen stays open far longer than the fifteen minutes
+         * a read URL is signed for. Refetching the job signs new ones, and the
+         * tiles heal themselves rather than leaving the driver looking at grey
+         * boxes where their evidence used to be.
+         */
+        onStale={() => void refetch()}
         busySlot={busySlot}
       />
 

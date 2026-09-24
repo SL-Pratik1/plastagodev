@@ -136,6 +136,13 @@ driverRouter.post(
   asyncHandler(driverController.markFutile),
 );
 
+/**
+ * Reports a contaminated load.
+ *
+ * Answers 200 with `ContaminationOutcome` rather than 204: the report is always
+ * recorded, but a job carries at most one contamination charge, so the phone
+ * needs to know whether this one raised money before it tells the driver so.
+ */
 driverRouter.post(
   '/jobs/:jobId/contamination',
   validate({ params: JobIdParamsSchema, body: ContaminationReportSchema }),

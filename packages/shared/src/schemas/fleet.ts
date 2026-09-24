@@ -140,7 +140,7 @@ export type DriverProfile = z.infer<typeof DriverProfileSchema>;
 
 /* ── Vehicles ─────────────────────────────────────────────────────────────── */
 
-export const VEHICLE_TYPES = ['crane-truck', 'hooklift', 'ute'] as const;
+export const VEHICLE_TYPES = ['crane-truck', 'hooklift', 'ute', 'tipper'] as const;
 export const VehicleTypeSchema = z.enum(VEHICLE_TYPES).meta({ id: 'VehicleType' });
 export type VehicleType = z.infer<typeof VehicleTypeSchema>;
 
@@ -148,6 +148,7 @@ export const VEHICLE_TYPE_LABELS: Record<VehicleType, string> = {
   'crane-truck': 'Crane truck',
   hooklift: 'Hooklift',
   ute: 'Ute',
+  tipper: 'Tipper',
 };
 
 /**

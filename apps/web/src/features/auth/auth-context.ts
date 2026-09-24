@@ -36,11 +36,21 @@ export interface AuthContextValue {
    * applications — a dispatch board and a run sheet — so this changes what the
    * whole app is, not a filter on one screen.
    *
-   * Rejects a role the user does not hold: the active role is what every
-   * capability check reads, so accepting an arbitrary one here would be a
-   * privilege escalation rather than a display bug.
+   * ── Why it is async, and why that matters ─────────────────────────────────
+   * Because the choice is SAVED, on the server, before anything moves. It was
+   * local state once, which failed at exactly the moment it was needed: the
+   * driver surface has its own origin, crossing to it is a full page load, and
+   * a page load discards React state — so the guard on the far side saw the old
+   * role and bounced the man straight back to the console. A plain refresh did
+   * the same thing on one origin.
+   *
+   * Callers must therefore AWAIT this before navigating. Navigating first is
+   * the bug it was written to fix.
+   *
+   * Rejects a role the user does not hold — the server decides that, not this
+   * function, because the active role is what every capability check reads.
    */
-  switchRole: (role: Role) => void;
+  switchRole: (role: Role) => Promise<void>;
 
   /** Capability check for the ACTIVE role. False when anonymous. */
   can: (capability: Capability) => boolean;

@@ -29,15 +29,51 @@ function nextId(): string {
   return counter.toString(16).padStart(24, '0');
 }
 
+/** The run a seeded job is a stop on. */
+interface SeedRun {
+  id: string;
+  /** `YYYY-MM-DD` — the day the truck goes. */
+  date: string;
+  name?: string;
+  number?: number;
+}
+
 interface SeedJob {
   id?: string;
   status?: Job['status'];
   driverId?: string | null;
   jobNumber?: number;
+  accountId?: string;
+  accountName?: string;
+  siteName?: string;
+  bookedByUserId?: string | null;
+  readyDate?: string;
+  targetDate?: string;
+  siteContactEmail?: string | null;
+  siteContactMobile?: string | null;
+  run?: SeedRun | null;
 }
 
+interface StoredJob {
+  jobNumber: number;
+  status: Job['status'];
+  driverId: string | null;
+  accountId: string;
+  accountName: string;
+  siteName: string;
+  bookedByUserId: string | null;
+  readyDate: string;
+  targetDate: string;
+  siteContactEmail: string | null;
+  siteContactMobile: string | null;
+  run: SeedRun | null;
+}
+
+/** The account a seeded job belongs to unless a test says otherwise. */
+export const FAKE_JOB_ACCOUNT_ID = 'acc0000000000000000000a1';
+
 export function createFakeJobRepository() {
-  const jobs = new Map<string, { jobNumber: number; status: Job['status']; driverId: string | null }>();
+  const jobs = new Map<string, StoredJob>();
 
   const calls = {
     lastScope: null as JobScope | null,
@@ -47,6 +83,8 @@ export function createFakeJobRepository() {
     comments: [] as CreateCommentInput[],
     cancels: [] as Array<{ id: string; reason: string; note: string | null }>,
     reschedules: [] as Array<{ id: string; readyDate: string; targetDate: string }>,
+    /** Jobs taken off a run because their date moved past it. */
+    releases: [] as Array<{ id: string; runId: string }>,
   };
 
   /** Set false to simulate the job moving underneath a cancel. */
@@ -67,7 +105,12 @@ export function createFakeJobRepository() {
 
     async findById(id: string, scope: JobScope): Promise<Job | null> {
       calls.lastScope = scope;
-      return Promise.resolve(jobs.has(id) ? ({ id } as unknown as Job) : null);
+      const job = jobs.get(id);
+      if (!job) return Promise.resolve(null);
+
+      // Only what a notice reads — the rest of a `Job` is not this fake's business.
+      const { run: _run, ...fields } = job;
+      return Promise.resolve({ id, ...fields, photos: [] } as unknown as Job);
     },
 
     async findSummary(id: string, scope: JobScope) {
@@ -76,10 +119,47 @@ export function createFakeJobRepository() {
       return Promise.resolve(job ? { id, ...job } : null);
     },
 
+    async allocationOf(id: string) {
+      const job = jobs.get(id);
+      if (!job?.run) return Promise.resolve(null);
+
+      return Promise.resolve({
+        runId: job.run.id,
+        runNumber: job.run.number ?? 1,
+        runName: job.run.name ?? 'Run 1',
+        runDate: job.run.date,
+        driverId: job.driverId,
+        status: job.status,
+      });
+    },
+
+    async releaseFromRun(id: string, runId: string): Promise<boolean> {
+      const job = jobs.get(id);
+      if (job?.run?.id !== runId) return Promise.resolve(false);
+
+      calls.releases.push({ id, runId });
+      jobs.set(id, { ...job, run: null, driverId: null, status: 'booked' });
+      return Promise.resolve(true);
+    },
+
     async create(input: CreateJobInput): Promise<JobListItem> {
       calls.lastCreate = input;
       const id = nextId();
-      jobs.set(id, { jobNumber: input.jobNumber, status: 'booked', driverId: null });
+      jobs.set(id, {
+        jobNumber: input.jobNumber,
+        status: 'booked',
+        driverId: null,
+        accountId: input.accountId,
+        accountName: input.accountName,
+        siteName: input.siteName,
+        bookedByUserId: input.bookedByUserId,
+        readyDate: input.readyDate,
+        targetDate: input.targetDate,
+        // Not carried: the booking-notice suite pins the no-contact path.
+        siteContactEmail: null,
+        siteContactMobile: null,
+        run: null,
+      });
       return Promise.resolve({ id, jobNumber: input.jobNumber } as unknown as JobListItem);
     },
 
@@ -109,6 +189,8 @@ export function createFakeJobRepository() {
 
     async reschedule(id: string, readyDate: string, targetDate: string): Promise<boolean> {
       calls.reschedules.push({ id, readyDate, targetDate });
+      const job = jobs.get(id);
+      if (job) jobs.set(id, { ...job, readyDate, targetDate });
       return Promise.resolve(jobs.has(id));
     },
 
@@ -122,6 +204,7 @@ export function createFakeJobRepository() {
         visibility: input.visibility,
         deliveredAt: input.deliveredAt ? input.deliveredAt.toISOString() : null,
         fromDriver: input.fromDriver,
+        fromCustomer: input.fromCustomer,
       });
     },
 
@@ -141,8 +224,22 @@ export function createFakeJobRepository() {
         jobNumber: options.jobNumber ?? 61_300,
         status: options.status ?? 'booked',
         driverId: options.driverId ?? null,
+        accountId: options.accountId ?? FAKE_JOB_ACCOUNT_ID,
+        accountName: options.accountName ?? 'Clarendon Homes',
+        siteName: options.siteName ?? 'Lot 214 Allambie Circuit',
+        bookedByUserId: options.bookedByUserId ?? null,
+        readyDate: options.readyDate ?? '2026-09-24',
+        targetDate: options.targetDate ?? '2026-10-01',
+        siteContactEmail: options.siteContactEmail ?? null,
+        siteContactMobile: options.siteContactMobile ?? null,
+        run: options.run ?? null,
       });
       return id;
+    },
+
+    /** The run a job is on now, or null — to assert a job came off it. */
+    runOf(id: string): SeedRun | null {
+      return jobs.get(id)?.run ?? null;
     },
 
     /** Make the guarded cancel match nothing — a completion racing a cancel. */

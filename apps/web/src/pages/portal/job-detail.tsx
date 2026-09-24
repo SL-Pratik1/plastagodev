@@ -27,16 +27,18 @@ import {
   MessageSquareIcon,
   PencilIcon,
   PhoneIcon,
+  SendIcon,
   TruckIcon,
   ZapIcon,
 } from 'lucide-react';
-import { useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { useEffect, useState } from 'react';
+import { Link, useLocation, useParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
 import { PickupStatusBadge, ReadinessBadge } from '@/components/portal/pickup-status';
 import {
   usePortalCertifyReadiness,
   usePortalJob,
+  usePortalPostMessage,
   usePortalRequestChange,
   usePortalScope,
   usePortalSetUrgency,
@@ -296,6 +298,9 @@ function PickupDetail({ job }: { job: PortalJob }) {
             </CardContent>
           </Card>
 
+          {/* ── The thread with the office (M2.11) ───────────────────── */}
+          <PickupMessages job={job} />
+
           {/* ── Photos (M5.9) ────────────────────────────────────────── */}
           <Card>
             <CardHeader>
@@ -334,31 +339,6 @@ function PickupDetail({ job }: { job: PortalJob }) {
               )}
             </CardContent>
           </Card>
-
-          {/* ── Messages from the office (M2.11, customer-visible) ────── */}
-          {job.messages.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <MessageSquareIcon aria-hidden className="size-4 text-muted-foreground" />
-                  Messages
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ul className="space-y-3">
-                  {job.messages.map((message) => (
-                    <li key={message.id} className="rounded-lg border border-border p-3">
-                      <p className="text-sm">{message.body}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {message.fromCustomer ? 'You' : message.author} ·{' '}
-                        {formatDateTime(message.at)}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-              </CardContent>
-            </Card>
-          )}
         </div>
 
         <div className="space-y-5">
@@ -478,6 +458,145 @@ function PickupDetail({ job }: { job: PortalJob }) {
         mutation={requestChange}
       />
     </div>
+  );
+}
+
+/* ── M2.11 — the pickup's thread with the office ──────────────────────────── */
+
+/**
+ * Messages between the customer and the office about this pickup.
+ *
+ * ── Why it is always on the page ──────────────────────────────────────────
+ * It used to render only once the office had written something, and sat below
+ * the photos. A customer looking for a message saw no Messages section at all,
+ * and had no way to answer one when it did arrive. Now it is always here, high
+ * on the page, with a reply box — and the office's messages and the replies are
+ * one thread, the same one the console shows as its Customer thread.
+ *
+ * A notification links here as `#messages`, so the thread is brought into view
+ * rather than leaving the customer to scroll for it.
+ */
+function PickupMessages({ job }: { job: PortalJob }) {
+  const toast = useToast();
+  const { hash } = useLocation();
+  const postMessage = usePortalPostMessage();
+
+  const [body, setBody] = useState('');
+  const [fieldError, setFieldError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (hash === '#messages') {
+      document.getElementById('messages')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [hash]);
+
+  const send = async () => {
+    const trimmed = body.trim();
+    if (!trimmed) {
+      setFieldError('Write something before sending.');
+      return;
+    }
+    if (trimmed.length > 2000) {
+      setFieldError('That is over the 2,000 character limit. Shorten it and send again.');
+      return;
+    }
+
+    setFieldError(null);
+    try {
+      await postMessage.mutateAsync({ id: job.id, body: trimmed });
+      setBody('');
+      toast.success('Message sent', 'The office has been notified and will reply here.');
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  return (
+    <Card id="messages" className="scroll-mt-24">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <MessageSquareIcon aria-hidden className="size-4 text-muted-foreground" />
+          Messages
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Your conversation with the PlastaGo office about this pickup.
+        </p>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {job.messages.length === 0 ? (
+          <EmptyState
+            icon={MessageSquareIcon}
+            title="No messages yet"
+            description="Anything the office sends about this pickup appears here. You can write to them below."
+          />
+        ) : (
+          <ol className="space-y-3">
+            {job.messages.map((message) => (
+              <li
+                key={message.id}
+                className={
+                  // Your side of the conversation is set in and tinted, so the
+                  // thread reads as two voices rather than a log.
+                  message.fromCustomer
+                    ? 'ml-6 rounded-lg border border-brand-500/35 bg-brand-500/6 p-3'
+                    : 'rounded-lg border border-border p-3'
+                }
+              >
+                <p className="text-sm whitespace-pre-wrap">{message.body}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {message.mine
+                    ? 'You'
+                    : message.fromCustomer
+                      ? message.author
+                      : `${message.author} (PlastaGo)`}{' '}
+                  · {formatDateTime(message.at)}
+                </p>
+              </li>
+            ))}
+          </ol>
+        )}
+
+        <div className="space-y-3 border-t border-border pt-4">
+          <Field
+            id="pickup-message"
+            label="Write to the office"
+            error={fieldError ?? undefined}
+            hint="They are notified straight away and reply here."
+          >
+            {(control) => (
+              <Textarea
+                {...control}
+                rows={3}
+                maxLength={2000}
+                value={body}
+                placeholder="The gate code has changed to 2291 — the new one is on the fence."
+                onChange={(event) => {
+                  setBody(event.target.value);
+                  setFieldError(null);
+                }}
+              />
+            )}
+          </Field>
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {body.length} / 2,000
+            </span>
+            <Button
+              size="sm"
+              disabled={postMessage.isPending || body.trim().length === 0}
+              onClick={() => void send()}
+            >
+              {postMessage.isPending && <Spinner label="Sending" />}
+              <SendIcon aria-hidden />
+              Send
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

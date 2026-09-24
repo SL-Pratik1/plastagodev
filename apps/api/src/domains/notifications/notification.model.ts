@@ -3,6 +3,7 @@ import { Schema, model } from 'mongoose';
 
 export const NOTIFICATIONS_COLLECTION = 'notifications';
 export const OUTBOUND_MESSAGES_COLLECTION = 'outboundmessages';
+export const SCHEDULED_RUNS_COLLECTION = 'scheduledruns';
 
 /**
  * The internal notification centre (M8.7).
@@ -170,3 +171,45 @@ outboundMessageSchema.index(
 );
 
 export const OutboundMessageModel = model('OutboundMessage', outboundMessageSchema);
+
+/**
+ * One run of a scheduled task — the daily sweep, an hour of reminders.
+ *
+ * ── Why the schedule keeps a record at all ────────────────────────────────
+ * Because "run once" has to survive the things a timer cannot see: a restart
+ * mid-afternoon, a deploy, two API instances behind one load balancer. Each of
+ * those would otherwise run the 3 pm reminders again. The unique index on
+ * `(task, slot)` is what arbitrates — whoever inserts the row runs the task,
+ * everyone else skips it.
+ *
+ * The messages themselves are also sent once-only (see `outboundmessages`), so
+ * a second run would not text anybody twice. This stops the second run from
+ * happening at all, which keeps the sweep from re-writing every inbox and the
+ * log honest about what ran when.
+ */
+const scheduledRunSchema = new Schema(
+  {
+    /** Which task — `queue-sweep`, `readiness-reminders`. */
+    task: { type: String, required: true, trim: true },
+    /** Which occurrence — `2026-09-25` for a daily task, `2026-09-25T15` hourly. */
+    slot: { type: String, required: true, trim: true },
+    state: { type: String, required: true, enum: ['running', 'done', 'failed'] },
+    /** How many times this slot has been tried. A failed one is retried, not forever. */
+    attempts: { type: Number, required: true, min: 1, default: 1 },
+    claimedAt: { type: Date, required: true },
+    finishedAt: { type: Date, default: null },
+    /** What it did, or why it failed — for somebody reading the collection later. */
+    detail: { type: String, default: null, trim: true },
+  },
+  { collection: SCHEDULED_RUNS_COLLECTION, timestamps: true, versionKey: false },
+);
+
+scheduledRunSchema.index({ task: 1, slot: 1 }, { unique: true, name: 'task_slot_unique' });
+
+/** A record of what ran is only interesting for a while. */
+scheduledRunSchema.index(
+  { claimedAt: 1 },
+  { name: 'purge_after_90_days', expireAfterSeconds: 90 * 24 * 60 * 60 },
+);
+
+export const ScheduledRunModel = model('ScheduledRun', scheduledRunSchema);

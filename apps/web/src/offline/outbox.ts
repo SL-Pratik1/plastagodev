@@ -38,6 +38,29 @@ export async function enqueue(input: EnqueueInput): Promise<string> {
 }
 
 /**
+ * Operations still on their way to the server: waiting, in flight, or failed
+ * with attempts left.
+ *
+ * For reads that must not contradict what the driver has already done. The
+ * query cache lives in memory, so after a reload the server's answer is all a
+ * screen has — and until the queue drains, that answer is the one from before
+ * the driver acted. An operation out of attempts is left out: it will never
+ * arrive, and pretending otherwise would hide the failure the sync badge
+ * reports.
+ *
+ * Never throws. A browser with IndexedDB blocked still gets its screens, just
+ * without the overlay.
+ */
+export async function queuedOperations(): Promise<OutboxOperation[]> {
+  try {
+    const rows = await db.outbox.where('status').anyOf('pending', 'syncing', 'failed').toArray();
+    return rows.filter((row) => row.attempts < MAX_ATTEMPTS);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Told when queued work has actually reached the server.
  *
  * ── Why this exists ───────────────────────────────────────────────────────

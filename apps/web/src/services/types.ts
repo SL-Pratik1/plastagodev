@@ -13,6 +13,7 @@ import type {
   AdditionalServiceUpdate,
   AllocationBoard,
   AwaitingCallUp,
+  AwaitingPoChaseResult,
   AwaitingPoItem,
   CallUp,
   CallUpOutcome,
@@ -22,6 +23,7 @@ import type {
   ChargeApprovalDetail,
   ChargeApprovalItem,
   ChargeDecision,
+  ChargeDecisionOutcome,
   CreateRunInput,
   FutileDecision,
   FutileReview,
@@ -57,9 +59,8 @@ import type {
   ZoneVolumeReport,
   ExceptionReason,
   InvoiceListItem,
+  RaisedInvoice,
   Job,
-  JobCharge,
-  JobChargeDraft,
   JobComment,
   JobCommentDraft,
   BookablePurchaseOrder,
@@ -79,6 +80,7 @@ import type {
   PortalJob,
   PortalJobEdit,
   PortalJobListItem,
+  PortalJobMessage,
   PortalScope,
   PortalSupervisor,
   PortalSupervisorInvite,
@@ -91,6 +93,7 @@ import type {
   RateScheduleCreate,
   OnboardingInvite,
   ReadinessCertification,
+  Role,
   Run,
   RunSheet,
   Session,
@@ -155,6 +158,16 @@ export interface AuthService {
   requestCode: (input: OtpRequest) => Promise<OtpChallenge>;
   resendCode: (challengeId: string) => Promise<OtpChallenge>;
   verifyCode: (input: OtpVerify) => Promise<Session>;
+  /**
+   * Change which of the user's roles is active, and get the new session back.
+   *
+   * Returns the session rather than `void` because the caller's next act is to
+   * re-render the whole application around the answer — a second `getSession`
+   * to learn what it already asked for would only add a flicker.
+   *
+   * Rejects with FORBIDDEN for a role the user does not hold.
+   */
+  setActiveRole: (role: Role) => Promise<Session>;
   signOut: () => Promise<void>;
 }
 
@@ -362,16 +375,6 @@ export interface JobService {
    * is part of the answer, and the thread has to show it.
    */
   addComment: (jobId: string, draft: JobCommentDraft) => Promise<JobComment>;
-  /**
-   * M6.5 — apply a configured extra to a job.
-   *
-   * The draft names a CODE, never an amount: the price comes from the
-   * additional-services list so the same charge costs the same whoever adds it.
-   * Returns the created charge because its approval state is decided by the
-   * server — a charge configured to need approval lands `pending`, and the
-   * screen has to say so rather than implying it is already billable.
-   */
-  addCharge: (jobId: string, draft: JobChargeDraft) => Promise<JobCharge>;
 }
 
 /**
@@ -441,7 +444,7 @@ export interface InvoiceService {
    * purchase order for the driver's extras. The server refuses a job that is
    * not finished, one with nothing billable, and one already invoiced.
    */
-  raiseForJob: (jobId: string) => Promise<InvoiceListItem[]>;
+  raiseForJob: (jobId: string) => Promise<RaisedInvoice[]>;
   /** Draft → sent. Returns how many actually changed. */
   send: (ids: readonly string[]) => Promise<number>;
   /** Releases an awaiting-PO invoice once its PO has been recorded (M7.3). */
@@ -707,6 +710,11 @@ export interface CustomerPortalService {
   setUrgency: (id: string, urgent: boolean) => Promise<PortalJobListItem>;
   /** M5.2 · W86 — certify readiness on a job booked without it, or re-confirm. */
   certifyReadiness: (id: string, input: ReadinessCertification) => Promise<PortalJobListItem>;
+  /**
+   * M2.11 — reply to the office on the pickup's message thread. Always lands on
+   * the job's customer thread; the server fixes that, not this call.
+   */
+  postMessage: (id: string, body: string) => Promise<PortalJobMessage>;
 
   /*
    * No site methods.
@@ -778,7 +786,10 @@ export interface QueueService {
   approvalList: (query: ListQuery) => Promise<ListResult<ChargeApprovalItem>>;
   approvalGet: (id: string) => Promise<ChargeApprovalDetail>;
   /** Bulk, because the queue is worked in batches. Returns how many changed. */
-  approvalDecide: (ids: readonly string[], decision: ChargeDecision) => Promise<number>;
+  approvalDecide: (
+    ids: readonly string[],
+    decision: ChargeDecision,
+  ) => Promise<ChargeDecisionOutcome>;
 
   // M7.3 — approved charges awaiting a PO.
   awaitingPoList: (query: ListQuery) => Promise<ListResult<AwaitingPoItem>>;
@@ -793,8 +804,11 @@ export interface QueueService {
 
   /** Records the answer. It does NOT move the job — see the service. */
   changeRequestDecide: (id: string, decision: ChangeRequestDecision) => Promise<void>;
-  /** Records that a chase went out, so ageing is measured against contact. */
-  awaitingPoChase: (ids: readonly string[]) => Promise<number>;
+  /**
+   * Emails each billing contact for the PO and records the chase. Says how
+   * many were emailed, so the screen never claims a send that did not happen.
+   */
+  awaitingPoChase: (ids: readonly string[]) => Promise<AwaitingPoChaseResult>;
 
   // M2.12 — AI purchase-order review.
   /* ── M2.12b · call-ups ─────────────────────────────────────────────── */

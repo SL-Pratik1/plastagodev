@@ -5,6 +5,7 @@ import {
   PortalBookingDraftSchema,
   PortalChangeRequestSchema,
   PortalJobEditSchema,
+  PortalJobMessageDraftSchema,
   PortalSupervisorInviteSchema,
   ReadinessCertificationSchema,
 } from '@plastago/shared';
@@ -134,6 +135,18 @@ portalRouter.post(
   '/jobs/:id/urgency',
   validate({ params: PortalJobIdParamsSchema, body: SetUrgencySchema }),
   asyncHandler(portalController.setUrgency),
+);
+
+/* ── M2.11 · the pickup's thread with the office ─────────────────────────── */
+
+/**
+ * Reply to the office. Always lands on the job's `customer` thread — the
+ * visibility is fixed in the service, never taken from the request.
+ */
+portalRouter.post(
+  '/jobs/:id/messages',
+  validate({ params: PortalJobIdParamsSchema, body: PortalJobMessageDraftSchema }),
+  asyncHandler(portalController.postMessage),
 );
 
 /* ── M5.2 · readiness ────────────────────────────────────────────────────── */

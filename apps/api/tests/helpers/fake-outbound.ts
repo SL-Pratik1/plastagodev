@@ -44,11 +44,21 @@ export const sendLog: Array<{
 /** Set to make the provider fail, so the "message did not go" path is real. */
 export const providerFailure = { message: null as string | null };
 
+/**
+ * Staff a suite can reach directly — a driver texted about their run. Keyed by
+ * user id; seed it with `staffContacts.set(id, { … })`.
+ */
+export const staffContacts = new Map<
+  string,
+  { id: string; name: string; email: string | null; mobile: string | null }
+>();
+
 export function clearOutbound(): void {
   sentMessages.length = 0;
   sendLog.length = 0;
   providerFailure.message = null;
   claims.clear();
+  staffContacts.clear();
 }
 
 /** subjectKey|channel → the outcome currently recorded against it. */
@@ -104,9 +114,12 @@ export function makeFakeNotificationRepository(): Record<string, unknown> {
     alreadySent: (subjectKey: string, channel: 'email' | 'sms') =>
       Promise.resolve(claims.get(`${subjectKey}|${channel}`) === 'sent'),
 
+    staffContact: (userId: string) => Promise.resolve(staffContacts.get(userId) ?? null),
+
     /* The inbox side of the domain, unused by these suites but imported with it. */
     officeRecipients: () => Promise.resolve([]),
-    accountRecipients: () => Promise.resolve([]),
+    accountAdministrators: () => Promise.resolve([]),
+    jobAudience: () => Promise.resolve([]),
     raise: () => Promise.resolve(),
     list: () =>
       Promise.resolve({ data: [], meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 } }),

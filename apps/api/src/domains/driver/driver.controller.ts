@@ -159,12 +159,19 @@ export const driverController = {
     }>,
     res: Response,
   ): Promise<void> => {
-    await driverService.markContaminated(
+    /*
+     * 200 with a body rather than 204, because the phone has to be able to tell
+     * the driver whether a charge was actually raised. A job carries one
+     * contamination charge at most, so a second report raises nothing — and on a
+     * 204 the screen cheerfully said "a charge goes to the office for approval"
+     * either way.
+     */
+    const outcome = await driverService.markContaminated(
       req.validated.params.jobId,
       req.validated.body,
       callerFrom(req),
     );
-    res.status(204).send();
+    res.status(200).json(outcome);
   },
 
   submitPreStart: async (

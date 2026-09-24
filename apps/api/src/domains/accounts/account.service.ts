@@ -1,16 +1,17 @@
-import type {
-  Account,
-  AccountDraft,
-  AccountListItem,
-  AccountType,
-  AccountUpdate,
-  BrandId,
-  CaptureMode,
-  InvitationResult,
-  PageMeta,
-  PoPolicy,
-  Role,
-  Zone,
+import {
+  OPEN_JOB_STATUSES,
+  type Account,
+  type AccountDraft,
+  type AccountListItem,
+  type AccountType,
+  type AccountUpdate,
+  type BrandId,
+  type CaptureMode,
+  type InvitationResult,
+  type PageMeta,
+  type PoPolicy,
+  type Role,
+  type Zone,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
@@ -27,8 +28,12 @@ import { outboundService } from '../notifications/outbound.service.js';
  * one definition — the same one the portal screen shows.
  */
 import { supervisorRepository } from '../portal/supervisor.repository.js';
+// Written only by the risk-assessment rule, which has to reach open jobs.
+import { jobRepository } from '../jobs/job.repository.js';
 // Read-only: "does this rate card exist?" is the settings domain's question.
 import { settingsRepository } from '../settings/settings.repository.js';
+// The customer's own portal login, made alongside the welcome email.
+import { userRepository } from '../users/user.repository.js';
 import {
   accountRepository,
   type AccountScope,
@@ -48,6 +53,8 @@ export interface Caller {
   roles: readonly Role[];
   /** Set for the two customer roles; null for office and admin. */
   accountId: string | null;
+  /** Who is acting, for the job trail. Optional: most account rules never write one. */
+  name?: string;
 }
 
 /**
@@ -223,6 +230,27 @@ export const accountService = {
       ]);
     }
 
+    /*
+     * ⚠️ The invitation now creates the customer's portal login (see
+     * `sendWelcome`), and a login belongs to ONE person. An address that
+     * already signs in — a member of staff, or somebody at another customer —
+     * cannot be given a second one, and "sign in with this email" would open
+     * THEIR login instead. Refused here, before the account exists, while it
+     * is still a form to correct rather than a mess to untangle.
+     */
+    if (
+      input.sendInvitation &&
+      (await userRepository.identifierTaken({ email: contactEmail.toLowerCase(), mobile: null }))
+    ) {
+      throw AppError.validation('That email already signs in to PlastaGo', [
+        {
+          path: 'accountsContactEmail',
+          message:
+            'Use a different email for this account, or untick the invitation and add their login from Users',
+        },
+      ]);
+    }
+
     return accountRepository.create({
       code,
       name: input.legalName.trim(),
@@ -252,11 +280,38 @@ export const accountService = {
   async sendWelcome(
     account: AccountListItem,
     recipient: { contactName: string; email: string },
+    /** Who set the account up — recorded on the login it creates. */
+    invitedBy: string = 'PlastaGo',
   ): Promise<InvitationResult> {
+    const email = recipient.email.trim().toLowerCase();
+
+    /*
+     * The login the email tells them to use.
+     *
+     * ⚠️ The email says "sign in here, enter this address and we will send you
+     * a code" — and nothing ever created a login for that address. Sign-in only
+     * finds people with a login, so the code never came: in production the
+     * screen even says it was sent (the decoy, by design). Every new customer's
+     * first experience of the portal was being unable to get into it.
+     *
+     * So the login is made first, as the account's portal administrator, and
+     * the email only goes when it exists.
+     */
+    const login = await ensurePortalLogin(account, recipient.contactName, email, invitedBy);
+
+    if (!login) {
+      return {
+        outcome: 'failed',
+        channel: 'email',
+        toMasked: null,
+        detail: 'Their portal login could not be created — add them from Users, then send the invitation',
+      };
+    }
+
     const welcome = await outboundService.send({
       event: 'account-welcome',
       subjectKey: `account-welcome:${account.id}`,
-      recipient: { email: recipient.email.trim() || null, mobile: null },
+      recipient: { email: email || null, mobile: null },
       email: (to) =>
         buildWelcomeEmail(to, {
           contactName: recipient.contactName,
@@ -278,7 +333,7 @@ export const accountService = {
    * without going through the lead and invite process. For the larger builders
    * like Clarendon Homes… we'll just create the account for them."*
    */
-  async create(draft: AccountDraft): Promise<CreatedAccount> {
+  async create(draft: AccountDraft, caller?: Pick<Caller, 'name'>): Promise<CreatedAccount> {
     const account = await this.provision({
       customerCode: draft.customerCode,
       legalName: draft.legalName,
@@ -298,10 +353,14 @@ export const accountService = {
 
     // Last, and unable to throw — see `sendWelcome`.
     const welcome = draft.sendInvitation
-      ? await this.sendWelcome(account, {
-          contactName: draft.accountsContactName.trim(),
-          email: draft.accountsContactEmail.trim(),
-        })
+      ? await this.sendWelcome(
+          account,
+          {
+            contactName: draft.accountsContactName.trim(),
+            email: draft.accountsContactEmail.trim(),
+          },
+          caller?.name,
+        )
       : null;
 
     return { account, welcome };
@@ -426,6 +485,23 @@ export const accountService = {
     return this.get(id, caller);
   },
 
+  /**
+   * M4.8b — switch the account's Site Risk Assessment rule on or off.
+   *
+   * ── Why open jobs change too ──────────────────────────────────────────────
+   * A job copies the rule when it is booked. Changing only the account left
+   * every job already booked on the old rule, so a driver standing on site
+   * saw "Optional here" for a customer the office had just made it compulsory
+   * for. Open jobs — including one a driver is on right now — take the new
+   * rule; finished jobs keep the one they were done under, for audit.
+   *
+   * Each job that changes gets an entry on its timeline saying who changed the
+   * rule, because the rule on that job no longer matches the one it was booked
+   * under and an auditor has to be able to see why.
+   *
+   * Safe to repeat: jobs already on the new rule are skipped, so re-sending the
+   * same value only fixes jobs a failed earlier attempt left behind.
+   */
   async setRiskAssessmentRequired(id: string, required: boolean, caller: Caller): Promise<Account> {
     // Office decision, not a customer's. Checked before the write, not after.
     if (isCustomer(caller)) {
@@ -434,6 +510,31 @@ export const accountService = {
 
     const updated = await accountRepository.setRiskAssessmentRequired(id, required);
     if (!updated) throw AppError.notFound('That account could not be found');
+
+    const changedJobs = await jobRepository.setRiskAssessmentOnOpenJobs(
+      id,
+      required,
+      OPEN_JOB_STATUSES,
+    );
+
+    await Promise.all(
+      changedJobs.map((job) =>
+        jobRepository.appendEvent({
+          jobId: job.id,
+          label: required
+            ? 'Site risk assessment now required'
+            : 'Site risk assessment no longer required',
+          actor: caller.name ?? 'The office',
+          status: null,
+          detail: 'The customer’s rule changed after this job was booked.',
+        }),
+      ),
+    );
+
+    log.info(
+      { accountId: id, required, openJobsUpdated: changedJobs.length },
+      'risk assessment rule changed',
+    );
 
     return this.get(id, caller);
   },
@@ -487,6 +588,53 @@ export const accountService = {
     return this.get(id, caller);
   },
 };
+
+/**
+ * Makes sure the person the welcome email is addressed to can sign in.
+ *
+ * Creates them as the account's portal administrator — the welcome describes
+ * exactly what that login can do (book, follow pickups, certificates,
+ * invoices). `invited`, like every login nobody has used yet; the first sign-in
+ * makes it active.
+ *
+ * An address that already has a login is left alone: `provision` refuses one
+ * that belongs to somebody else, so what is found here is this account's own —
+ * a welcome sent a second time, or two sends racing.
+ *
+ * Returns false only when a login could not be made. Never throws, for the
+ * reason `sendWelcome` gives: the account already exists.
+ */
+async function ensurePortalLogin(
+  account: AccountListItem,
+  contactName: string,
+  email: string,
+  invitedBy: string,
+): Promise<boolean> {
+  if (email === '') return false;
+
+  try {
+    if (await userRepository.identifierTaken({ email, mobile: null })) return true;
+
+    await userRepository.create({
+      name: contactName.trim() || account.name,
+      email,
+      mobile: null,
+      role: 'customer-administrator',
+      roles: ['customer-administrator'],
+      jobTitle: null,
+      brandIds: [account.brandId],
+      accountId: account.id,
+      notes: 'Created with the account’s welcome email.',
+      invitedBy,
+    });
+
+    log.info({ accountId: account.id }, 'portal login created for the welcome email');
+    return true;
+  } catch (error) {
+    log.error({ err: error, accountId: account.id }, 'could not create the portal login for a welcome');
+    return false;
+  }
+}
 
 function isCustomer(caller: Caller): boolean {
   return caller.roles.some((role) => CUSTOMER_ROLES.has(role));

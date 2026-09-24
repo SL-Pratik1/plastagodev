@@ -18,15 +18,18 @@ import { VehicleExpenseModel, VehicleModel } from './vehicle.model.js';
  * (§6A.3 #5).
  */
 
+type ExpiryFilter = 'expired' | 'due-soon' | 'valid';
+
 export interface ListVehiclesQuery {
   page: number;
   pageSize: number;
   sort?: string | undefined;
   q?: string | undefined;
   type?: VehicleType | undefined;
-  active?: boolean | undefined;
-  /** Vehicles whose registration or service is due — the reason to look. */
-  expiring?: 'registration' | 'service' | undefined;
+  status?: 'active' | 'inactive' | undefined;
+  registration?: ExpiryFilter | undefined;
+  service?: ExpiryFilter | undefined;
+  defects?: 'open' | 'none' | undefined;
 }
 
 export interface UpsertVehicleInput {
@@ -116,28 +119,34 @@ const DUE_SOON_DAYS = 30;
 export const vehicleRepository = {
   async list(query: ListVehiclesQuery): Promise<{ data: VehicleListItem[]; meta: PageMeta }> {
     const filter: Record<string, unknown> = {};
+    // Each of these can bring its own `$or`, so they collect here rather than
+    // fight over a single `filter.$or` key — the text search below needs one
+    // too, and the last write would otherwise silently drop the others.
+    const clauses: Record<string, unknown>[] = [];
 
     if (query.type) filter.type = query.type;
-    if (query.active !== undefined) filter.active = query.active;
+    if (query.status !== undefined) filter.active = query.status === 'active';
 
     if (query.q) {
       const term = escapeRegex(query.q);
-      filter.$or = [
-        { rego: { $regex: term, $options: 'i' } },
-        { label: { $regex: term, $options: 'i' } },
-        { assignedDriverName: { $regex: term, $options: 'i' } },
-      ];
+      clauses.push({
+        $or: [
+          { rego: { $regex: term, $options: 'i' } },
+          { label: { $regex: term, $options: 'i' } },
+          { assignedDriverName: { $regex: term, $options: 'i' } },
+        ],
+      });
     }
 
-    if (query.expiring === 'registration') {
-      filter.registrationExpiresOn = { $lte: shiftDays(DUE_SOON_DAYS) };
+    if (query.registration) clauses.push(expiryClause('registrationExpiresOn', query.registration));
+    if (query.service) clauses.push(expiryClause('nextServiceDueOn', query.service));
+
+    if (query.defects) {
+      const openRegos = await openDefectRegos();
+      clauses.push({ rego: query.defects === 'open' ? { $in: [...openRegos] } : { $nin: [...openRegos] } });
     }
 
-    if (query.expiring === 'service') {
-      // A null next-service is not "due" — it is unbooked, which is a different
-      // problem from being overdue and is not what this filter asks about.
-      filter.nextServiceDueOn = { $ne: null, $lte: shiftDays(DUE_SOON_DAYS) };
-    }
+    if (clauses.length > 0) filter.$and = clauses;
 
     const sortKey = query.sort?.replace(/^-/, '') ?? '';
     const direction: 1 | -1 = query.sort?.startsWith('-') ? -1 : 1;
@@ -523,6 +532,20 @@ function expiryState(dueOn: string | null): ExpiryState {
   return dueOn <= shiftDays(DUE_SOON_DAYS) ? 'due-soon' : 'valid';
 }
 
+/**
+ * The list filter's version of `expiryState` — same thresholds, run in Mongo
+ * instead of in JS, so a vehicle badged "due soon" on the page can never be
+ * the one the "due soon" filter leaves out.
+ */
+function expiryClause(field: 'registrationExpiresOn' | 'nextServiceDueOn', state: ExpiryFilter): Record<string, unknown> {
+  const today = todayIso();
+  const soonCutoff = shiftDays(DUE_SOON_DAYS);
+
+  if (state === 'expired') return { [field]: { $ne: null, $lt: today } };
+  if (state === 'due-soon') return { [field]: { $ne: null, $gte: today, $lte: soonCutoff } };
+  return { $or: [{ [field]: null }, { [field]: { $gt: soonCutoff } }] };
+}
+
 /** The driver app's language → the workshop's. See the note at the call site. */
 const SEVERITY_TO_FLEET: Record<string, VehicleDefect['severity']> = {
   monitor: 'low',
@@ -572,6 +595,20 @@ async function openDefectCounts(regos: string[]): Promise<Map<string, number>> {
   ]);
 
   return new Map(counts.map((row) => [row._id, row.count]));
+}
+
+/**
+ * Every rego with at least one unresolved defect — fleet-wide, not just this
+ * page. The "has open defects" filter has to select before pagination, so it
+ * cannot reuse `openDefectCounts`, which is scoped to the rows already fetched.
+ */
+async function openDefectRegos(): Promise<Set<string>> {
+  const rows = await VehicleDefectModel.aggregate<{ _id: string }>([
+    { $match: { status: { $ne: 'resolved' } } },
+    { $group: { _id: '$vehicleRego' } },
+  ]);
+
+  return new Set(rows.map((row) => row._id));
 }
 
 function todayIso(): string {

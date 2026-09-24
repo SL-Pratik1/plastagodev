@@ -62,6 +62,19 @@ function readEnvPort(file: string, key: string, fallback: number): number {
 }
 
 /**
+ * A surface port set in the process environment, which wins over `.env` — the
+ * same precedence dotenv gives every other variable.
+ *
+ * How the e2e launcher (`scripts/e2e.mjs`) moves its surfaces: `--port` alone
+ * moves the server but not the cross-surface links built from these numbers,
+ * so an isolated admin on 5273 still linked to the everyday driver app on 5176.
+ */
+function processPort(key: string): number | null {
+  const port = Number(process.env[key]);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : null;
+}
+
+/**
  * The ports THIS checkout is configured for — not the defaults.
  *
  * Resolved from the `.env` files rather than baked in, because a checkout that
@@ -72,9 +85,15 @@ function readEnvPort(file: string, key: string, fallback: number): number {
 function devPorts() {
   return {
     api: readEnvPort('../api/.env', 'PORT', DEFAULT_PORTS.api),
-    admin: readEnvPort('./.env', 'PLASTAGO_PORT_ADMIN', DEFAULT_PORTS.admin),
-    portal: readEnvPort('./.env', 'PLASTAGO_PORT_PORTAL', DEFAULT_PORTS.portal),
-    driver: readEnvPort('./.env', 'PLASTAGO_PORT_DRIVER', DEFAULT_PORTS.driver),
+    admin:
+      processPort('PLASTAGO_PORT_ADMIN') ??
+      readEnvPort('./.env', 'PLASTAGO_PORT_ADMIN', DEFAULT_PORTS.admin),
+    portal:
+      processPort('PLASTAGO_PORT_PORTAL') ??
+      readEnvPort('./.env', 'PLASTAGO_PORT_PORTAL', DEFAULT_PORTS.portal),
+    driver:
+      processPort('PLASTAGO_PORT_DRIVER') ??
+      readEnvPort('./.env', 'PLASTAGO_PORT_DRIVER', DEFAULT_PORTS.driver),
   };
 }
 

@@ -7,12 +7,13 @@ import type {
   GeoFix,
   PreStartSubmission,
   RunSheetDay,
+  RunStop,
   SiteRiskAssessment,
   StatusUpdate,
   TipOffEntry,
   WeightCapture,
 } from '@plastago/shared';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { useServices } from '@/services/services-context';
 
 /**
@@ -176,18 +177,80 @@ export function useRemovePhoto() {
   });
 }
 
-export function useMarkFutile() {
-  const { driverRun: run } = useServices();
-  return useRunMutation(({ jobId, input }: { jobId: string; input: FutileReport }) =>
-    run.markFutile(jobId, input),
+/**
+ * Writes what a queued report is known to have done into every cached view of
+ * its job — the job itself and each run sheet that lists it.
+ *
+ * ── Why the exception reports patch rather than invalidate ────────────────
+ * The reason `useSubmitPreStart` gives, and it bit harder here. The report is
+ * QUEUED, so invalidating re-read the job before the server had been told: the
+ * phone cached "arrived" as fresh, and the job the driver had just reported
+ * came straight back with Can't collect and Contaminated still on it — for up
+ * to a minute with signal, and until the queue drained without. Drivers
+ * reported the same load again, because the screen said they had not.
+ *
+ * In-flight reads are cancelled first: one that left before this write would
+ * otherwise land after it and put the old answer back. `onOutboxSynced` in the
+ * driver shell re-reads once the report has actually reached the server.
+ */
+async function patchCachedStop(
+  queryClient: QueryClient,
+  jobId: string,
+  patch: { job: (job: DriverJob) => DriverJob; stop?: (stop: RunStop) => RunStop },
+): Promise<void> {
+  await queryClient.cancelQueries({ queryKey: runKeys.all });
+
+  queryClient.setQueryData(runKeys.job(jobId), (current: DriverJob | undefined) =>
+    current ? patch.job(current) : current,
+  );
+
+  const patchStop = patch.stop;
+  if (!patchStop) return;
+
+  const onSheet = (stop: RunStop) => (stop.jobId === jobId ? patchStop(stop) : stop);
+  queryClient.setQueriesData<RunSheetDay>({ queryKey: ['run', 'sheet'] }, (current) =>
+    current
+      ? {
+          ...current,
+          stops: current.stops.map(onSheet),
+          runs: current.runs.map((run) => ({ ...run, stops: run.stops.map(onSheet) })),
+        }
+      : current,
   );
 }
 
+/** M4.6 — could not collect. Ends the job, so the job and the run sheet both say so. */
+export function useMarkFutile() {
+  const { driverRun: run } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ jobId, input }: { jobId: string; input: FutileReport }) =>
+      run.markFutile(jobId, input),
+    onSuccess: (_result, { jobId, input }) =>
+      patchCachedStop(queryClient, jobId, {
+        job: (job) => ({ ...job, status: 'futile', completedAt: input.occurredAt }),
+        stop: (stop) => ({ ...stop, status: 'futile' }),
+      }),
+  });
+}
+
+/** M4.7 — one contamination report per job, so the job says it has been made. */
 export function useMarkContaminated() {
   const { driverRun: run } = useServices();
-  return useRunMutation(({ jobId, input }: { jobId: string; input: ContaminationReport }) =>
-    run.markContaminated(jobId, input),
-  );
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ jobId, input }: { jobId: string; input: ContaminationReport }) =>
+      run.markContaminated(jobId, input),
+    onSuccess: (_result, { jobId, input }) =>
+      patchCachedStop(queryClient, jobId, {
+        job: (job) => ({
+          ...job,
+          contamination: { reportedAt: input.occurredAt, type: input.type, extent: input.extent },
+        }),
+      }),
+  });
 }
 
 /**

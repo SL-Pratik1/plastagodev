@@ -106,6 +106,72 @@ export const DriverPhotoSchema = z
   })
   .meta({ id: 'DriverPhoto' });
 
+/**
+ * What a photo is evidence OF: the pickup itself, or one of the two exception
+ * reports.
+ *
+ * ── Why this is decided in one place ──────────────────────────────────────
+ * The could-not-collect and contamination screens take photos onto the same job
+ * as the five-shot checklist, and every screen used to show every photo. So the
+ * could-not-collect screen listed "pile before" as its evidence — and counted
+ * it, which let a report through with no photo of the problem at all — while
+ * the checklist filed the locked gate under "anything else". The office review
+ * screens then showed all of them as the evidence for one charge.
+ *
+ * Each screen now asks this function, and so does the API when it picks the
+ * photos an office decision rests on, so the phone and the console cannot
+ * disagree about which picture belongs to which report.
+ */
+export const PHOTO_PURPOSES = ['job', 'futile', 'contamination'] as const;
+export type PhotoPurpose = (typeof PHOTO_PURPOSES)[number];
+
+/** The `slot` an exception screen files its evidence under. */
+export const EVIDENCE_PHOTO_SLOTS = {
+  futile: 'futile',
+  contamination: 'contamination',
+} as const satisfies Record<Exclude<PhotoPurpose, 'job'>, string>;
+
+/**
+ * The captions those screens have always written.
+ *
+ * ⚠️ Load-bearing for photos taken BEFORE the slot tag existed: they were filed
+ * as slot-less extras, and the caption is the only thing that says which report
+ * they belong to. Change these strings and every such photo silently becomes an
+ * ordinary job photo again — including on reviews the office has not decided.
+ */
+export const EVIDENCE_PHOTO_CAPTIONS = {
+  futile: 'Could not collect — evidence',
+  contamination: 'Contamination — evidence',
+} as const satisfies Record<Exclude<PhotoPurpose, 'job'>, string>;
+
+export function photoPurpose(photo: { slot?: string | null; caption: string }): PhotoPurpose {
+  if (photo.slot === EVIDENCE_PHOTO_SLOTS.futile) return 'futile';
+  if (photo.slot === EVIDENCE_PHOTO_SLOTS.contamination) return 'contamination';
+
+  // `== null` rather than `=== null`: a stored photo older than the field has
+  // no `slot` at all, and that is the legacy case this branch exists for.
+  if (photo.slot == null) {
+    if (photo.caption === EVIDENCE_PHOTO_CAPTIONS.futile) return 'futile';
+    if (photo.caption === EVIDENCE_PHOTO_CAPTIONS.contamination) return 'contamination';
+  }
+
+  return 'job';
+}
+
+/**
+ * Which photos an office decision on a charge rests on.
+ *
+ * A contamination charge is approved by looking at the contamination, and a
+ * futile fee by looking at what stopped the pickup — not at the pile-before
+ * shot of a different moment. Every other charge (extra bags, extra time, an
+ * office adjustment) is judged against the ordinary job photos.
+ */
+export function evidencePurposeForCharge(code: string): PhotoPurpose {
+  if (code === 'contamination') return 'contamination';
+  if (code === 'futile-pickup') return 'futile';
+  return 'job';
+}
+
 /** One stop on today's run. Flat: a run sheet must render with no lookups. */
 export const RunStopSchema = z
   .object({
@@ -238,6 +304,70 @@ export const RunSheetDaySchema = z
   })
   .meta({ id: 'RunSheetDay' });
 
+/* ── Contamination, what it was and how much (M4.7) ──────────────────────── */
+
+/**
+ * M4.7 — what the contamination was, so it becomes reportable.
+ *
+ * Defined here rather than with the report below because the job detail needs
+ * it too: the job says what was reported on it.
+ */
+export const CONTAMINATION_TYPES = [
+  'timber',
+  'insulation',
+  'metal',
+  'general-waste',
+  'wet-board',
+  'other',
+] as const;
+export const ContaminationTypeSchema = z
+  .enum(CONTAMINATION_TYPES)
+  .meta({ id: 'ContaminationType' });
+export type ContaminationType = z.infer<typeof ContaminationTypeSchema>;
+
+export const CONTAMINATION_TYPE_LABELS: Record<ContaminationType, string> = {
+  timber: 'Timber offcuts',
+  insulation: 'Insulation',
+  metal: 'Metal — track, screws, offcuts',
+  'general-waste': 'General site rubbish',
+  'wet-board': 'Wet or mouldy board',
+  other: 'Something else',
+};
+
+export const CONTAMINATION_EXTENTS = ['light', 'moderate', 'heavy'] as const;
+export const ContaminationExtentSchema = z
+  .enum(CONTAMINATION_EXTENTS)
+  .meta({ id: 'ContaminationExtent' });
+export type ContaminationExtent = z.infer<typeof ContaminationExtentSchema>;
+
+export const CONTAMINATION_EXTENT_LABELS: Record<ContaminationExtent, string> = {
+  light: 'Light — a few pieces',
+  moderate: 'Moderate — through part of the load',
+  heavy: 'Heavy — through most of the load',
+};
+
+/**
+ * The contamination report already made on a job.
+ *
+ * ── Why the job carries it ────────────────────────────────────────────────
+ * A job takes ONE contamination report. The phone had no way to know one had
+ * been made, so the button stayed on the job and a driver could — and did —
+ * report the same load eleven times. This is what lets the job screen say
+ * "reported" instead of offering the form again.
+ *
+ * `type` and `extent` are null only for a report made before they were stored
+ * with it: those survive as a charge whose note may not parse, and inventing a
+ * type for them would put words in the driver's mouth.
+ */
+export const DriverContaminationSchema = z
+  .object({
+    reportedAt: IsoDateTimeSchema,
+    type: ContaminationTypeSchema.nullable(),
+    extent: ContaminationExtentSchema.nullable(),
+  })
+  .meta({ id: 'DriverContamination' });
+export type DriverContamination = z.infer<typeof DriverContaminationSchema>;
+
 /* ── Job detail (M4.1) ────────────────────────────────────────────────────── */
 
 export const DriverJobSchema = RunStopSchema.extend({
@@ -294,6 +424,14 @@ export const DriverJobSchema = RunStopSchema.extend({
       fromDriver: z.boolean(),
     }),
   ),
+  /**
+   * M4.7 — the contamination report on this job, or null when there is none.
+   * See `DriverContaminationSchema`.
+   *
+   * Defaulted so a phone updated before the API still parses the job it gets
+   * back: an older API simply has no report to describe.
+   */
+  contamination: DriverContaminationSchema.nullable().default(null),
 }).meta({ id: 'DriverJob' });
 
 /* ── Status updates (M4.2 · F45, F11, W26, W29, W36) ──────────────────────── */
@@ -508,41 +646,6 @@ export const FutileReportSchema = DriverActionEnvelopeSchema.extend({
   photoIds: z.array(z.string()).min(1, 'Take at least one photo — the charge depends on it'),
 }).meta({ id: 'FutileReport' });
 
-/** M4.7 — what the contamination was, so it becomes reportable. */
-export const CONTAMINATION_TYPES = [
-  'timber',
-  'insulation',
-  'metal',
-  'general-waste',
-  'wet-board',
-  'other',
-] as const;
-export const ContaminationTypeSchema = z
-  .enum(CONTAMINATION_TYPES)
-  .meta({ id: 'ContaminationType' });
-export type ContaminationType = z.infer<typeof ContaminationTypeSchema>;
-
-export const CONTAMINATION_TYPE_LABELS: Record<ContaminationType, string> = {
-  timber: 'Timber offcuts',
-  insulation: 'Insulation',
-  metal: 'Metal — track, screws, offcuts',
-  'general-waste': 'General site rubbish',
-  'wet-board': 'Wet or mouldy board',
-  other: 'Something else',
-};
-
-export const CONTAMINATION_EXTENTS = ['light', 'moderate', 'heavy'] as const;
-export const ContaminationExtentSchema = z
-  .enum(CONTAMINATION_EXTENTS)
-  .meta({ id: 'ContaminationExtent' });
-export type ContaminationExtent = z.infer<typeof ContaminationExtentSchema>;
-
-export const CONTAMINATION_EXTENT_LABELS: Record<ContaminationExtent, string> = {
-  light: 'Light — a few pieces',
-  moderate: 'Moderate — through part of the load',
-  heavy: 'Heavy — through most of the load',
-};
-
 /**
  * M4.7 — raises a $90 charge into the approval queue (M2.7).
  *
@@ -556,6 +659,26 @@ export const ContaminationReportSchema = DriverActionEnvelopeSchema.extend({
   note: z.string().trim().max(500),
   photoIds: z.array(z.string()).min(1, 'Photograph the contamination — the charge depends on it'),
 }).meta({ id: 'ContaminationReport' });
+
+/**
+ * What actually happened to the money when a contamination was reported.
+ *
+ * ── Why this replaced a 204 ───────────────────────────────────────────────
+ * A job carries at most one contamination charge: the second report on the same
+ * job is recorded as an event but raises nothing, which is deliberate — it stops
+ * a double-tap billing a builder twice. The endpoint said 204 either way, so the
+ * phone told the driver "a charge goes to the office for approval" on a report
+ * that had raised no charge at all. The driver then believes the load is covered
+ * and nobody finds out until the invoice does not match the site.
+ *
+ * `chargeRaised: false` is not a failure — the report is still on the record.
+ * It only means the screen must say what really happened.
+ */
+export const ContaminationOutcomeSchema = z
+  .object({
+    chargeRaised: z.boolean(),
+  })
+  .meta({ id: 'ContaminationOutcome' });
 
 /* ── Pre-start and site risk (M4.8 · F56, F14, W37, W41) ─────────────────── */
 
@@ -889,6 +1012,7 @@ export type TipOffEntry = z.infer<typeof TipOffEntrySchema>;
 export type TipOffReconciliation = z.infer<typeof TipOffReconciliationSchema>;
 export type FutileReport = z.infer<typeof FutileReportSchema>;
 export type ContaminationReport = z.infer<typeof ContaminationReportSchema>;
+export type ContaminationOutcome = z.infer<typeof ContaminationOutcomeSchema>;
 export type PreStartSubmission = z.infer<typeof PreStartSubmissionSchema>;
 export type SiteRiskAssessment = z.infer<typeof SiteRiskAssessmentSchema>;
 export type DefectReport = z.infer<typeof DefectReportSchema>;

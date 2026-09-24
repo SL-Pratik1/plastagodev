@@ -1,4 +1,10 @@
-import { EXCEPTION_REASONS, EXCEPTION_REASON_LABELS, type ExceptionReason } from '@plastago/shared';
+import {
+  EVIDENCE_PHOTO_CAPTIONS,
+  EVIDENCE_PHOTO_SLOTS,
+  EXCEPTION_REASONS,
+  EXCEPTION_REASON_LABELS,
+  type ExceptionReason,
+} from '@plastago/shared';
 import {
   Alert,
   ErrorState,
@@ -11,9 +17,16 @@ import {
   useToast,
 } from '@plastago/ui';
 import { CameraIcon, CircleSlashIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { useAddPhoto, useDriverJob, useMarkFutile } from '@/features/driver/queries';
+import { PhotoThumb } from '@/components/driver/photo-grid';
+import { evidencePhotos } from '@/components/driver/photo-rules';
+import {
+  useAddPhoto,
+  useDriverJob,
+  useMarkFutile,
+  useRemovePhoto,
+} from '@/features/driver/queries';
 import { currentPosition } from '@/lib/geolocation';
 
 /**
@@ -67,24 +80,123 @@ export function DriverJobFutilePage() {
     );
   }
 
-  return <FutileForm key={job.jobId} job={job} />;
+  /*
+   * ⚠️ The form is for a job that can still be reported.
+   *
+   * It used to render for any job — including one already marked futile, which
+   * is exactly where the phone's Back button lands after submitting. The driver
+   * saw the form again, reasonably concluded the report had not gone, and filed
+   * it a second time.
+   */
+  if (job.status === 'futile') {
+    return (
+      <ReportClosed
+        jobId={job.jobId}
+        jobNumber={job.jobNumber}
+        tone="success"
+        title="Already reported as could not collect"
+      >
+        The office will review it. There is nothing more to do here.
+      </ReportClosed>
+    );
+  }
+
+  if (job.status === 'completed' || job.status === 'admin-complete' || job.status === 'cancelled') {
+    return (
+      <ReportClosed
+        jobId={job.jobId}
+        jobNumber={job.jobNumber}
+        tone="info"
+        title="This job can’t be marked as could not collect"
+      >
+        {job.status === 'cancelled'
+          ? 'The office cancelled it — do not collect it.'
+          : 'It has already been completed.'}
+      </ReportClosed>
+    );
+  }
+
+  return <FutileForm key={job.jobId} job={job} onStale={() => void refetch()} />;
 }
 
-function FutileForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['data']> }) {
+/** In place of the form, when there is nothing left to report. */
+function ReportClosed({
+  jobId,
+  jobNumber,
+  tone,
+  title,
+  children,
+}: {
+  jobId: string;
+  jobNumber: number;
+  tone: 'success' | 'info';
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-4">
+      <Link
+        to={`/driver/jobs/${jobId}`}
+        className="focus-ring inline-block rounded text-sm text-muted-foreground underline-offset-4"
+      >
+        ← Job #{jobNumber}
+      </Link>
+      <Alert variant={tone} title={title}>
+        {children}
+      </Alert>
+      <Link to="/driver" className={`${buttonVariants({ size: 'lg' })} min-h-14 w-full`}>
+        Back to the run
+      </Link>
+    </div>
+  );
+}
+
+function FutileForm({
+  job,
+  onStale,
+}: {
+  job: NonNullable<ReturnType<typeof useDriverJob>['data']>;
+  /** Re-signs the thumbnails' read URLs; see the note on `PhotoThumb`. */
+  onStale: () => void;
+}) {
   const toast = useToast();
   const navigate = useNavigate();
   const markFutile = useMarkFutile();
   const addPhoto = useAddPhoto();
+  const removePhoto = useRemovePhoto();
 
   const [reason, setReason] = useState<ExceptionReason | null>(null);
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [capturing, setCapturing] = useState(false);
 
-  // Photos taken on this visit that are evidence of the failure, not of a
-  // collection. Any photo on the job counts — the driver may already have shot
-  // the front of the site before discovering the problem.
-  const evidence = job.photos;
+  /*
+   * ⚠️ The photos taken HERE — of what stopped the pickup — and nothing else.
+   *
+   * This used to be every photo on the job, so the checklist's "pile before"
+   * and "front of site" were listed as the evidence, sent to the office as the
+   * evidence, and counted towards the one required photo: a driver could report
+   * could-not-collect without ever photographing the locked gate. Filed under
+   * their own slot, they come back here if the driver leaves and returns.
+   */
+  const evidence = evidencePhotos(job.photos, 'futile');
+
+  /*
+   * A wrong shot has to be removable HERE.
+   *
+   * This screen counted the photos and showed none of them, and the only way to
+   * delete one was the separate photos screen — which a driver on the futile
+   * path never opens. So a mis-tap left evidence the office would later approve
+   * a $120 charge on, with no way to tell it was the inside of a pocket.
+   */
+  const remove = async (photoId: string) => {
+    try {
+      await removePhoto.mutateAsync({ jobId: job.jobId, photoId });
+      toast.success('Photo removed');
+    } catch {
+      toast.error('Could not remove that photo');
+    }
+  };
 
   const takePhoto = () => {
     const input = document.createElement('input');
@@ -102,8 +214,9 @@ function FutileForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>[
 
         await addPhoto.mutateAsync({
           jobId: job.jobId,
-          slot: null,
-          caption: 'Could not collect — evidence',
+          // Its own slot, so it is this report's evidence and not a checklist extra.
+          slot: EVIDENCE_PHOTO_SLOTS.futile,
+          caption: EVIDENCE_PHOTO_CAPTIONS.futile,
           blob,
           position,
         });
@@ -165,7 +278,8 @@ function FutileForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>[
         },
       });
       toast.success('Reported', 'The office will review it. You can move on.');
-      await navigate('/driver');
+      // `replace`, so Back does not return to a form for a job already reported.
+      await navigate('/driver', { replace: true });
     } catch {
       toast.error('Could not save that', 'Try again — nothing was lost.');
     }
@@ -243,6 +357,30 @@ function FutileForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>[
             Take
           </button>
         </div>
+
+        {/*
+          ⚠️ The shots themselves, not just a count.
+          This block showed "Photos (1)" and nothing else, so a driver had no way
+          to tell whether the camera had caught the locked gate or their thumb —
+          on the one screen whose entire purpose is evidence that has to survive
+          a challenge. Keyed on the URL so an expired signature remounts the tile
+          with the fresh one; see the note on `PhotoThumb`.
+        */}
+        {evidence.length > 0 && (
+          <ul className="mt-3 flex flex-wrap gap-3">
+            {evidence.map((photo) => (
+              <li key={photo.id}>
+                <PhotoThumb
+                  key={photo.url ?? photo.id}
+                  photo={photo}
+                  label={photo.caption}
+                  onRemove={() => void remove(photo.id)}
+                  onStale={onStale}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <Field

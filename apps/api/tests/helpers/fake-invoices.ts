@@ -25,6 +25,9 @@ import type {
 
 let counter = 0;
 
+/** The statuses an invoice can still be changed in — see `UNSENT_STATUSES`. */
+const UNSENT: readonly InvoiceStatus[] = ['draft', 'awaiting-po'];
+
 function nextId(): string {
   counter += 1;
   return counter.toString(16).padStart(24, '0');
@@ -147,12 +150,51 @@ export function createFakeInvoiceRepository() {
         return Promise.resolve();
       },
 
-      kindsForJob(jobId: string) {
+      forJob(jobId: string) {
         return Promise.resolve(
           [...invoices.values()]
             .filter((invoice) => invoice.jobId === jobId)
-            .map((invoice) => invoice.kind),
+            .map((invoice) => ({
+              id: invoice.id,
+              kind: invoice.kind,
+              status: invoice.status,
+              invoiceNumber: invoice.invoiceNumber,
+              poNumber: invoice.poNumber,
+              lines: invoice.lines.map((line) => ({
+                sourceChargeId: line.sourceChargeId,
+                description: line.description,
+                quantity: line.quantity,
+                unitRate: line.unitRate,
+                amount: line.amount,
+              })),
+            })),
         );
+      },
+
+      /**
+       * ⚠️ The status is in the filter, as in the real update: an invoice that
+       * has gone out is a document a builder is holding, and is never rewritten.
+       */
+      replaceLines(
+        invoiceId: string,
+        input: Pick<CreateInvoiceInput, 'subtotalExGst' | 'gst' | 'totalIncGst' | 'lines'>,
+      ) {
+        const invoice = invoices.get(invoiceId);
+        if (!invoice || !UNSENT.includes(invoice.status)) return Promise.resolve(null);
+
+        invoice.lines = input.lines;
+        invoice.subtotalExGst = input.subtotalExGst;
+        invoice.gst = input.gst;
+        invoice.totalIncGst = input.totalIncGst;
+        invoice.pdfKey = null;
+        return Promise.resolve({ ...invoice } as InvoiceListItem);
+      },
+
+      deleteUnsent(invoiceId: string) {
+        const invoice = invoices.get(invoiceId);
+        if (!invoice || !UNSENT.includes(invoice.status)) return Promise.resolve(false);
+        invoices.delete(invoiceId);
+        return Promise.resolve(true);
       },
 
       /**

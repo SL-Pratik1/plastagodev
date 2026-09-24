@@ -4,11 +4,13 @@ import {
   ChangeRequestItemSchema,
   API_PREFIX,
   AwaitingCallUpSchema,
+  AwaitingPoChaseResultSchema,
   AwaitingPoItemSchema,
   CallUpOutcomeSchema,
   CallUpSchema,
   ChargeApprovalDetailSchema,
   ChargeApprovalItemSchema,
+  ChargeDecisionOutcomeSchema,
   FutileReviewItemSchema,
   FutileReviewSchema,
   LeadAttachmentSchema,
@@ -39,8 +41,6 @@ import { viaService } from './to-service-error.js';
  *
  * Endpoint paths appear here and nowhere else in the app.
  */
-
-const ChangedSchema = z.object({ changed: z.number().int().nonnegative() });
 
 /**
  * The media type to declare for a picked file.
@@ -188,15 +188,18 @@ export function createHttpQueueService(api: ApiClient): QueueService {
        * The queue is worked in batches, and the count comes back rather than an
        * error because a grid selection is expected to contain rows somebody else
        * already actioned.
+       *
+       * An approval also says where the money went — which invoices it raised
+       * or topped up, and which jobs are still under way. See
+       * `ChargeDecisionOutcomeSchema`.
        */
-      const { changed } = await viaService(() =>
+      return viaService(() =>
         api.request(`${base}/approvals/decision`, {
           method: 'POST',
           body: { ids, ...decision },
-          schema: ChangedSchema,
+          schema: ChargeDecisionOutcomeSchema,
         }),
       );
-      return changed;
     },
 
     /* ── M5.4 · change requests from the portal ───────────────────────────── */
@@ -229,16 +232,14 @@ export function createHttpQueueService(api: ApiClient): QueueService {
         }),
       ),
 
-    awaitingPoChase: async (ids: readonly string[]) => {
-      const { changed } = await viaService(() =>
+    awaitingPoChase: (ids: readonly string[]) =>
+      viaService(() =>
         api.request(`${base}/awaiting-po/chase`, {
           method: 'POST',
           body: { ids },
-          schema: ChangedSchema,
+          schema: AwaitingPoChaseResultSchema,
         }),
-      );
-      return changed;
-    },
+      ),
 
     /* ── M2.12 · AI purchase-order review ─────────────────────────────────── */
 

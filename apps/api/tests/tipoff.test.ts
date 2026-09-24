@@ -203,6 +203,54 @@ describe('dockets that do not make sense', () => {
     expect(result.warning).toMatch(/no hand-load stops/);
   });
 
+  /*
+   * Two scales never agree to the kilogram. On a run where every stop was
+   * bagged there is nowhere to put the difference, and refusing it meant the
+   * run could only be tipped off when the weighbridge matched the crane
+   * exactly — so it never could be.
+   */
+  describe('an all-bagged run, where the two scales disagree a little', () => {
+    const BAGGED = [
+      stop({ jobNumber: 1, loadType: 'bagged', craneScaleKg: 820 }),
+      stop({ jobNumber: 2, loadType: 'bagged', craneScaleKg: 610 }),
+    ];
+
+    it('accepts a weighbridge a little over the crane total, and gives the difference to no job', () => {
+      const result = reconcileTipOff({ ...RUN, totalKg: 1445, stops: BAGGED });
+
+      expect(result.looksWrong).toBe(false);
+      expect(result.remainderKg).toBe(15);
+      expect(result.warning).toMatch(/within the normal difference/);
+      // The crane figures stand exactly as weighed; nothing is imputed.
+      expect(result.lines.map((line) => line.measuredKg)).toEqual([820, 610]);
+      expect(result.lines.every((line) => line.imputedKg === null)).toBe(true);
+    });
+
+    it('accepts a weighbridge a little under the crane total', () => {
+      const result = reconcileTipOff({ ...RUN, totalKg: 1420, stops: BAGGED });
+
+      expect(result.looksWrong).toBe(false);
+      expect(result.remainderKg).toBe(-10);
+    });
+
+    // A mistyped crane weight is still caught at the weighbridge.
+    it('still refuses a difference too big to be the scales', () => {
+      expect(reconcileTipOff({ ...RUN, totalKg: 1800, stops: BAGGED }).looksWrong).toBe(true);
+      expect(reconcileTipOff({ ...RUN, totalKg: 1100, stops: BAGGED }).looksWrong).toBe(true);
+    });
+
+    // A hand load cannot weigh less than nothing, so no tolerance applies.
+    it('still refuses an overshoot when there are hand loads on the run', () => {
+      const result = reconcileTipOff({
+        ...RUN,
+        totalKg: 1420,
+        stops: [...BAGGED, stop({ jobNumber: 3, expectedAreaM2: 300 })],
+      });
+
+      expect(result.looksWrong).toBe(true);
+    });
+  });
+
   it('is content when the bagged weights account for the whole docket', () => {
     const result = reconcileTipOff({
       ...RUN,

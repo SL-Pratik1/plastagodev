@@ -41,6 +41,29 @@ export interface ListInvoicesQuery {
   issuedWindow?: string | undefined;
 }
 
+/**
+ * The statuses an invoice can still be changed in: nothing has gone to the
+ * customer. `unknown` is NOT one — it is the payment state TransVirtual could
+ * not report for an invoice that was sent long ago.
+ */
+export const UNSENT_STATUSES: InvoiceStatus[] = ['draft', 'awaiting-po'];
+
+/** One of a job's invoices as the billing sync reads it. See `forJob`. */
+export interface JobInvoiceRow {
+  id: string;
+  kind: InvoiceKind;
+  status: InvoiceStatus;
+  invoiceNumber: number;
+  poNumber: string | null;
+  lines: Array<{
+    sourceChargeId: string | null;
+    description: string;
+    quantity: number;
+    unitRate: string;
+    amount: string;
+  }>;
+}
+
 export interface CreateInvoiceInput {
   invoiceNumber: number;
   kind: InvoiceKind;
@@ -275,16 +298,134 @@ export const invoiceRepository = {
     ]);
   },
 
-  /** Which kinds already exist for a job — the duplicate-billing guard. */
-  async kindsForJob(jobId: string): Promise<InvoiceKind[]> {
+  /**
+   * Every invoice raised for a job, with what each line was raised from.
+   *
+   * The billing sync reads this to tell what is already billed — a charge on a
+   * SENT invoice is settled — from what an unsent invoice still carries and may
+   * need bringing up to date.
+   */
+  async forJob(jobId: string): Promise<JobInvoiceRow[]> {
     if (!mongoose.isValidObjectId(jobId)) return [];
 
     const rows = await InvoiceModel.find(
       { jobId: new mongoose.Types.ObjectId(jobId) },
-      { kind: 1 },
-    ).lean<Array<{ kind: InvoiceKind }>>();
+      { kind: 1, status: 1, invoiceNumber: 1, poNumber: 1 },
+    ).lean<
+      Array<{
+        _id: mongoose.Types.ObjectId;
+        kind: InvoiceKind;
+        status: InvoiceStatus;
+        invoiceNumber: number;
+        poNumber: string | null;
+      }>
+    >();
 
-    return rows.map((row) => row.kind);
+    if (rows.length === 0) return [];
+
+    const lines = await InvoiceLineModel.find(
+      { invoiceId: { $in: rows.map((row) => row._id) } },
+      { invoiceId: 1, sourceChargeId: 1, description: 1, quantity: 1, unitRate: 1, amount: 1 },
+    )
+      .sort({ position: 1 })
+      .lean<
+        Array<{
+          invoiceId: mongoose.Types.ObjectId;
+          sourceChargeId: mongoose.Types.ObjectId | null;
+          description: string;
+          quantity: number;
+          unitRate: mongoose.Types.Decimal128;
+          amount: mongoose.Types.Decimal128;
+        }>
+      >();
+
+    return rows.map((row) => ({
+      id: row._id.toHexString(),
+      kind: row.kind,
+      status: row.status,
+      invoiceNumber: row.invoiceNumber,
+      poNumber: row.poNumber ?? null,
+      lines: lines
+        .filter((line) => line.invoiceId.equals(row._id))
+        .map((line) => ({
+          sourceChargeId: line.sourceChargeId ? line.sourceChargeId.toHexString() : null,
+          description: line.description,
+          quantity: line.quantity,
+          unitRate: fromDecimal128(line.unitRate),
+          amount: fromDecimal128(line.amount),
+        })),
+    }));
+  },
+
+  /**
+   * Rewrites an UNSENT invoice's lines and totals.
+   *
+   * ⚠️ The status is in the FILTER: an invoice that went out between the read
+   * and this write is a document a builder is holding, and must not change
+   * under them. Null means it had already gone, and nothing was written.
+   *
+   * The stored PDF is cleared with it — it shows the old lines, and an unsent
+   * invoice is re-rendered on demand.
+   */
+  async replaceLines(
+    invoiceId: string,
+    input: Pick<CreateInvoiceInput, 'subtotalExGst' | 'gst' | 'totalIncGst' | 'lines'>,
+  ): Promise<InvoiceListItem | null> {
+    if (!mongoose.isValidObjectId(invoiceId)) return null;
+    const _id = new mongoose.Types.ObjectId(invoiceId);
+
+    const updated = await InvoiceModel.findOneAndUpdate(
+      { _id, status: { $in: UNSENT_STATUSES } },
+      {
+        $set: {
+          subtotalExGst: toDecimal128(input.subtotalExGst),
+          gst: toDecimal128(input.gst),
+          totalIncGst: toDecimal128(input.totalIncGst),
+          pdfKey: null,
+          pdfRenderedAt: null,
+        },
+      },
+      { returnDocument: 'after' },
+    ).lean<RawInvoice>();
+
+    if (!updated) return null;
+
+    await InvoiceLineModel.deleteMany({ invoiceId: _id });
+    if (input.lines.length > 0) {
+      await InvoiceLineModel.insertMany(
+        input.lines.map((line, position) => ({
+          invoiceId: _id,
+          description: line.description,
+          quantity: line.quantity,
+          unitRate: toDecimal128(line.unitRate),
+          amount: toDecimal128(line.amount),
+          raisedBy: line.raisedBy,
+          sourceChargeId: line.sourceChargeId
+            ? new mongoose.Types.ObjectId(line.sourceChargeId)
+            : null,
+          position,
+        })),
+      );
+    }
+
+    return toListItem(updated);
+  },
+
+  /**
+   * Removes an UNSENT invoice that has nothing billable left on it.
+   *
+   * Only ever an unsent one, for the reason `replaceLines` gives. Returns
+   * whether anything was removed.
+   */
+  async deleteUnsent(invoiceId: string): Promise<boolean> {
+    if (!mongoose.isValidObjectId(invoiceId)) return false;
+    const _id = new mongoose.Types.ObjectId(invoiceId);
+
+    const result = await InvoiceModel.deleteOne({ _id, status: { $in: UNSENT_STATUSES } });
+    if (result.deletedCount === 0) return false;
+
+    await InvoiceLineModel.deleteMany({ invoiceId: _id });
+    return true;
   },
 
   /**

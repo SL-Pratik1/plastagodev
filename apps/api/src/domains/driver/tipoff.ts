@@ -64,6 +64,32 @@ function roundKg(value: number): number {
   return Math.round(value);
 }
 
+/**
+ * How far the weighbridge may differ from the crane scale when there is
+ * nowhere to put the difference.
+ *
+ * ── Why a tolerance exists at all ─────────────────────────────────────────
+ * Two scales never agree to the kilogram: a weighbridge reads in 20 kg steps,
+ * and a crane scale moves with the bag's swing. On a run where every stop was
+ * bagged and weighed, the docket and the crane total differ by a little every
+ * time, and there is no hand-load stop to take the difference. With no
+ * tolerance, such a run could only be tipped off when the two agreed exactly —
+ * which is never — so it could not be closed, and its jobs never reached a
+ * certificate. (This became reachable once `loadType` was actually stored;
+ * before that every stop reconciled as a hand load.)
+ *
+ * Inside the tolerance the crane figures stand exactly as weighed — they are
+ * measurements of each bag — and the difference goes to no job. Outside it the
+ * docket is still refused, because that is a typing mistake, not scale drift.
+ */
+const SCALE_TOLERANCE = { minimumKg: 20, fraction: 0.05 } as const;
+
+function withinScaleTolerance(differenceKg: number, totalKg: number): boolean {
+  return (
+    Math.abs(differenceKg) <= Math.max(SCALE_TOLERANCE.minimumKg, totalKg * SCALE_TOLERANCE.fraction)
+  );
+}
+
 export function reconcileTipOff(input: ReconciliationInput): TipOffReconciliation {
   const bagged = input.stops.filter((stop) => stop.loadType === 'bagged');
   const handLoads = input.stops.filter((stop) => stop.loadType === 'hand-load');
@@ -165,9 +191,24 @@ function assess(input: {
   splittableCount: number;
   handLoadAreaM2: number;
 }): { looksWrong: boolean; warning: string | null } {
-  // Measured more than the weighbridge saw. Something was typed wrong, and
-  // committing it would put negative weight on a certificate.
+  const differenceKg = Math.abs(input.remainderKg);
+
+  // Measured more than the weighbridge saw.
   if (input.remainderKg < 0) {
+    /*
+     * With nothing hand-loaded, a small overshoot is the two scales
+     * disagreeing — see `SCALE_TOLERANCE`. With hand loads on the run it is
+     * never that: they would have to weigh less than nothing.
+     */
+    if (input.handLoadCount === 0 && withinScaleTolerance(input.remainderKg, input.totalKg)) {
+      return {
+        looksWrong: false,
+        warning: `The crane weights come to ${String(input.measuredKg)} kg, ${String(differenceKg)} kg more than the weighbridge total of ${String(input.totalKg)} kg. That is within the normal difference between the two scales, so the crane weights stand.`,
+      };
+    }
+
+    // Something was typed wrong, and committing it would put negative weight
+    // on a certificate.
     return {
       looksWrong: true,
       warning: `The crane weights add up to ${String(input.measuredKg)} kg, which is more than the weighbridge total of ${String(input.totalKg)} kg. Check the docket and the bag weights.`,
@@ -176,9 +217,16 @@ function assess(input: {
 
   // Weight to share out, but nobody to share it with.
   if (input.remainderKg > 0 && input.handLoadCount === 0) {
+    if (withinScaleTolerance(input.remainderKg, input.totalKg)) {
+      return {
+        looksWrong: false,
+        warning: `The weighbridge total is ${String(differenceKg)} kg more than the crane weights. That is within the normal difference between the two scales, so the crane weights stand and the ${String(differenceKg)} kg is not given to any job.`,
+      };
+    }
+
     return {
       looksWrong: true,
-      warning: `There is ${String(input.remainderKg)} kg left after the bagged jobs, but no hand-load stops on this run to attribute it to.`,
+      warning: `There is ${String(input.remainderKg)} kg left after the bagged jobs, but no hand-load stops on this run to attribute it to. Check the docket and the bag weights.`,
     };
   }
 

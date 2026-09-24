@@ -1,6 +1,9 @@
 import {
+  CONTAMINATION_EXTENT_LABELS,
+  CONTAMINATION_TYPE_LABELS,
   DRIVER_TRANSITION_LABELS,
   LOAD_TYPE_LABELS,
+  type DriverContamination,
   type DriverJob,
   type DriverTransition,
   type SraDocument,
@@ -40,7 +43,7 @@ import {
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ActionButton } from '@/components/driver/action-button';
-import { missingRequiredPhotos } from '@/components/driver/photo-rules';
+import { jobPhotos, missingRequiredPhotos } from '@/components/driver/photo-rules';
 import {
   useCompleteJob,
   useDriverJob,
@@ -124,6 +127,8 @@ function JobScreen({ job }: { job: DriverJob }) {
   const failed = job.status === 'futile' || job.status === 'cancelled';
 
   const missingPhotos = missingRequiredPhotos(job.photos, job.requiredPhotos);
+  // What the Photos screen lists — not the exception reports' own evidence.
+  const checklistPhotoCount = jobPhotos(job.photos).length;
   const needsWeights = job.weightsRecordedAt === null;
   const riskFormDone = job.riskAssessmentDoneAt !== null;
   const needsRiskForm = job.riskAssessmentRequired && !riskFormDone;
@@ -157,7 +162,8 @@ function JobScreen({ job }: { job: DriverJob }) {
       // M4.8b — arriving is what pops the risk assessment. Matt described the
       // sequence precisely, and the form appearing on its own is the mechanism.
       if (to === 'arrived' && job.riskAssessmentRequired) {
-        toast.info('Site risk assessment required', 'Domaine need this before you start.');
+        // The customer's own name — this used to say "Domaine" on every job.
+        toast.info('Site risk assessment required', `${job.accountName} require it before you start.`);
         await navigate(`/driver/jobs/${job.jobId}/risk-assessment`);
         return;
       }
@@ -415,7 +421,7 @@ function JobScreen({ job }: { job: DriverJob }) {
                 label="Photos"
                 hint={
                   missingPhotos.length === 0
-                    ? `${String(job.photos.length)} taken — all required shots done`
+                    ? `${String(checklistPhotoCount)} taken — all required shots done`
                     : `${String(missingPhotos.length)} still needed: ${missingPhotos.map((slot) => slot.label.toLowerCase()).join(', ')}`
                 }
                 icon={CameraIcon}
@@ -489,12 +495,21 @@ function JobScreen({ job }: { job: DriverJob }) {
                 tone="danger"
                 onClick={() => void navigate(`/driver/jobs/${job.jobId}/futile`)}
               />
-              <ActionButton
-                label="Contaminated"
-                icon={TriangleAlertIcon}
-                tone="warning"
-                onClick={() => void navigate(`/driver/jobs/${job.jobId}/contamination`)}
-              />
+              {/*
+                ⚠️ One contamination report per job. This button used to stay
+                after the report was made — the phone had no way to know — and a
+                driver filed the same load eleven times.
+              */}
+              {job.contamination === null ? (
+                <ActionButton
+                  label="Contaminated"
+                  icon={TriangleAlertIcon}
+                  tone="warning"
+                  onClick={() => void navigate(`/driver/jobs/${job.jobId}/contamination`)}
+                />
+              ) : (
+                <ContaminationReported report={job.contamination} />
+              )}
             </div>
           )}
         </div>
@@ -662,6 +677,41 @@ function JobScreen({ job }: { job: DriverJob }) {
           )}
         </Field>
       </Dialog>
+    </div>
+  );
+}
+
+/**
+ * Where the Contaminated button was, once the job's report has been made.
+ *
+ * Deliberately NOT a button — not even a disabled one. A control that looks
+ * tappable and does nothing reads as the app being broken, and this is a fact
+ * about the job: it was reported, and here is what was said. A correction goes
+ * to the office through the message button below.
+ */
+function ContaminationReported({ report }: { report: DriverContamination }) {
+  const at = new Date(report.reportedAt).toLocaleTimeString('en-AU', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const what = [
+    report.type === null ? null : CONTAMINATION_TYPE_LABELS[report.type],
+    report.extent === null ? null : CONTAMINATION_EXTENT_LABELS[report.extent].split(' —')[0],
+  ].filter((part): part is string => part !== null && part !== undefined);
+
+  return (
+    <div
+      role="status"
+      className="flex min-h-16 w-full items-center gap-3 rounded-xl border border-warning/50 bg-warning/10 px-4 py-3 text-left"
+    >
+      <CheckCircle2Icon aria-hidden className="size-6 shrink-0 text-warning" />
+      <span className="min-w-0 flex-1">
+        <span className="block text-base leading-tight font-semibold">Contamination reported</span>
+        <span className="mt-0.5 block text-xs leading-snug text-muted-foreground">
+          {[...what, at].join(' · ')}
+        </span>
+      </span>
     </div>
   );
 }

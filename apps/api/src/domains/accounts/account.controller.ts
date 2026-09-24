@@ -41,7 +41,7 @@ export const accountController = {
     req: ValidatedRequest<{ body: typeof AccountDraftSchema }>,
     res: Response,
   ): Promise<void> => {
-    const created = await accountService.create(req.validated.body);
+    const created = await accountService.create(req.validated.body, callerOf(req));
     /*
      * 201 with the created row AND what reached them.
      *
@@ -124,5 +124,9 @@ export const accountController = {
  */
 function callerOf(req: Request): Caller {
   if (!req.auth) throw AppError.unauthenticated('Sign in to continue');
-  return { roles: req.auth.roles as Caller['roles'], accountId: req.auth.accountId };
+  return {
+    roles: req.auth.roles as Caller['roles'],
+    accountId: req.auth.accountId,
+    name: req.auth.name,
+  };
 }

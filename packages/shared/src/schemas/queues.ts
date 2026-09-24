@@ -16,7 +16,12 @@ import {
   RateCardIdSchema,
   ZoneSchema,
 } from './party.js';
-import { ChargeCodeSchema, ExceptionReasonSchema, JobPhotoSchema } from './jobs.js';
+import {
+  ChargeApprovalStateSchema,
+  ChargeCodeSchema,
+  ExceptionReasonSchema,
+  JobPhotoSchema,
+} from './jobs.js';
 
 /**
  * The five office queues (M2.6, M2.7, M7.3, M2.12, M5 · Journey A).
@@ -196,6 +201,30 @@ export const ChargeApprovalItemSchema = z
     /** M4.2 — where the driver was when they raised it. */
     latitude: z.number().nullable(),
     longitude: z.number().nullable(),
+    /**
+     * Where this charge stands, so a decided one can be told from a waiting one.
+     *
+     * The queue used to be pending-only with no way to ask for anything else, so
+     * approving made a charge disappear from the screen entirely — and "what did
+     * we approve, and on what evidence?" became unanswerable without opening the
+     * job. The money has been committed at that point, which is exactly when
+     * somebody is most likely to ask.
+     *
+     * Defaults to `pending` when absent — the only state an API released
+     * before this field could list — so the console still parses it while the
+     * surfaces and the API roll out separately.
+     */
+    approvalState: ChargeApprovalStateSchema.default('pending'),
+    /**
+     * Whether the job is finished — completed, admin-complete or futile.
+     *
+     * Approving a charge on a finished job invoices it straight away; on a job
+     * still under way it is billed when the job is. The row says which, so the
+     * approver is not promised an Awaiting PO entry that is not coming yet.
+     *
+     * Defaults to `false` — the cautious wording — when an older API omits it.
+     */
+    jobFinished: z.boolean().default(false),
   })
   .meta({ id: 'ChargeApprovalItem' });
 
@@ -215,6 +244,47 @@ export const ChargeDecisionSchema = z
     note: z.string().trim().max(500),
   })
   .meta({ id: 'ChargeDecision' });
+
+/**
+ * What a charge decision actually did.
+ *
+ * ── Why this is more than a count ─────────────────────────────────────────
+ * Approving used to answer `{ changed }` and nothing else, while the screen
+ * promised the charge had "moved to the Awaiting PO queue". Nothing had moved:
+ * approval only flipped a flag, the charge was on no invoice, and it vanished
+ * from every list the office works from.
+ *
+ * Approving now bills the charge. This says where the money went, so the toast
+ * can name the invoice — and say plainly when a charge could not be billed yet.
+ *
+ * Every field beyond `changed` is defaulted: a console released before this
+ * shape still reads the count, and an older API's reply still parses here.
+ */
+export const ChargeDecisionOutcomeSchema = z
+  .object({
+    changed: z.number().int().nonnegative(),
+    /** Invoices raised or topped up by this approval. Empty on a rejection. */
+    invoices: z
+      .array(
+        z.object({
+          invoiceNumber: z.number().int().positive(),
+          jobNumber: z.number().int().positive(),
+          kind: z.enum(['base', 'additional-charges']),
+          status: z.enum(['draft', 'awaiting-po', 'sent', 'paid', 'overdue', 'unknown']),
+          change: z.enum(['created', 'updated']),
+        }),
+      )
+      .default([]),
+    /** Jobs still under way — their approved charges are billed with the job. */
+    awaitingJobCompletion: z.array(z.number().int().positive()).default([]),
+    /** Approved, but could not be billed automatically — and why, in words. */
+    notInvoiced: z
+      .array(z.object({ jobNumber: z.number().int().positive(), reason: z.string() }))
+      .default([]),
+  })
+  .meta({ id: 'ChargeDecisionOutcome' });
+
+export type ChargeDecisionOutcome = z.infer<typeof ChargeDecisionOutcomeSchema>;
 
 /* ── M7.3 · Approved charges awaiting a PO ────────────────────────────────── */
 
@@ -241,6 +311,29 @@ export const AwaitingPoItemSchema = z
     chaseCount: z.number().int().nonnegative(),
   })
   .meta({ id: 'AwaitingPoItem' });
+
+/**
+ * What "Send reminder" actually did, so the screen can say it truthfully.
+ *
+ * `changed` is how many chases were logged — every selected invoice still
+ * waiting. The other three split them by whether an email reached anybody.
+ *
+ * ⚠️ The counts default to 0 so a newer console reading an older API (which
+ * answered `{ changed }` alone) still parses; release the API first anyway.
+ */
+export const AwaitingPoChaseResultSchema = z
+  .object({
+    changed: z.number().int().nonnegative(),
+    /** Emailed to at least one billing contact. */
+    emailed: z.number().int().nonnegative().default(0),
+    /** The account has no billing contact with an email — somebody has to ring. */
+    noBillingEmail: z.number().int().nonnegative().default(0),
+    /** A billing contact exists but the send failed — try again. */
+    failed: z.number().int().nonnegative().default(0),
+  })
+  .meta({ id: 'AwaitingPoChaseResult' });
+
+export type AwaitingPoChaseResult = z.infer<typeof AwaitingPoChaseResultSchema>;
 
 /* ── M2.12 · AI purchase-order review ─────────────────────────────────────── */
 

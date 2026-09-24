@@ -4,11 +4,16 @@ import type {
   NotificationSeverity,
   NotificationSummary,
   PageMeta,
+  Role,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { fromDecimal128, toDecimal128 } from '../../lib/money.js';
 import { UserModel } from '../auth/auth.model.js';
-import { NotificationModel, OutboundMessageModel } from './notification.model.js';
+import {
+  NotificationModel,
+  OutboundMessageModel,
+  ScheduledRunModel,
+} from './notification.model.js';
 
 /**
  * Repository layer — the ONLY file in this domain that touches Mongoose
@@ -22,6 +27,69 @@ export interface ListNotificationsQuery {
   severity?: NotificationSeverity | undefined;
   /** Only what still needs acting on — the default view. */
   unreadOnly?: boolean | undefined;
+}
+
+/** Somebody a notification is raised for. The email is for the message that may follow it. */
+export interface NotificationRecipient {
+  id: string;
+  name: string;
+  email: string | null;
+  /**
+   * Every role they hold. Carried for staff so one alert can link each person
+   * to a screen THEY can open — an allocator cannot open the queues.
+   */
+  roles?: readonly Role[];
+}
+
+/** Who `officeRecipients` means when it is not told — the three office roles. */
+const DEFAULT_OFFICE_ROLES: readonly Role[] = ['super-admin', 'operations', 'office-staff'];
+
+interface RawRecipient {
+  _id: mongoose.Types.ObjectId;
+  name: string;
+  email?: string | null;
+  roles?: Role[];
+}
+
+function toRecipient(row: RawRecipient): NotificationRecipient {
+  return {
+    id: row._id.toHexString(),
+    name: row.name,
+    email: row.email ?? null,
+    ...(row.roles ? { roles: row.roles } : {}),
+  };
+}
+
+/**
+ * Active customer administrators on the account, plus — when named — the one
+ * site supervisor who booked the job. See `jobAudience`.
+ */
+async function customerRecipients(
+  accountId: string,
+  bookedByUserId: string | null,
+): Promise<NotificationRecipient[]> {
+  if (!mongoose.isValidObjectId(accountId)) return [];
+
+  const booker =
+    bookedByUserId !== null && mongoose.isValidObjectId(bookedByUserId)
+      ? [
+          {
+            _id: new mongoose.Types.ObjectId(bookedByUserId),
+            roles: { $in: ['customer-site-supervisor' as const] },
+          },
+        ]
+      : [];
+
+  const rows = await UserModel.find(
+    {
+      status: 'active',
+      accountId: new mongoose.Types.ObjectId(accountId),
+      $or: [{ roles: { $in: ['customer-administrator' as const] } }, ...booker],
+    },
+    { name: 1, email: 1 },
+  ).lean<RawRecipient[]>();
+
+  return rows.map(toRecipient);
 }
 
 export interface RaiseNotificationInput {
@@ -221,40 +289,128 @@ export const notificationRepository = {
     return result.modifiedCount;
   },
 
-  /** Everyone who should receive office alerts. */
-  async officeRecipients(): Promise<Array<{ id: string; name: string }>> {
+  /**
+   * Active staff holding any of `roles` — by default the three office roles.
+   *
+   * The roles are handed back with each person because some alerts link
+   * different people to different screens: see `notifyOffice`.
+   */
+  async officeRecipients(
+    roles: readonly Role[] = DEFAULT_OFFICE_ROLES,
+  ): Promise<NotificationRecipient[]> {
     const rows = await UserModel.find(
-      {
-        status: 'active',
-        roles: { $in: ['super-admin', 'operations', 'office-staff'] },
-      },
-      { name: 1 },
-    ).lean<Array<{ _id: mongoose.Types.ObjectId; name: string }>>();
+      { status: 'active', roles: { $in: [...roles] } },
+      { name: 1, email: 1, roles: 1 },
+    ).lean<RawRecipient[]>();
 
-    return rows.map((row) => ({ id: row._id.toHexString(), name: row.name }));
+    return rows.map(toRecipient);
   },
 
   /**
-   * The portal users of ONE account — a customer's own inbox.
-   *
-   * ⚠️ Filtered to the two customer roles as well as the account, not just the
-   * account. A staff record carrying an `accountId` would otherwise be handed a
-   * notification written for the customer's eyes, which is the same disclosure
-   * mistake in the other direction.
+   * How to reach one member of staff directly — a driver, for a text about a
+   * job on their run. Null when they no longer exist or cannot sign in.
    */
-  async accountRecipients(accountId: string): Promise<Array<{ id: string; name: string }>> {
-    if (!mongoose.isValidObjectId(accountId)) return [];
+  async staffContact(
+    userId: string,
+  ): Promise<{ id: string; name: string; email: string | null; mobile: string | null } | null> {
+    if (!mongoose.isValidObjectId(userId)) return null;
 
-    const rows = await UserModel.find(
-      {
-        status: 'active',
-        accountId: new mongoose.Types.ObjectId(accountId),
-        roles: { $in: ['customer-administrator', 'customer-site-supervisor'] },
-      },
-      { name: 1 },
-    ).lean<Array<{ _id: mongoose.Types.ObjectId; name: string }>>();
+    const row = await UserModel.findOne(
+      { _id: new mongoose.Types.ObjectId(userId), status: { $ne: 'suspended' } },
+      { name: 1, email: 1, phoneNumber: 1 },
+    ).lean<{
+      _id: mongoose.Types.ObjectId;
+      name: string;
+      email?: string | null;
+      phoneNumber?: string | null;
+    }>();
 
-    return rows.map((row) => ({ id: row._id.toHexString(), name: row.name }));
+    if (!row) return null;
+
+    return {
+      id: row._id.toHexString(),
+      name: row.name,
+      email: row.email ?? null,
+      mobile: row.phoneNumber ?? null,
+    };
+  },
+
+  /* ── The schedule's own record (see `ScheduledRunModel`) ───────────────── */
+
+  /**
+   * Claims one occurrence of a scheduled task. True means "you run it".
+   *
+   * ⚠️ The insert IS the lock, for the reason `claimSend` gives: two processes
+   * checking first would both see nothing and both run. A failed attempt, or
+   * one abandoned mid-run (the process died), is taken over rather than left
+   * to block the slot — but only a few times, so a task that fails every time
+   * stops being retried every five minutes all day.
+   */
+  async claimScheduledRun(task: string, slot: string, now: Date = new Date()): Promise<boolean> {
+    try {
+      await ScheduledRunModel.create({ task, slot, state: 'running', attempts: 1, claimedAt: now });
+      return true;
+    } catch (error) {
+      if (!isDuplicateKey(error)) throw error;
+
+      const abandonedBefore = new Date(now.getTime() - ABANDONED_AFTER_MS);
+      const taken = await ScheduledRunModel.updateOne(
+        {
+          task,
+          slot,
+          attempts: { $lt: MAX_SCHEDULED_ATTEMPTS },
+          $or: [{ state: 'failed' }, { state: 'running', claimedAt: { $lt: abandonedBefore } }],
+        },
+        { $set: { state: 'running', claimedAt: now, finishedAt: null }, $inc: { attempts: 1 } },
+      ).exec();
+
+      return taken.modifiedCount > 0;
+    }
+  },
+
+  /** Records how a claimed run ended. */
+  async finishScheduledRun(
+    task: string,
+    slot: string,
+    state: 'done' | 'failed',
+    detail: string | null,
+  ): Promise<void> {
+    await ScheduledRunModel.updateOne(
+      { task, slot },
+      { $set: { state, detail, finishedAt: new Date() } },
+    ).exec();
+  },
+
+  /**
+   * The portal users who can SEE one job: every customer administrator on the
+   * account, plus the site supervisor who booked it.
+   *
+   * ── Why there is no "everyone on the account" list any more ──────────────
+   * There was one, and every customer notice used it — so every supervisor on
+   * an account was told about every pickup: "Pickup booked — Lot 88", "Invoice
+   * INV-1042 — $245.52". A site supervisor sees only the pickups they booked
+   * (M1.5), and never a price. Each notice put a site, and sometimes an amount,
+   * in front of people the portal itself refuses to show it to, with a link that
+   * 404s for them. A job's notice goes to this audience; anything about money
+   * goes to `accountAdministrators`.
+   *
+   * ⚠️ Filtered to customer roles as well as the account. A staff record
+   * carrying an `accountId` would otherwise be handed a notification written for
+   * the customer's eyes, which is the same disclosure in the other direction.
+   */
+  async jobAudience(
+    accountId: string,
+    bookedByUserId: string | null,
+  ): Promise<NotificationRecipient[]> {
+    return customerRecipients(accountId, bookedByUserId);
+  },
+
+  /**
+   * The account's customer administrators — the only portal users who may see
+   * invoices and prices (M1.5).
+   */
+  async accountAdministrators(accountId: string): Promise<NotificationRecipient[]> {
+    return customerRecipients(accountId, null);
   },
 
   /* ── M8.1 / M8.2 · the outbound log ────────────────────────────────────── */
@@ -413,6 +569,15 @@ export const notificationRepository = {
     }));
   },
 };
+
+/** A scheduled slot is tried this many times at most — a broken task is not retried all day. */
+const MAX_SCHEDULED_ATTEMPTS = 3;
+
+/**
+ * A run still "running" after this long was abandoned — the process died under
+ * it. Far longer than any real run: the sweep and the reminders take seconds.
+ */
+const ABANDONED_AFTER_MS = 30 * 60_000;
 
 /** Mongo's duplicate-key error, whatever wrapper it arrives in. */
 function isDuplicateKey(error: unknown): boolean {

@@ -15,8 +15,9 @@ import {
   useToast,
 } from '@plastago/ui';
 import { CameraIcon, CheckCircle2Icon, ScaleIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
+import { PhotoThumb } from '@/components/driver/photo-grid';
 import {
   useRecordTipOff,
   useRunSheet,
@@ -68,8 +69,32 @@ export function DriverTipOffPage() {
 
   const [totalKg, setTotalKg] = useState('');
   const [docket, setDocket] = useState('');
-  const [docketPhotoId, setDocketPhotoId] = useState<string | null>(null);
+  /*
+   * The docket photo: the storage key the tip-off carries, and the phone's own
+   * copy of the picture to show for it — nothing hands the phone a link back
+   * to the stored one.
+   */
+  const [docketPhoto, setDocketPhoto] = useState<{
+    key: string;
+    previewUrl: string;
+    takenAt: string;
+  } | null>(null);
+  const docketPhotoId = docketPhoto?.key ?? null;
   const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // Every preview made here, released when the screen closes.
+  const previews = useRef<string[]>([]);
+  useEffect(
+    () => () => {
+      for (const url of previews.current) URL.revokeObjectURL(url);
+    },
+    [],
+  );
+
+  const clearDocketPhoto = () => {
+    if (docketPhoto) URL.revokeObjectURL(docketPhoto.previewUrl);
+    setDocketPhoto(null);
+  };
   const [chosenRunId, setChosenRunId] = useState<string | null>(null);
 
   /*
@@ -159,9 +184,14 @@ export function DriverTipOffPage() {
       void (async () => {
         try {
           const key = await uploadDocket.mutateAsync({ runId: activeRunId, blob: file });
-          setDocketPhotoId(key);
+          const previewUrl = URL.createObjectURL(file);
+          previews.current.push(previewUrl);
+          // A retake replaces the shot; its preview goes with it.
+          if (docketPhoto) URL.revokeObjectURL(docketPhoto.previewUrl);
+          setDocketPhoto({ key, previewUrl, takenAt: new Date().toISOString() });
           setErrors(({ docket: _drop, ...rest }) => rest);
-          toast.success('Docket photo saved');
+          // Uploaded, not "saved on this phone": the bytes are already in storage.
+          toast.success('Docket photo uploaded');
         } catch {
           toast.error(
             'Could not save the docket photo',
@@ -293,9 +323,14 @@ export function DriverTipOffPage() {
           <div>
             <p className="text-sm font-medium">Photo of the docket</p>
             <p className="mt-0.5 text-xs text-muted-foreground">
+              {/*
+                "Saved on this phone" was untrue — the photo is uploaded before
+                this line changes — and it invited the driver to go back and
+                take it again once in signal.
+              */}
               {docketPhotoId === null
                 ? 'Required — the monthly tipping bill is audited against these.'
-                : 'Saved on this phone.'}
+                : 'Uploaded. Check it reads clearly — tap the ✕ to take it again.'}
             </p>
           </div>
           <button
@@ -307,6 +342,30 @@ export function DriverTipOffPage() {
             {docketPhotoId === null ? 'Take' : 'Retake'}
           </button>
         </div>
+
+        {/*
+          The docket itself, not just a tick. The figure on it is what the whole
+          run's weights are split from, so the driver has to be able to see the
+          photo actually caught it — and drop it if it did not.
+        */}
+        {docketPhoto && (
+          <div className="mt-3">
+            <PhotoThumb
+              photo={{
+                id: docketPhoto.key,
+                slot: null,
+                caption: 'Weighbridge docket',
+                takenAt: docketPhoto.takenAt,
+                latitude: null,
+                longitude: null,
+                uploaded: true,
+                url: docketPhoto.previewUrl,
+              }}
+              label="Weighbridge docket"
+              onRemove={clearDocketPhoto}
+            />
+          </div>
+        )}
         {errors.docket !== undefined && (
           <p role="alert" className="mt-1.5 text-xs font-medium text-destructive">
             {errors.docket}

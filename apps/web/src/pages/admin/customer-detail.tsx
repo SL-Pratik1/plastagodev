@@ -606,11 +606,16 @@ function RiskAssessmentCard({ account }: { account: Account }) {
   const toggle = async (next: boolean) => {
     try {
       await setRequired.mutateAsync(next);
+      /*
+       * ⚠️ The "off" message used to say "Sites with their own override are
+       * unaffected". No such override exists — there is no Sites tab and no
+       * per-site rule — so it promised something the product cannot do.
+       */
       toast.success(
         next ? 'Risk assessment now required' : 'Risk assessment no longer required',
         next
-          ? `Drivers must complete it on arrival at every ${account.name} site.`
-          : 'Sites with their own override are unaffected.',
+          ? `Drivers must complete it at every ${account.name} site. Their open jobs are updated too.`
+          : `Their open jobs are updated too. Finished jobs keep the rule they were done under.`,
       );
     } catch (error) {
       toast.error(describeError(error).title, describeError(error).detail);
@@ -636,7 +641,8 @@ function RiskAssessmentCard({ account }: { account: Account }) {
                 it is done.
               </p>
               <p className="mt-1.5 text-xs text-muted-foreground">
-                Individual sites can differ — set an exception on the Sites tab.
+                Changing this also updates their open jobs, including one a driver is on now.
+                Finished jobs keep the rule they were done under.
               </p>
             </div>
           </div>

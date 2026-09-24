@@ -20,6 +20,7 @@ import {
   BellIcon,
   CheckIcon,
   CircleDollarSignIcon,
+  MessageSquareIcon,
   ReceiptIcon,
   RefreshCwIcon,
   SettingsIcon,
@@ -65,6 +66,7 @@ const CATEGORY_ICON = {
   invoice: ReceiptIcon,
   sync: RefreshCwIcon,
   system: SettingsIcon,
+  message: MessageSquareIcon,
 } as const;
 
 export function AdminNotificationsPage() {

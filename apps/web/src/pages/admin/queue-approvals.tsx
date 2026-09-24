@@ -1,4 +1,9 @@
-import { CHARGE_CODES, CHARGE_CODE_LABELS, type ChargeApprovalItem } from '@plastago/shared';
+import {
+  CHARGE_CODES,
+  CHARGE_CODE_LABELS,
+  type ChargeApprovalItem,
+  type ChargeDecisionOutcome,
+} from '@plastago/shared';
 import {
   Alert,
   Badge,
@@ -51,7 +56,15 @@ import { formatDateTime, formatMoney } from '@/lib/format';
  * queue in dollars, not just in rows — a count of 14 does not make anyone open
  * it, and $1,260 does.
  */
-const FILTER_KEYS = ['code', 'account', 'driver', 'po', 'evidence', 'age'] as const;
+const FILTER_KEYS = [
+  'code',
+  'account',
+  'driver',
+  'po',
+  'evidence',
+  'age',
+  'approvalState',
+] as const;
 
 const STATIC_FILTERS: readonly FilterDefinition[] = [
   {
@@ -76,6 +89,28 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
     options: [
       { value: 'with-photos', label: 'Has photos' },
       { value: 'no-photos', label: 'No photos' },
+    ],
+  },
+  /*
+   * ── The decision, which this queue had no way to ask about ──────────────
+   * Approving a charge removed it from the only screen that lists charges, so
+   * "what did we approve this week, and on what evidence?" could not be
+   * answered from the queue that approved it — and that question gets asked
+   * when a builder is disputing money already committed.
+   *
+   * ⚠️ `allLabel` is NOT "any": leaving this filter alone means `pending`, not
+   * everything. The queue is a worklist first and the nav badge counts pending,
+   * so a default of "all" would put decided rows into a table that offers bulk
+   * approve. "Actioned and not" is the explicit opt-in.
+   */
+  {
+    key: 'approvalState',
+    label: 'Decision',
+    allLabel: 'Awaiting decision',
+    options: [
+      { value: 'any', label: 'Actioned and not' },
+      { value: 'approved', label: 'Approved' },
+      { value: 'rejected', label: 'Rejected' },
     ],
   },
   {
@@ -130,8 +165,17 @@ const COLUMNS: readonly DataTableColumn<ChargeApprovalItem>[] = [
     cell: (row) => (
       <span className="block">
         <span className="block">{row.accountName}</span>
+        {/*
+          Only a finished job is invoiced on approval, so only there is Awaiting
+          PO the next stop. This said so on every row, including jobs still on
+          a truck, where approving puts nothing in the queue yet.
+        */}
         {row.poRequired && (
-          <span className="block text-xs text-warning">Approving sends this to Awaiting PO</span>
+          <span className="block text-xs text-warning">
+            {row.jobFinished
+              ? 'Approving sends this to Awaiting PO'
+              : 'Goes to Awaiting PO when the job is invoiced'}
+          </span>
         )}
       </span>
     ),
@@ -170,6 +214,25 @@ const COLUMNS: readonly DataTableColumn<ChargeApprovalItem>[] = [
       </span>
     ),
   },
+  /*
+   * Only meaningful once the Decision filter is off "Awaiting decision" — but
+   * shown always rather than conditionally, because a column that appears and
+   * disappears moves every other column under the reader's cursor. A pending
+   * row simply says so.
+   */
+  {
+    id: 'approvalState',
+    header: 'Decision',
+    priority: 'secondary',
+    cell: (row) =>
+      row.approvalState === 'pending' ? (
+        <span className="text-xs text-muted-foreground">Awaiting decision</span>
+      ) : (
+        <Badge variant={row.approvalState === 'approved' ? 'success' : 'destructive'}>
+          {row.approvalState === 'approved' ? 'Approved' : 'Rejected'}
+        </Badge>
+      ),
+  },
   {
     id: 'amountExGst',
     header: 'Amount ex GST',
@@ -206,19 +269,38 @@ export function AdminQueueApprovalsPage() {
     (sum, row) => sum + Math.round(Number(row.amountExGst) * 100),
     0,
   );
-  const selectedValueCents = (data?.data ?? [])
-    .filter((row) => selected.includes(row.id))
+  /*
+   * ── Only pending rows can be bulk-approved ──────────────────────────────
+   * With the Decision filter set to "Actioned and not", the table can hold rows
+   * that were decided weeks ago. Select-all then covers them, and the button
+   * would ask the server to approve charges that are already approved.
+   *
+   * The API refuses them anyway — `approvalState: 'pending'` is part of its
+   * filter, which is why it answers with a COUNT rather than throwing — so this
+   * is not what keeps the data right. It is what stops the office being told
+   * "12 charges approved" when four of them were somebody else's decision from
+   * last month, and stops the total beside the button counting money nobody is
+   * about to commit.
+   */
+  const rows = data?.data ?? [];
+  const pendingSelected = selected.filter((id) =>
+    rows.some((row) => row.id === id && row.approvalState === 'pending'),
+  );
+
+  const selectedValueCents = rows
+    .filter((row) => pendingSelected.includes(row.id))
     .reduce((sum, row) => sum + Math.round(Number(row.amountExGst) * 100), 0);
 
   const approveSelected = async () => {
     try {
-      const changed = await decide.mutateAsync({
-        ids: selected,
+      const outcome = await decide.mutateAsync({
+        ids: pendingSelected,
         decision: { decision: 'approve', note: '' },
       });
-      toast.success(
-        `${String(changed)} charge${changed === 1 ? '' : 's'} approved`,
-        'Charges on PO-required accounts have moved to the Awaiting PO queue.',
+      announceApproval(
+        toast,
+        `${String(outcome.changed)} charge${outcome.changed === 1 ? '' : 's'} approved`,
+        outcome,
       );
       setSelected([]);
     } catch (caught) {
@@ -247,11 +329,11 @@ export function AdminQueueApprovalsPage() {
           searchPlaceholder="Search job number, customer, site or driver…"
           filters={filters}
           actions={
-            selected.length > 0 ? (
+            pendingSelected.length > 0 ? (
               <div className="flex flex-wrap items-center gap-2">
                 {decide.isPending && <Spinner label="Working" />}
                 <span className="text-xs text-muted-foreground">
-                  {selected.length} selected ·{' '}
+                  {pendingSelected.length} selected ·{' '}
                   <span className="font-medium text-foreground tabular-nums">
                     {formatMoney((selectedValueCents / 100).toFixed(2))}
                   </span>
@@ -309,10 +391,22 @@ export function AdminQueueApprovalsPage() {
           onClearFilters={controller.clearFilters}
           selectedIds={selected}
           onSelectionChange={setSelected}
+          /*
+           * The copy follows the filter. "Every driver-raised charge has been
+           * actioned" is true of an empty pending queue and a lie on an empty
+           * "Rejected" view — where it would tell the office nothing was ever
+           * refused, on a screen that is only showing refusals.
+           */
           empty={{
             icon: ClipboardCheckIcon,
-            title: 'Nothing to approve',
-            description: 'Every driver-raised charge has been actioned.',
+            title:
+              controller.query.filters?.approvalState === undefined
+                ? 'Nothing to approve'
+                : 'Nothing matches that filter',
+            description:
+              controller.query.filters?.approvalState === undefined
+                ? 'Every driver-raised charge has been actioned.'
+                : 'No charges here with that decision. Try "Actioned and not".',
           }}
         />
 
@@ -329,9 +423,10 @@ export function AdminQueueApprovalsPage() {
       </Card>
 
       <Alert variant="info" title="What approving actually does">
-        An approved charge becomes billable. On an account that requires a purchase order it moves
-        to the Awaiting PO queue and is invoiced separately — it never holds up the base invoice for
-        the job, which is the whole point of the two-invoice workflow.
+        An approved charge on a finished job is invoiced straight away. On an account that requires
+        a purchase order it goes on its own invoice in the Awaiting PO queue — it never holds up the
+        base invoice for the job, which is the whole point of the two-invoice workflow. Otherwise it
+        joins the job’s invoice, ready to send. A job still under way is billed when it is invoiced.
       </Alert>
 
       <Dialog
@@ -339,8 +434,8 @@ export function AdminQueueApprovalsPage() {
         onClose={() => {
           setConfirmingBulk(false);
         }}
-        title={`Approve ${String(selected.length)} charge${selected.length === 1 ? '' : 's'}?`}
-        description={`${formatMoney((selectedValueCents / 100).toFixed(2))} ex GST becomes billable. Charges on PO-required accounts will move to the Awaiting PO queue rather than being invoiced now.`}
+        title={`Approve ${String(pendingSelected.length)} charge${pendingSelected.length === 1 ? '' : 's'}?`}
+        description={`${formatMoney((selectedValueCents / 100).toFixed(2))} ex GST becomes billable. Finished jobs are invoiced now — charges on PO-required accounts go to the Awaiting PO queue.`}
         footer={
           <>
             <Button
@@ -365,16 +460,16 @@ export function AdminQueueApprovalsPage() {
         onClose={() => {
           setReviewingId(null);
         }}
-        onDecided={(decision, amount) => {
+        onDecided={(decision, amount, outcome) => {
           setReviewingId(null);
           setSelected((current) => current.filter((id) => id !== reviewingId));
           if (decision === 'approve') {
-            toast.success(
-              `${formatMoney(amount)} approved`,
-              'The charge is now billable on this job.',
-            );
+            announceApproval(toast, `${formatMoney(amount)} approved`, outcome);
           } else {
-            toast.success('Charge rejected', 'Your reason is saved on the job. Let the driver know.');
+            toast.success(
+              'Charge rejected',
+              'Your reason is saved on the job. Let the driver know.',
+            );
           }
         }}
       />
@@ -382,22 +477,84 @@ export function AdminQueueApprovalsPage() {
   );
 }
 
+/**
+ * Says where an approval's money went.
+ *
+ * ── Why the toast names invoices ──────────────────────────────────────────
+ * It used to announce that charges "have moved to the Awaiting PO queue"
+ * whatever had happened — and nothing had moved: approving flipped a flag, and
+ * the charge dropped out of every list. Approving now bills, and the office is
+ * told what it produced: which invoice, and whether it waits on a PO. A charge
+ * that could not be billed yet is said plainly, as a warning rather than a
+ * success, because that is money somebody still has to act on.
+ */
+function announceApproval(
+  toast: ReturnType<typeof useToast>,
+  title: string,
+  outcome: ChargeDecisionOutcome,
+): void {
+  const lines = outcome.invoices.map((invoice) => {
+    const where =
+      invoice.status === 'awaiting-po'
+        ? 'waiting for a PO in Awaiting PO'
+        : 'ready to send from Invoices';
+    return invoice.change === 'created'
+      ? `Invoice #${String(invoice.invoiceNumber)} raised for job #${String(invoice.jobNumber)} — ${where}.`
+      : `Added to invoice #${String(invoice.invoiceNumber)} for job #${String(invoice.jobNumber)} — ${where}.`;
+  });
+
+  if (outcome.awaitingJobCompletion.length > 0) {
+    const jobs = outcome.awaitingJobCompletion
+      .map((jobNumber) => `#${String(jobNumber)}`)
+      .join(', ');
+    lines.push(
+      `Job ${jobs} ${outcome.awaitingJobCompletion.length === 1 ? 'is' : 'are'} still under way — billed when invoiced.`,
+    );
+  }
+
+  const failures = outcome.notInvoiced.map(
+    (miss) => `Job #${String(miss.jobNumber)}: ${miss.reason}`,
+  );
+
+  // Three lines is what fits in a toast; the rest are on the Invoices screen.
+  const shown = [...failures, ...lines];
+  const detail =
+    shown.length > 3
+      ? `${shown.slice(0, 3).join(' ')} And ${String(shown.length - 3)} more.`
+      : shown.join(' ') || 'The charge is now billable on this job.';
+
+  if (failures.length > 0) toast.warning(title, detail);
+  else toast.success(title, detail);
+}
+
 /* ── Evidence and the per-charge decision ─────────────────────────────────── */
 
 interface ChargeEvidenceDialogProps {
   id: string | null;
   onClose: () => void;
-  onDecided: (decision: 'approve' | 'reject', amountExGst: string) => void;
+  onDecided: (
+    decision: 'approve' | 'reject',
+    amountExGst: string,
+    outcome: ChargeDecisionOutcome,
+  ) => void;
 }
 
 function ChargeEvidenceDialog({ id, onClose, onDecided }: ChargeEvidenceDialogProps) {
   const toast = useToast();
-  const { data: charge, isPending, error } = useApprovalDetail(id ?? undefined);
+  const { data: charge, isPending, error, refetch } = useApprovalDetail(id ?? undefined);
   const decide = useApprovalDecide();
 
   const [rejecting, setRejecting] = useState(false);
   const [note, setNote] = useState('');
   const [noteError, setNoteError] = useState<string | null>(null);
+
+  /*
+   * The Decision filter makes approved and rejected charges openable, and the
+   * dialog offered Approve and Reject on them anyway — the server then refused
+   * with a 409 that never said the charge had already been decided. A decided
+   * charge is shown as such, with nothing left to press.
+   */
+  const decided = charge !== undefined && charge.approvalState !== 'pending';
 
   const close = () => {
     setRejecting(false);
@@ -411,17 +568,22 @@ function ChargeEvidenceDialog({ id, onClose, onDecided }: ChargeEvidenceDialogPr
 
     // A rejection is a message to a person. An empty one is worse than none.
     if (decision === 'reject' && note.trim().length < 5) {
-      setNoteError('Say why — this is the only record of the decision, and “no” on its own is not reviewable.');
+      setNoteError(
+        'Say why — this is the only record of the decision, and “no” on its own is not reviewable.',
+      );
       return;
     }
 
     try {
-      await decide.mutateAsync({ ids: [charge.id], decision: { decision, note: note.trim() } });
+      const outcome = await decide.mutateAsync({
+        ids: [charge.id],
+        decision: { decision, note: note.trim() },
+      });
       const amount = charge.amountExGst;
       setRejecting(false);
       setNote('');
       setNoteError(null);
-      onDecided(decision, amount);
+      onDecided(decision, amount, outcome);
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);
@@ -444,7 +606,7 @@ function ChargeEvidenceDialog({ id, onClose, onDecided }: ChargeEvidenceDialogPr
           <Button variant="ghost" onClick={close} disabled={decide.isPending}>
             Close
           </Button>
-          {rejecting ? (
+          {decided ? null : rejecting ? (
             <Button
               variant="destructive"
               onClick={() => void run('reject')}
@@ -485,6 +647,28 @@ function ChargeEvidenceDialog({ id, onClose, onDecided }: ChargeEvidenceDialogPr
 
       {charge && (
         <div className="space-y-5">
+          {decided && (
+            <Alert
+              variant="info"
+              title={
+                charge.approvalState === 'rejected'
+                  ? 'Already rejected'
+                  : charge.approvalState === 'approved'
+                    ? 'Already approved'
+                    : 'Does not need approval'
+              }
+            >
+              Nothing left to decide here. The decision and its reason are on{' '}
+              <Link
+                to={`/admin/jobs/${charge.jobId}?tab=charges`}
+                className="font-medium underline underline-offset-4"
+              >
+                job #{charge.jobNumber}&rsquo;s Charges tab
+              </Link>
+              .
+            </Alert>
+          )}
+
           <DetailList
             columns={2}
             items={[
@@ -532,14 +716,23 @@ function ChargeEvidenceDialog({ id, onClose, onDecided }: ChargeEvidenceDialogPr
 
           {charge.poRequired && (
             <Alert variant="warning" title="This account requires a purchase order">
-              Approving moves the charge to the Awaiting PO queue. It will be invoiced separately
-              once the PO arrives — the base invoice for job #{charge.jobNumber} is not held up.
+              {charge.jobFinished ? (
+                <>
+                  Approving puts the charge on its own invoice in the Awaiting PO queue. It is sent
+                  once the PO arrives — the base invoice for job #{charge.jobNumber} is not held up.
+                </>
+              ) : (
+                <>
+                  Job #{charge.jobNumber} is still under way, so approving does not invoice it yet.
+                  It goes to the Awaiting PO queue when the job is invoiced.
+                </>
+              )}
             </Alert>
           )}
 
           <div>
             <h3 className="mb-2 text-sm font-semibold">Evidence from site</h3>
-            <EvidenceGrid photos={charge.photos} />
+            <EvidenceGrid photos={charge.photos} onStale={refetch} />
           </div>
 
           {rejecting && (

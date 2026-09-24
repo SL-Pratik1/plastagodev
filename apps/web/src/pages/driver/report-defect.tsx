@@ -1,8 +1,9 @@
 import { DEFECT_SEVERITIES, DEFECT_SEVERITY_LABELS, type DefectSeverity } from '@plastago/shared';
 import { Alert, Field, Input, Spinner, Textarea, buttonVariants, cn, useToast } from '@plastago/ui';
 import { CameraIcon, PhoneIcon, WrenchIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { PhotoThumb } from '@/components/driver/photo-grid';
 import { useReportDefect, useRunSheet, useUploadDefectPhoto } from '@/features/driver/queries';
 import { todayInSydney } from '@/lib/geolocation';
 import { currentPosition } from '@/lib/geolocation';
@@ -23,6 +24,15 @@ import { currentPosition } from '@/lib/geolocation';
  * "stop driving" — and the driver may have no signal, which is precisely when a
  * form is the wrong channel.
  */
+/** A photo already in storage, and the phone's own copy to show for it. */
+interface DefectPhoto {
+  /** The storage key the report carries. */
+  key: string;
+  /** An object URL over the picture the camera handed back. */
+  previewUrl: string;
+  takenAt: string;
+}
+
 export function DriverReportDefectPage() {
   const toast = useToast();
   const navigate = useNavigate();
@@ -33,8 +43,32 @@ export function DriverReportDefectPage() {
   const [severity, setSeverity] = useState<DefectSeverity | null>(null);
   const [summary, setSummary] = useState('');
   const [detail, setDetail] = useState('');
-  const [photoIds, setPhotoIds] = useState<string[]>([]);
+  const [photos, setPhotos] = useState<DefectPhoto[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
+
+  /*
+   * Every preview made on this screen, released when it closes. Each one pins
+   * a full-size camera image in memory, and a driver who photographs a cracked
+   * windscreen four times should not be carrying four of them round the run.
+   */
+  const previews = useRef<string[]>([]);
+  useEffect(
+    () => () => {
+      for (const url of previews.current) URL.revokeObjectURL(url);
+    },
+    [],
+  );
+
+  /*
+   * Off this report, which is what the driver asked for. The upload itself has
+   * already happened and stays in storage — as a Retake on the tip-off docket
+   * always has — because nothing offers a way to delete it again.
+   */
+  const removePhoto = (key: string) => {
+    const gone = photos.find((photo) => photo.key === key);
+    if (gone) URL.revokeObjectURL(gone.previewUrl);
+    setPhotos((current) => current.filter((photo) => photo.key !== key));
+  };
 
   /**
    * ⚠️ This used to upload nothing whatsoever.
@@ -65,7 +99,17 @@ export function DriverReportDefectPage() {
       void (async () => {
         try {
           const key = await uploadPhoto.mutateAsync(file);
-          setPhotoIds((current) => [...current, key]);
+          /*
+           * The preview is the phone's own copy of the picture. The workshop's
+           * copy is in storage, but nothing hands the phone a link back to it,
+           * and the driver only needs to see what they took.
+           */
+          const previewUrl = URL.createObjectURL(file);
+          previews.current.push(previewUrl);
+          setPhotos((current) => [
+            ...current,
+            { key, previewUrl, takenAt: new Date().toISOString() },
+          ]);
           toast.success('Photo uploaded');
         } catch {
           toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
@@ -95,7 +139,7 @@ export function DriverReportDefectPage() {
         severity: severity as DefectSeverity,
         summary: summary.trim(),
         detail: detail.trim(),
-        photoIds,
+        photoIds: photos.map((photo) => photo.key),
       });
       toast.success(
         'Reported',
@@ -226,7 +270,7 @@ export function DriverReportDefectPage() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-sm font-medium">
-              Photos <span className="text-muted-foreground">({photoIds.length})</span>
+              Photos <span className="text-muted-foreground">({photos.length})</span>
             </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
               A picture saves the workshop a phone call.
@@ -242,6 +286,36 @@ export function DriverReportDefectPage() {
             {uploadPhoto.isPending ? 'Uploading' : 'Take'}
           </button>
         </div>
+
+        {/*
+          The shots themselves, with a ✕ on each. This showed a count and
+          nothing else, so a blurred or wrong photo went to the workshop because
+          the driver could neither see it nor take it back.
+        */}
+        {photos.length > 0 && (
+          <ul className="mt-3 flex flex-wrap gap-3">
+            {photos.map((photo) => (
+              <li key={photo.key}>
+                <PhotoThumb
+                  photo={{
+                    id: photo.key,
+                    slot: null,
+                    caption: 'Defect photo',
+                    takenAt: photo.takenAt,
+                    latitude: null,
+                    longitude: null,
+                    uploaded: true,
+                    url: photo.previewUrl,
+                  }}
+                  label="Defect photo"
+                  onRemove={() => {
+                    removePhoto(photo.key);
+                  }}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <button

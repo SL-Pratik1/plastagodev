@@ -95,11 +95,33 @@ export function AdminQueueAwaitingPoPage() {
 
   const runChase = async () => {
     try {
-      const changed = await chase.mutateAsync(selected);
-      toast.success(
-        `${String(changed)} reminder${changed === 1 ? '' : 's'} sent`,
-        'Emailed to each account’s billing contact and logged against the invoice.',
-      );
+      const result = await chase.mutateAsync(selected);
+
+      /*
+       * What was ACTUALLY sent. This toast used to announce emails for every
+       * selected invoice while the server sent none; an account with no
+       * billing email is one somebody has to ring, so it is named here.
+       */
+      const problems = [
+        result.noBillingEmail > 0
+          ? `${String(result.noBillingEmail)} ${result.noBillingEmail === 1 ? 'account has' : 'accounts have'} no billing email — phone them`
+          : null,
+        result.failed > 0 ? `${String(result.failed)} could not be sent — try again` : null,
+      ]
+        .filter((part): part is string => part !== null)
+        .join('. ');
+
+      if (problems === '') {
+        toast.success(
+          `${String(result.emailed)} reminder${result.emailed === 1 ? '' : 's'} emailed`,
+          'Sent to each account’s billing contact and logged against the invoice.',
+        );
+      } else {
+        toast.warning(
+          `${String(result.emailed)} of ${String(result.changed)} reminders emailed`,
+          `${problems}. Every chase is logged against its invoice.`,
+        );
+      }
       setSelected([]);
     } catch (caught) {
       const described = describeError(caught);

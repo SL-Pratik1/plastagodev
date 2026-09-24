@@ -35,7 +35,7 @@ import { formatRelative } from '@/lib/format';
  * card, PO policy, capture mode — because those are the questions the office
  * actually asks of this list.
  */
-const FILTER_KEYS = ['status', 'accountType', 'rateCard', 'poPolicy', 'captureMode'] as const;
+const FILTER_KEYS = ['status', 'accountType', 'rateCardId', 'poPolicy', 'captureMode'] as const;
 
 const FILTERS: readonly FilterDefinition[] = [
   {
@@ -88,7 +88,7 @@ const FILTERS: readonly FilterDefinition[] = [
  */
 function filtersWith(rateCards: readonly { value: string; label: string }[]): FilterDefinition[] {
   const rateCardFilter: FilterDefinition = {
-    key: 'rateCard',
+    key: 'rateCardId',
     label: 'Rate card',
     allLabel: 'All rate cards',
     options: rateCards,

@@ -1,4 +1,13 @@
-import type { JobStatus, LoadType, WeightBasis } from '@plastago/shared';
+import {
+  photoPurpose,
+  type ContaminationExtent,
+  type ContaminationType,
+  type JobStatus,
+  type LoadType,
+  type PhotoPurpose,
+  type WeightBasis,
+} from '@plastago/shared';
+import { parseContaminationNote } from '../../src/domains/driver/contamination-note.js';
 import { ZONE } from './fake-settings.js';
 import mongoose from 'mongoose';
 import type {
@@ -63,6 +72,8 @@ export interface StoredStop {
   bagWeights: number[];
   /** What the driver counted. Null until weights are captured (M4.3). */
   collectedBagCount: number | null;
+  /** When the weights screen was saved. Null until it is (M4.3). */
+  weightsRecordedAt: Date | null;
   arrivedAt: Date | null;
   completedAt: Date | null;
   siteName: string;
@@ -93,10 +104,29 @@ export interface StoredEvent {
   longitude: number | null;
 }
 
+/** A stored contamination report, as `contaminationreports` holds it. */
+export interface StoredContaminationReport {
+  jobId: string;
+  type: ContaminationType;
+  extent: ContaminationExtent;
+  note: string | null;
+  reportedAt: Date;
+  latitude: number | null;
+  longitude: number | null;
+  timelineRecordedAt: Date | null;
+}
+
 export function createFakeDriverRepository(driverId: string) {
   const stops = new Map<string, StoredStop>();
   const charges: StoredCharge[] = [];
   const events: StoredEvent[] = [];
+  const contaminationReports = new Map<string, StoredContaminationReport>();
+  /**
+   * Makes the next `raiseCharge` throw, standing in for the failure part-way
+   * through a report — pricing missing, the database blinking — that a replay
+   * has to be able to finish.
+   */
+  let failNextCharge = false;
   const photos = new Map<string, DriverPhotoRow & { jobId: string }>();
   const messages: Array<DriverMessageRow & { jobId: string }> = [];
   const preStarts: Array<{ jobId: string; date: string; completedAt: Date; failed: number }> = [];
@@ -155,6 +185,7 @@ export function createFakeDriverRepository(driverId: string) {
       recoveredWeightBasis: stop.recoveredWeightBasis,
       bagWeights: stop.bagWeights,
       collectedBagCount: stop.collectedBagCount,
+      weightsRecordedAt: stop.weightsRecordedAt,
       runId: stop.runId ? objectId(stop.runId) : null,
       runSequence: stop.runSequence,
       driverId: objectId(stop.driverId),
@@ -186,6 +217,7 @@ export function createFakeDriverRepository(driverId: string) {
         recoveredWeightBasis: null,
         bagWeights: [],
         collectedBagCount: null,
+        weightsRecordedAt: null,
         arrivedAt: null,
         completedAt: null,
         siteName: `Lot ${String(overrides.jobNumber)}`,
@@ -206,12 +238,30 @@ export function createFakeDriverRepository(driverId: string) {
       if (stop) stop.status = status;
     },
 
+    /** Seed a charge directly — a report made before the report record existed. */
+    addCharge(charge: StoredCharge & { source?: string; raisedAt?: Date }): void {
+      charges.push(charge);
+    },
+
+    /** Seed a report whose later steps never ran — the half-saved case. */
+    addContaminationReport(report: StoredContaminationReport): void {
+      contaminationReports.set(report.jobId, report);
+    },
+
+    /** See `failNextCharge`. */
+    failNextCharge(): void {
+      failNextCharge = true;
+    },
+
     /* ── Inspection ───────────────────────────────────────────────────── */
     get charges() {
       return charges;
     },
     get events() {
       return events;
+    },
+    contaminationReport(jobId: string) {
+      return contaminationReports.get(jobId);
     },
     get defects() {
       return defects;
@@ -301,6 +351,7 @@ export function createFakeDriverRepository(driverId: string) {
         loadType: LoadType;
         bagWeights: number[];
         craneScaleKg: number | null;
+        recordedAt: Date;
       }) {
         const stop = stops.get(input.jobId);
         if (!stop) return Promise.resolve(false);
@@ -312,6 +363,9 @@ export function createFakeDriverRepository(driverId: string) {
         stop.bagWeights = input.bagWeights;
         stop.recoveredWeightKg = input.craneScaleKg;
         stop.recoveredWeightBasis = input.craneScaleKg === null ? null : 'actual';
+        // ⚠️ Stamped on SAVE, as the real repository does. A fake that waited
+        // for completion would let the deadlock back in unnoticed.
+        stop.weightsRecordedAt = input.recordedAt;
         return Promise.resolve(true);
       },
 
@@ -415,6 +469,10 @@ export function createFakeDriverRepository(driverId: string) {
         photoCount: number;
         note: string | null;
       }) {
+        if (failNextCharge) {
+          failNextCharge = false;
+          return Promise.reject(new Error('pricing blinked'));
+        }
         charges.push({ ...input, approvalState: 'pending' });
         return Promise.resolve(nextId());
       },
@@ -489,6 +547,81 @@ export function createFakeDriverRepository(driverId: string) {
 
       appendEvent(input: StoredEvent) {
         events.push(input);
+        return Promise.resolve();
+      },
+
+      hasStatusEvent(jobId: string, status: JobStatus) {
+        return Promise.resolve(
+          events.some((event) => event.jobId === jobId && event.status === status),
+        );
+      },
+
+      countEvidencePhotos(jobId: string, purpose: PhotoPurpose) {
+        return Promise.resolve(
+          [...photos.values()].filter(
+            (photo) => photo.jobId === jobId && photoPurpose(photo) === purpose,
+          ).length,
+        );
+      },
+
+      /*
+       * Mirrors the real read, including the fallback: a job whose report
+       * predates the record reads its driver-raised contamination charge as
+       * the report.
+       */
+      findContaminationReport(jobId: string) {
+        const report = contaminationReports.get(jobId);
+        if (report) return Promise.resolve({ ...report, legacy: false });
+
+        const charge = charges.find(
+          (row) =>
+            row.jobId === jobId &&
+            row.code === 'contamination' &&
+            (row as { source?: string }).source === 'driver',
+        );
+        if (!charge) return Promise.resolve(null);
+
+        const parsed = parseContaminationNote(charge.note);
+        const raisedAt = (charge as { raisedAt?: Date }).raisedAt ?? new Date(0);
+        return Promise.resolve({
+          reportedAt: raisedAt,
+          type: parsed.type,
+          extent: parsed.extent,
+          note: parsed.note,
+          latitude: null,
+          longitude: null,
+          timelineRecordedAt: raisedAt,
+          legacy: true,
+        });
+      },
+
+      /** First writer wins, exactly as the unique index makes the real one behave. */
+      recordContaminationReport(input: {
+        jobId: string;
+        type: ContaminationType;
+        extent: ContaminationExtent;
+        note: string | null;
+        reportedAt: Date;
+        latitude: number | null;
+        longitude: number | null;
+      }) {
+        if (contaminationReports.has(input.jobId)) return Promise.resolve(false);
+        contaminationReports.set(input.jobId, {
+          jobId: input.jobId,
+          type: input.type,
+          extent: input.extent,
+          note: input.note,
+          reportedAt: input.reportedAt,
+          latitude: input.latitude,
+          longitude: input.longitude,
+          timelineRecordedAt: null,
+        });
+        return Promise.resolve(true);
+      },
+
+      markContaminationOnTimeline(jobId: string, at: Date) {
+        const report = contaminationReports.get(jobId);
+        if (report && report.timelineRecordedAt === null) report.timelineRecordedAt = at;
         return Promise.resolve();
       },
 

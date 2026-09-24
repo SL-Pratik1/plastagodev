@@ -2,6 +2,7 @@ import type { DriverPhoto, RequiredPhoto } from '@plastago/shared';
 import { Badge, Button, cn } from '@plastago/ui';
 import { CameraIcon, CheckIcon, CloudUploadIcon, ImageIcon, XIcon } from 'lucide-react';
 import { useState } from 'react';
+import { useStaleUrlRefresh } from '@/lib/use-stale-url-refresh';
 
 /**
  * The required-photo checklist and what has been taken (M4.5).
@@ -35,16 +36,40 @@ import { useState } from 'react';
  * than a placeholder that would imply something is wrong. `onError` covers the
  * narrow case of a URL that expired while the screen sat open: the tile falls
  * back to an icon instead of the browser's broken-image glyph.
+ *
+ * ── Why the broken state has to be recoverable ────────────────────────────
+ * The read URL is signed for fifteen minutes, and a driver keeps this screen
+ * open for a great deal longer than that — it is the checklist they work down
+ * while loading. So "expired" is not a narrow case at all: it is where the
+ * screen spends most of its day.
+ *
+ * `failed` used to latch. One expired URL and the tile stayed an icon until the
+ * app was reloaded, so a driver glancing back at their evidence saw it quietly
+ * gone. Now a failure asks the page to refetch the job — which signs fresh URLs
+ * — and the flag clears when a new URL arrives.
  */
-function PhotoThumb({
+export function PhotoThumb({
   photo,
   label,
   onRemove,
+  onStale,
 }: {
   photo: DriverPhoto;
   label: string;
   onRemove: () => void;
+  /** Ask the page for fresh signed URLs; see the note on `failed` above. */
+  onStale?: (() => void) | undefined;
 }) {
+  /*
+   * ⚠️ Cleared by REMOUNTING, not by an effect.
+   *
+   * Without a reset the flag survives the very refetch that was supposed to heal
+   * it, and the tile stays broken while holding a perfectly good new link. The
+   * reset is done by keying this component on `photo.url` where it is rendered:
+   * a new URL mounts a new component with a fresh flag. An effect calling
+   * `setState` would do the same job by triggering a second render pass, which
+   * is what React tells you not to do.
+   */
   const [failed, setFailed] = useState(false);
 
   const takenAt = new Date(photo.takenAt).toLocaleTimeString('en-AU', {
@@ -75,6 +100,9 @@ function PhotoThumb({
             className="size-full object-cover"
             onError={() => {
               setFailed(true);
+              // Most likely an expired signature, and the only cure is a newly
+              // signed URL — which arrives with a fresh read of the job.
+              onStale?.();
             }}
           />
         ) : (
@@ -120,6 +148,11 @@ export interface PhotoGridProps {
   required: readonly RequiredPhoto[];
   onCapture: (slot: string | null, caption: string) => void;
   onRemove: (photoId: string) => void;
+  /**
+   * Called when a thumbnail fails to load, so the page can refetch the job and
+   * get freshly signed URLs. See the note on `PhotoThumb`.
+   */
+  onStale?: (() => void) | undefined;
   busySlot?: string | null;
   disabled?: boolean;
 }
@@ -129,10 +162,13 @@ export function PhotoGrid({
   required,
   onCapture,
   onRemove,
+  onStale,
   busySlot,
   disabled = false,
 }: PhotoGridProps) {
   const extras = photos.filter((photo) => photo.slot === null);
+  // At most one refresh a minute, however many tiles fail — see the hook.
+  const requestFreshUrls = useStaleUrlRefresh(onStale);
 
   return (
     <div className="space-y-4">
@@ -176,11 +212,13 @@ export function PhotoGrid({
                       {taken.map((photo) => (
                         <li key={photo.id}>
                           <PhotoThumb
+                            key={photo.url ?? photo.id}
                             photo={photo}
                             label={slot.label}
                             onRemove={() => {
                               onRemove(photo.id);
                             }}
+                            onStale={requestFreshUrls}
                           />
                         </li>
                       ))}
@@ -237,11 +275,13 @@ export function PhotoGrid({
               {extras.map((photo) => (
                 <li key={photo.id}>
                   <PhotoThumb
+                    key={photo.url ?? photo.id}
                     photo={photo}
                     label={photo.caption}
                     onRemove={() => {
                       onRemove(photo.id);
                     }}
+                    onStale={requestFreshUrls}
                   />
                 </li>
               ))}

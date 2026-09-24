@@ -11,8 +11,8 @@ import {
   InvitationResultSchema,
   InvoiceDownloadsSchema,
   InvoiceListItemSchema,
+  RaisedInvoiceSchema,
   InvoiceSchema,
-  JobChargeSchema,
   JobCommentSchema,
   JobListItemSchema,
   JobSchema,
@@ -28,7 +28,6 @@ import {
   type AccountType,
   type CreateRunInput,
   type ExceptionReason,
-  type JobChargeDraft,
   type JobCommentDraft,
   type JobDraft,
   type ReportFilters,
@@ -256,17 +255,6 @@ export function createHttpJobService(api: ApiClient): JobService {
           schema: JobCommentSchema,
         }),
       ),
-
-    addCharge: (jobId: string, draft: JobChargeDraft) =>
-      viaService(() =>
-        api.request(`${base}/${jobId}/charges`, {
-          method: 'POST',
-          body: draft,
-          // Returns the created charge: the server decides its approval state
-          // from the configured service, and the screen has to show which.
-          schema: JobChargeSchema,
-        }),
-      ),
   };
 }
 
@@ -378,7 +366,8 @@ export function createHttpInvoiceService(api: ApiClient): InvoiceService {
       viaService(() =>
         api.request(`${base}/jobs/${jobId}`, {
           method: 'POST',
-          schema: z.array(InvoiceListItemSchema),
+          // Raised or brought up to date — each one says which.
+          schema: z.array(RaisedInvoiceSchema),
         }),
       ),
 

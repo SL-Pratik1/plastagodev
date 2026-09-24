@@ -1,4 +1,5 @@
 import {
+  COMMENT_VISIBILITIES,
   COMMENT_VISIBILITY_LABELS,
   type CommentVisibility,
   type Job,
@@ -27,8 +28,10 @@ import {
   MessageSquareIcon,
   SendIcon,
   TruckIcon,
+  UserIcon,
 } from 'lucide-react';
 import { useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { useAuth } from '@/features/auth/auth-context';
 import { useAddJobComment } from '@/features/jobs/queries';
 import { describeError } from '@/lib/error-message';
@@ -78,9 +81,17 @@ const THREADS: readonly {
     key: 'customer',
     label: 'Customer',
     icon: EyeIcon,
-    blurb: 'Visible to the customer in their portal. Write it as they will read it.',
+    blurb:
+      'Visible to the customer in their portal, and they can reply here. Write it as they will read it.',
   },
 ];
+
+/** A thread named in the URL — how a notification opens the right one. */
+function threadFrom(value: string | null): CommentVisibility {
+  return (COMMENT_VISIBILITIES as readonly string[]).includes(value ?? '')
+    ? (value as CommentVisibility)
+    : 'internal';
+}
 
 const BADGE_VARIANT: Record<CommentVisibility, BadgeProps['variant']> = {
   internal: 'outline',
@@ -92,8 +103,11 @@ export function JobCommentThreads({ job }: { job: Job }) {
   const toast = useToast();
   const { can } = useAuth();
   const addComment = useAddJobComment();
+  const [params] = useSearchParams();
 
-  const [active, setActive] = useState<CommentVisibility>('internal');
+  // `?thread=customer` from a "message from the customer" notification opens
+  // on the reply rather than on the internal notes.
+  const [active, setActive] = useState<CommentVisibility>(() => threadFrom(params.get('thread')));
   const [body, setBody] = useState('');
   const [fieldError, setFieldError] = useState<string | null>(null);
 
@@ -142,7 +156,7 @@ export function JobCommentThreads({ job }: { job: Job }) {
         active === 'driver'
           ? 'It has been pushed to their app and will show on the job.'
           : active === 'customer'
-            ? 'The customer can see this against the job.'
+            ? 'They have been notified and can reply from the pickup.'
             : undefined,
       );
     } catch (caught) {
@@ -240,7 +254,7 @@ export function JobCommentThreads({ job }: { job: Job }) {
                 active === 'driver'
                   ? `${job.driverName ?? 'The driver'} gets a push notification straight away.`
                   : active === 'customer'
-                    ? 'This appears in the customer portal against this job.'
+                    ? 'This appears on the pickup in their portal, and they are notified.'
                     : 'Stays inside the office.'
               }
             >
@@ -289,16 +303,19 @@ export function JobCommentThreads({ job }: { job: Job }) {
 /**
  * One comment.
  *
- * Driver replies are indented and tinted so the driver thread reads as a
- * conversation with two sides rather than a log with a name column — which is
- * what "communicate with drivers" (W102) actually means in use.
+ * Replies — the driver's on the driver thread, the customer's on the customer
+ * thread — are indented and tinted so a thread reads as a conversation with two
+ * sides rather than a log with a name column — which is what "communicate with
+ * drivers" (W102) actually means in use.
  */
 function CommentBubble({ comment }: { comment: JobComment }) {
+  const isReply = comment.fromDriver || comment.fromCustomer;
+
   return (
     <li
       className={cn(
         'rounded-lg border p-3',
-        comment.fromDriver ? 'ml-6 border-brand-500/35 bg-brand-500/6' : 'border-border',
+        isReply ? 'ml-6 border-brand-500/35 bg-brand-500/6' : 'border-border',
       )}
     >
       <div className="flex flex-wrap items-baseline gap-2">
@@ -309,7 +326,13 @@ function CommentBubble({ comment }: { comment: JobComment }) {
             Driver
           </Badge>
         )}
-        {!comment.fromDriver && comment.visibility !== 'internal' && (
+        {comment.fromCustomer && (
+          <Badge variant="outline">
+            <UserIcon aria-hidden className="size-3" />
+            Customer
+          </Badge>
+        )}
+        {!isReply && comment.visibility !== 'internal' && (
           <Badge variant={BADGE_VARIANT[comment.visibility]}>
             {COMMENT_VISIBILITY_LABELS[comment.visibility]}
           </Badge>

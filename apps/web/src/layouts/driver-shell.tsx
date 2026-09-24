@@ -14,6 +14,7 @@ import {
   ClipboardListIcon,
   LogOutIcon,
   PhoneIcon,
+  RepeatIcon,
   ScaleIcon,
   TriangleAlertIcon,
   type LucideIcon,
@@ -25,9 +26,11 @@ import { BrandMark } from '@/components/brand/brand-mark';
 import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
+import { switchLabel, useRoleSwitch } from '@/features/auth/use-role-switch';
 import { SessionExpiry } from '@/features/auth/session-expiry';
 import { runKeys } from '@/features/driver/queries';
-import { onOutboxSynced, startOutboxSync } from '@/offline/outbox';
+import { flushOutbox, onOutboxSynced, startOutboxSync } from '@/offline/outbox';
+import { useOutboxSummary } from '@/offline/use-offline-state';
 
 /**
  * The driver shell (M4) — one layout, two shapes.
@@ -78,6 +81,7 @@ const TABS: readonly Tab[] = [
 export function DriverShell() {
   const driver = useCurrentUser();
   const { signOut } = useAuth();
+  const { switchTo, switching } = useRoleSwitch();
   const location = useLocation();
   const navigate = useNavigate();
   const toast = useToast();
@@ -85,6 +89,41 @@ export function DriverShell() {
 
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
+
+  /*
+   * What is still on this phone and not yet on the server.
+   *
+   * The outbox only drains while this shell is mounted, so going back to the
+   * console with work unsent leaves it on the phone until the driver app is
+   * next opened — a futile report or a completion the office never sees. Sign
+   * out already said so; the way back to the console said nothing.
+   */
+  const outbox = useOutboxSummary();
+  const unsent = outbox.pending + outbox.failed;
+
+  /**
+   * The role this person would go BACK to, or `null` for an ordinary driver.
+   *
+   * Read off the session rather than asked of the server, because the session
+   * already carries it: `roles` is everything they hold and `role` is what they
+   * are doing now, so a second entry means the run sheet is borrowed. Only the
+   * allocator pairing exists today (Matt, 27:36, ruled the rest out), and `find`
+   * keeps that an assumption about the data rather than a hardcoded 'allocator'
+   * that would quietly do nothing if a second pairing ever appeared.
+   */
+  const otherRole = driver.roles.find((held) => held !== driver.role) ?? null;
+
+  const requestSwitchBack = () => {
+    if (otherRole === null) return;
+    if (unsent === 0) {
+      void switchTo(otherRole);
+      return;
+    }
+    // Try to send it now; the dialog's count follows the queue live.
+    void flushOutbox();
+    setLeaveOpen(true);
+  };
 
   /*
    * The outbox drains for as long as this shell is mounted — which is exactly
@@ -259,6 +298,33 @@ export function DriverShell() {
                   {ROLE_LABELS[driver.role]}
                 </Badge>
               </div>
+              {/*
+                The way out, for the one person who has somewhere else to be.
+
+                Its absence is what made switching a trapdoor: an allocator
+                covering a shift (Matt, 27:01) reached the run sheet and then
+                found that nothing here went back, and that typing `/admin`
+                didn't either — the guard read his now-driver role and returned
+                him to `/driver`. Signing out and waiting for a fresh code was
+                the only way home.
+
+                Nothing appears for an ordinary driver, who holds one role and
+                has no console to return to.
+              */}
+              {otherRole !== null && (
+                <>
+                  <MenuSeparator />
+                  <MenuItem
+                    icon={RepeatIcon}
+                    disabled={switching}
+                    onSelect={() => {
+                      requestSwitchBack();
+                    }}
+                  >
+                    {switchLabel(otherRole, true)}
+                  </MenuItem>
+                </>
+              )}
               <MenuSeparator />
               <MenuItem
                 icon={LogOutIcon}
@@ -272,6 +338,44 @@ export function DriverShell() {
             </Menu>
           </div>
         </header>
+
+        {/*
+          ── The cover banner ───────────────────────────────────────────────
+          A borrowed role should never be something you have to remember. This
+          says whose screens these are and offers the way out in one tap, so
+          the exit does not live only behind an avatar the driver surface was
+          never designed to make anyone open — on a phone that menu is a small
+          target reached one-handed, and "how do I get back" is not a question
+          to answer with a hunt.
+
+          It renders for nobody but the person covering: an ordinary driver
+          holds one role and sees the shell exactly as before.
+
+          `bg-warning/12` with `text-warning` is the tint `stat-card` already
+          uses. Solid `bg-warning` is reserved for the driver's own action
+          buttons, and a full amber bar above them would outrank the thing it
+          sits over — this is a standing note, not an alarm.
+        */}
+        {otherRole !== null && (
+          <div className="border-b border-warning/25 bg-warning/12 px-4 py-2 sm:px-6">
+            <div className="mx-auto flex w-full max-w-md items-center gap-3 md:max-w-3xl">
+              <p className="min-w-0 flex-1 text-xs leading-tight text-warning">
+                <span className="font-semibold">Covering a shift.</span> You’re working as{' '}
+                {ROLE_LABELS[driver.role].toLowerCase()}.
+              </p>
+              <button
+                type="button"
+                disabled={switching}
+                onClick={() => {
+                  requestSwitchBack();
+                }}
+                className="focus-ring shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-warning underline underline-offset-2 disabled:opacity-50"
+              >
+                {switchLabel(otherRole, true)}
+              </button>
+            </div>
+          </div>
+        )}
 
         <main
           id="driver-main"
@@ -340,6 +444,26 @@ export function DriverShell() {
         description="Anything still waiting to send stays on this device until you sign back in. You’ll need a new one-time code."
         confirmLabel="Sign out"
         pending={signingOut}
+      />
+
+      <ConfirmDialog
+        open={leaveOpen}
+        onCancel={() => {
+          setLeaveOpen(false);
+        }}
+        onConfirm={() => {
+          setLeaveOpen(false);
+          if (otherRole !== null) void switchTo(otherRole);
+        }}
+        title="Back to the console?"
+        description={
+          unsent > 0
+            ? `${String(unsent)} ${unsent === 1 ? 'change has' : 'changes have'} not reached the office yet. They send from the driver app, so if you go back now they wait on this device until you next open it.`
+            : 'Everything has now reached the office.'
+        }
+        cancelLabel="Stay and send"
+        confirmLabel={unsent > 0 ? 'Go back anyway' : 'Back to the console'}
+        pending={switching}
       />
     </div>
   );

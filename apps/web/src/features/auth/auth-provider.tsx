@@ -110,23 +110,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   /**
    * Change the active role.
    *
-   * Local to the session object: no network call, because in the real build the
-   * roles a user holds are already inside the signed token — switching chooses
-   * among them rather than asking for more. The server still authorises every
-   * request against the full set, so this cannot grant anything.
+   * ── Why this is a network call now ────────────────────────────────────────
+   * It was a `setState` and nothing else, on the reasoning that the server
+   * authorises against the full role set anyway so the active one is a display
+   * concern. True as far as it goes — and it broke the single journey the
+   * feature exists for. The driver surface is a separate ORIGIN (§6A.5), so an
+   * allocator taking over a shift leaves this page entirely; the state died with
+   * the page, the far side read his stored role, found `allocator`, and sent him
+   * back to the console. Unreachable, every time. The same thing happened on one
+   * origin the moment anybody pressed refresh.
    *
-   * Silently ignores a role the user does not hold. A caller passing one is a
-   * bug in the caller, and throwing here would take down the layout that renders
-   * the switcher.
+   * So the choice is persisted, and the session that comes back is the one the
+   * app re-renders from — no second read, no window where the shell is drawn
+   * from a role that has stopped being true.
+   *
+   * Throws for a role the user does not hold, because now something real
+   * refuses it. Callers should await this BEFORE they navigate.
    */
-  const switchRole = useCallback((role: Role) => {
-    setSession((current) => {
-      if (!current) return current;
-      if (current.user.role === role) return current;
-      if (!current.user.roles.includes(role)) return current;
-      return { ...current, user: { ...current.user, role } };
-    });
-  }, []);
+  const switchRole = useCallback(
+    async (role: Role) => {
+      const issued = await auth.setActiveRole(role);
+      setSession(issued);
+      setStatus('authenticated');
+    },
+    [auth],
+  );
 
   const abandonChallenge = useCallback(() => {
     setChallenge(null);

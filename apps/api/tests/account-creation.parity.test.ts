@@ -70,6 +70,22 @@ vi.mock('../src/domains/notifications/notification.repository.js', () => ({
   notificationRepository: makeFakeNotificationRepository(),
 }));
 
+/*
+ * Both doors create the customer's portal login with the welcome email — the
+ * same call from the same shared step, so it cannot drift between them either.
+ */
+const loginsCreated: Array<Record<string, unknown>> = [];
+
+vi.mock('../src/domains/users/user.repository.js', () => ({
+  userRepository: {
+    identifierTaken: () => Promise.resolve(false),
+    create: (input: Record<string, unknown>) => {
+      loginsCreated.push(input);
+      return Promise.resolve(`usr${String(loginsCreated.length).padStart(21, '0')}`);
+    },
+  },
+}));
+
 vi.mock('../src/domains/settings/settings.repository.js', () => ({
   settingsRepository: {
     findRateCard: (id: string) =>
@@ -279,6 +295,24 @@ describe('both doors into the customer list', () => {
     expect(sentMessages).toHaveLength(2);
     expect(sentMessages.every((message) => message.channel === 'email')).toBe(true);
     expect(sentMessages.every((message) => message.body.includes('ACM001'))).toBe(true);
+  });
+
+  /*
+   * And both create the login that email tells them to sign in with — the
+   * same person, the same role, whichever door the office used.
+   */
+  it('both create the same portal login with the welcome email', async () => {
+    loginsCreated.length = 0;
+
+    await accountService.create(directDraft({ sendInvitation: true }));
+    await leadService.convert(LEAD_ID, conversion({ sendInvitation: true }), OPERATIONS);
+
+    expect(loginsCreated).toHaveLength(2);
+    const [direct, converted] = loginsCreated.map(
+      ({ accountId: _accountId, invitedBy: _invitedBy, ...person }) => person,
+    );
+    expect(converted).toEqual(direct);
+    expect(direct).toMatchObject({ role: 'customer-administrator', mobile: null });
   });
 
   it('both refuse an invitation with nowhere to send it', async () => {

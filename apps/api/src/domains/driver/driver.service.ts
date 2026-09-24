@@ -1,14 +1,17 @@
 import {
+  EXCEPTION_REASON_LABELS,
   PRE_START_ITEMS,
   RISK_CONTROLS,
   SITE_HAZARDS,
   type Completion,
   type ContaminationReport,
+  type ContaminationOutcome,
   type DefectReport,
   type DriverJob,
   type DriverPhoto,
   type FutileReport,
   type GeoFix,
+  type JobStatus,
   type PreStartSubmission,
   type RunSheetDay,
   type RunStop,
@@ -33,13 +36,15 @@ import {
   addDriverMessage,
   driverRepository,
   loadJobDetail,
+  type ContaminationReportRow,
   type DriverPhotoRow,
   type DriverStopRow,
 } from './driver.repository.js';
-import { jobNotices } from '../notifications/job-notices.service.js';
+import { jobNotices, previewOf } from '../notifications/job-notices.service.js';
 import { notificationService } from '../notifications/notification.service.js';
 import { queueRepository } from '../queues/queue.repository.js';
 import { reportService } from '../reports/report.service.js';
+import { describeContamination } from './contamination-note.js';
 import { reconcileTipOff } from './tipoff.js';
 
 const log = logger.child({ module: 'driver' });
@@ -120,7 +125,10 @@ export const driverService = {
 
   async job(jobId: string, caller: DriverCaller): Promise<DriverJob> {
     const stop = await requireStop(jobId, caller);
-    const detail = await loadJobDetail(jobId);
+    const [detail, contamination] = await Promise.all([
+      loadJobDetail(jobId),
+      driverRepository.findContaminationReport(jobId),
+    ]);
     const photos = await toDriverPhotos(detail.photos);
 
     return {
@@ -152,9 +160,10 @@ export const driverService = {
       // Same gate as the total: an estimated figure has no per-bag breakdown,
       // and echoing a stale one next to it would read as a measurement.
       bagWeights: stop.recoveredWeightBasis === 'actual' ? (stop.bagWeights ?? []) : [],
-      weightsRecordedAt: stop.recoveredWeightBasis !== null && stop.completedAt !== null
-        ? stop.completedAt.toISOString()
-        : null,
+      // A STORED fact, stamped when the driver saved the screen. Deriving it from
+      // `completedAt` deadlocked the phone: completion is blocked until weights
+      // are recorded, so it could not become true until the job was already done.
+      weightsRecordedAt: stop.weightsRecordedAt?.toISOString() ?? null,
       riskAssessment: detail.riskAssessment
         ? {
             completedAt: detail.riskAssessment.completedAt.toISOString(),
@@ -172,12 +181,20 @@ export const driverService = {
         at: message.at.toISOString(),
         fromDriver: message.fromDriver,
       })),
+      // M4.7 — so the job says "reported" instead of offering the form again.
+      contamination: contamination
+        ? {
+            reportedAt: contamination.reportedAt.toISOString(),
+            type: contamination.type,
+            extent: contamination.extent,
+          }
+        : null,
     };
   },
 
   /** M8.6 · W102 — the driver's side of the office ↔ driver thread. */
   async sendMessage(jobId: string, body: string, caller: DriverCaller): Promise<void> {
-    await requireStop(jobId, caller);
+    const stop = await requireStop(jobId, caller);
 
     const trimmed = body.trim();
     if (!trimmed) {
@@ -186,12 +203,32 @@ export const driverService = {
       ]);
     }
 
-    await addDriverMessage({
+    const message = await addDriverMessage({
       jobId,
       body: trimmed,
       authorId: caller.userId,
       author: caller.name,
       at: new Date(),
+    });
+
+    /*
+     * M8.6 — and the office is told.
+     *
+     * A driver writes from a site because they are stuck at it — "gate locked,
+     * nobody here". The message used to sit on the job until somebody happened
+     * to open it, while the driver waited at the gate. Keyed on the message:
+     * every one is new, and reading one must not hide the next.
+     */
+    await notificationService.notifyOffice({
+      audience: 'dispatch',
+      category: 'message',
+      severity: 'action',
+      title: `Driver message — #${String(stop.jobNumber)} ${stop.siteName}`,
+      body: `${caller.name}: ${previewOf(trimmed)}`,
+      href: `/admin/jobs/${jobId}?tab=comments&thread=driver`,
+      subjectKey: `driver-message:${message.id}`,
+      jobId,
+      jobNumber: stop.jobNumber,
     });
   },
 
@@ -377,6 +414,7 @@ export const driverService = {
       loadType: input.loadType,
       bagWeights,
       craneScaleKg,
+      recordedAt: new Date(input.occurredAt),
     });
 
     await driverRepository.appendEvent({
@@ -517,20 +555,51 @@ export const driverService = {
     const stop = await requireStop(jobId, caller);
     const occurredAt = new Date(input.occurredAt);
 
-    if (stop.status === 'futile') return; // Replay.
-    if (stop.status === 'completed') {
-      throw AppError.conflict('This job is already completed, so it cannot be marked futile');
+    /*
+     * ⚠️ Refused BEFORE anything is written. This used to check only
+     * `completed`, and it ignored whether the status change below matched —
+     * so a report queued offline that reached a job the office had since
+     * cancelled still raised the $120 fee and opened a review against a job
+     * nobody was meant to collect.
+     */
+    const refusal = futileRefusal(stop.status);
+    if (refusal) throw refusal;
+
+    if (stop.status !== 'futile') {
+      const changed = await driverRepository.transition({
+        jobId,
+        driverId: caller.userId,
+        to: 'futile',
+        fromStatuses: ['assigned', 'in-transit', 'arrived'],
+        occurredAt,
+        completedAt: occurredAt,
+      });
+
+      if (!changed) {
+        // The job moved between the read above and this write. Almost always a
+        // second replay of this same report landing at once — which is fine,
+        // it is futile now. Anything else is a real refusal.
+        const now = await requireStop(jobId, caller);
+        if (now.status !== 'futile') {
+          throw (
+            futileRefusal(now.status) ??
+            AppError.conflict('This job has changed — ring the office before you leave')
+          );
+        }
+      }
     }
 
-    await driverRepository.transition({
-      jobId,
-      driverId: caller.userId,
-      to: 'futile',
-      fromStatuses: ['assigned', 'in-transit', 'arrived'],
-      occurredAt,
-      completedAt: occurredAt,
-    });
-
+    /*
+     * From here the job IS futile — by this request or an earlier attempt —
+     * and each step below is idempotent on its own.
+     *
+     * ⚠️ That is the half-saved fix. A replay used to return straight away on
+     * "already futile", so a first attempt that moved the status and then
+     * failed on the charge, the review or the timeline could never be finished:
+     * the fee was never raised and the office never heard about the pickup.
+     * Now the phone's retry completes whatever is missing and duplicates
+     * nothing.
+     */
     await raiseChargeOnce({
       jobId,
       code: FUTILE_CODE,
@@ -538,17 +607,7 @@ export const driverService = {
       occurredAt,
       photoCount: input.photoIds.length,
       note: input.note.trim() || null,
-    });
-
-    await driverRepository.appendEvent({
-      jobId,
-      at: occurredAt,
-      label: 'Marked futile',
-      actor: caller.name,
-      status: 'futile',
-      detail: input.note.trim() || input.reason,
-      latitude: input.position?.latitude ?? null,
-      longitude: input.position?.longitude ?? null,
+      position: input.position ?? null,
     });
 
     /*
@@ -566,7 +625,51 @@ export const driverService = {
       reason: input.reason,
       note: input.note.trim() || null,
       markedAt: occurredAt,
+      latitude: input.position?.latitude ?? null,
+      longitude: input.position?.longitude ?? null,
     });
+
+    // Once: a retry that finds the line already written leaves it alone.
+    if (!(await driverRepository.hasStatusEvent(jobId, 'futile'))) {
+      await driverRepository.appendEvent({
+        jobId,
+        at: occurredAt,
+        label: 'Marked futile',
+        actor: caller.name,
+        status: 'futile',
+        detail: input.note.trim() || input.reason,
+        latitude: input.position?.latitude ?? null,
+        longitude: input.position?.longitude ?? null,
+      });
+    }
+
+    /*
+     * M2.6 — and people are told, now rather than when somebody opens a queue.
+     *
+     * The office owns the next step (rebook or cancel) and the allocator has a
+     * slot on a run to refill. The customer hears the same day, while the site
+     * still remembers why — the fee otherwise first surfaces on an invoice,
+     * weeks later, as an argument. Both are keyed on the job, so a phone
+     * replaying this report tells nobody twice, and neither can throw.
+     */
+    const reasonLabel = EXCEPTION_REASON_LABELS[input.reason];
+    const note = input.note.trim();
+
+    await notificationService.notifyOffice({
+      audience: 'dispatch',
+      category: 'exception',
+      severity: 'action',
+      title: `Futile pickup — #${String(stop.jobNumber)} ${stop.siteName}`,
+      body: `${caller.name} could not collect: ${reasonLabel}.${note ? ` ${note}` : ''} Rebook or cancel it.`,
+      href: '/admin/queues/futile',
+      // The allocator cannot open the queues; the job shows them what happened.
+      allocatorHref: `/admin/jobs/${jobId}`,
+      subjectKey: `futile:${jobId}`,
+      jobId,
+      jobNumber: stop.jobNumber,
+    });
+
+    await jobNotices.futile(jobId, reasonLabel);
 
     log.info({ jobId, jobNumber: stop.jobNumber, reason: input.reason }, 'job marked futile');
   },
@@ -582,17 +685,60 @@ export const driverService = {
     jobId: string,
     input: ContaminationReport,
     caller: DriverCaller,
-  ): Promise<void> {
+  ): Promise<ContaminationOutcome> {
     const stop = await requireStop(jobId, caller);
     const occurredAt = new Date(input.occurredAt);
 
-    await raiseChargeOnce({
+    if (stop.status === 'cancelled') {
+      throw AppError.conflict('The office cancelled this job — do not collect it');
+    }
+    if (stop.status === 'futile') {
+      throw AppError.conflict(
+        'This job was marked as could not collect, so there is no load to report on',
+      );
+    }
+
+    /*
+     * ⚠️ ONE report per job.
+     *
+     * Every report used to be accepted: the first raised the charge, and each
+     * one after it added another "Contamination reported" line — eleven on one
+     * job in the dev data, because nothing ever told the phone a report had
+     * been made. A second report now changes nothing. It only finishes what an
+     * earlier attempt at the FIRST left undone, which is what makes a replay
+     * after a half-saved report safe rather than lost.
+     */
+    const existing = await driverRepository.findContaminationReport(jobId);
+    if (existing) {
+      const chargeRaised = existing.legacy
+        ? false
+        : await finishContaminationReport(jobId, existing, caller);
+      return { chargeRaised };
+    }
+
+    const created = await driverRepository.recordContaminationReport({
+      jobId,
+      type: input.type,
+      extent: input.extent,
+      note: input.note.trim() || null,
+      reportedAt: occurredAt,
+      reportedByUserId: caller.userId,
+      reportedByName: caller.name,
+      latitude: input.position?.latitude ?? null,
+      longitude: input.position?.longitude ?? null,
+    });
+
+    // Lost a race to a replay of this same report, which will finish it.
+    if (!created) return { chargeRaised: false };
+
+    const chargeRaised = await raiseChargeOnce({
       jobId,
       code: CONTAMINATION_CODE,
       caller,
       occurredAt,
       photoCount: input.photoIds.length,
-      note: `${input.type} · ${input.extent}${input.note.trim() ? ` — ${input.note.trim()}` : ''}`,
+      note: describeContamination(input.type, input.extent, input.note.trim() || null),
+      position: input.position ?? null,
     });
 
     await driverRepository.appendEvent({
@@ -605,11 +751,19 @@ export const driverService = {
       latitude: input.position?.latitude ?? null,
       longitude: input.position?.longitude ?? null,
     });
+    await driverRepository.markContaminationOnTimeline(jobId, new Date());
 
     log.info(
-      { jobId, jobNumber: stop.jobNumber, type: input.type, extent: input.extent },
+      { jobId, jobNumber: stop.jobNumber, type: input.type, extent: input.extent, chargeRaised },
       'contamination reported',
     );
+
+    /*
+     * The report is recorded either way. This only tells the caller whether a
+     * charge went with it, so nobody is promised an approval that is never
+     * coming.
+     */
+    return { chargeRaised };
   },
 
   /**
@@ -743,6 +897,8 @@ export const driverService = {
        * pickup did not happen and nobody knew why.
        */
       await notificationService.notifyOffice({
+        // The allocator too: the stop has to come off today's plan.
+        audience: 'dispatch',
         category: 'exception',
         severity: 'urgent',
         title: `Site unsafe — #${String(stop.jobNumber)} stopped`,
@@ -966,6 +1122,12 @@ export const driverService = {
      */
     if (input.severity === 'unroadworthy') {
       await notificationService.notifyOffice({
+        /*
+         * The people who can open the fleet screens — the allocator, who would
+         * otherwise put this truck on tomorrow's run, and not office staff,
+         * whose link to the vehicles page opened "Forbidden".
+         */
+        audience: 'fleet',
         category: 'exception',
         severity: 'urgent',
         title: `${vehicle.rego} reported UNROADWORTHY`,
@@ -1068,8 +1230,16 @@ async function raiseChargeOnce(input: {
   occurredAt: Date;
   photoCount: number;
   note: string | null;
-}): Promise<void> {
-  if (await driverRepository.hasCharge(input.jobId, input.code)) return;
+  /** The driver's fix, carried onto the charge — see the note on the model. */
+  position: GeoFix | null;
+}): Promise<boolean> {
+  /*
+   * Already charged means already charged — but the caller needs to KNOW that
+   * rather than merely be spared a duplicate. This returned void, so the phone
+   * reported success either way and told the driver a charge was on its way to
+   * the office when none had been raised.
+   */
+  if (await driverRepository.hasCharge(input.jobId, input.code)) return false;
 
   const priced = await pricingService.priceAdditionalService(input.code);
 
@@ -1084,7 +1254,84 @@ async function raiseChargeOnce(input: {
     raisedAt: input.occurredAt,
     photoCount: input.photoCount,
     note: input.note,
+    latitude: input.position?.latitude ?? null,
+    longitude: input.position?.longitude ?? null,
   });
+
+  return true;
+}
+
+/**
+ * Why a job in this status cannot be marked futile, or null when it can.
+ *
+ * `futile` itself is allowed: that is a replay, and a replay must be able to
+ * finish a report an earlier attempt half-saved — see `markFutile`.
+ */
+function futileRefusal(status: JobStatus): AppError | null {
+  switch (status) {
+    case 'cancelled':
+      return AppError.conflict('The office cancelled this job — do not collect it');
+    case 'completed':
+    case 'admin-complete':
+      return AppError.conflict('This job is already completed, so it cannot be marked futile');
+    case 'booked':
+      return AppError.conflict(
+        'This job is no longer on your run — ring the office before you leave',
+      );
+    case 'assigned':
+    case 'in-transit':
+    case 'arrived':
+    case 'futile':
+      return null;
+  }
+}
+
+/**
+ * Completes a stored report that an earlier attempt left half-done.
+ *
+ * The report row is written first, so a failure after it — pricing missing,
+ * the database blinking — used to leave the report recorded and never charged.
+ * The phone retries; this finishes the job from the STORED report rather than
+ * the retry's body, so the charge and the timeline describe what the driver
+ * actually reported the first time. Both steps are guarded, so a completed
+ * report passes straight through.
+ */
+async function finishContaminationReport(
+  jobId: string,
+  report: ContaminationReportRow,
+  caller: DriverCaller,
+): Promise<boolean> {
+  const position =
+    report.latitude !== null && report.longitude !== null
+      ? { latitude: report.latitude, longitude: report.longitude, accuracyMetres: null }
+      : null;
+
+  const chargeRaised = await raiseChargeOnce({
+    jobId,
+    code: CONTAMINATION_CODE,
+    caller,
+    occurredAt: report.reportedAt,
+    photoCount: await driverRepository.countEvidencePhotos(jobId, 'contamination'),
+    note: describeContamination(report.type, report.extent, report.note),
+    position,
+  });
+
+  if (report.timelineRecordedAt === null) {
+    await driverRepository.appendEvent({
+      jobId,
+      at: report.reportedAt,
+      label: 'Contamination reported',
+      actor: caller.name,
+      status: null,
+      detail:
+        report.type !== null && report.extent !== null ? `${report.type} · ${report.extent}` : null,
+      latitude: report.latitude,
+      longitude: report.longitude,
+    });
+    await driverRepository.markContaminationOnTimeline(jobId, new Date());
+  }
+
+  return chargeRaised;
 }
 
 /**
@@ -1368,6 +1615,24 @@ async function syncExtraBagCharge(input: {
     await note(
       `${String(excess)} bag${excess === 1 ? '' : 's'} over the ${String(input.allowedBags)} on the order, but no extra-bag rate is configured. Raise this charge by hand.`,
     );
+
+    /*
+     * "Left for the office to pick up" meant a log line and a timeline note —
+     * so the charge was simply lost unless somebody opened this job. The office
+     * is told. Money, so the office roles only.
+     */
+    await notificationService.notifyOffice({
+      category: 'exception',
+      severity: 'action',
+      title: `Extra bags not charged — #${String(input.jobNumber)}`,
+      body:
+        `${String(excess)} bag${excess === 1 ? '' : 's'} over the ${String(input.allowedBags)} on the order, ` +
+        'but no extra-bag price is set. Set it in Settings, then add the charge on the job.',
+      href: `/admin/jobs/${input.jobId}?tab=charges`,
+      subjectKey: `extra-bags-unpriced:${input.jobId}`,
+      jobId: input.jobId,
+      jobNumber: input.jobNumber,
+    });
     return;
   }
 

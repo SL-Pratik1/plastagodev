@@ -27,6 +27,12 @@ export interface UserRecord extends AuthenticatedUser {
   status: UserStatus;
 }
 
+/**
+ * Better Auth's own session collection — its default model name, which this
+ * app does not override (only `user.modelName` is set, in `better-auth.ts`).
+ */
+const SESSIONS_COLLECTION = 'session';
+
 /** The challenge state the service reasons about. No Mongo types escape. */
 export interface ChallengeRecord {
   challengeId: string;
@@ -95,6 +101,52 @@ export const authRepository = {
     if (!mongoose.isValidObjectId(id)) return null;
     const raw = await UserModel.findById(id).lean<RawUser>().exec();
     return raw ? toUserRecord(raw) : null;
+  },
+
+  /**
+   * The role this SESSION is working as, or `null` for the person's usual one.
+   *
+   * ── Why the session and not the user ──────────────────────────────────────
+   * Matt, 27:01 — the driver manager covers a sick driver's shift, so he moves
+   * between the console and the run sheet. The choice has to survive a reload
+   * and the jump to the driver app's origin (§6A.5), a full page load that
+   * discards anything held in a tab — so it lives on the server. It was stored
+   * on the USER, and that was wrong twice over: a switch on his phone sent the
+   * console on his office PC to the driver app too, and a session that simply
+   * expired on Friday left Monday's fresh sign-in landing on an empty run
+   * sheet. On the session, each device keeps its own choice, and a new sign-in
+   * starts clean because it is a new session.
+   *
+   * All three surfaces talk to one API, so one browser holds one session
+   * across the console and the driver app — which is what the jump needs.
+   *
+   * ⚠️ NOT a permission. Every server-side gate reads `roles`; this only
+   * decides where they land and what the shell shows. No validation here —
+   * whether the role is one they hold is a rule, and rules live in the service.
+   */
+  async findSessionActiveRole(sessionId: string): Promise<Role | null> {
+    if (!mongoose.isValidObjectId(sessionId)) return null;
+
+    const row = await getMongoDb()
+      .collection(SESSIONS_COLLECTION)
+      .findOne(
+        { _id: new mongoose.Types.ObjectId(sessionId) },
+        { projection: { activeRole: 1 } },
+      );
+
+    return (row?.activeRole as Role | null | undefined) ?? null;
+  },
+
+  /** Records the role this session is working as, or clears it with `null`. */
+  async setSessionActiveRole(sessionId: string, role: Role | null): Promise<void> {
+    if (!mongoose.isValidObjectId(sessionId)) return;
+
+    // A targeted `$set` on one field Better Auth does not know about. Its own
+    // writes to the session (the rolling expiry) are `$set`s too, so neither
+    // side overwrites the other.
+    await getMongoDb()
+      .collection(SESSIONS_COLLECTION)
+      .updateOne({ _id: new mongoose.Types.ObjectId(sessionId) }, { $set: { activeRole: role } });
   },
 
   /**

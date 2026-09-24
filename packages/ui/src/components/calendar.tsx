@@ -1,4 +1,4 @@
-import { ChevronLeftIcon, ChevronRightIcon } from 'lucide-react';
+import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon } from 'lucide-react';
 import { DayPicker } from 'react-day-picker';
 import { enAU } from 'react-day-picker/locale';
 import type { ComponentProps } from 'react';
@@ -26,12 +26,19 @@ import { cn } from '../lib/utils.js';
  */
 export type CalendarProps = ComponentProps<typeof DayPicker>;
 
-export function Calendar({ className, classNames, showOutsideDays = true, ...props }: CalendarProps) {
+export function Calendar({
+  className,
+  classNames,
+  showOutsideDays = true,
+  captionLayout = 'dropdown',
+  ...props
+}: CalendarProps) {
   return (
     <DayPicker
       locale={enAU}
       weekStartsOn={1}
       showOutsideDays={showOutsideDays}
+      captionLayout={captionLayout}
       className={cn('w-fit', className)}
       classNames={{
         months: 'flex flex-col gap-4 sm:flex-row',
@@ -40,8 +47,22 @@ export function Calendar({ className, classNames, showOutsideDays = true, ...pro
         // The caption is centred and the nav floats over it, so a long month
         // name ("September") cannot push the arrows out of alignment.
         month_caption: 'relative flex h-8 items-center justify-center',
-        caption_label: 'text-sm font-semibold tracking-tight',
+        caption_label: 'relative z-[1] inline-flex items-center gap-1 whitespace-nowrap text-sm font-semibold tracking-tight',
         nav: 'absolute inset-x-0 top-0 flex h-8 items-center justify-between',
+
+        // Month/year jump — a real `<select>` sits invisibly over the visible
+        // label + chevron so it keeps native keyboard and screen-reader
+        // behaviour without looking like an OS control. Same trick `Select`
+        // uses elsewhere in this file's family of components.
+        //
+        // ⚠️ The select is invisible, so its focus is too: Shift+Tab from the
+        // day grid landed on two stops nobody could see. The wrapper draws the
+        // same ring `focus-ring` does whenever the select inside has keyboard
+        // focus.
+        dropdowns: 'relative inline-flex items-center gap-1.5',
+        dropdown_root:
+          'relative inline-flex items-center rounded-md px-0.5 has-[select:focus-visible]:outline-2 has-[select:focus-visible]:outline-offset-2 has-[select:focus-visible]:outline-ring',
+        dropdown: 'absolute inset-0 z-10 w-full cursor-pointer appearance-none border-none bg-transparent opacity-0',
         button_previous:
           'focus-ring grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40',
         button_next:
@@ -67,14 +88,14 @@ export function Calendar({ className, classNames, showOutsideDays = true, ...pro
         ...classNames,
       }}
       components={{
-        // The library renders one chevron and rotates it; supplying both
-        // directions keeps the arrows optically identical to the rest of the UI.
-        Chevron: ({ orientation, ...rest }) =>
-          orientation === 'left' ? (
-            <ChevronLeftIcon aria-hidden className="size-4" {...rest} />
-          ) : (
-            <ChevronRightIcon aria-hidden className="size-4" {...rest} />
-          ),
+        // The library renders one chevron and rotates it; supplying all three
+        // directions keeps them optically identical to the rest of the UI.
+        // 'down' is the small indicator next to the month/year dropdown text.
+        Chevron: ({ orientation, ...rest }) => {
+          if (orientation === 'left') return <ChevronLeftIcon aria-hidden className="size-4" {...rest} />;
+          if (orientation === 'down') return <ChevronDownIcon aria-hidden className="size-3.5" {...rest} />;
+          return <ChevronRightIcon aria-hidden className="size-4" {...rest} />;
+        },
       }}
       {...props}
     />

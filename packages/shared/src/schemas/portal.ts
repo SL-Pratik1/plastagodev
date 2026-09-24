@@ -182,6 +182,41 @@ export const PortalJobStepSchema = z
   })
   .meta({ id: 'PortalJobStep' });
 
+/**
+ * One message on the pickup's thread with the office (M2.11).
+ *
+ * The office's side is whatever it posted to the job's `customer` thread; the
+ * customer's side is replies from the portal. Neither the internal thread nor
+ * the driver thread ever reaches this shape.
+ */
+export const PortalJobMessageSchema = z
+  .object({
+    id: ObjectIdSchema,
+    body: NonEmptyStringSchema,
+    author: NonEmptyStringSchema,
+    at: IsoDateTimeSchema,
+    /** Written by someone on the customer's side, rather than the office. */
+    fromCustomer: z.boolean(),
+    /**
+     * Written by the person reading it. Worked out on the server, so the
+     * portal can say "You" without being sent anyone's user id. Defaults to
+     * false for an API released before this field existed.
+     */
+    mine: z.boolean().default(false),
+  })
+  .meta({ id: 'PortalJobMessage' });
+
+/** What the portal's reply box sends. */
+export const PortalJobMessageDraftSchema = z
+  .object({
+    body: z
+      .string()
+      .trim()
+      .min(1, 'Write something before sending')
+      .max(2000, 'Keep a message under 2000 characters'),
+  })
+  .meta({ id: 'PortalJobMessageDraft' });
+
 export const PortalJobSchema = PortalJobListItemSchema.extend({
   builderName: z.string(),
   zoneId: ZoneSchema,
@@ -193,16 +228,8 @@ export const PortalJobSchema = PortalJobListItemSchema.extend({
   /** M5.9 — the full completion record, all photos included. */
   photos: z.array(JobPhotoSchema),
   steps: z.array(PortalJobStepSchema),
-  /** Comments the office marked customer-visible (M2.11). */
-  messages: z.array(
-    z.object({
-      id: ObjectIdSchema,
-      body: NonEmptyStringSchema,
-      author: NonEmptyStringSchema,
-      at: IsoDateTimeSchema,
-      fromCustomer: z.boolean(),
-    }),
-  ),
+  /** The pickup's thread with the office, oldest first (M2.11). */
+  messages: z.array(PortalJobMessageSchema),
   /** Diversion certificate for this job, once issued (M9.5 · F52). */
   certificateReference: z.string().nullable(),
 }).meta({ id: 'PortalJob' });
@@ -603,6 +630,8 @@ export type PortalDashboard = z.infer<typeof PortalDashboardSchema>;
 export type PortalJobListItem = z.infer<typeof PortalJobListItemSchema>;
 export type PortalJobStep = z.infer<typeof PortalJobStepSchema>;
 export type PortalJob = z.infer<typeof PortalJobSchema>;
+export type PortalJobMessage = z.infer<typeof PortalJobMessageSchema>;
+export type PortalJobMessageDraft = z.infer<typeof PortalJobMessageDraftSchema>;
 export type ReadinessCertification = z.infer<typeof ReadinessCertificationSchema>;
 export type PortalBookingDraft = z.infer<typeof PortalBookingDraftSchema>;
 export type PortalJobEdit = z.infer<typeof PortalJobEditSchema>;

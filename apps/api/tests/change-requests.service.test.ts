@@ -18,7 +18,7 @@ const changeRequestList = vi.fn();
  * A zero-arg signature cannot be spread into, and the assertions in this file
  * read the recorded arguments.
  */
-const notifyAccount = vi.fn(async (..._args: unknown[]) => undefined);
+const notifyJobAudience = vi.fn(async (..._args: unknown[]) => [] as unknown[]);
 
 vi.mock('../src/domains/queues/queue.repository.js', () => ({
   queueRepository: {
@@ -29,8 +29,8 @@ vi.mock('../src/domains/queues/queue.repository.js', () => ({
 
 vi.mock('../src/domains/notifications/notification.service.js', () => ({
   notificationService: {
-    notifyAccount: (...args: unknown[]) => notifyAccount(...args),
-    notifyOffice: vi.fn(async () => undefined),
+    notifyJobAudience: (...args: unknown[]) => notifyJobAudience(...args),
+    notifyOffice: vi.fn(async () => []),
   },
 }));
 
@@ -49,7 +49,12 @@ const caller = (role: Role) => ({
   accountId: null,
 });
 
-const RESOLVED = { jobId: 'job1', jobNumber: 61472, accountId: 'acc1' };
+const RESOLVED = {
+  jobId: 'job1',
+  jobNumber: 61472,
+  accountId: 'acc1',
+  bookedByUserId: 'usr0000000000000000000s1',
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -144,13 +149,30 @@ describe('telling the customer', () => {
       caller('office-staff'),
     );
 
-    expect(notifyAccount).toHaveBeenCalledWith(
+    expect(notifyJobAudience).toHaveBeenCalledWith(
       expect.objectContaining({
         accountId: 'acc1',
         title: 'Your change request for #61472 was declined',
         body: 'The truck is already loaded for this run.',
         href: '/portal/jobs/job1',
       }),
+    );
+  });
+
+  /*
+   * The pickup's audience — its administrators and the supervisor who booked
+   * it. Every other supervisor on the account would be told about a pickup the
+   * portal will not open for them.
+   */
+  it('reaches the supervisor who booked the pickup, not every supervisor', async () => {
+    await queueService.changeRequestDecide(
+      'cr1',
+      { outcome: 'actioned', note: '' },
+      caller('office-staff'),
+    );
+
+    expect(notifyJobAudience).toHaveBeenCalledWith(
+      expect.objectContaining({ bookedByUserId: 'usr0000000000000000000s1' }),
     );
   });
 
@@ -161,7 +183,7 @@ describe('telling the customer', () => {
       caller('office-staff'),
     );
 
-    expect(notifyAccount).toHaveBeenCalledWith(
+    expect(notifyJobAudience).toHaveBeenCalledWith(
       expect.objectContaining({ body: 'Moved to Thursday, same driver.' }),
     );
   });
@@ -174,7 +196,7 @@ describe('telling the customer', () => {
       caller('office-staff'),
     );
 
-    expect(notifyAccount).toHaveBeenCalledWith(
+    expect(notifyJobAudience).toHaveBeenCalledWith(
       expect.objectContaining({ body: 'The office has actioned your request.' }),
     );
   });
@@ -187,7 +209,7 @@ describe('telling the customer', () => {
       caller('office-staff'),
     );
 
-    expect(notifyAccount).toHaveBeenCalledWith(
+    expect(notifyJobAudience).toHaveBeenCalledWith(
       expect.objectContaining({ subjectKey: 'change-request-decided:cr1' }),
     );
   });

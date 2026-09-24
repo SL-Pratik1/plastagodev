@@ -157,6 +157,20 @@ export function usePortalSetUrgency() {
   );
 }
 
+/**
+ * M2.11 — reply to the office on a pickup.
+ *
+ * Through `usePortalJobMutation` because the office's console shows the same
+ * thread: invalidating only this pickup would leave an office screen open in
+ * the same browser a refresh behind.
+ */
+export function usePortalPostMessage() {
+  const { portal } = useServices();
+  return usePortalJobMutation(({ id, body }: { id: string; body: string }) =>
+    portal.postMessage(id, body),
+  );
+}
+
 export function usePortalCertifyReadiness() {
   const { portal } = useServices();
   return usePortalJobMutation((id: string) =>

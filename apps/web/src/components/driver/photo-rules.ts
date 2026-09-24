@@ -1,4 +1,24 @@
-import type { DriverPhoto, RequiredPhoto } from '@plastago/shared';
+import { photoPurpose, type DriverPhoto, type RequiredPhoto } from '@plastago/shared';
+
+/**
+ * The photos of the pickup itself — the checklist shots and their extras —
+ * without either exception report's evidence.
+ *
+ * The Photos screen showed every photo on the job, so a locked gate shot for
+ * could-not-collect sat under "anything else" beside the pile-before shot.
+ * Each report keeps its own photos now; see `photoPurpose`.
+ */
+export function jobPhotos(photos: readonly DriverPhoto[]): DriverPhoto[] {
+  return photos.filter((photo) => photoPurpose(photo) === 'job');
+}
+
+/** The photos taken as evidence for one exception report, and nothing else. */
+export function evidencePhotos(
+  photos: readonly DriverPhoto[],
+  report: 'futile' | 'contamination',
+): DriverPhoto[] {
+  return photos.filter((photo) => photoPurpose(photo) === report);
+}
 
 /**
  * Which required photo slots are still empty (M4.5).

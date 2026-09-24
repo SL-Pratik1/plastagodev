@@ -75,6 +75,20 @@ export const OPEN_JOB_STATUSES: readonly JobStatus[] = [
   'arrived',
 ];
 
+/**
+ * What the futile review writes on the ORIGINAL job's timeline when it is
+ * decided, either way.
+ *
+ * A futile job stays `futile` whatever the office decides — rebooking makes a
+ * NEW job — so the status cannot say whether the review is still waiting. The
+ * job page reads these to stop sending people to decide something already
+ * decided.
+ */
+export const FUTILE_DECIDED_EVENT_LABELS = {
+  rescheduled: 'Rebooked after a futile attempt',
+  cancelled: 'Futile review closed — no new pickup',
+} as const;
+
 export const SERVICE_LEVELS = ['standard', 'urgent'] as const;
 export const ServiceLevelSchema = z.enum(SERVICE_LEVELS).meta({ id: 'ServiceLevel' });
 export type ServiceLevel = z.infer<typeof ServiceLevelSchema>;
@@ -221,6 +235,17 @@ export const JobChargeSchema = z
     decidedBy: z.string().nullable(),
     decidedAt: IsoDateTimeSchema.nullable(),
     decisionNote: z.string().nullable(),
+    /**
+     * Whether this charge is on an invoice yet.
+     *
+     * An approved charge that is on no invoice is money nobody will collect —
+     * and nothing said so: a charge approved after the job's invoice was
+     * raised just sat on the job, and the Raise invoice button had already
+     * gone. This is what lets the job page offer to bill it.
+     *
+     * Defaulted so a console updated before the API still parses the job.
+     */
+    invoiced: z.boolean().default(false),
   })
   .meta({ id: 'JobCharge' });
 
@@ -248,6 +273,34 @@ export const JobPhotoSchema = z
     takenBy: z.string(),
     latitude: z.number().nullable(),
     longitude: z.number().nullable(),
+    /**
+     * A short-lived URL for looking at the photograph, or null when there is
+     * nothing to look at.
+     *
+     * ── Why this had to exist ─────────────────────────────────────────────
+     * Without it the office could not see a single driver photo anywhere: the
+     * approvals queue, the futile review and the job's own Photos tab all
+     * rendered a grey icon and the caption. M2.7's argument is that the office
+     * *sees the photo of the timber offcuts in the bag* and approves — and a
+     * charge approved without its evidence is one that cannot be defended when
+     * the builder disputes it.
+     *
+     * ── Why it is signed per read rather than stored ──────────────────────
+     * Same reasoning as `DriverPhoto.url`: the bucket is private, and a signed
+     * URL expires (`S3_URL_TTL_SECONDS`). Persisting one would write down a link
+     * that works on the day it is saved and is dead whenever it is next needed.
+     * Signing on read is a local HMAC — no network call — and is always valid
+     * for the screen that asked.
+     *
+     * Null when the bytes are not confirmed in the bucket, or when signing
+     * failed: a URL to an object that is not there renders as a broken image,
+     * which reads as "the evidence is lost" rather than "still arriving".
+     *
+     * Defaults to null when absent, so a screen built against this contract
+     * still parses an API that has not been released with it yet — the four
+     * surfaces deploy separately.
+     */
+    url: z.string().nullable().default(null),
   })
   .meta({ id: 'JobPhoto' });
 
@@ -304,6 +357,13 @@ export const JobCommentSchema = z
     deliveredAt: IsoDateTimeSchema.nullable(),
     /** True when the driver wrote it, so the thread reads as a conversation. */
     fromDriver: z.boolean(),
+    /**
+     * True when the customer wrote it — a reply from the portal, on the
+     * `customer` thread. Shown apart from the office's own posts for the same
+     * reason driver replies are. Defaults to false for an API released before
+     * customers could reply.
+     */
+    fromCustomer: z.boolean().default(false),
   })
   .meta({ id: 'JobComment' });
 

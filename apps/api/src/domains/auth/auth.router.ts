@@ -4,9 +4,10 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { env } from '../../config/env.js';
 import { asyncHandler } from '../../lib/async-handler.js';
 import { AppError } from '../../lib/app-error.js';
+import { requireAuth } from '../../middleware/require-auth.js';
 import { validate } from '../../middleware/validate.js';
 import { authController } from './auth.controller.js';
-import { OtpResendSchema } from './auth.schemas.js';
+import { ActiveRoleSchema, OtpResendSchema } from './auth.schemas.js';
 
 /**
  * Router layer — paths and middleware only. No logic.
@@ -77,5 +78,21 @@ authRouter.post(
 );
 
 authRouter.get('/session', asyncHandler(authController.getSession));
+
+/**
+ * The only route in this file that requires a session.
+ *
+ * `requireAuth` rather than leaving it to the service: this is where a reader
+ * looks to find out who may call what, and "everything above is anonymous, this
+ * one is not" should be visible here rather than buried in a service method.
+ * No rate limiter — it sends nothing, costs nothing, and cannot grant a role
+ * the caller does not already hold.
+ */
+authRouter.post(
+  '/active-role',
+  requireAuth,
+  validate({ body: ActiveRoleSchema }),
+  asyncHandler(authController.setActiveRole),
+);
 
 authRouter.post('/sign-out', asyncHandler(authController.signOut));

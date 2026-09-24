@@ -84,6 +84,20 @@ const EnvSchema = z
       .transform((value) => value === 'true'),
     REDIS_URL: z.string().default('redis://127.0.0.1:6379'),
 
+    /**
+     * The in-process clock that runs the daily chase sweep and the evening
+     * "ready for tomorrow?" reminders (see `scheduler.service.ts`).
+     *
+     * Unset means ON in production and OFF everywhere else — a laptop pointed
+     * at somebody's test data must not start raising notifications and sending
+     * reminders just because the API was started. Set it explicitly to try the
+     * schedule locally.
+     */
+    SCHEDULER_ENABLED: z
+      .enum(['true', 'false'])
+      .optional()
+      .transform((value) => (value === undefined ? undefined : value === 'true')),
+
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
 
@@ -740,6 +754,14 @@ export const revealUnknownIdentifier = !isProduction && env.AUTH_REVEAL_UNKNOWN_
  * between a live deployment and an unauthenticated sign-in.
  */
 export const revealOtpCode = !isProduction && env.AUTH_REVEAL_OTP_CODE;
+
+/**
+ * Whether this process runs the daily sweep and the readiness reminders.
+ *
+ * On by default only in production: the jobs write into inboxes and send
+ * messages, which a developer's laptop must not do unless somebody asks it to.
+ */
+export const schedulerEnabled = env.SCHEDULER_ENABLED ?? isProduction;
 
 /**
  * Where Xero returns the organisation owner after they approve.

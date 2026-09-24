@@ -733,8 +733,16 @@ export function AdminJobCreatePage() {
           </div>
 
           {/* ── Price preview ────────────────────────────────────────────── */}
-          <div className="space-y-4">
-            <Card className="lg:sticky lg:top-20">
+          {/*
+            Sticky on the WRAPPER, not the card: stickiness only pins the box
+            it is applied to. Sticking the card and leaving the buttons as its
+            sibling meant the buttons stayed at their static position — right
+            after the (short) card, near the top of a much taller left column
+            — so they scrolled out of view while the card stayed put. Pinning
+            this whole column keeps the card and the buttons moving together.
+          */}
+          <div className="space-y-4 lg:sticky lg:top-20 lg:self-start">
+            <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <CircleDollarSignIcon aria-hidden className="size-4 text-muted-foreground" />

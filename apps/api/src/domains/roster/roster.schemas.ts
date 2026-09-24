@@ -18,10 +18,6 @@ export const ListDriversQuerySchema = z
     pageSize: z.coerce.number().int().min(1).max(100).default(20),
     sort: z.string().trim().max(40).optional(),
     q: z.string().trim().max(120).optional(),
-    /** A string on the wire; the boolean the repository wants is coerced here. */
-    active: z
-      .enum(['true', 'false'])
-      .optional()
-      .transform((value) => (value === undefined ? undefined : value === 'true')),
+    status: z.enum(['active', 'inactive']).optional(),
   })
   .meta({ id: 'ListDriversQuery' });

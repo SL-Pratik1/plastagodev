@@ -3,8 +3,11 @@ import {
   CONTAMINATION_EXTENT_LABELS,
   CONTAMINATION_TYPES,
   CONTAMINATION_TYPE_LABELS,
+  EVIDENCE_PHOTO_CAPTIONS,
+  EVIDENCE_PHOTO_SLOTS,
   type ContaminationExtent,
   type ContaminationType,
+  type DriverContamination,
 } from '@plastago/shared';
 import {
   Alert,
@@ -18,9 +21,16 @@ import {
   useToast,
 } from '@plastago/ui';
 import { CameraIcon, TriangleAlertIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { useAddPhoto, useDriverJob, useMarkContaminated } from '@/features/driver/queries';
+import { PhotoThumb } from '@/components/driver/photo-grid';
+import { evidencePhotos } from '@/components/driver/photo-rules';
+import {
+  useAddPhoto,
+  useDriverJob,
+  useMarkContaminated,
+  useRemovePhoto,
+} from '@/features/driver/queries';
 import { currentPosition } from '@/lib/geolocation';
 
 /**
@@ -64,14 +74,108 @@ export function DriverJobContaminationPage() {
     );
   }
 
-  return <ContaminationForm key={job.jobId} job={job} />;
+  /*
+   * ⚠️ One report per job, so the form is for a job that has none.
+   *
+   * It used to render every time, including where the phone's Back button lands
+   * straight after submitting — the driver saw the form again, took it that the
+   * report had not gone, and filed it again. One job carries eleven.
+   */
+  if (job.contamination !== null) {
+    return (
+      <ReportClosed
+        jobId={job.jobId}
+        jobNumber={job.jobNumber}
+        tone="success"
+        title="Contamination already reported"
+      >
+        <p>{describeReport(job.contamination)}</p>
+        <p>If something in it is wrong, message the office from the job.</p>
+      </ReportClosed>
+    );
+  }
+
+  if (job.status === 'futile' || job.status === 'cancelled') {
+    return (
+      <ReportClosed
+        jobId={job.jobId}
+        jobNumber={job.jobNumber}
+        tone="info"
+        title="There is no load to report on"
+      >
+        {job.status === 'cancelled'
+          ? 'The office cancelled this job — do not collect it.'
+          : 'This job was reported as could not collect.'}
+      </ReportClosed>
+    );
+  }
+
+  return <ContaminationForm key={job.jobId} job={job} onStale={() => void refetch()} />;
 }
 
-function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['data']> }) {
+/** "Timber offcuts · Heavy · reported 14:32" — what the job's report said. */
+function describeReport(report: DriverContamination): string {
+  const at = new Date(report.reportedAt).toLocaleTimeString('en-AU', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const what = [
+    report.type === null ? null : CONTAMINATION_TYPE_LABELS[report.type],
+    report.extent === null ? null : CONTAMINATION_EXTENT_LABELS[report.extent].split(' —')[0],
+  ].filter((part): part is string => part !== null && part !== undefined);
+
+  return [...what, `reported ${at}`].join(' · ');
+}
+
+/** In place of the form, when there is nothing left to report. */
+function ReportClosed({
+  jobId,
+  jobNumber,
+  tone,
+  title,
+  children,
+}: {
+  jobId: string;
+  jobNumber: number;
+  tone: 'success' | 'info';
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-4">
+      <Link
+        to={`/driver/jobs/${jobId}`}
+        className="focus-ring inline-block rounded text-sm text-muted-foreground underline-offset-4"
+      >
+        ← Job #{jobNumber}
+      </Link>
+      <Alert variant={tone} title={title}>
+        {children}
+      </Alert>
+      <Link
+        to={`/driver/jobs/${jobId}`}
+        className={`${buttonVariants({ size: 'lg' })} min-h-14 w-full`}
+      >
+        Back to the job
+      </Link>
+    </div>
+  );
+}
+
+function ContaminationForm({
+  job,
+  onStale,
+}: {
+  job: NonNullable<ReturnType<typeof useDriverJob>['data']>;
+  /** Re-signs the thumbnails' read URLs; see the note on `PhotoThumb`. */
+  onStale: () => void;
+}) {
   const toast = useToast();
   const navigate = useNavigate();
   const markContaminated = useMarkContaminated();
   const addPhoto = useAddPhoto();
+  const removePhoto = useRemovePhoto();
 
   const [type, setType] = useState<ContaminationType | null>(null);
   const [extent, setExtent] = useState<ContaminationExtent | null>(null);
@@ -79,7 +183,31 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
   const [error, setError] = useState<string | null>(null);
   const [capturing, setCapturing] = useState(false);
 
-  const evidence = job.photos.filter((photo) => photo.caption.startsWith('Contamination'));
+  /**
+   * The photos filed under this report's own slot, and nothing else.
+   *
+   * ── Why the slot and not "what this screen captured" ──────────────────────
+   * The guard once counted any photo captioned "Contamination", and a second
+   * report on the same job was satisfied by the FIRST report's photograph.
+   * Tracking this visit's captures fixed that and broke something else: leave
+   * the screen and come back, and the photo just taken was gone from the list
+   * while still sitting on the job. A job now takes one report, so every photo
+   * under the contamination slot is this report's — and they stay listed.
+   */
+  const evidence = evidencePhotos(job.photos, 'contamination');
+
+  /*
+   * A wrong shot has to be removable here, before the office approves a
+   * charge by looking at it. This screen showed a count and nothing else.
+   */
+  const remove = async (photoId: string) => {
+    try {
+      await removePhoto.mutateAsync({ jobId: job.jobId, photoId });
+      toast.success('Photo removed');
+    } catch {
+      toast.error('Could not remove that photo');
+    }
+  };
 
   const takePhoto = () => {
     const input = document.createElement('input');
@@ -96,8 +224,9 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
 
         await addPhoto.mutateAsync({
           jobId: job.jobId,
-          slot: null,
-          caption: 'Contamination — evidence',
+          // Its own slot, so it is this report's evidence and not a checklist extra.
+          slot: EVIDENCE_PHOTO_SLOTS.contamination,
+          caption: EVIDENCE_PHOTO_CAPTIONS.contamination,
           blob,
           position,
         });
@@ -163,11 +292,24 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
           photoIds: evidence.map((photo) => photo.id),
         },
       });
-      toast.success(
-        'Reported',
-        'A charge goes to the office for approval. Carry on with the pickup.',
-      );
-      await navigate(`/driver/jobs/${job.jobId}`);
+      /*
+       * ⚠️ Deliberately does not promise a charge.
+       *
+       * This write goes through the offline outbox (`queue`), which resolves as
+       * soon as the action is stored on the phone — hours before the server sees
+       * it. The endpoint now answers with `ContaminationOutcome.chargeRaised`,
+       * because a job carries at most one contamination charge and a second
+       * report raises nothing, but a queued write cannot read that response.
+       *
+       * So the copy states only what is certainly true: the report is recorded.
+       * It used to say "a charge goes to the office for approval", which was a
+       * promise this screen was in no position to make — and was simply false on
+       * a second report, where the driver walked away believing the load was
+       * covered.
+       */
+      toast.success('Reported', 'The office has it. Carry on with the pickup.');
+      // `replace`, so Back does not return to the form for a job already reported.
+      await navigate(`/driver/jobs/${job.jobId}`, { replace: true });
     } catch {
       toast.error('Could not save that', 'Try again — nothing was lost.');
     }
@@ -189,9 +331,13 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
         </p>
       </header>
 
+      {/*
+        One report per job, and it cannot be changed from the phone once sent —
+        so the copy says so before the tap rather than after.
+      */}
       <Alert variant="warning" title="Take the load anyway">
-        Report it and carry on with the pickup. A charge goes to the office for approval — this
-        does not stop the job.
+        Report it and carry on with the pickup — this does not stop the job. A job takes one report,
+        and it raises a contamination charge for the office to approve.
       </Alert>
 
       <fieldset className="space-y-2">
@@ -272,6 +418,28 @@ function ContaminationForm({ job }: { job: NonNullable<ReturnType<typeof useDriv
             Take
           </button>
         </div>
+
+        {/*
+          The shots themselves, not just a count — the driver has to be able to
+          see whether the camera caught the timber or their thumb, and remove it.
+          Keyed on the URL so an expired signature remounts the tile with the
+          fresh one; see the note on `PhotoThumb`.
+        */}
+        {evidence.length > 0 && (
+          <ul className="mt-3 flex flex-wrap gap-3">
+            {evidence.map((photo) => (
+              <li key={photo.id}>
+                <PhotoThumb
+                  key={photo.url ?? photo.id}
+                  photo={photo}
+                  label={photo.caption}
+                  onRemove={() => void remove(photo.id)}
+                  onStale={onStale}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <Field id="contamination-note" label="Anything else" hint="Optional.">

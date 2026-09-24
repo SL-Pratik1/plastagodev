@@ -8,6 +8,8 @@ import type {
   PortalJob,
   PortalJobEdit,
   PortalJobListItem,
+  PortalJobMessage,
+  PortalJobMessageDraft,
   PortalScope as PortalScopeContract,
   PricePreview,
   ReadinessCertification,
@@ -162,6 +164,7 @@ export const portalService = {
       id,
       scopeFor(caller, account.id),
       canSeePricing(caller),
+      caller.userId,
     );
 
     // 404, not 403 — a 403 would confirm another customer's job exists.
@@ -283,6 +286,7 @@ export const portalService = {
       created.id,
       scopeFor(caller, account.id),
       canSeePricing(caller),
+      caller.userId,
     );
     if (!job) throw new Error('Job vanished immediately after being booked');
 
@@ -474,6 +478,8 @@ export const portalService = {
      * sheet — `editJob` refuses and points them here.
      */
     await notificationService.notifyOffice({
+      // The allocator too — whether the run has room is theirs to see.
+      audience: 'dispatch',
       category: 'exception',
       /*
        * A cancellation is urgent and the others are not: a truck may be about
@@ -484,6 +490,8 @@ export const portalService = {
       title: `${describeChangeKind(input.kind)} — #${String(existing.jobNumber)}`,
       body: `${caller.name} at ${account.name} asked to ${describeChangeAsk(input)}. ${input.note.trim()}`,
       href: `/admin/queues/change-requests`,
+      // They cannot open the queues; the job is where they can act on it.
+      allocatorHref: `/admin/jobs/${id}`,
       /*
        * One open request per job is all the service allows, so the job is the
        * subject. A second ask after the first is resolved is genuinely new and
@@ -537,6 +545,8 @@ export const portalService = {
        */
       if (job) {
         await notificationService.notifyOffice({
+          // Sooner means a different run — the allocator's call.
+          audience: 'dispatch',
           category: 'exception',
           severity: 'action',
           title: `Marked urgent — #${String(job.jobNumber)}`,
@@ -597,6 +607,52 @@ export const portalService = {
     return this.jobListItem(id, caller);
   },
 
+  /**
+   * M2.11 — reply to the office on a pickup's message thread.
+   *
+   * ── Who may ───────────────────────────────────────────────────────────────
+   * Anyone who can see the pickup: an administrator on any of the account's
+   * pickups, a site supervisor on the ones they booked. Scoped exactly like
+   * reading it, so a pickup the portal will not show is a 404 here too.
+   *
+   * ── Where it lands ────────────────────────────────────────────────────────
+   * On the job's `customer` thread, through the same path the office posts
+   * with, so the office reads it in the console's Customer thread and is
+   * notified. It can never reach the internal or driver threads: the
+   * visibility is fixed here, not taken from the request.
+   *
+   * Allowed on a finished pickup too. "Why was this one futile?" is asked
+   * after the fact, and the office's answer belongs on the job.
+   */
+  async postMessage(
+    id: string,
+    draft: PortalJobMessageDraft,
+    caller: Caller,
+  ): Promise<PortalJobMessage> {
+    const account = await requireAccount(caller);
+
+    // 404, not 403 — the same answer as reading a pickup outside the scope.
+    const existing = await portalRepository.findJobForEdit(id, scopeFor(caller, account.id));
+    if (!existing) throw AppError.notFound('No such job');
+
+    const comment = await jobService.addComment(
+      id,
+      { body: draft.body, visibility: 'customer' },
+      toJobCaller({ ...caller, accountId: account.id }),
+    );
+
+    log.info({ jobId: id, accountId: account.id, by: caller.name }, 'message sent from the portal');
+
+    return {
+      id: comment.id,
+      body: comment.body,
+      author: comment.author,
+      at: comment.at,
+      fromCustomer: true,
+      mine: true,
+    };
+  },
+
   /** Re-reads one job as a list item, for the mutations that return one. */
   async jobListItem(id: string, caller: Caller): Promise<PortalJobListItem> {
     const account = await requireAccount(caller);
@@ -605,6 +661,7 @@ export const portalService = {
       id,
       scopeFor(caller, account.id),
       canSeePricing(caller),
+      caller.userId,
     );
     if (!job) throw AppError.notFound('No such job');
 

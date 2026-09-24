@@ -350,3 +350,159 @@ describe('the role invariant', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 });
+
+/**
+ * Working as another of your own roles (Matt, 27:01).
+ *
+ * ── Why these assert on PERSISTENCE, not on a return value ────────────────
+ * Because persistence is the entire feature. The switch already worked as
+ * browser state and was still unusable: the driver surface has its own origin
+ * (§6A.5), so reaching it is a page load, and a page load discards whatever the
+ * console was holding. The far side then read the stored role, found the
+ * allocator he had just stopped being, and sent him back — a control that
+ * looked like it did something and could never once have worked. A plain
+ * refresh reproduced it on a single origin.
+ *
+ * So what is under test is that the answer survives the request that set it.
+ */
+describe('setActiveRole', () => {
+  const PHONE = 'a0000000000000000000000a';
+  const OFFICE_PC = 'b0000000000000000000000b';
+
+  /** One of his devices signed in — each is its own session. */
+  function onDevice(userId: string, sessionId: string) {
+    auth.setSession({
+      user: { id: userId },
+      session: {
+        id: sessionId,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    });
+  }
+
+  /** The allocator who covers a driver's shift — the only dual-role pairing. */
+  function signedInDriverManager() {
+    const user = repo.addUser({ email: 'allocations@plastago.com.au', role: 'allocator' });
+    repo.setUserRoles(user.id, 'allocator', ['allocator', 'driver']);
+    onDevice(user.id, PHONE);
+    return user;
+  }
+
+  it('reports the chosen role and keeps reporting it on the next session read', async () => {
+    signedInDriverManager();
+
+    const switched = await authService.setActiveRole('driver', ctx);
+    expect(switched.user.role).toBe('driver');
+
+    // The one that matters: a fresh read, standing in for the reload or the
+    // hop to the driver origin that used to undo the switch.
+    const reloaded = await authService.getSession(ctx);
+    expect(reloaded?.user.role).toBe('driver');
+  });
+
+  it('leaves the role they ARE alone, so they stay an allocator on the users grid', async () => {
+    const user = signedInDriverManager();
+
+    await authService.setActiveRole('driver', ctx);
+
+    // `role` names the person; the session's choice names what they are doing.
+    // Writing the cover into `role` would drop him out of the office's
+    // allocator list every time he drove for an afternoon.
+    const stored = await repo.repository.findUserById(user.id);
+    expect(stored?.role).toBe('allocator');
+    expect(repo.sessionRoleOf(PHONE)).toBe('driver');
+  });
+
+  it('clears the override when they switch back, rather than storing it again', async () => {
+    signedInDriverManager();
+
+    await authService.setActiveRole('driver', ctx);
+    const back = await authService.setActiveRole('allocator', ctx);
+
+    expect(back.user.role).toBe('allocator');
+    // Otherwise "is this person covering right now?" stops being answerable.
+    expect(repo.sessionRoleOf(PHONE)).toBeNull();
+  });
+
+  /*
+   * ⚠️ The bug this replaced: the choice was stored on the USER, so switching
+   * to driver on his phone sent the console on his office PC to the driver app
+   * on its next load — and "Back to the console" there undid it on the phone.
+   */
+  it('keeps each device to its own choice', async () => {
+    const user = signedInDriverManager();
+    await authService.setActiveRole('driver', ctx);
+
+    onDevice(user.id, OFFICE_PC);
+    expect((await authService.getSession(ctx))?.user.role).toBe('allocator');
+
+    onDevice(user.id, PHONE);
+    expect((await authService.getSession(ctx))?.user.role).toBe('driver');
+  });
+
+  /*
+   * A session that lapses without a sign-out used to leave the choice behind,
+   * so Friday's cover put Monday's fresh sign-in on an empty run sheet.
+   */
+  it('starts a fresh sign-in on their usual role, whatever an old session chose', async () => {
+    const user = signedInDriverManager();
+    await authService.setActiveRole('driver', ctx);
+
+    // Monday: the phone's session has expired and he signs in again.
+    auth.setSession(null);
+    const challenge = await authService.requestCode(
+      { identifier: 'allocations@plastago.com.au' },
+      ctx,
+    );
+    const signedIn = await authService.verifyCode(
+      { challengeId: challenge.challengeId, code: VALID_CODE },
+      ctx,
+    );
+
+    expect(signedIn.session.user.id).toBe(user.id);
+    expect(signedIn.session.user.role).toBe('allocator');
+  });
+
+  it('refuses a role the user does not hold', async () => {
+    signedInDriverManager();
+
+    // The check that keeps this a switcher rather than a way to award yourself
+    // a role. The body arrives from a browser.
+    await expect(authService.setActiveRole('super-admin', ctx)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
+  });
+
+  it('refuses when nobody is signed in', async () => {
+    await expect(authService.setActiveRole('driver', ctx)).rejects.toMatchObject({
+      code: 'UNAUTHENTICATED',
+    });
+  });
+
+  it('falls back to their usual role when the cover role is taken away', async () => {
+    const user = signedInDriverManager();
+    await authService.setActiveRole('driver', ctx);
+
+    // The office unticks "also drives" while he is still signed in.
+    repo.setUserRoles(user.id, 'allocator', ['allocator']);
+
+    // Not a lockout: he keeps the console he has every right to, and the stale
+    // override is simply ignored.
+    const session = await authService.getSession(ctx);
+    expect(session?.user.role).toBe('allocator');
+  });
+
+  it('ends the cover at sign-out', async () => {
+    const user = signedInDriverManager();
+    await authService.setActiveRole('driver', ctx);
+
+    await authService.signOut(ctx);
+
+    // A switch should outlive a reload — that is the point — but not a
+    // deliberate exit. The choice went with the session sign-out destroyed;
+    // the next session starts on his usual role.
+    onDevice(user.id, OFFICE_PC);
+    expect((await authService.getSession(ctx))?.user.role).toBe('allocator');
+  });
+});

@@ -56,6 +56,12 @@ const userSchema = new Schema(
         message: 'A user must hold at least one role',
       },
     },
+    /*
+     * ⚠️ No `activeRole` here. The role somebody has chosen to work as lives on
+     * their SESSION (see `authRepository.setSessionActiveRole`): stored on the
+     * user, a switch on one device moved every other device with it, and a
+     * choice made on Friday survived into Monday's sign-in.
+     */
     status: { type: String, required: true, enum: USER_STATUSES, default: 'active' },
     jobTitle: { type: String, default: null, trim: true },
 

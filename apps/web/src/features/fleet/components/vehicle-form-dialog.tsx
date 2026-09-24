@@ -50,7 +50,10 @@ const FormSchema = z.object({
   type: z.enum(VEHICLE_TYPES),
   make: z.string().trim().max(40, 'Keep the make under 40 characters'),
   model: z.string().trim().max(40, 'Keep the model under 40 characters'),
-  year: z.string().trim(),
+  year: z
+    .string()
+    .trim()
+    .refine((value) => value === '' || /^\d{4}$/.test(value), 'Enter a 4-digit year'),
   odometerKm: z.string().trim(),
   registrationExpiresOn: z.string().min(1, 'When does the registration expire?'),
   registrationPeriodMonths: z.string(),
@@ -263,9 +266,14 @@ export function VehicleFormDialog({ open, onClose, vehicle }: VehicleFormDialogP
               <Input
                 {...aria}
                 {...register('year')}
-                type="number"
+                type="text"
                 inputMode="numeric"
+                maxLength={4}
                 placeholder="2019"
+                onChange={(event) => {
+                  event.target.value = event.target.value.replace(/\D/g, '').slice(0, 4);
+                  void register('year').onChange(event);
+                }}
               />
             )}
           </Field>

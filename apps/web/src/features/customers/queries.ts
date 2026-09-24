@@ -137,6 +137,9 @@ export function useSetRiskAssessmentRequired(accountId: string | undefined) {
       customers.setRiskAssessmentRequired(accountId ?? '', required),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
+      // The server carries the rule onto the account's open jobs, so any job
+      // screen already loaded (its Compliance tab, its timeline) is now stale.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.jobs.all });
     },
   });
 }

@@ -30,7 +30,7 @@ export interface ListDriversQuery {
   pageSize: number;
   sort?: string | undefined;
   q?: string | undefined;
-  active?: boolean | undefined;
+  status?: 'active' | 'inactive' | undefined;
 }
 
 interface RawUser {
@@ -47,8 +47,8 @@ export const rosterRepository = {
   async list(query: ListDriversQuery): Promise<{ data: DriverListItem[]; meta: PageMeta }> {
     const filter: Record<string, unknown> = { roles: 'driver' };
 
-    if (query.active !== undefined) {
-      filter.status = query.active ? 'active' : { $ne: 'active' };
+    if (query.status !== undefined) {
+      filter.status = query.status === 'active' ? 'active' : { $ne: 'active' };
     }
 
     if (query.q) {

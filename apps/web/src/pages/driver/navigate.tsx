@@ -105,8 +105,13 @@ export function DriverNavigatePage() {
 
   return (
     <div className="space-y-4">
+      {/*
+        ⚠️ The driver's screens live under `/driver`. This linked to `/jobs/:id`,
+        a path left over from the standalone driver app, and every tap on it
+        landed on the 404 page.
+      */}
       <Link
-        to={`/jobs/${job.jobId}`}
+        to={`/driver/jobs/${job.jobId}`}
         className="focus-ring inline-block rounded text-sm text-muted-foreground underline-offset-4"
       >
         ← Back to the job

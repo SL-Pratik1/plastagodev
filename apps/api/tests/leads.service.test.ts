@@ -125,6 +125,14 @@ vi.mock('../src/domains/notifications/notification.repository.js', () => ({
   notificationRepository: makeFakeNotificationRepository(),
 }));
 
+/* The welcome creates the customer's portal login; faked like every repository. */
+vi.mock('../src/domains/users/user.repository.js', () => ({
+  userRepository: {
+    identifierTaken: () => Promise.resolve(false),
+    create: () => Promise.resolve('usr000000000000000000001'),
+  },
+}));
+
 /**
  * Which rate cards exist (M6.1).
  *

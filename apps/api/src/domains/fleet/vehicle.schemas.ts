@@ -29,9 +29,10 @@ export const ListVehiclesQuerySchema = z
     sort: z.string().trim().max(40).optional(),
     q: z.string().trim().max(120).optional(),
     type: VehicleTypeSchema.optional(),
-    active: z.coerce.boolean().optional(),
-    /** The reason anybody opens this screen in a hurry. */
-    expiring: z.enum(['registration', 'service']).optional(),
+    status: z.enum(['active', 'inactive']).optional(),
+    registration: z.enum(['expired', 'due-soon', 'valid']).optional(),
+    service: z.enum(['expired', 'due-soon', 'valid']).optional(),
+    defects: z.enum(['open', 'none']).optional(),
   })
   .meta({ id: 'ListVehiclesQuery' });
 

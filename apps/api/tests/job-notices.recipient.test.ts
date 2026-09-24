@@ -28,8 +28,16 @@ vi.mock('../src/domains/notifications/outbound.service.js', () => ({
   },
 }));
 
+/** Who each portal notice was raised for. Asserted in the last describe. */
+let audiences: Array<{ accountId: string; bookedByUserId: string | null; title: string }> = [];
+
 vi.mock('../src/domains/notifications/notification.service.js', () => ({
-  notificationService: { notifyAccount: () => Promise.resolve() },
+  notificationService: {
+    notifyJobAudience: (input: { accountId: string; bookedByUserId: string | null; title: string }) => {
+      audiences.push(input);
+      return Promise.resolve([]);
+    },
+  },
 }));
 
 vi.mock('../src/domains/accounts/account.repository.js', () => ({
@@ -58,6 +66,7 @@ const job = (over: Partial<Record<string, unknown>> = {}) => ({
 
 beforeEach(() => {
   sent = [];
+  audiences = [];
   contacts = [
     { role: 'accounts', email: 'accounts@allcastle.com.au', mobile: null },
     { role: 'site', email: 'site@allcastle.com.au', mobile: '0430942011' },
@@ -102,5 +111,48 @@ describe('who a pickup notice reaches', () => {
 
     await expect(jobNotices.booked(job())).resolves.toBeUndefined();
     expect(sent[0]?.recipient).toEqual({ email: null, mobile: null });
+  });
+});
+
+/*
+ * Who sees the notice in the PORTAL — separate from who is emailed.
+ *
+ * ⚠️ These went to every portal user on the account, so every site supervisor
+ * was told about every pickup — including ones the portal will not open for
+ * them. They now go to the pickup's audience: its administrators and the
+ * supervisor who booked it.
+ */
+describe('who sees a pickup notice in the portal', () => {
+  it('names the supervisor who booked it on "Pickup booked"', async () => {
+    await jobNotices.booked(job({ bookedByUserId: 'usr0000000000000000000s1' }));
+
+    expect(audiences).toEqual([
+      expect.objectContaining({
+        accountId: 'acc1',
+        bookedByUserId: 'usr0000000000000000000s1',
+        title: 'Pickup booked — Lot 9 Example Rise',
+      }),
+    ]);
+  });
+
+  it('names nobody but the administrators on a job the office booked', async () => {
+    await jobNotices.booked(job({ bookedByUserId: null }));
+
+    expect(audiences[0]?.bookedByUserId).toBeNull();
+  });
+
+  it('does the same for "Ready for tomorrow?"', async () => {
+    await jobNotices.readinessReminder({
+      ...job({ bookedByUserId: 'usr0000000000000000000s1' }),
+      // The run's day — what a reminder is about since it follows the truck.
+      runDate: '2026-09-25',
+    });
+
+    expect(audiences).toEqual([
+      expect.objectContaining({
+        bookedByUserId: 'usr0000000000000000000s1',
+        title: 'Ready for tomorrow? Lot 9 Example Rise',
+      }),
+    ]);
   });
 });

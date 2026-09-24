@@ -332,6 +332,13 @@ export const ROLE_CAPABILITIES: Record<Role, readonly Capability[]> = {
     'driver-comms',
     'drivers:manage',
     'vehicles:manage',
+    /*
+     * The bell. The allocator is who acts on a futile pickup's empty slot, an
+     * unroadworthy truck, a driver's message and a moved job — and had no
+     * inbox at all. They receive the dispatch alerts only; nothing about money
+     * (see `AUDIENCE_ROLES` in the API's notification service).
+     */
+    'notifications:read',
   ],
 
   /*

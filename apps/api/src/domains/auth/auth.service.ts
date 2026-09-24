@@ -6,6 +6,7 @@ import {
   type OtpChallenge,
   type OtpRequest,
   type OtpVerify,
+  type Role,
   type Session,
 } from '@plastago/shared';
 import { getAuth } from '../../auth/better-auth.js';
@@ -218,7 +219,82 @@ export const authService = {
     const user = await authRepository.findUserById(result.user.id);
     if (!user || user.status === 'suspended') return null;
 
-    return buildSession(user, new Date(result.session.createdAt), new Date(result.session.expiresAt));
+    // The role THIS session chose, if any — see `setActiveRole`.
+    const activeRole = await authRepository.findSessionActiveRole(result.session.id);
+
+    return buildSession(
+      user,
+      new Date(result.session.createdAt),
+      new Date(result.session.expiresAt),
+      activeRole,
+    );
+  },
+
+  /**
+   * POST /auth/active-role — change which of their roles they are working as.
+   *
+   * ── Why this is a server call and not a browser toggle ────────────────────
+   * It was a browser toggle, and that is precisely what did not work. The
+   * allocator who covers a driver's shift (Matt, 27:01) leaves the console for
+   * the driver app, and under the surface split (§6A.5) that is a different
+   * ORIGIN — a full page load, which discards anything held in a tab. So the
+   * switch undid itself between the click and the landing, and the guard on the
+   * far side bounced him straight back to the console. A plain reload did the
+   * same thing on one origin.
+   *
+   * Persisting it here is the whole fix: the next `getSession` — on either
+   * origin, after any reload — reports the role he chose.
+   *
+   * It is stored on the SESSION, not the user: his phone and his office PC are
+   * two sessions and keep their own choice, and a fresh sign-in is a new
+   * session, so it starts on his usual role. See
+   * `authRepository.setSessionActiveRole`.
+   *
+   * ⚠️ This grants NOTHING. The role must already be one of theirs, and every
+   * server-side gate still reads the full `roles` set, because what a person is
+   * permitted to do does not shrink because they opened a different screen.
+   * What it decides is where they land and what the shell shows them.
+   */
+  async setActiveRole(role: Role, ctx: RequestContext): Promise<Session> {
+    const auth = getAuth();
+
+    const result = await auth.api.getSession({ headers: ctx.headers });
+    if (!result) throw AppError.unauthenticated('Sign in to continue');
+
+    const user = await authRepository.findUserById(result.user.id);
+    if (!user || user.status === 'suspended') {
+      throw AppError.unauthenticated('Sign in to continue');
+    }
+
+    /*
+     * The one check that matters. `role` arrives from a browser, and a browser
+     * that asks to become a super admin must be told no — otherwise this
+     * endpoint is a role-granting endpoint wearing a switcher's clothes.
+     */
+    if (!user.roles.includes(role)) {
+      log.warn(
+        { userId: user.id, requested: role, roles: user.roles },
+        'refused a switch to a role this user does not hold',
+      );
+      throw AppError.forbidden('You do not hold that role');
+    }
+
+    /*
+     * Back to their usual role is a CLEAR, not a write of the same value.
+     * Otherwise "is this person covering a shift?" — the question the field
+     * exists to answer — becomes unanswerable the moment they switch back.
+     */
+    const activeRole = role === user.role ? null : role;
+    await authRepository.setSessionActiveRole(result.session.id, activeRole);
+
+    log.info({ userId: user.id, role, mainRole: user.role }, 'active role changed');
+
+    return buildSession(
+      user,
+      new Date(result.session.createdAt),
+      new Date(result.session.expiresAt),
+      activeRole,
+    );
   },
 
   /** POST /auth/sign-out */
@@ -226,6 +302,12 @@ export const authService = {
     const auth = getAuth();
 
     try {
+      /*
+       * Signing out ends the cover by itself: the chosen role lives on the
+       * session, and this destroys it. The next sign-in is a new session and
+       * starts on their usual role — so an allocator who drove on Friday does
+       * not sign in on Monday to an empty run sheet.
+       */
       const { headers } = await auth.api.signOut({
         headers: ctx.headers,
         returnHeaders: true,
@@ -427,7 +509,13 @@ async function verifyWithProvider(
   }
 }
 
-function buildSession(user: UserRecord, issuedAt: Date, expiresAt?: Date): Session {
+function buildSession(
+  user: UserRecord,
+  issuedAt: Date,
+  expiresAt?: Date,
+  /** The role this session chose to work as; `null` for their usual one. */
+  activeRole: Role | null = null,
+): Session {
   /**
    * `role` must be a member of `roles` — the invariant stated on
    * `AuthenticatedUserSchema`: permission checks read the ACTIVE role, so an
@@ -449,12 +537,26 @@ function buildSession(user: UserRecord, issuedAt: Date, expiresAt?: Date): Sessi
     throw AppError.forbidden('Your account is misconfigured — contact the office');
   }
 
-  // `status` is intentionally dropped: it decided whether this session exists,
-  // and the browser has no use for it on the session object.
+  /*
+   * The chosen role wins over the usual one — but only while they still hold
+   * it. A cover role revoked overnight (the checkbox unticked while he was
+   * signed in) must not keep opening the driver app on the strength of a stale
+   * field, so this falls back rather than trusting what was written.
+   *
+   * Ignoring it silently is right here: the office took the role away, and
+   * refusing the session would lock the man out of the console he still has
+   * every right to. `setActiveRole` is what tidies the field up.
+   *
+   * Folded into `role` rather than shipped beside it, so every surface reads
+   * one active role where the contract promises one.
+   */
+  const active = activeRole !== null && user.roles.includes(activeRole) ? activeRole : user.role;
+
+  // `status` decided whether this session exists; the browser has no use for it.
   const { status: _status, ...authenticated } = user;
 
   return {
-    user: authenticated satisfies AuthenticatedUser,
+    user: { ...authenticated, role: active } satisfies AuthenticatedUser,
     issuedAt: issuedAt.toISOString(),
     expiresAt: (
       expiresAt ?? new Date(issuedAt.getTime() + env.AUTH_SESSION_TTL_HOURS * 60 * 60 * 1000)

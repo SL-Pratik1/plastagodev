@@ -35,9 +35,8 @@ import {
   type BrandSelection,
 } from '@/config/brands';
 import { visibleNav, type NavGroup } from '@/config/navigation';
-import { roleSurfaceHref } from '@/config/surfaces';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
-import { landingPathFor } from '@/features/auth/permissions';
+import { switchLabel, useRoleSwitch } from '@/features/auth/use-role-switch';
 
 /**
  * The admin & office console shell (M2).
@@ -61,7 +60,8 @@ import { landingPathFor } from '@/features/auth/permissions';
  */
 export function AdminShell() {
   const user = useCurrentUser();
-  const { can, signOut, switchRole } = useAuth();
+  const { can, signOut } = useAuth();
+  const { switchTo, switching } = useRoleSwitch();
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useToast();
@@ -301,26 +301,18 @@ export function AdminShell() {
                       <MenuItem
                         key={held}
                         icon={RepeatIcon}
+                        disabled={switching}
                         onSelect={() => {
-                          switchRole(held);
                           /*
-                           * Each surface has its own origin (Matt, 29:04), so
-                           * a switch that crosses one is a page load rather
-                           * than a route change. `roleSurfaceHref` returns null
-                           * when the target surface is already this one — and
-                           * always, in single-server mode — so the ordinary
-                           * in-app path is unchanged.
+                           * The save has to finish before anything moves — see
+                           * `useRoleSwitch`, which owns the whole sequence now
+                           * because the driver shell performs the same one in
+                           * reverse.
                            */
-                          const home = landingPathFor(held);
-                          const external = roleSurfaceHref(held, home);
-                          if (external !== null) {
-                            window.location.assign(external);
-                            return;
-                          }
-                          void navigate(home);
+                          void switchTo(held);
                         }}
                       >
-                        Work as {ROLE_LABELS[held].toLowerCase()}
+                        {switchLabel(held, false)}
                       </MenuItem>
                     ))}
                 </>

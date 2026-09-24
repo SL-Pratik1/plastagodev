@@ -6,11 +6,13 @@ import {
   OtpChallengeSchema,
   OtpRequestSchema,
   OtpVerifySchema,
+  RoleSchema,
   SessionSchema,
 } from '../schemas/identity.js';
 import { IsoDateSchema, ObjectIdSchema } from '../schemas/primitives.js';
 import {
   CompletionSchema,
+  ContaminationOutcomeSchema,
   ContaminationReportSchema,
   DefectReportSchema,
   DriverJobSchema,
@@ -51,6 +53,16 @@ const OtpResendSchema = z
   .object({ challengeId: ObjectIdSchema })
   .meta({ id: 'OtpResend' });
 
+/**
+ * The switch body, local here for the same reason as the one above.
+ *
+ * `apps/api/src/domains/auth/auth.schemas.ts` carries the same declaration and
+ * does the validating; this one exists so the Flutter repo can see the shape.
+ */
+const ActiveRoleSchema = z
+  .object({ role: RoleSchema })
+  .meta({ id: 'ActiveRoleRequest' });
+
 /* ── Driver route plumbing ────────────────────────────────────────────────── */
 
 /*
@@ -76,6 +88,9 @@ const signedIn = [{ sessionCookie: [] }];
  * phone does not already hold. Returning the mutated job instead would be a
  * round trip the app cannot rely on anyway, because the write may well have
  * been queued offline and replayed hours later.
+ *
+ * `response` is for the rare write that has something the phone must be told
+ * — it then answers 200 with that body instead of 204.
  */
 function driverAction(input: {
   operationId: string;
@@ -84,6 +99,7 @@ function driverAction(input: {
   body: z.ZodType;
   path?: z.ZodObject;
   success: string;
+  response?: z.ZodType;
 }) {
   return {
     post: {
@@ -95,7 +111,9 @@ function driverAction(input: {
       ...(input.path ? { requestParams: { path: input.path } } : {}),
       requestBody: jsonBody(input.body),
       responses: {
-        '204': { description: input.success },
+        ...(input.response
+          ? { '200': jsonResponse(input.success, input.response) }
+          : { '204': { description: input.success } }),
         ...errorResponses('400', '422', '401', '403', '404', '409'),
       },
     },
@@ -287,6 +305,27 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
         },
       },
 
+      [`${API_PREFIX}/auth/active-role`]: {
+        post: {
+          tags: ['Authentication'],
+          operationId: 'setActiveRole',
+          summary: 'Choose which of your roles you are working as',
+          description:
+            'For the rare user who holds more than one — an allocator who covers a driver’s ' +
+            'shift. Refuses with 403 any role the caller does not already hold, so it can never ' +
+            'grant anything. Server-side because the surfaces are separate origins: a choice ' +
+            'held in the browser is discarded by the page load that crosses to the other one. ' +
+            'Switching back to the user’s usual role clears the override. Returns the session ' +
+            'to render from, so the caller needs no second request.',
+          security: [{ sessionCookie: [] }],
+          requestBody: jsonBody(ActiveRoleSchema),
+          responses: {
+            '200': jsonResponse('The session, now reporting the chosen role', SessionSchema),
+            ...errorResponses('400', '422', '401', '403'),
+          },
+        },
+      },
+
       [`${API_PREFIX}/auth/sign-out`]: {
         post: {
           tags: ['Authentication'],
@@ -470,6 +509,11 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           'booking that the job was ready and accessible — photo plus GPS plus timestamp at ' +
           'the point of failure is what turns a disputed phone call into an invoice line that ' +
           'survives challenge.\n\n' +
+          'Idempotent: a replay of a job already marked futile completes anything an earlier ' +
+          'attempt left unrecorded (charge, office review, timeline entry) and creates no ' +
+          'duplicates. 409 when the office has cancelled the job or it is already completed.\n\n' +
+          'Photos sent as `photoIds` should be the ones filed under the `futile` slot — the ' +
+          'office reviews the report against those, not the rest of the job.\n\n' +
           '⚠️ The reason enum accepts **eight** values (`weather`, `customer-request` and ' +
           '`other` beyond the five on the original screens). Confirm with the office which ' +
           'the app should offer before trimming the list client-side.',
@@ -483,10 +527,15 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
         summary: 'Contaminated load',
         description:
           '**Does not stop the job** — the driver takes the load anyway and carries on. A ' +
-          'photo is required because the office approves the charge by looking at it.',
+          'photo is required because the office approves the charge by looking at it, and ' +
+          'the evidence is the photos filed under the `contamination` slot.\n\n' +
+          '**One report per job.** Once a job carries a report (see `DriverJob.contamination`) ' +
+          'a further one changes nothing and answers `chargeRaised: false`; the app should not ' +
+          'offer the form again. 409 when the office has cancelled the job or it went futile.',
         body: ContaminationReportSchema,
         path: JobIdPathSchema,
         success: 'Contamination recorded',
+        response: ContaminationOutcomeSchema,
       }),
 
       [`${API_PREFIX}/driver/pre-start`]: driverAction({

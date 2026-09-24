@@ -175,6 +175,9 @@ export const leadService = {
        * — the same argument as the sweep in `notification.service.ts`.
        */
       await notificationService.notifyOffice({
+        // The roles that can open the lead queue — office staff cannot, and
+        // their link used to land on "Forbidden".
+        audience: 'sales',
         category: 'queue',
         severity: 'action',
         title: `New website enquiry — ${input.companyName}`,
@@ -421,10 +424,14 @@ export const leadService = {
     let welcome: InvitationResult | null = null;
 
     if (input.sendInvitation) {
-      welcome = await accountService.sendWelcome(account, {
-        contactName: input.accountsContactName || lead.contactName,
-        email: input.accountsContactEmail || lead.email,
-      });
+      welcome = await accountService.sendWelcome(
+        account,
+        {
+          contactName: input.accountsContactName || lead.contactName,
+          email: input.accountsContactEmail || lead.email,
+        },
+        caller.name,
+      );
     }
 
     return { accountId: account.id, customerCode: account.code, welcome };

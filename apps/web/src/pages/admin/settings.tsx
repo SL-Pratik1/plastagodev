@@ -1,5 +1,4 @@
 import {
-  BRAND_IDS,
   CHARGE_CODES,
   CHARGE_CODE_LABELS,
   BRAND_LABELS,
@@ -64,6 +63,7 @@ import { useZoneOptions } from '@/features/lookups/queries';
 import type { ZoneOption } from '@/services/types';
 import { PageHeader } from '@/components/page-header';
 import { UnsavedBar } from '@/components/unsaved-bar';
+import { CONFIGURED_BRAND_IDS } from '@/config/brands';
 import { CAPABILITY_GROUPS, ROLE_CAPABILITIES, can } from '@/features/auth/permissions';
 import {
   useCreateAdditionalService,
@@ -2544,13 +2544,13 @@ function NewServiceDialog({
 
         {/*
           Said plainly, because the alternative is an administrator creating a
-          charge and waiting for it to appear on a driver's phone. A new charge
-          is a PRICE the office applies to a job; the driver app's buttons are
-          the ones it ships with.
+          charge and waiting for it to appear on a driver's phone or a job. The
+          job page no longer has an Add charge button, so a new charge is a
+          PRICE only; the driver app's buttons are the ones it ships with.
         */}
-        <Alert variant="neutral" title="A new charge is added by the office">
-          Drivers report contamination and futile pickups from their own screens. A charge created
-          here is one the office applies to a job.
+        <Alert variant="neutral" title="A new charge is not added to jobs on its own">
+          Drivers report contamination and futile pickups from their own screens, and the system
+          adds a job&rsquo;s own charges. A charge created here only sets a price.
         </Alert>
       </div>
     </Dialog>
@@ -3589,7 +3589,7 @@ function InvoiceTemplateDialog({
                   setForm({ ...form, brandId: event.target.value as BrandId });
                 }}
               >
-                {BRAND_IDS.map((id) => (
+                {CONFIGURED_BRAND_IDS.map((id) => (
                   <option key={id} value={id}>
                     {BRAND_LABELS[id]}
                   </option>

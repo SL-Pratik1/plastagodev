@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import type { Place, PortalBookingDraft } from '@plastago/shared';
+import { normaliseMobile, type Place, type PortalBookingDraft } from '@plastago/shared';
 import {
   Alert,
   Button,
@@ -79,7 +79,19 @@ const FormSchema = z.object({
   inductionRequired: z.boolean(),
   craneAvailable: z.boolean(),
   siteContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
-  siteContactMobile: z.string().trim().max(20, 'A mobile number is at most 20 characters'),
+  /*
+   * Checked in its STORED form, after `normaliseMobile` turns "+61 412 345 678"
+   * into "0412345678". The field used to strip every non-digit and cut to ten,
+   * so a pasted or autofilled +61 number became "6141234567" — which passed the
+   * check and was saved as the number the driver taps to call.
+   */
+  siteContactMobile: z
+    .string()
+    .trim()
+    .refine(
+      (value) => value === '' || /^0\d{9}$/.test(normaliseMobile(value)),
+      'Enter a 10-digit Australian number, e.g. 0412 345 678',
+    ),
   siteContactEmail: z
     .string()
     .trim()
@@ -295,7 +307,7 @@ export function PortalBookPage() {
         inductionRequired: values.inductionRequired,
         craneAvailable: values.craneAvailable,
         siteContactName: values.siteContactName,
-        siteContactMobile: values.siteContactMobile,
+        siteContactMobile: normaliseMobile(values.siteContactMobile),
         siteContactEmail: values.siteContactEmail,
         readyDate: values.readyDate,
         expectedAreaM2: fromPurchaseOrder ? null : Number(values.expectedAreaM2),
@@ -564,6 +576,13 @@ export function PortalBookPage() {
                   inputMode="tel"
                   placeholder="0412 345 678"
                   {...register('siteContactMobile')}
+                  onChange={(event) => {
+                    // What a phone number is typed or pasted with, and nothing
+                    // else. The +61 form is converted when it is checked and
+                    // saved, not cut off here.
+                    event.target.value = event.target.value.replace(/[^\d\s+()-]/g, '').slice(0, 20);
+                    void register('siteContactMobile').onChange(event);
+                  }}
                 />
               )}
             </Field>

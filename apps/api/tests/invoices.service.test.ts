@@ -67,7 +67,12 @@ const JOB = {
   accountId: ACCOUNT.id,
   status: 'completed' as string,
   poNumber: 'PO-88213' as string | null,
+  /** What the job's rollup already records — null until it is first invoiced. */
+  invoiceNumber: null as number | null,
 };
+
+/** Makes reading the job's charges fail — standing in for the database blinking mid-bill. */
+let billingFails = false;
 
 /** What `billableCharges` returns — approved and not-required only. */
 let charges: Array<{
@@ -84,11 +89,17 @@ let charges: Array<{
 let invoiceStatusWrites: Array<{ jobId: string; status: string; invoiceNumber?: number }> = [];
 
 // GETTERS, not values: `vi.mock` factories hoist above every import.
-vi.mock('../src/domains/invoices/invoice.repository.js', () => ({
-  get invoiceRepository() {
-    return invoices.repository;
-  },
-}));
+vi.mock('../src/domains/invoices/invoice.repository.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../src/domains/invoices/invoice.repository.js')>();
+  return {
+    // The real list, so the service and this suite cannot disagree on "unsent".
+    UNSENT_STATUSES: actual.UNSENT_STATUSES,
+    get invoiceRepository() {
+      return invoices.repository;
+    },
+  };
+});
 
 vi.mock('../src/domains/settings/settings.repository.js', () => ({
   get settingsRepository() {
@@ -106,7 +117,8 @@ vi.mock('../src/domains/jobs/job.repository.js', () => ({
   jobRepository: {
     findById: () => Promise.resolve({ ...JOB }),
   },
-  billableCharges: () => Promise.resolve(charges),
+  billableCharges: () =>
+    billingFails ? Promise.reject(new Error('database blinked')) : Promise.resolve(charges),
   setInvoiceStatus: (jobId: string, status: string, invoiceNumber?: number) => {
     invoiceStatusWrites.push({ jobId, status, invoiceNumber });
     return Promise.resolve();
@@ -257,6 +269,8 @@ beforeEach(() => {
   ACCOUNT.poPolicy = 'required-before-invoice';
   JOB.status = 'completed';
   JOB.poNumber = 'PO-88213';
+  JOB.invoiceNumber = null;
+  billingFails = false;
   clearOutbound();
   setMessagingProvidersForTests(recordingProviders());
 });
@@ -484,6 +498,223 @@ describe('not billing twice', () => {
     expect(second).toHaveLength(1);
     expect(second[0]?.kind).toBe('additional-charges');
     expect(invoices.all).toHaveLength(2);
+  });
+});
+
+/*
+ * ⚠️ REGRESSION — a charge approved after the job's invoice was raised.
+ *
+ * Billing only ever created, and refused once the job had an invoice of each
+ * kind. A $120 futile fee approved eleven minutes after its job was invoiced sat
+ * on the job, on no invoice, with the Raise invoice button already gone.
+ */
+describe('a charge approved after the job was invoiced', () => {
+  it('joins the invoice while it is still unsent', async () => {
+    ACCOUNT.poPolicy = 'not-required';
+    await invoiceService.generateForJob(JOB.id, OFFICE);
+
+    charges = [...BASE_CHARGES, DRIVER_CHARGE];
+    const second = await invoiceService.generateForJob(JOB.id, OFFICE);
+
+    expect(second).toHaveLength(1);
+    expect(second[0]).toMatchObject({ kind: 'base', change: 'updated' });
+    expect(invoices.all).toHaveLength(1);
+    expect(invoices.byKind('base')?.lines).toHaveLength(3);
+    expect(invoices.byKind('base')?.subtotalExGst).toBe('441.75');
+  });
+
+  it('rides on a second invoice once the first has gone out', async () => {
+    ACCOUNT.poPolicy = 'not-required';
+    await invoiceService.generateForJob(JOB.id, OFFICE);
+    const base = invoices.byKind('base');
+    if (base) base.status = 'sent';
+
+    charges = [...BASE_CHARGES, DRIVER_CHARGE];
+    const second = await invoiceService.generateForJob(JOB.id, OFFICE);
+
+    expect(second).toHaveLength(1);
+    // No PO policy, so it is ready to send and carries the job's reference.
+    expect(second[0]).toMatchObject({
+      kind: 'additional-charges',
+      change: 'created',
+      status: 'draft',
+      poNumber: 'PO-88213',
+    });
+    // The invoice the customer is holding is untouched.
+    expect(invoices.byKind('base')?.lines).toHaveLength(2);
+  });
+
+  it('says so, rather than billing twice, when the extras invoice has already gone out', async () => {
+    charges = [...BASE_CHARGES, DRIVER_CHARGE];
+    await invoiceService.generateForJob(JOB.id, OFFICE);
+    const extra = invoices.byKind('additional-charges');
+    if (extra) extra.status = 'sent';
+
+    charges = [...BASE_CHARGES, DRIVER_CHARGE, EXTRA_BAGS_CHARGE];
+
+    await expect(invoiceService.generateForJob(JOB.id, OFFICE)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/already been sent/) as unknown,
+    });
+    expect(invoices.all).toHaveLength(2);
+  });
+
+  it('keeps the job on Awaiting PO while another of its invoices still waits', async () => {
+    invoices.seed({ status: 'awaiting-po', jobId: JOB.id, kind: 'base' });
+    const extra = invoices.seed({
+      status: 'awaiting-po',
+      jobId: JOB.id,
+      kind: 'additional-charges',
+    });
+
+    await invoiceService.recordPo(extra.id, 'PO-99001', OFFICE);
+
+    expect(invoiceStatusWrites.at(-1)).toMatchObject({ jobId: JOB.id, status: 'awaiting-po' });
+  });
+});
+
+/*
+ * ⚠️ REGRESSION — a futile job billed at full price.
+ *
+ * Its service fee, area and bags were written at booking for a pickup that
+ * never happened, and they went on the invoice beside the fee: $930 for a truck
+ * turned away at the gate, before the rebooked job billed the full price again.
+ */
+describe('a futile job bills the fee and nothing else', () => {
+  const FUTILE_FEE = {
+    ...DRIVER_CHARGE,
+    id: 'chg9',
+    code: 'futile-pickup',
+    description: 'Futile pickup',
+    unitRate: '120.00',
+    amount: '120.00',
+  };
+
+  it('leaves the pickup it never made off the invoice', async () => {
+    ACCOUNT.poPolicy = 'not-required';
+    JOB.status = 'futile';
+    charges = [...BASE_CHARGES, FUTILE_FEE];
+
+    await invoiceService.generateForJob(JOB.id, OFFICE);
+
+    const base = invoices.byKind('base');
+    expect(base?.lines).toHaveLength(1);
+    expect(base?.lines[0]?.description).toBe('Futile pickup');
+    expect(base?.subtotalExGst).toBe('120.00');
+  });
+
+  it('corrects a full-price draft raised before the rule', async () => {
+    ACCOUNT.poPolicy = 'not-required';
+    JOB.status = 'futile';
+    invoices.seed({
+      status: 'draft',
+      jobId: JOB.id,
+      kind: 'base',
+      subtotalExGst: '351.75',
+      lines: BASE_CHARGES.map((charge) => ({
+        description: charge.description,
+        quantity: charge.quantity,
+        unitRate: charge.unitRate,
+        amount: charge.amount,
+        raisedBy: null,
+        sourceChargeId: charge.id,
+      })),
+    });
+    charges = [...BASE_CHARGES, FUTILE_FEE];
+
+    const raised = await invoiceService.generateForJob(JOB.id, OFFICE);
+
+    expect(raised[0]).toMatchObject({ kind: 'base', change: 'updated' });
+    expect(invoices.all).toHaveLength(1);
+    expect(invoices.byKind('base')?.subtotalExGst).toBe('120.00');
+  });
+
+  it('puts a PO customer’s fee on its own invoice and drops a full-price draft', async () => {
+    JOB.status = 'futile';
+    invoices.seed({
+      status: 'draft',
+      jobId: JOB.id,
+      kind: 'base',
+      lines: BASE_CHARGES.map((charge) => ({
+        description: charge.description,
+        quantity: charge.quantity,
+        unitRate: charge.unitRate,
+        amount: charge.amount,
+        raisedBy: null,
+        sourceChargeId: charge.id,
+      })),
+    });
+    charges = [...BASE_CHARGES, FUTILE_FEE];
+
+    await invoiceService.generateForJob(JOB.id, OFFICE);
+
+    expect(invoices.byKind('base')).toBeUndefined();
+    expect(invoices.byKind('additional-charges')).toMatchObject({
+      status: 'awaiting-po',
+      subtotalExGst: '120.00',
+    });
+  });
+
+  it('has nothing to bill once the fee is waived', async () => {
+    JOB.status = 'futile';
+    // The office rejected the fee, so it is not billable — and nothing else is.
+    charges = [...BASE_CHARGES];
+
+    await expect(invoiceService.generateForJob(JOB.id, OFFICE)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/futile fee/) as unknown,
+    });
+    expect(invoices.all).toHaveLength(0);
+  });
+});
+
+/*
+ * M2.7 → M7.3 — approving a charge bills it.
+ *
+ * The approvals screen promised an approved charge "moves to the Awaiting PO
+ * queue", and nothing moved. These pin what an approval now does to the money.
+ */
+describe('billing on approval', () => {
+  it('bills a finished job the moment its charge is approved', async () => {
+    charges = [...BASE_CHARGES, DRIVER_CHARGE];
+
+    const result = await invoiceService.billApprovedCharges([JOB.id]);
+
+    expect(result.awaitingJobCompletion).toEqual([]);
+    expect(result.notInvoiced).toEqual([]);
+    expect(result.invoices).toEqual([
+      expect.objectContaining({ kind: 'base', status: 'draft', change: 'created' }),
+      expect.objectContaining({
+        kind: 'additional-charges',
+        status: 'awaiting-po',
+        change: 'created',
+        jobNumber: JOB.jobNumber,
+      }),
+    ]);
+  });
+
+  it('leaves a job still under way to be billed with the job', async () => {
+    JOB.status = 'arrived';
+    charges = [...BASE_CHARGES, DRIVER_CHARGE];
+
+    const result = await invoiceService.billApprovedCharges([JOB.id]);
+
+    expect(result.awaitingJobCompletion).toEqual([JOB.jobNumber]);
+    expect(result.invoices).toEqual([]);
+    expect(invoices.all).toHaveLength(0);
+  });
+
+  /*
+   * The approval is already committed. A billing failure must come back as a
+   * report — never as an error that makes the office think the decision failed.
+   */
+  it('reports a billing failure rather than throwing it', async () => {
+    billingFails = true;
+
+    const result = await invoiceService.billApprovedCharges([JOB.id]);
+
+    expect(result.invoices).toEqual([]);
+    expect(result.notInvoiced).toEqual([expect.objectContaining({ jobNumber: JOB.jobNumber })]);
   });
 });
 

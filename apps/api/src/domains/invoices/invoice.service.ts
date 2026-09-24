@@ -6,6 +6,7 @@ import type {
   InvoiceListItem,
   InvoiceStatus,
   PageMeta,
+  RaisedInvoice,
   Role,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
@@ -22,8 +23,11 @@ import { settingsRepository } from '../settings/settings.repository.js';
 import { invoiceRenderService } from './invoice-render.service.js';
 import { xeroService } from '../xero/xero.service.js';
 import {
+  UNSENT_STATUSES,
   invoiceRepository,
+  type CreateInvoiceInput,
   type InvoiceScope,
+  type JobInvoiceRow,
   type ListInvoicesQuery,
 } from './invoice.repository.js';
 
@@ -88,7 +92,8 @@ export const invoiceService = {
   },
 
   /**
-   * M7.1 — raise the invoices for a completed job.
+   * M7.1 — bill a finished job: raise its invoices, or bring the unsent ones up
+   * to date with its charges.
    *
    * ── Why this is one call that may produce two invoices ────────────────────
    * Because the split is a property of the ACCOUNT's PO policy, not a choice at
@@ -96,12 +101,20 @@ export const invoiceService = {
    * one document: the split exists to unblock cash, and where nothing is blocked
    * it would only be noise on a builder's desk.
    *
+   * ── Why it can change an invoice as well as create one ────────────────────
+   * It used to create and nothing else, and refused once the job had an
+   * invoice of each kind. So a charge approved AFTER the invoice was raised was
+   * never billed at all: a $120 futile fee approved eleven minutes too late sat
+   * on its job, on no invoice, with no way to add it. Now such a charge joins
+   * the job's invoice while that is still unsent, or rides on a second invoice
+   * once the first has gone out. See `billJob`.
+   *
    * Idempotent. A retried completion, or two office staff clicking at once, must
    * not bill the customer twice — `job_kind_unique` enforces that in the
-   * database, and this checks first so the second caller gets an explanation
-   * rather than a duplicate-key error.
+   * database, and a charge already on an invoice is never placed again, so the
+   * second caller gets an explanation rather than a duplicate.
    */
-  async generateForJob(jobId: string, caller: Caller): Promise<InvoiceListItem[]> {
+  async generateForJob(jobId: string, caller: Caller): Promise<RaisedInvoice[]> {
     assertFinance(caller);
 
     const job = await jobRepository.findById(jobId, {
@@ -116,181 +129,110 @@ export const invoiceService = {
      * charges — the driver may yet report contamination — and invoicing it would
      * bill for a collection that has not happened.
      */
-    if (job.status !== 'completed' && job.status !== 'admin-complete' && job.status !== 'futile') {
+    if (!FINISHED_JOB_STATUSES.has(job.status)) {
       throw AppError.conflict(
         `Job ${String(job.jobNumber)} is ${job.status} — only completed or futile jobs can be invoiced`,
       );
     }
 
-    const account = await accountRepository.findById(job.accountId, { accountId: null });
-    if (!account) throw AppError.notFound('The account behind this job no longer exists');
+    const outcome = await billJob(job);
+    if (outcome.invoices.length > 0) return outcome.invoices;
 
-    const existing = await invoiceRepository.kindsForJob(jobId);
-    const charges = await billableCharges(jobId);
-
-    if (charges.length === 0) {
+    /*
+     * Nothing raised or changed is not success.
+     *
+     * This used to answer `201` with an empty array when every invoice already
+     * existed, which reads to any caller as "done" — pressing it twice looked
+     * like it worked twice and silently did nothing the second time. Say why
+     * instead.
+     */
+    if (outcome.billable === 0) {
       throw AppError.conflict(
-        `Job ${String(job.jobNumber)} has nothing billable on it — every charge is pending or rejected`,
+        job.status === 'futile'
+          ? `Job ${String(job.jobNumber)} has nothing billable on it — the futile fee is still waiting for approval, or was waived`
+          : `Job ${String(job.jobNumber)} has nothing billable on it — every charge is pending or rejected`,
       );
     }
 
-    const settings = await settingsRepository.get();
-    const requiresPo = account.poPolicy === 'required-before-invoice';
+    if (outcome.blocked.length > 0) throw AppError.conflict(outcome.blocked.join(' '));
 
-    /*
-     * `system` and `office` charges are the job as sold: the service fee, the
-     * area, the bags, anything the office added. `driver` charges are the
-     * exceptions raised on site, and those are what need a second PO.
-     */
-    const baseCharges = charges.filter((charge) => charge.source !== 'driver');
-    const extraCharges = charges.filter((charge) => charge.source === 'driver');
+    const raised = await invoiceRepository.forJob(jobId);
+    throw AppError.conflict(
+      `Job ${String(job.jobNumber)} has already been invoiced — nothing further to raise${
+        raised.length > 0 ? ` (${raised.map((invoice) => invoice.kind).join(' and ')})` : ''
+      }`,
+    );
+  },
 
-    // Where nothing is blocked, one invoice. See the note above.
-    const split = requiresPo && settings.invoicing.splitAdditionalCharges;
+  /**
+   * M2.7 → M7.3 — bill the charges an approval has just made billable.
+   *
+   * ── Why approving bills ───────────────────────────────────────────────────
+   * The approvals screen told the office an approved charge "moves to the
+   * Awaiting PO queue". It did not: approving flipped a flag, the charge went on
+   * no invoice, and it dropped out of every list anybody works from — money the
+   * office believed was being chased, and was not.
+   *
+   * So a finished job is billed the moment one of its charges is approved: the
+   * extras land on their own invoice (in Awaiting PO where the account needs a
+   * PO), or join the job's unsent invoice. A job still under way is left alone
+   * and billed with the job, and the caller is told so rather than promised a
+   * queue entry that is not coming yet.
+   *
+   * ⚠️ Never throws. The approval is already committed by the time this runs,
+   * and a billing failure must not turn a successful decision into an error the
+   * office retries — that would be "none of those charges could be decided". A
+   * failure is reported back per job, and Raise invoice on the job finishes it.
+   */
+  async billApprovedCharges(jobIds: readonly string[]): Promise<ApprovalBilling> {
+    const result: ApprovalBilling = { invoices: [], awaitingJobCompletion: [], notInvoiced: [] };
 
-    const issuedOn = today();
-    const termsDays = account.paymentTermsDays || settings.invoicing.defaultPaymentTermsDays;
-    const created: InvoiceListItem[] = [];
+    for (const jobId of jobIds) {
+      const job = await jobRepository
+        .findById(jobId, { accountId: null, bookedByUserId: null, driverId: null })
+        .catch((error: unknown) => {
+          log.error({ err: error, jobId }, 'could not read a job to bill its approved charges');
+          return null;
+        });
+      if (!job) continue;
 
-    const plan: Array<{ kind: InvoiceKind; lines: typeof charges; poNumber: string | null }> = split
-      ? [
-          { kind: 'base', lines: baseCharges, poNumber: job.poNumber },
-          /*
-           * ⚠️ `poNumber: null` even though the base invoice has one. That is
-           * the split: this invoice needs a NEW purchase order, and until it
-           * arrives the row sits in the awaiting-PO queue (M7.3).
-           */
-          { kind: 'additional-charges', lines: extraCharges, poNumber: null },
-        ]
-      : [{ kind: 'base', lines: charges, poNumber: job.poNumber }];
-
-    for (const entry of plan) {
-      if (entry.lines.length === 0) continue;
-      if (existing.includes(entry.kind)) {
-        log.info(
-          { jobId, jobNumber: job.jobNumber, kind: entry.kind },
-          'invoice already exists for this job and kind — skipping',
-        );
+      if (!FINISHED_JOB_STATUSES.has(job.status)) {
+        result.awaitingJobCompletion.push(job.jobNumber);
         continue;
       }
 
-      const subtotalCents = entry.lines.reduce(
-        (total, line) => total + moneyToCents(line.amount),
-        0,
-      );
-      // Rounded once, at the end. Rounding each line then summing produces a
-      // total that disagrees with its own breakdown by a cent or two.
-      const gstCents = Math.round(subtotalCents / GST_DIVISOR);
+      try {
+        const outcome = await billJob(job);
 
-      /*
-       * The status decides whether this can go out.
-       *
-       *  • No PO policy → `draft`, ready to send.
-       *  • PO required and we have one → `draft`.
-       *  • PO required and we do not → `awaiting-po`, which is the M7.3 queue.
-       *    That is where money currently leaks, so it is a STATE rather than an
-       *    absence somebody has to notice.
-       */
-      const status: InvoiceStatus = !requiresPo || entry.poNumber ? 'draft' : 'awaiting-po';
-
-      const invoiceNumber = await settingsRepository.takeNextNumber('nextInvoiceNumber');
-      let createdId: string | null = null;
-
-      const invoice = await withTransaction(
-        async () =>
-          invoiceRepository
-            .create({
-              invoiceNumber,
-              kind: entry.kind,
-              status,
-              accountId: account.id,
-              accountName: account.name,
-              brandId: account.brandId,
-              jobId,
-              jobNumber: job.jobNumber,
-              poNumber: entry.poNumber,
-              issuedOn,
-              dueOn: addDays(issuedOn, termsDays),
-              paymentTermsDays: termsDays,
-              subtotalExGst: centsToMoney(subtotalCents),
-              gst: centsToMoney(gstCents),
-              totalIncGst: centsToMoney(subtotalCents + gstCents),
-              templateName: 'Standard',
-              notes: '',
-              lines: entry.lines.map((line) => ({
-                description: line.description,
-                quantity: line.quantity,
-                unitRate: line.unitRate,
-                amount: line.amount,
-                raisedBy: line.raisedBy,
-                sourceChargeId: line.id,
-              })),
-            })
-            .then((row) => {
-              createdId = row.id;
-              return row;
-            }),
-        {
-          label: 'create-invoice',
-          compensate: async () => {
-            if (createdId === null) return;
-            log.warn({ invoiceNumber, invoiceId: createdId }, 'removing a half-created invoice');
-            await invoiceRepository.deleteCascade(createdId);
-          },
-        },
-      );
-
-      created.push(invoice);
-    }
-
-    /*
-     * Nothing raised is not success.
-     *
-     * Every entry in the plan was skipped — the job already carries an invoice
-     * of each kind its charges would produce — and this used to answer `201`
-     * with an empty array, which reads to any caller as "done". Pressing it
-     * twice therefore looked like it worked twice and silently did nothing the
-     * second time. Say which invoices are already there instead.
-     */
-    if (created.length === 0) {
-      const raised = await invoiceRepository.kindsForJob(jobId);
-      throw AppError.conflict(
-        `Job ${String(job.jobNumber)} has already been invoiced — nothing further to raise${
-          raised.length > 0 ? ` (${raised.join(' and ')})` : ''
-        }`,
-      );
-    }
-
-    if (created.length > 0) {
-      /*
-       * The job's rollup badge follows, so the jobs grid agrees with the invoice
-       * list. `awaiting-po` wins when anything raised is still blocked — the
-       * grid should show the worst state, not the most optimistic one.
-       */
-      const blocked = created.some((invoice) => invoice.status === 'awaiting-po');
-      const base = created.find((invoice) => invoice.kind === 'base');
-
-      await setInvoiceStatus(
-        jobId,
-        blocked ? 'awaiting-po' : 'invoiced',
-        base?.invoiceNumber,
-      );
-
-      log.info(
-        {
-          jobId,
-          jobNumber: job.jobNumber,
-          raised: created.map((invoice) => ({
-            number: invoice.invoiceNumber,
+        result.invoices.push(
+          ...outcome.invoices.map((invoice) => ({
+            invoiceNumber: invoice.invoiceNumber,
+            jobNumber: job.jobNumber,
             kind: invoice.kind,
             status: invoice.status,
+            change: invoice.change,
           })),
-        },
-        'invoices raised for job',
-      );
+        );
+
+        if (outcome.blocked.length > 0) {
+          result.notInvoiced.push({ jobNumber: job.jobNumber, reason: outcome.blocked.join(' ') });
+        }
+      } catch (error) {
+        log.error(
+          { err: error, jobId, jobNumber: job.jobNumber },
+          'approved charges could not be billed — Raise invoice on the job will finish it',
+        );
+        result.notInvoiced.push({
+          jobNumber: job.jobNumber,
+          reason:
+            error instanceof AppError
+              ? error.message
+              : 'Billing it failed — use Raise invoice on the job to try again.',
+        });
+      }
     }
 
-    return created;
+    return result;
   },
 
   /**
@@ -408,8 +350,13 @@ export const invoiceService = {
     const result = await invoiceRepository.recordPo(id, trimmed, scopeFor(caller));
     if (!result.matched) throw AppError.notFound('No such invoice');
 
-    // The job's rollup follows, so the jobs grid agrees with the invoice list.
-    if (result.jobId) await setInvoiceStatus(result.jobId, 'invoiced');
+    /*
+     * The job's rollup follows, so the jobs grid agrees with the invoice list —
+     * worked out from ALL the job's invoices. It used to be set to `invoiced`
+     * outright, which cleared the badge while a second invoice on the same job
+     * was still waiting on its own PO.
+     */
+    if (result.jobId) await refreshJobRollup(result.jobId);
 
     log.info({ invoiceId: id, poNumber: trimmed, by: caller.name }, 'purchase order recorded');
   },
@@ -501,6 +448,364 @@ export const invoiceService = {
     return result;
   },
 };
+
+/* ── Billing a job (M7.1, M7.3) ──────────────────────────────────────────── */
+
+/** A job is billable once the work is over: collected, closed by the office, or futile. */
+const FINISHED_JOB_STATUSES: ReadonlySet<string> = new Set([
+  'completed',
+  'admin-complete',
+  'futile',
+]);
+
+/** The one charge a futile job is billed for. See `billJob`. */
+const FUTILE_FEE_CODE = 'futile-pickup';
+
+/** Both kinds, base first — the order a job's invoices are numbered in. */
+const INVOICE_KIND_ORDER: readonly InvoiceKind[] = ['base', 'additional-charges'];
+
+type BillableJob = NonNullable<Awaited<ReturnType<typeof jobRepository.findById>>>;
+type BillableAccount = NonNullable<Awaited<ReturnType<typeof accountRepository.findById>>>;
+type BillableCharge = Awaited<ReturnType<typeof billableCharges>>[number];
+
+/** What billing an approval did, per job. See `billApprovedCharges`. */
+export interface ApprovalBilling {
+  invoices: Array<{
+    invoiceNumber: number;
+    jobNumber: number;
+    kind: InvoiceKind;
+    status: InvoiceStatus;
+    change: 'created' | 'updated';
+  }>;
+  /** Jobs still under way — their charges are billed with the job. */
+  awaitingJobCompletion: number[];
+  notInvoiced: Array<{ jobNumber: number; reason: string }>;
+}
+
+interface BillingOutcome {
+  /** Invoices created or changed, in numbering order. */
+  invoices: RaisedInvoice[];
+  /** Billable charges that could not be placed on any invoice, in words. */
+  blocked: string[];
+  /** How many charges on the job are billable at all. */
+  billable: number;
+}
+
+/**
+ * Brings a finished job's invoices into line with its billable charges.
+ *
+ *  • A charge on an invoice that has GONE OUT is settled and never placed again.
+ *  • Every other billable charge goes on the invoice of its kind — the base
+ *    invoice, or the additional-charges one that waits for its own PO — and an
+ *    unsent invoice is rewritten to carry exactly its charges.
+ *  • Once the base invoice has gone out, a new charge rides on the
+ *    additional-charges invoice instead of being refused.
+ *  • An unsent invoice left with nothing billable on it is removed.
+ *
+ * Running it twice changes nothing the second time, which is what makes it safe
+ * to call from both the Raise invoice button and every approval.
+ */
+async function billJob(job: BillableJob): Promise<BillingOutcome> {
+  const account = await accountRepository.findById(job.accountId, { accountId: null });
+  if (!account) throw AppError.notFound('The account behind this job no longer exists');
+
+  const [settings, existing, charges] = await Promise.all([
+    settingsRepository.get(),
+    invoiceRepository.forJob(job.id),
+    billableCharges(job.id),
+  ]);
+
+  /*
+   * ⚠️ A futile job bills the attendance fee and NOTHING else.
+   *
+   * Its service fee, area and bag charges were written at booking for a
+   * pickup that never happened, and they used to go on the invoice beside the
+   * fee — $930 billed for a truck turned away at the gate, with the rebooked
+   * job then billing the full price again. A waived fee leaves nothing to bill.
+   */
+  const billable =
+    job.status === 'futile' ? charges.filter((charge) => charge.code === FUTILE_FEE_CODE) : charges;
+
+  const requiresPo = account.poPolicy === 'required-before-invoice';
+  const split = requiresPo && settings.invoicing.splitAdditionalCharges;
+
+  const current = new Map(existing.map((invoice) => [invoice.kind, invoice]));
+  const hasGoneOut = (kind: InvoiceKind): boolean => {
+    const invoice = current.get(kind);
+    return invoice !== undefined && !UNSENT_STATUSES.includes(invoice.status);
+  };
+
+  const settled = new Set(
+    existing
+      .filter((invoice) => !UNSENT_STATUSES.includes(invoice.status))
+      .flatMap((invoice) =>
+        invoice.lines.flatMap((line) => (line.sourceChargeId ? [line.sourceChargeId] : [])),
+      ),
+  );
+
+  const planned: Record<InvoiceKind, BillableCharge[]> = { base: [], 'additional-charges': [] };
+  const blocked: string[] = [];
+
+  for (const charge of billable) {
+    if (settled.has(charge.id)) continue;
+
+    /*
+     * `system` and `office` charges are the job as sold: the service fee, the
+     * area, the bags, anything the office added. `driver` charges are the
+     * exceptions raised on site, and those are what need a second PO.
+     */
+    const preferred: InvoiceKind =
+      split && charge.source === 'driver' ? 'additional-charges' : 'base';
+    // The base invoice is already with the customer: a later charge goes on a second one.
+    const kind: InvoiceKind =
+      preferred === 'base' && hasGoneOut('base') ? 'additional-charges' : preferred;
+
+    if (hasGoneOut(kind)) {
+      blocked.push(
+        `${charge.description} could not be billed — job ${String(job.jobNumber)}'s additional-charges invoice has already been sent.`,
+      );
+      continue;
+    }
+
+    planned[kind].push(charge);
+  }
+
+  const issuedOn = today();
+  const termsDays = account.paymentTermsDays || settings.invoicing.defaultPaymentTermsDays;
+  const invoices: RaisedInvoice[] = [];
+  let changed = false;
+
+  for (const kind of INVOICE_KIND_ORDER) {
+    const lines = planned[kind];
+    const invoice = current.get(kind);
+
+    // Gone out: never touched. Anything meant for it was routed away above.
+    if (invoice && !UNSENT_STATUSES.includes(invoice.status)) continue;
+
+    if (!invoice) {
+      if (lines.length === 0) continue;
+
+      /*
+       * The status decides whether this can go out.
+       *
+       *  • No PO policy → `draft`, ready to send.
+       *  • PO required and we have one → `draft`.
+       *  • PO required and we do not → `awaiting-po`, which is the M7.3 queue.
+       *    That is where money currently leaks, so it is a STATE rather than an
+       *    absence somebody has to notice.
+       *
+       * ⚠️ On a PO-required account the additional-charges invoice starts with
+       * NO PO even though the base invoice had one. That is the split: it needs
+       * a NEW purchase order, and until one arrives it waits in Awaiting PO.
+       */
+      const poNumber = kind === 'base' || !requiresPo ? job.poNumber : null;
+      const status: InvoiceStatus = !requiresPo || poNumber ? 'draft' : 'awaiting-po';
+
+      const created = await createInvoice({
+        job,
+        account,
+        kind,
+        status,
+        poNumber,
+        lines,
+        issuedOn,
+        termsDays,
+      });
+      invoices.push({ ...created, change: 'created' });
+      changed = true;
+      continue;
+    }
+
+    if (sameLines(invoice.lines, lines)) continue;
+
+    if (lines.length === 0) {
+      /*
+       * An invoice that never went out, now carrying nothing billable — the
+       * full price raised on a futile job before the rule above existed. A
+       * draft for money nobody owes is worse than no draft.
+       */
+      if (await invoiceRepository.deleteUnsent(invoice.id)) {
+        log.warn(
+          { jobId: job.id, jobNumber: job.jobNumber, invoiceNumber: invoice.invoiceNumber },
+          'removed an unsent invoice that had nothing billable left on it',
+        );
+        changed = true;
+      }
+      continue;
+    }
+
+    const updated = await invoiceRepository.replaceLines(invoice.id, {
+      ...totalsFor(lines),
+      lines: lines.map(toInvoiceLine),
+    });
+
+    if (updated) {
+      invoices.push({ ...updated, change: 'updated' });
+      changed = true;
+    } else {
+      // Sent in the moment between the read and the write. Its charges stay put.
+      blocked.push(
+        `Invoice ${String(invoice.invoiceNumber)} was sent while job ${String(job.jobNumber)} was being billed — try again to bill what is left.`,
+      );
+    }
+  }
+
+  if (changed) {
+    await refreshJobRollup(job.id, job.invoiceNumber);
+
+    log.info(
+      {
+        jobId: job.id,
+        jobNumber: job.jobNumber,
+        invoices: invoices.map((invoice) => ({
+          number: invoice.invoiceNumber,
+          kind: invoice.kind,
+          status: invoice.status,
+          change: invoice.change,
+        })),
+      },
+      'job billed',
+    );
+  }
+
+  return { invoices, blocked, billable: billable.length };
+}
+
+/** Writes one new invoice, removing it again if the degraded path fails part-way. */
+async function createInvoice(input: {
+  job: BillableJob;
+  account: BillableAccount;
+  kind: InvoiceKind;
+  status: InvoiceStatus;
+  poNumber: string | null;
+  lines: readonly BillableCharge[];
+  issuedOn: string;
+  termsDays: number;
+}): Promise<InvoiceListItem> {
+  const invoiceNumber = await settingsRepository.takeNextNumber('nextInvoiceNumber');
+  let createdId: string | null = null;
+
+  return withTransaction(
+    async () =>
+      invoiceRepository
+        .create({
+          invoiceNumber,
+          kind: input.kind,
+          status: input.status,
+          accountId: input.account.id,
+          accountName: input.account.name,
+          brandId: input.account.brandId,
+          jobId: input.job.id,
+          jobNumber: input.job.jobNumber,
+          poNumber: input.poNumber,
+          issuedOn: input.issuedOn,
+          dueOn: addDays(input.issuedOn, input.termsDays),
+          paymentTermsDays: input.termsDays,
+          ...totalsFor(input.lines),
+          templateName: 'Standard',
+          notes: '',
+          lines: input.lines.map(toInvoiceLine),
+        })
+        .then((row) => {
+          createdId = row.id;
+          return row;
+        }),
+    {
+      label: 'create-invoice',
+      compensate: async () => {
+        if (createdId === null) return;
+        log.warn({ invoiceNumber, invoiceId: createdId }, 'removing a half-created invoice');
+        await invoiceRepository.deleteCascade(createdId);
+      },
+    },
+  );
+}
+
+/**
+ * The money on a set of lines.
+ *
+ * Rounded once, at the end. Rounding each line then summing produces a total
+ * that disagrees with its own breakdown by a cent or two.
+ */
+function totalsFor(lines: readonly BillableCharge[]): {
+  subtotalExGst: string;
+  gst: string;
+  totalIncGst: string;
+} {
+  const subtotalCents = lines.reduce((total, line) => total + moneyToCents(line.amount), 0);
+  const gstCents = Math.round(subtotalCents / GST_DIVISOR);
+
+  return {
+    subtotalExGst: centsToMoney(subtotalCents),
+    gst: centsToMoney(gstCents),
+    totalIncGst: centsToMoney(subtotalCents + gstCents),
+  };
+}
+
+function toInvoiceLine(charge: BillableCharge): CreateInvoiceInput['lines'][number] {
+  return {
+    description: charge.description,
+    quantity: charge.quantity,
+    unitRate: charge.unitRate,
+    amount: charge.amount,
+    raisedBy: charge.raisedBy,
+    sourceChargeId: charge.id,
+  };
+}
+
+/**
+ * Whether an invoice already carries exactly these charges, as they now read.
+ *
+ * Compared on the figures as well as the ids, so a charge the office corrected
+ * after the draft was raised brings the draft with it.
+ */
+function sameLines(existing: JobInvoiceRow['lines'], planned: readonly BillableCharge[]): boolean {
+  if (existing.length !== planned.length) return false;
+
+  const byCharge = new Map(existing.map((line) => [line.sourceChargeId, line]));
+  return planned.every((charge) => {
+    const line = byCharge.get(charge.id);
+    return (
+      line !== undefined &&
+      line.description === charge.description &&
+      line.quantity === charge.quantity &&
+      line.unitRate === charge.unitRate &&
+      line.amount === charge.amount
+    );
+  });
+}
+
+/**
+ * The job's invoice badge, worked out from ALL its invoices.
+ *
+ * `awaiting-po` wins while any of them waits on a PO — the grid shows the
+ * worst state, not the most optimistic. The number shown is the base
+ * invoice's; `knownNumber` is what the job already records, so an unchanged
+ * number is left alone rather than re-stamped with today's date.
+ */
+async function refreshJobRollup(jobId: string, knownNumber?: number | null): Promise<void> {
+  const invoices = await invoiceRepository.forJob(jobId);
+
+  const headline = invoices.find((invoice) => invoice.kind === 'base') ?? invoices[0];
+  if (!headline) {
+    await setInvoiceStatus(jobId, 'not-invoiced', null);
+    return;
+  }
+
+  const status = invoices.some((invoice) => invoice.status === 'awaiting-po')
+    ? 'awaiting-po'
+    : invoices.every((invoice) => invoice.status === 'paid')
+      ? 'paid'
+      : 'invoiced';
+
+  await setInvoiceStatus(
+    jobId,
+    status,
+    knownNumber === undefined || headline.invoiceNumber === knownNumber
+      ? undefined
+      : headline.invoiceNumber,
+  );
+}
 
 /* ── Xero (I1 · M7.8) ────────────────────────────────────────────────────── */
 
@@ -677,8 +982,12 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
    * And in the portal, where somebody looking at their account sees it without
    * having found the email. `action` rather than `info`: an invoice is
    * something to do, and one waiting on a PO is something to do urgently.
+   *
+   * ⚠️ Administrators only. This went to every portal user on the account, so
+   * each site supervisor got the invoice total in their inbox — the one figure
+   * M1.5 says they must never see, on a screen (Invoices) they cannot open.
    */
-  await notificationService.notifyAccount({
+  await notificationService.notifyAccountAdministrators({
     accountId: invoice.accountId,
     category: 'invoice',
     severity: 'action',

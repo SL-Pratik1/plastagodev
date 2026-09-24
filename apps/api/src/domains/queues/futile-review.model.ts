@@ -38,6 +38,20 @@ const futileReviewSchema = new Schema(
      */
     markedAt: { type: Date, required: true },
 
+    /**
+     * Where the driver was standing when they marked it futile (M4.2).
+     *
+     * The futile screen tells them their position is part of what makes the $120
+     * stand up, and the phone sends it — but the review record had nowhere to
+     * put it, so the queue rendered "Position when marked — Not captured" on
+     * every row and the projection hard-coded null to match.
+     *
+     * ⚠️ Null on reviews opened before these fields existed. Not back-filled:
+     * the position was never stored, so there is nothing to recover.
+     */
+    latitude: { type: Number, default: null },
+    longitude: { type: Number, default: null },
+
     /** `pending` IS the queue. Everything else has left it. */
     outcome: { type: String, required: true, enum: FUTILE_OUTCOMES, default: 'pending' },
 

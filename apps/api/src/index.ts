@@ -5,6 +5,7 @@ import { env } from './config/env.js';
 import { connectMongo, disconnectMongo, isMongoConnected } from './db/mongo.js';
 import { authRepository } from './domains/auth/auth.repository.js';
 import { wireExtractor } from './domains/extractor/extractor.service.js';
+import { scheduler } from './domains/notifications/scheduler.service.js';
 import { disconnectRedis } from './db/redis.js';
 import { logger } from './lib/logger.js';
 import { closeQueues } from './queues/index.js';
@@ -37,6 +38,12 @@ async function main(): Promise<void> {
   // exactly the failure a transactional system must not have.
   server.headersTimeout = 65_000;
   server.requestTimeout = 60_000;
+
+  /*
+   * The daily sweep and the evening reminders. Only with a database: every run
+   * claims its slot there first, and without one nothing could be claimed.
+   */
+  if (isMongoConnected()) scheduler.start();
 
   registerShutdown(server);
 }
@@ -86,6 +93,7 @@ function registerShutdown(server: Server): void {
       forceExit.unref();
 
       try {
+        scheduler.stop();
         await new Promise<void>((resolve, reject) => {
           server.close((error) => (error ? reject(error) : resolve()));
         });

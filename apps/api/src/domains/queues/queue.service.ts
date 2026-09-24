@@ -1,10 +1,12 @@
 import type {
   ChangeRequestDecision,
   ChangeRequestItem,
+  AwaitingPoChaseResult,
   AwaitingPoItem,
   ChargeApprovalDetail,
   ChargeApprovalItem,
   ChargeDecision,
+  ChargeDecisionOutcome,
   FutileDecision,
   FutileReview,
   FutileReviewItem,
@@ -15,10 +17,21 @@ import type {
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
 import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
+import { invoiceService } from '../invoices/invoice.service.js';
 import { jobService } from '../jobs/job.service.js';
+import { buildPoRequestEmail } from '../../integrations/notice-messages.js';
 import { notificationService } from '../notifications/notification.service.js';
+import { outboundService } from '../notifications/outbound.service.js';
 import { pricingService } from '../settings/pricing.service.js';
-import { queueRepository, type QueueListQuery } from './queue.repository.js';
+import { settingsRepository } from '../settings/settings.repository.js';
+import {
+  FUTILE_CHARGE_CODE,
+  queueRepository,
+  type ApprovalListQuery,
+  type AwaitingPoListQuery,
+  type FutileListQuery,
+  type QueueListQuery,
+} from './queue.repository.js';
 
 const log = logger.child({ module: 'queues' });
 
@@ -78,7 +91,7 @@ export const queueService = {
   /* ── M2.6 · Futile review ──────────────────────────────────────────────── */
 
   async futileList(
-    query: QueueListQuery,
+    query: FutileListQuery,
     caller: Caller,
   ): Promise<{ data: FutileReviewItem[]; meta: PageMeta }> {
     assertOffice(caller);
@@ -175,6 +188,15 @@ export const queueService = {
       rebookedJobNumber = rebooked.jobNumber;
     }
 
+    /*
+     * A cancel books nothing, but the original job still has to say it was
+     * decided — otherwise its page keeps asking for the decision. A rebook
+     * writes its own line in `rebookFromFutile`.
+     */
+    if (decision.outcome === 'cancelled') {
+      await jobService.recordFutileClosed(result.jobId, decision.note.trim() || null, caller);
+    }
+
     log.info(
       {
         reviewId: id,
@@ -190,7 +212,7 @@ export const queueService = {
   /* ── M2.7 · Charge approvals ───────────────────────────────────────────── */
 
   async approvalList(
-    query: QueueListQuery,
+    query: ApprovalListQuery,
     caller: Caller,
   ): Promise<{ data: ChargeApprovalItem[]; meta: PageMeta }> {
     assertOffice(caller);
@@ -221,14 +243,21 @@ export const queueService = {
    * driver, or the customer, is usually not the person who pressed the button.
    *
    * ⚠️ It is NOT sent to the driver. There is no driver notification channel
-   * (`notificationService` has `notifyAccount` and `notifyOffice`, and that is
+   * (`notificationService` reaches the office and customer users, and that is
    * all), so telling them is a conversation somebody has to have.
+   *
+   * ── Why approving bills ───────────────────────────────────────────────────
+   * The screen said an approved charge "moves to the Awaiting PO queue", and
+   * nothing moved: approving flipped a flag, the charge went on no invoice and
+   * vanished from every list the office works from. Now an approval bills the
+   * charges on every finished job it touched — see
+   * `invoiceService.billApprovedCharges` — and says where each one went.
    */
   async approvalDecide(
     ids: readonly string[],
     decision: ChargeDecision,
     caller: Caller,
-  ): Promise<number> {
+  ): Promise<ChargeDecisionOutcome> {
     assertApprover(caller);
 
     if (ids.length === 0) throw AppError.validation('Select at least one charge');
@@ -263,7 +292,14 @@ export const queueService = {
       'charge approvals decided',
     );
 
-    return result.changed;
+    if (decision.decision === 'reject') {
+      return { changed: result.changed, invoices: [], awaitingJobCompletion: [], notInvoiced: [] };
+    }
+
+    // After the decision is committed, and unable to undo it — see the method.
+    const billing = await invoiceService.billApprovedCharges(result.jobIds);
+
+    return { changed: result.changed, ...billing };
   },
 
   /* ── M5.4 · Change requests from the portal ───────────────────────────── */
@@ -328,9 +364,13 @@ export const queueService = {
      * Tell the customer. The portal promised "we will confirm by phone or
      * text"; this is the in-product half of that, and it is what stops them
      * ringing to ask whether anyone saw it.
+     *
+     * The pickup's audience — its administrators and the supervisor who booked
+     * it — not every supervisor on the account, who could not open the link.
      */
-    await notificationService.notifyAccount({
+    await notificationService.notifyJobAudience({
       accountId: resolved.accountId,
+      bookedByUserId: resolved.bookedByUserId,
       category: 'queue',
       severity: 'info',
       title: `Your change request for #${String(resolved.jobNumber)} was ${decision.outcome === 'actioned' ? 'accepted' : 'declined'}`,
@@ -350,7 +390,7 @@ export const queueService = {
   /* ── M7.3 · Awaiting a purchase order ──────────────────────────────────── */
 
   async awaitingPoList(
-    query: QueueListQuery,
+    query: AwaitingPoListQuery,
     caller: Caller,
   ): Promise<{ data: AwaitingPoItem[]; meta: PageMeta }> {
     assertOffice(caller);
@@ -358,7 +398,12 @@ export const queueService = {
   },
 
   /**
-   * M7.3 — record that a chase went out.
+   * M7.3 — "Send reminder": email each billing contact for the PO, and log
+   * the chase.
+   *
+   * ⚠️ The screen always said "emailed to each account's billing contact",
+   * and nothing was ever sent — this only recorded a chase. The office
+   * believed the customer had been asked, nobody rang, and the invoice waited.
    *
    * ── Why chasing is a recorded act and not just a note ─────────────────────
    * Because the queue's whole value is its ageing, and ageing against the
@@ -366,24 +411,76 @@ export const queueService = {
    * Ageing against the last contact answers the question the office actually
    * has: who have we not spoken to about this?
    *
-   * It does not send anything. Somebody picks up the phone; this records that
-   * they did.
+   * The chase is logged for every invoice still waiting, emailed or not, as it
+   * always was — an account with no billing email is one the office rings, and
+   * the result says which those are so the screen can tell them.
    */
-  async awaitingPoChase(ids: readonly string[], caller: Caller): Promise<number> {
+  async awaitingPoChase(ids: readonly string[], caller: Caller): Promise<AwaitingPoChaseResult> {
     assertOffice(caller);
 
     if (ids.length === 0) throw AppError.validation('Select at least one invoice to chase');
 
-    const changed = await queueRepository.recordChase(ids);
+    const invoices = await queueRepository.awaitingPoForChase(ids);
 
-    if (changed === 0) {
+    if (invoices.length === 0) {
       throw AppError.conflict(
         'None of those invoices are waiting on a purchase order any more',
       );
     }
 
-    log.info({ count: changed, by: caller.name }, 'purchase-order chases recorded');
-    return changed;
+    const prefix = await invoiceNumberPrefix();
+    let emailed = 0;
+    let noBillingEmail = 0;
+    let failed = 0;
+
+    for (const invoice of invoices) {
+      if (invoice.billingContacts.length === 0) {
+        noBillingEmail += 1;
+        continue;
+      }
+
+      const context = {
+        accountName: invoice.accountName,
+        invoiceNumber: `${prefix}${String(invoice.invoiceNumber)}`,
+        totalIncGst: invoice.totalIncGst,
+        chargeSummary: invoice.chargeSummary,
+        jobNumber: invoice.jobNumber,
+        siteName: invoice.siteName,
+      };
+
+      const outcomes = await Promise.all(
+        invoice.billingContacts.map((contact) =>
+          outboundService.send({
+            event: 'po-request',
+            /*
+             * One per contact per CHASE: the next reminder is a new email, while
+             * a double-click on this one sends it once.
+             */
+            subjectKey: `po-request:${invoice.id}:${String(invoice.chaseCount + 1)}:${contact.id}`,
+            recipient: { email: contact.email, mobile: null, notifyByEmail: true },
+            email: (to) => buildPoRequestEmail(to, context),
+            accountId: invoice.accountId,
+            invoiceId: invoice.id,
+            jobId: invoice.jobId,
+          }),
+        ),
+      );
+
+      if (outcomes.some((result) => result.outcome === 'sent' || result.outcome === 'duplicate')) {
+        emailed += 1;
+      } else {
+        failed += 1;
+      }
+    }
+
+    const changed = await queueRepository.recordChase(invoices.map((invoice) => invoice.id));
+
+    log.info(
+      { count: changed, emailed, noBillingEmail, failed, by: caller.name },
+      'purchase-order reminders sent',
+    );
+
+    return { changed, emailed, noBillingEmail, failed };
   },
 };
 
@@ -395,16 +492,40 @@ export const queueService = {
  * It is $120 today. It is a setting because Matt can change it without a
  * deploy, and because the queue showing a stale number beside a real charge is
  * how somebody talks a customer out of paying it.
+ *
+ * ⚠️ A FALLBACK ONLY. Each row now carries the fee frozen onto its own job when
+ * the driver marked the pickup futile, joined in the repository — see
+ * `FUTILE_CHARGE_LOOKUP`. This value is used for a review whose charge line is
+ * missing, and nowhere else.
+ *
+ * That distinction is the whole point. Handing the CURRENT price to every row
+ * meant editing the fee restated history: a pickup charged $120 last month read
+ * $150 in the queue, beside a job and an invoice that both still said $120.
  */
 async function futileFee(): Promise<string> {
   try {
-    const priced = await pricingService.priceAdditionalService('futile-pickup');
+    const priced = await pricingService.priceAdditionalService(FUTILE_CHARGE_CODE);
     return priced.amountExGst;
   } catch {
     // A missing price must not blank the whole queue — the rows still need
     // reviewing, and the fee is shown for context rather than charged here.
     log.warn('futile-pickup is not configured in the price list');
     return '0.00';
+  }
+}
+
+/**
+ * The invoice number as the customer's copy prints it — "PGA-104234", or the
+ * bare "104234" when no prefix is set. The PO request quotes the number they
+ * will find on the PDF they already hold, not a variant of it.
+ */
+async function invoiceNumberPrefix(): Promise<string> {
+  try {
+    const prefix = (await settingsRepository.get()).invoicing.invoiceNumberPrefix.trim();
+    return prefix === '' ? '' : `${prefix}-`;
+  } catch {
+    // A settings read that fails must not stop the reminders going out.
+    return '';
   }
 }
 

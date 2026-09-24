@@ -34,6 +34,8 @@ export interface FakeUserInput {
   email?: string | null;
   mobile?: string | null;
   role?: Role;
+  /** Everything they hold. Defaults to `[role]`. */
+  roles?: Role[];
   status?: UserStatus;
 }
 
@@ -42,6 +44,8 @@ export function createFakeRepository() {
   const challenges = new Map<string, ChallengeRecord>();
   const sendLog: string[] = [];
   const signedIn: Array<{ userId: string; at: Date }> = [];
+  /** The role each SESSION chose to work as — see `setSessionActiveRole`. */
+  const sessionRoles = new Map<string, Role | null>();
 
   function addUser(input: FakeUserInput = {}): UserRecord {
     const user: UserRecord = {
@@ -50,7 +54,12 @@ export function createFakeRepository() {
       email: input.email === undefined ? 'test@plastago.com.au' : input.email,
       mobile: input.mobile === undefined ? null : input.mobile,
       role: input.role ?? 'office-staff',
-      roles: [input.role ?? 'office-staff'],
+      /*
+       * `roles` defaults to the single main role, but takes an override so a
+       * test can build the one person this matters for: the allocator who also
+       * drives (Matt, 27:01) and therefore has a role to switch to.
+       */
+      roles: input.roles ?? [input.role ?? 'office-staff'],
       status: input.status ?? 'active',
       jobTitle: 'Tester',
       brandIds: ['plastago'],
@@ -69,6 +78,14 @@ export function createFakeRepository() {
       Promise.resolve([...users.values()].find((u) => u.mobile === mobile) ?? null),
 
     findUserById: (id: string) => Promise.resolve(users.get(id) ?? null),
+
+    findSessionActiveRole: (sessionId: string) =>
+      Promise.resolve(sessionRoles.get(sessionId) ?? null),
+
+    setSessionActiveRole: (sessionId: string, role: Role | null) => {
+      sessionRoles.set(sessionId, role);
+      return Promise.resolve();
+    },
 
     markSignedIn: (userId: string, at: Date) => {
       signedIn.push({ userId, at });
@@ -150,6 +167,10 @@ export function createFakeRepository() {
     challenges,
     sendLog,
     signedIn,
+    /** What one session chose to work as, or `null` for the usual role. */
+    sessionRoleOf(sessionId: string): Role | null {
+      return sessionRoles.get(sessionId) ?? null;
+    },
     /** Force a challenge into a state the clock would otherwise have to reach. */
     mutateChallenge(id: string, patch: Partial<ChallengeRecord>) {
       const found = challenges.get(id);
@@ -175,7 +196,10 @@ export function createFakeRepository() {
 export function createFakeAuth() {
   const emailsSent: Array<{ email: string; type: string }> = [];
   const smsSent: string[] = [];
-  let session: { user: { id: string }; session: { createdAt: Date; expiresAt: Date } } | null = null;
+  let session: {
+    user: { id: string };
+    session: { id: string; createdAt: Date; expiresAt: Date };
+  } | null = null;
 
   function cookieHeaders(): Headers {
     const headers = new Headers();

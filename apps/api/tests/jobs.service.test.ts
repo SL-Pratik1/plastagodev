@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearOutbound,
   makeFakeNotificationRepository,
   recordingProviders,
   sentMessages,
+  staffContacts,
 } from './helpers/fake-outbound.js';
 import type { JobDraft, Role } from '@plastago/shared';
 import { createFakeJobRepository } from './helpers/fake-jobs.js';
@@ -122,7 +123,9 @@ vi.mock('../src/integrations/maps.js', async (importOriginal) => {
 });
 
 const { jobService } = await import('../src/domains/jobs/job.service.js');
+const { notificationService } = await import('../src/domains/notifications/notification.service.js');
 const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
+const { fitsOneSms } = await import('../src/integrations/notice-messages.js');
 
 const OFFICE = {
   userId: 'usr0000000000000000000f1',
@@ -492,6 +495,55 @@ describe('cancelling', () => {
       jobService.cancel('f'.repeat(24), 'customer-request', '', CUSTOMER_ADMIN),
     ).rejects.toMatchObject({ status: 404 });
   });
+
+  /*
+   * ⚠️ Nobody was told. The site contact still held "pickup booked" and kept
+   * the pile back; a driver with it on their run found out by opening it.
+   */
+  it('tells the site contact the pickup is cancelled', async () => {
+    const id = repo.seed({ status: 'booked', siteContactEmail: 'foreman@site.com.au' });
+
+    await jobService.cancel(id, 'customer-request', '', OFFICE);
+
+    expect(sentMessages).toEqual([
+      expect.objectContaining({ channel: 'email', to: 'foreman@site.com.au' }),
+    ]);
+    expect(sentMessages[0]?.subject).toContain('Pickup cancelled');
+  });
+
+  it('texts the driver when the job is on their run', async () => {
+    staffContacts.set('drv0000000000000000000d1', {
+      id: 'drv0000000000000000000d1',
+      name: 'Troy Holm',
+      email: 'troy@plastago.com.au',
+      mobile: '0455112233',
+    });
+    const id = repo.seed({
+      status: 'assigned',
+      driverId: 'drv0000000000000000000d1',
+      run: { id: 'run0000000000000000000r1', date: '2026-09-25' },
+    });
+
+    await jobService.cancel(id, 'customer-request', '', OFFICE);
+
+    // A text even though an email is on file: a driver on the road reads texts.
+    const text = sentMessages.find((message) => message.to === '0455112233');
+    expect(text?.channel).toBe('sms');
+    expect(text?.body).toContain('CANCELLED');
+    expect(fitsOneSms(text?.body ?? '')).toBe(true);
+  });
+
+  it('texts no driver when the run has nobody on it yet', async () => {
+    const id = repo.seed({
+      status: 'booked',
+      driverId: null,
+      run: { id: 'run0000000000000000000r1', date: '2026-09-25' },
+    });
+
+    await jobService.cancel(id, 'customer-request', '', OFFICE);
+
+    expect(sentMessages.filter((message) => message.channel === 'sms')).toHaveLength(0);
+  });
 });
 
 describe('rescheduling', () => {
@@ -518,6 +570,93 @@ describe('rescheduling', () => {
 
     await expect(jobService.reschedule(id, '2026-03-02', SUPERVISOR)).rejects.toMatchObject({
       status: 403,
+    });
+  });
+
+  it('tells the site contact the new date', async () => {
+    const id = repo.seed({ status: 'booked', siteContactEmail: 'foreman@site.com.au' });
+
+    await jobService.reschedule(id, '2026-03-02', OFFICE);
+
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toMatchObject({ channel: 'email', to: 'foreman@site.com.au' });
+    expect(sentMessages[0]?.subject).toContain('Pickup date changed');
+    expect(sentMessages[0]?.body).toContain('2 Mar');
+    expect(sentMessages[0]?.body).toContain('9 Mar');
+  });
+
+  /*
+   * ⚠️ The date moved and the job stayed on its run — on a driver's sheet for
+   * a day the site is not ready. It comes off now, and the driver is texted.
+   */
+  describe('a job on a run whose day is before the new ready date', () => {
+    const DRIVER_ID = 'drv0000000000000000000d1';
+    const RUN = { id: 'run0000000000000000000r1', date: '2026-09-25', name: 'Run 7 — North' };
+
+    beforeEach(() => {
+      staffContacts.set(DRIVER_ID, {
+        id: DRIVER_ID,
+        name: 'Troy Holm',
+        email: null,
+        mobile: '0455112233',
+      });
+    });
+
+    it('takes it off the run, back to the jobs to plan', async () => {
+      const id = repo.seed({ status: 'assigned', driverId: DRIVER_ID, run: RUN });
+
+      await jobService.reschedule(id, '2026-09-30', OFFICE);
+
+      expect(repo.calls.releases).toEqual([{ id, runId: RUN.id }]);
+      expect(repo.runOf(id)).toBeNull();
+      expect(repo.statusOf(id)).toBe('booked');
+      expect(repo.calls.events.map((event) => event.label)).toEqual([
+        'Ready date changed',
+        'Taken off run',
+      ]);
+    });
+
+    it('texts the driver not to collect it', async () => {
+      const id = repo.seed({ status: 'assigned', driverId: DRIVER_ID, run: RUN });
+
+      await jobService.reschedule(id, '2026-09-30', OFFICE);
+
+      const text = sentMessages.find((message) => message.to === '0455112233');
+      expect(text?.channel).toBe('sms');
+      expect(text?.body).toContain('off your');
+      expect(text?.body).toContain('Do not collect it');
+      expect(fitsOneSms(text?.body ?? '')).toBe(true);
+    });
+
+    it('tells the planners — but not whoever moved it', async () => {
+      const notifyOffice = vi.spyOn(notificationService, 'notifyOffice').mockResolvedValue([]);
+      const id = repo.seed({ status: 'assigned', driverId: DRIVER_ID, run: RUN });
+
+      await jobService.reschedule(id, '2026-09-30', OFFICE);
+
+      expect(notifyOffice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          audience: 'planning',
+          href: '/admin/dispatch',
+          exceptUserId: OFFICE.userId,
+          subjectKey: `job-off-run:${id}:${RUN.id}`,
+        }),
+      );
+    });
+
+    it('leaves it on a run it can still make', async () => {
+      const id = repo.seed({
+        status: 'assigned',
+        driverId: DRIVER_ID,
+        run: { ...RUN, date: '2026-09-30' },
+      });
+
+      // Ready earlier than the run's day: the truck can still collect it then.
+      await jobService.reschedule(id, '2026-09-25', OFFICE);
+
+      expect(repo.calls.releases).toHaveLength(0);
+      expect(repo.runOf(id)).not.toBeNull();
+      expect(sentMessages.filter((message) => message.channel === 'sms')).toHaveLength(0);
     });
   });
 });
@@ -587,6 +726,216 @@ describe('commenting', () => {
     await expect(
       jobService.addComment('f'.repeat(24), { body: 'Hi', visibility: 'customer' }, CUSTOMER_ADMIN),
     ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+/*
+ * M2.11 — the customer thread is a conversation, so each side is told when the
+ * other writes. Before this, an office message sat on a pickup page nobody had
+ * a reason to open, and a customer could not answer it at all.
+ */
+describe('the customer thread is a conversation (M2.11)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stores a customer’s post as from the customer', async () => {
+    const id = repo.seed();
+    const comment = await jobService.addComment(
+      id,
+      { body: 'Gate code is now 2291', visibility: 'customer' },
+      CUSTOMER_ADMIN,
+    );
+
+    expect(comment.fromCustomer).toBe(true);
+    expect(repo.calls.comments[0]?.fromCustomer).toBe(true);
+  });
+
+  it('never marks the office’s own post as the customer’s', async () => {
+    const id = repo.seed();
+    const comment = await jobService.addComment(
+      id,
+      { body: 'Booked for Thursday.', visibility: 'customer' },
+      OFFICE,
+    );
+
+    expect(comment.fromCustomer).toBe(false);
+  });
+
+  /** The office users the bell reaches — one with an email address, one without. */
+  const OFFICE_INBOX = [
+    { id: 'usr0000000000000000000f1', name: 'Renee Boyle', email: 'renee@plastago.com.au' },
+    { id: 'usr0000000000000000000f2', name: 'Night Shift', email: null },
+  ];
+
+  /** The pickup's audience — the administrator has email, the supervisor signs in by SMS. */
+  const PICKUP_AUDIENCE = [
+    { id: CUSTOMER_ADMIN.userId, name: 'Alex Tran', email: 'alex@clarendon.com.au' },
+    { id: SUPERVISOR.userId, name: 'Sam Doyle', email: null },
+  ];
+
+  it('tells the office when the customer writes, linking to the Customer thread', async () => {
+    const notifyOffice = vi.spyOn(notificationService, 'notifyOffice').mockResolvedValue([]);
+    const id = repo.seed({ jobNumber: 61_306, accountName: 'Westbrook Homes' });
+
+    const comment = await jobService.addComment(
+      id,
+      { body: 'Can you come Thursday instead?', visibility: 'customer' },
+      SUPERVISOR,
+    );
+
+    expect(notifyOffice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'message',
+        title: 'Message from Westbrook Homes — #61306',
+        body: 'Sam Doyle: Can you come Thursday instead?',
+        href: `/admin/jobs/${id}?tab=comments&thread=customer`,
+        // One per message, so a read notification cannot hide the next one.
+        subjectKey: `job-comment:${comment.id}`,
+        jobId: id,
+      }),
+    );
+  });
+
+  it('emails the office users it notified, where they have an address', async () => {
+    vi.spyOn(notificationService, 'notifyOffice').mockResolvedValue(OFFICE_INBOX);
+    const id = repo.seed({ jobNumber: 61_306, accountName: 'Westbrook Homes' });
+
+    await jobService.addComment(
+      id,
+      { body: 'Can you come Thursday instead?', visibility: 'customer' },
+      SUPERVISOR,
+    );
+
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toMatchObject({
+      channel: 'email',
+      to: 'renee@plastago.com.au',
+      subject: 'Message from Westbrook Homes — job #61306',
+    });
+    expect(sentMessages[0]?.body).toContain('Can you come Thursday instead?');
+    expect(sentMessages[0]?.body).toContain(`/admin/jobs/${id}?tab=comments&thread=customer`);
+  });
+
+  /*
+   * ⚠️ The pickup's audience, not the account's: a site supervisor sees only
+   * the pickups they booked, so the booker is named and nobody else is.
+   */
+  it('tells the people who can see the pickup when the office writes', async () => {
+    const notifyAudience = vi.spyOn(notificationService, 'notifyJobAudience').mockResolvedValue([]);
+    const notifyOffice = vi.spyOn(notificationService, 'notifyOffice').mockResolvedValue([]);
+    const id = repo.seed({
+      jobNumber: 61_306,
+      siteName: 'Lot 402 Kingsford Smith Avenue',
+      bookedByUserId: SUPERVISOR.userId,
+    });
+
+    await jobService.addComment(
+      id,
+      { body: 'Your pickup is booked for Thursday.', visibility: 'customer' },
+      OFFICE,
+    );
+
+    expect(notifyAudience).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: account.id,
+        bookedByUserId: SUPERVISOR.userId,
+        category: 'message',
+        title: 'New message about pickup #61306',
+        body: 'Lot 402 Kingsford Smith Avenue: Your pickup is booked for Thursday.',
+        href: `/portal/jobs/${id}#messages`,
+      }),
+    );
+    // The office wrote it; the office does not need telling.
+    expect(notifyOffice).not.toHaveBeenCalled();
+  });
+
+  it('emails the customer the whole message, with a link back to the thread', async () => {
+    vi.spyOn(notificationService, 'notifyJobAudience').mockResolvedValue(PICKUP_AUDIENCE);
+    const id = repo.seed({ jobNumber: 61_306, siteName: 'Lot 402 Kingsford Smith Avenue' });
+
+    await jobService.addComment(
+      id,
+      { body: 'Gate code is 4417 — supervisor on site from 7am.', visibility: 'customer' },
+      OFFICE,
+    );
+
+    // The supervisor has no email: the bell reached them, and nothing else is sent.
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toMatchObject({
+      channel: 'email',
+      to: 'alex@clarendon.com.au',
+      subject: 'Message about Lot 402 Kingsford Smith Avenue — job #61306',
+    });
+    expect(sentMessages[0]?.body).toContain('Gate code is 4417 — supervisor on site from 7am.');
+    expect(sentMessages[0]?.body).toContain(`/portal/jobs/${id}#messages`);
+  });
+
+  it('sends each email once, however often the notice is repeated', async () => {
+    vi.spyOn(notificationService, 'notifyJobAudience').mockResolvedValue(PICKUP_AUDIENCE);
+    const id = repo.seed();
+    const comment = await jobService.addComment(
+      id,
+      { body: 'Booked for Thursday.', visibility: 'customer' },
+      OFFICE,
+    );
+
+    // A retry of the same message — the once-only guard is keyed per person.
+    const { jobNotices } = await import('../src/domains/notifications/job-notices.service.js');
+    await jobNotices.messagePosted({
+      commentId: comment.id,
+      jobId: id,
+      jobNumber: 61_300,
+      siteName: 'Lot 214 Allambie Circuit',
+      accountId: account.id,
+      accountName: account.name,
+      bookedByUserId: null,
+      author: OFFICE.name,
+      body: comment.body,
+      fromCustomer: false,
+    });
+
+    expect(sentMessages).toHaveLength(1);
+  });
+
+  it('raises nothing for an internal note or a driver message', async () => {
+    const notifyAudience = vi.spyOn(notificationService, 'notifyJobAudience').mockResolvedValue([]);
+    const notifyOffice = vi.spyOn(notificationService, 'notifyOffice').mockResolvedValue([]);
+    const id = repo.seed({ status: 'assigned', driverId: 'drv0000000000000000000d1' });
+
+    await jobService.addComment(id, { body: 'Chased the PO', visibility: 'internal' }, OFFICE);
+    await jobService.addComment(id, { body: 'Gate code 4821', visibility: 'driver' }, OFFICE);
+
+    expect(notifyAudience).not.toHaveBeenCalled();
+    expect(notifyOffice).not.toHaveBeenCalled();
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it('keeps a long message to one readable line in the notification', async () => {
+    const notifyOffice = vi
+      .spyOn(notificationService, 'notifyOffice')
+      .mockResolvedValue(OFFICE_INBOX);
+    const id = repo.seed();
+    const long = `The board is stacked by the garage.\n\n${'Please bring extra bags. '.repeat(20)}`;
+
+    await jobService.addComment(id, { body: long, visibility: 'customer' }, CUSTOMER_ADMIN);
+
+    const raised = notifyOffice.mock.calls[0]?.[0];
+    expect(raised?.body).not.toContain('\n');
+    expect(raised?.body.endsWith('…')).toBe(true);
+    expect(raised?.body.length).toBeLessThan(170);
+    // The email is where the whole message goes.
+    expect(sentMessages[0]?.body).toContain(long.trim());
+  });
+
+  // The notification is a side effect: the message stands whether or not
+  // anybody could be told about it.
+  it('still saves the message when nobody can be notified', async () => {
+    const id = repo.seed();
+
+    await expect(
+      jobService.addComment(id, { body: 'Thanks', visibility: 'customer' }, OFFICE),
+    ).resolves.toMatchObject({ visibility: 'customer', fromCustomer: false });
   });
 });
 

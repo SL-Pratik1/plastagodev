@@ -9,9 +9,49 @@ import { jobNotices } from './job-notices.service.js';
 import {
   notificationRepository,
   type ListNotificationsQuery,
+  type NotificationRecipient,
+  type RaiseNotificationInput,
 } from './notification.repository.js';
 
 const log = logger.child({ module: 'notifications' });
+
+/** The three office roles — everybody with the queues and the prices. */
+const OFFICE_ROLES: readonly Role[] = ['super-admin', 'operations', 'office-staff'];
+
+/**
+ * Who a staff alert is for, by what they can DO about it.
+ *
+ * ── Why an alert is not simply "the office" any more ──────────────────────
+ * Because the office is four roles that open different screens. The allocator
+ * plans the runs a futile pickup or an unroadworthy truck upsets, and was told
+ * about none of it; office staff were told about trucks and enquiries and then
+ * shown "Forbidden" by the link, because they cannot open the fleet or lead
+ * screens. Each audience below is the set of roles that can open the screen
+ * the alert links to — keep it in step with `apps/web/.../permissions.ts`.
+ */
+export type StaffAudience = 'office' | 'dispatch' | 'planning' | 'fleet' | 'sales';
+
+const AUDIENCE_ROLES: Record<StaffAudience, readonly Role[]> = {
+  /** Money and customer conversations. Never the allocator, who sees no prices. */
+  office: OFFICE_ROLES,
+  /** A job, a site, a driver — the operational news the allocator plans around. */
+  dispatch: [...OFFICE_ROLES, 'allocator'],
+  /** "Re-plan this" — the roles that can open the dispatch board (`dispatch:manage`). */
+  planning: ['super-admin', 'operations', 'allocator'],
+  /** Trucks. The roles that can open the vehicle screens (`vehicles:manage`). */
+  fleet: ['super-admin', 'operations', 'allocator'],
+  /** Enquiries. The roles that can open the lead queue (`leads:manage`). */
+  sales: ['super-admin', 'operations'],
+};
+
+/**
+ * An allocator with no office role as well. They cannot open the queues, so an
+ * alert that links there sends them somewhere they can go instead.
+ */
+function isOnlyAllocator(recipient: NotificationRecipient): boolean {
+  const roles = recipient.roles ?? [];
+  return roles.includes('allocator') && !roles.some((role) => OFFICE_ROLES.includes(role));
+}
 
 /**
  * The internal notification centre (M8.7) and the sweep that fills it.
@@ -84,9 +124,17 @@ export const notificationService = {
    * from the inbox.
    */
   async runQueueSweep(): Promise<{ raised: number }> {
-    const recipients = await notificationRepository.officeRecipients();
+    /*
+     * Two audiences. The queues hold money and are worked from screens only
+     * the office can open; the fleet reminders go to whoever can open a
+     * vehicle — which includes the allocator and excludes office staff.
+     */
+    const [recipients, fleetRecipients] = await Promise.all([
+      notificationRepository.officeRecipients(AUDIENCE_ROLES.office),
+      notificationRepository.officeRecipients(AUDIENCE_ROLES.fleet),
+    ]);
 
-    if (recipients.length === 0) {
+    if (recipients.length === 0 && fleetRecipients.length === 0) {
       // Nobody to tell is worth saying out loud: a silent sweep looks like a
       // working one.
       log.warn('queue sweep found no active office users to notify');
@@ -187,7 +235,10 @@ export const notificationService = {
         });
         raised += 1;
       }
+    }
 
+    // Trucks go to the people who can open a vehicle — see `AUDIENCE_ROLES.fleet`.
+    for (const recipient of fleetRecipients) {
       for (const vehicle of expiring) {
         const overdue = vehicle.dueOn < todayIso();
 
@@ -212,6 +263,7 @@ export const notificationService = {
     log.info(
       {
         recipients: recipients.length,
+        fleetRecipients: fleetRecipients.length,
         futile: futile.data.length,
         approvals: approvals.data.length,
         awaitingPo: awaitingPo.data.length,
@@ -232,7 +284,18 @@ export const notificationService = {
    * truck.
    */
   /**
-   * M8.3 — asks every site booked for tomorrow whether it will be ready.
+   * M8.3 — asks every site with a truck booked for tomorrow whether it will be
+   * ready.
+   *
+   * ⚠️ "Booked for tomorrow" means ON A RUN DATED TOMORROW — the day a truck is
+   * actually going. It used to mean the job's `targetDate`, which is the SLA
+   * deadline (ready date + five business days): a job on tomorrow's run with a
+   * later deadline was never asked, and a job with no truck at all was asked
+   * about "tomorrow's pickup". See `jobRepository.dueForReadinessReminder`.
+   *
+   * Run every hour through the afternoon (`scheduler.service.ts`), so a job the
+   * allocator puts on tomorrow's run at 5 pm is still asked. Each site is asked
+   * once per truck day — the send is keyed on the job and the run date.
    *
    * ── Why this is the highest-value message in the product ───────────────────
    * A futile pickup costs $120 and a truck slot, and the customer disputes it
@@ -267,19 +330,63 @@ export const notificationService = {
   },
 
   /**
-   * Raises one notification for every portal user of an account.
+   * Raises one notification for the portal users who can see ONE job — the
+   * account's administrators and the site supervisor who booked it.
    *
    * ── Why customers get an inbox at all ─────────────────────────────────────
    * Because email is where a pickup update goes to die. A site supervisor who
    * opens the portal to book the next job should see that yesterday's was
-   * completed, and an invoice that needs a PO should be visible to the person
-   * who can supply one — without either of them having found the email.
+   * completed without having found the email.
    *
-   * ⚠️ An account with no portal users yet raises nothing, silently. That is
-   * correct: the customer has been emailed, and inventing an inbox for somebody
-   * who cannot sign in would just accumulate unread rows.
+   * ── Why not everybody on the account ──────────────────────────────────────
+   * That is what this used to be, and it told every supervisor about every
+   * pickup. A supervisor sees only the pickups they booked (M1.5), so the
+   * notice showed them a job the portal refuses to open for them. See
+   * `notificationRepository.jobAudience`.
+   *
+   * ⚠️ Swallowed, like the two below. All three are side effects of somebody
+   * else's work — a booking, a completed job, a message, a driver reporting an
+   * unsafe site. If raising the notification threw, it would take that work
+   * down with it. The inbox is the least important thing in each transaction.
+   *
+   * Returns who was notified, so a caller sending an email alongside reaches
+   * the same people — and nobody when the raise failed.
    */
-  async notifyAccount(input: {
+  async notifyJobAudience(input: {
+    accountId: string;
+    bookedByUserId: string | null;
+    category: Notification['category'];
+    severity: Notification['severity'];
+    title: string;
+    body: string;
+    href: string;
+    subjectKey: string;
+    jobId?: string | null;
+    jobNumber?: number | null;
+  }): Promise<NotificationRecipient[]> {
+    const { accountId, bookedByUserId, ...notification } = input;
+
+    try {
+      const recipients = await notificationRepository.jobAudience(accountId, bookedByUserId);
+      await raiseFor(recipients, notification);
+      return recipients;
+    } catch (error) {
+      log.error(
+        { err: error, accountId, subjectKey: input.subjectKey },
+        'could not notify the job’s customer users',
+      );
+      return [];
+    }
+  },
+
+  /**
+   * Raises one notification for the account's customer administrators only.
+   *
+   * For anything about money. A site supervisor never sees a price or an
+   * invoice (M1.5), so an invoice notice that reached them put an amount in
+   * their inbox that the portal will not show them anywhere else.
+   */
+  async notifyAccountAdministrators(input: {
     accountId: string;
     category: Notification['category'];
     severity: Notification['severity'];
@@ -290,32 +397,27 @@ export const notificationService = {
     valueExGst?: string | null;
     jobId?: string | null;
     jobNumber?: number | null;
-  }): Promise<void> {
+  }): Promise<NotificationRecipient[]> {
     const { accountId, ...notification } = input;
 
-    /*
-     * ⚠️ Swallowed, like `notifyOffice` below.
-     *
-     * Both are side effects of somebody else's work — an invoice being sent, a
-     * driver reporting an unsafe site. If raising the notification threw, it
-     * would take that work down with it: the invoice would report a failure
-     * having already been marked sent, and the driver's report would be lost
-     * because the office could not be told about it. The inbox is the least
-     * important thing in either transaction.
-     */
+    // Swallowed for the same reason as `notifyJobAudience` — see the note there.
     try {
-      const recipients = await notificationRepository.accountRecipients(accountId);
-
-      await Promise.all(
-        recipients.map((recipient) =>
-          notificationRepository.raise({ ...notification, userId: recipient.id }),
-        ),
-      );
+      const recipients = await notificationRepository.accountAdministrators(accountId);
+      await raiseFor(recipients, notification);
+      return recipients;
     } catch (error) {
-      log.error({ err: error, accountId, subjectKey: input.subjectKey }, 'could not notify account');
+      log.error(
+        { err: error, accountId, subjectKey: input.subjectKey },
+        'could not notify the account administrators',
+      );
+      return [];
     }
   },
 
+  /**
+   * Raises one notification for each member of staff in `audience` — by
+   * default the three office roles. See `AUDIENCE_ROLES` for who is in each.
+   */
   async notifyOffice(input: {
     category: Notification['category'];
     severity: Notification['severity'];
@@ -326,21 +428,57 @@ export const notificationService = {
     valueExGst?: string | null;
     jobId?: string | null;
     jobNumber?: number | null;
-  }): Promise<void> {
-    // Swallowed for the same reason as `notifyAccount` — see the note there.
+    /** Who is told. Omitted means `office`. */
+    audience?: StaffAudience;
+    /**
+     * Where an allocator-only recipient is sent instead of `href`, when `href`
+     * is a screen they cannot open — the queues need a capability they lack.
+     */
+    allocatorHref?: string;
+    /** Whoever caused this. Told nothing: they know, they just did it. */
+    exceptUserId?: string | null;
+  }): Promise<NotificationRecipient[]> {
+    const { audience = 'office', allocatorHref, exceptUserId, ...notification } = input;
+
+    // Swallowed for the same reason as `notifyJobAudience` — see the note there.
     try {
-      const recipients = await notificationRepository.officeRecipients();
+      const recipients = (
+        await notificationRepository.officeRecipients(AUDIENCE_ROLES[audience])
+      ).filter((recipient) => !exceptUserId || recipient.id !== exceptUserId);
 
       await Promise.all(
-        recipients.map((recipient) =>
-          notificationRepository.raise({ ...input, userId: recipient.id }),
-        ),
+        recipients.map((recipient) => {
+          const allocatorOnly = isOnlyAllocator(recipient);
+
+          return notificationRepository.raise({
+            ...notification,
+            userId: recipient.id,
+            href: allocatorOnly && allocatorHref ? allocatorHref : notification.href,
+            // The allocator is never shown what a job is worth (M1.5).
+            valueExGst: allocatorOnly ? null : (notification.valueExGst ?? null),
+          });
+        }),
       );
+
+      return recipients;
     } catch (error) {
-      log.error({ err: error, subjectKey: input.subjectKey }, 'could not notify the office');
+      log.error({ err: error, subjectKey: input.subjectKey, audience }, 'could not notify the office');
+      return [];
     }
   },
 };
+
+/** One row per recipient, raised together. */
+async function raiseFor(
+  recipients: readonly NotificationRecipient[],
+  notification: Omit<RaiseNotificationInput, 'userId'>,
+): Promise<void> {
+  await Promise.all(
+    recipients.map((recipient) =>
+      notificationRepository.raise({ ...notification, userId: recipient.id }),
+    ),
+  );
+}
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 

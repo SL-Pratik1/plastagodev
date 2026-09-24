@@ -345,6 +345,83 @@
         }
       }
     },
+    "/api/v1/auth/active-role": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "setActiveRole",
+        "summary": "Choose which of your roles you are working as",
+        "description": "For the rare user who holds more than one — an allocator who covers a driver’s shift. Refuses with 403 any role the caller does not already hold, so it can never grant anything. Server-side because the surfaces are separate origins: a choice held in the browser is discarded by the page load that crosses to the other one. Switching back to the user’s usual role clears the override. Returns the session to render from, so the caller needs no second request.",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActiveRoleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The session, now reporting the chosen role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or expired credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not permitted for this role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Failed validation — `issues[]` names the offending fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/sign-out": {
       "post": {
         "tags": [
@@ -1119,7 +1196,7 @@
         ],
         "operationId": "reportFutile",
         "summary": "Could not collect",
-        "description": "Ends the job and raises the futile charge. At least one photo is REQUIRED and the reason is structured rather than free text, because the customer certified at booking that the job was ready and accessible — photo plus GPS plus timestamp at the point of failure is what turns a disputed phone call into an invoice line that survives challenge.\n\n⚠️ The reason enum accepts **eight** values (`weather`, `customer-request` and `other` beyond the five on the original screens). Confirm with the office which the app should offer before trimming the list client-side.",
+        "description": "Ends the job and raises the futile charge. At least one photo is REQUIRED and the reason is structured rather than free text, because the customer certified at booking that the job was ready and accessible — photo plus GPS plus timestamp at the point of failure is what turns a disputed phone call into an invoice line that survives challenge.\n\nIdempotent: a replay of a job already marked futile completes anything an earlier attempt left unrecorded (charge, office review, timeline entry) and creates no duplicates. 409 when the office has cancelled the job or it is already completed.\n\nPhotos sent as `photoIds` should be the ones filed under the `futile` slot — the office reviews the report against those, not the rest of the job.\n\n⚠️ The reason enum accepts **eight** values (`weather`, `customer-request` and `other` beyond the five on the original screens). Confirm with the office which the app should offer before trimming the list client-side.",
         "security": [
           {
             "sessionCookie": []
@@ -1220,7 +1297,7 @@
         ],
         "operationId": "reportContamination",
         "summary": "Contaminated load",
-        "description": "**Does not stop the job** — the driver takes the load anyway and carries on. A photo is required because the office approves the charge by looking at it.",
+        "description": "**Does not stop the job** — the driver takes the load anyway and carries on. A photo is required because the office approves the charge by looking at it, and the evidence is the photos filed under the `contamination` slot.\n\n**One report per job.** Once a job carries a report (see `DriverJob.contamination`) a further one changes nothing and answers `chargeRaised: false`; the app should not offer the form again. 409 when the office has cancelled the job or it went futile.",
         "security": [
           {
             "sessionCookie": []
@@ -1248,8 +1325,15 @@
           }
         },
         "responses": {
-          "204": {
-            "description": "Contamination recorded"
+          "200": {
+            "description": "Contamination recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContaminationOutcome"
+                }
+              }
+            }
           },
           "400": {
             "description": "Malformed request or failed validation",
@@ -2108,6 +2192,29 @@
         "required": [
           "challengeId",
           "code"
+        ]
+      },
+      "ActiveRoleRequest": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        },
+        "required": [
+          "role"
+        ]
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "super-admin",
+          "operations",
+          "office-staff",
+          "allocator",
+          "driver",
+          "customer-administrator",
+          "customer-site-supervisor"
         ]
       },
       "IsoDate": {
@@ -3062,18 +3169,6 @@
         ],
         "additionalProperties": false
       },
-      "Role": {
-        "type": "string",
-        "enum": [
-          "super-admin",
-          "operations",
-          "office-staff",
-          "allocator",
-          "driver",
-          "customer-administrator",
-          "customer-site-supervisor"
-        ]
-      },
       "RunSheetDay": {
         "type": "object",
         "properties": {
@@ -3672,6 +3767,17 @@
               ],
               "additionalProperties": false
             }
+          },
+          "contamination": {
+            "default": null,
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DriverContamination"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -3720,7 +3826,8 @@
           "bagWeights",
           "weightsRecordedAt",
           "riskAssessment",
-          "messages"
+          "messages",
+          "contamination"
         ],
         "additionalProperties": false
       },
@@ -3854,6 +3961,40 @@
         ],
         "additionalProperties": false
       },
+      "DriverContamination": {
+        "type": "object",
+        "properties": {
+          "reportedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContaminationType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "extent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContaminationExtent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "reportedAt",
+          "type",
+          "extent"
+        ],
+        "additionalProperties": false
+      },
       "PhotoUploadTicket": {
         "type": "object",
         "properties": {
@@ -3900,6 +4041,18 @@
           "uploadUrl",
           "headers",
           "expiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "ContaminationOutcome": {
+        "type": "object",
+        "properties": {
+          "chargeRaised": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "chargeRaised"
         ],
         "additionalProperties": false
       },

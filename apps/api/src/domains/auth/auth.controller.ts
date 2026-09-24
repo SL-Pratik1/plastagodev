@@ -2,7 +2,7 @@ import type { OtpRequestSchema, OtpVerifySchema } from '@plastago/shared';
 import type { Request, Response } from 'express';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { authService, type RequestContext } from './auth.service.js';
-import type { OtpResendSchema } from './auth.schemas.js';
+import type { ActiveRoleSchema, OtpResendSchema } from './auth.schemas.js';
 
 /**
  * Controller layer — HTTP in, HTTP out. No business rules, no Mongoose.
@@ -52,6 +52,22 @@ export const authController = {
    */
   getSession: async (req: Request, res: Response): Promise<void> => {
     const session = await authService.getSession(contextOf(req));
+    res.status(200).json(session);
+  },
+
+  /**
+   * Returns the whole session, not a 204.
+   *
+   * The caller's next act is to re-render the entire application around the new
+   * role, and handing back the session it should render from removes the
+   * round trip — and with it the flicker of a shell drawn from a role that has
+   * just stopped being true.
+   */
+  setActiveRole: async (
+    req: ValidatedRequest<{ body: typeof ActiveRoleSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    const session = await authService.setActiveRole(req.validated.body.role, contextOf(req));
     res.status(200).json(session);
   },
 

@@ -1,12 +1,11 @@
 import {
   CHARGE_CODE_LABELS,
-  CHARGE_CODES,
   EXCEPTION_REASON_LABELS,
   EXCEPTION_REASONS,
   FREIGHT_ITEM_LABELS,
+  FUTILE_DECIDED_EVENT_LABELS,
   WEIGHT_BASIS_HINTS,
   WEIGHT_BASIS_LABELS,
-  type ChargeCode,
   type ExceptionReason,
 } from '@plastago/shared';
 import {
@@ -23,10 +22,8 @@ import {
   EmptyState,
   ErrorState,
   Field,
-  Input,
   Select,
   Skeleton,
-  Spinner,
   Tabs,
   TabsList,
   TabsPanel,
@@ -40,9 +37,7 @@ import {
   FileIcon,
   ImageIcon,
   MapPinIcon,
-  PlusIcon,
   ReceiptIcon,
-  TriangleAlertIcon,
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
@@ -56,11 +51,11 @@ import {
   UrgentBadge,
 } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
+import { EvidenceGrid } from '@/components/queues/evidence-grid';
 import { useAuth } from '@/features/auth/auth-context';
 import { JobCommentThreads } from '@/features/jobs/components/comment-thread';
 import { useRaiseInvoiceForJob } from '@/features/invoices/queries';
-import { useAddJobCharge, useCancelJob, useJob, useRescheduleJob } from '@/features/jobs/queries';
-import { useSettings } from '@/features/settings/queries';
+import { useCancelJob, useJob, useRescheduleJob } from '@/features/jobs/queries';
 import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatArea, formatDate, formatDateTime, formatMoney, formatWeight } from '@/lib/format';
@@ -74,18 +69,30 @@ const TABS = [
   'comments',
   'compliance',
   'invoice',
-  'exceptions',
 ] as const;
 type TabKey = (typeof TABS)[number];
 
-const TERMINAL = ['completed', 'admin-complete', 'cancelled'] as const;
+/**
+ * Statuses with no Reschedule and no Cancel left in them.
+ *
+ * ⚠️ `futile` belongs here, and leaving it out is what put two dead buttons on
+ * every futile job. The server refuses both — its own list of what may still be
+ * cancelled or rescheduled is `booked · assigned · in-transit · arrived` — so
+ * the header offered actions that could only ever answer "that job is finished,
+ * so there is nothing left to reschedule".
+ *
+ * A futile pickup is not rescheduled in place either way: the $120 stays on it
+ * and the Futile review books a NEW job. That decision lives on the review, and
+ * the alert on this page links to it.
+ */
+const TERMINAL = ['completed', 'admin-complete', 'cancelled', 'futile'] as const;
 
 /**
  * One job (M2.3).
  *
  * The full record: all parties, the site, the timeline of status changes with
  * timestamps and actors, m² and weight, itemised charges, photos, documents,
- * comments, exceptions and the linked invoice.
+ * comments and the linked invoice.
  *
  * ── Two things the tabs are careful about ──────────────────────────────────
  *  • **m² and kg are shown as different quantities**, never as two units of one
@@ -125,7 +132,6 @@ export function AdminJobDetailPage() {
   const [cancelNote, setCancelNote] = useState('');
   const [rescheduleOpen, setRescheduleOpen] = useState(false);
   const [newReadyDate, setNewReadyDate] = useState('');
-  const [addingCharge, setAddingCharge] = useState(false);
 
   const visibleTabs: readonly TabKey[] = seesPricing
     ? TABS
@@ -184,16 +190,33 @@ export function AdminJobDetailPage() {
   const complianceGaps = countComplianceGaps(job);
 
   const isTerminal = (TERMINAL as readonly string[]).includes(job.status);
+  // The review wrote its decision on this job's timeline — see the futile alert.
+  const futileDecided = job.events.some((event) =>
+    (Object.values(FUTILE_DECIDED_EVENT_LABELS) as readonly string[]).includes(event.label),
+  );
 
   /*
    * Finished work that has not been billed yet, in front of somebody allowed to
-   * see money. The server checks all three again — this only decides whether
+   * see money. The server checks all of it again — this only decides whether
    * offering the button makes sense.
+   *
+   * ⚠️ "Not billed" includes a charge approved AFTER the job was invoiced. The
+   * button used to vanish the moment a job had any invoice, so such a charge sat
+   * approved, on no invoice, with no way to bill it. A futile job is billed its
+   * fee and nothing else, so only the fee counts there.
    */
+  const jobFinished =
+    job.status === 'completed' || job.status === 'admin-complete' || job.status === 'futile';
+  const unbilledCharges = job.charges.filter(
+    (charge) =>
+      (charge.approvalState === 'approved' || charge.approvalState === 'not-required') &&
+      !charge.invoiced &&
+      (job.status !== 'futile' || charge.code === 'futile-pickup'),
+  );
   const canRaiseInvoice =
     seesPricing &&
-    job.invoiceStatus === 'not-invoiced' &&
-    (job.status === 'completed' || job.status === 'admin-complete' || job.status === 'futile');
+    jobFinished &&
+    (job.invoiceStatus === 'not-invoiced' || unbilledCharges.length > 0);
   const atRisk =
     !isTerminal &&
     job.status !== 'futile' &&
@@ -239,10 +262,13 @@ export function AdminJobDetailPage() {
        * go anywhere. "Invoice raised" would hide the one still blocked.
        */
       const blocked = raised.filter((invoice) => invoice.status === 'awaiting-po');
+      // "Updated" where a late charge joined an invoice that already existed —
+      // "raised" would send the office looking for a second document.
+      const allUpdated = raised.every((invoice) => invoice.change === 'updated');
       toast.success(
         raised.length === 1
-          ? `Invoice #${String(raised[0]?.invoiceNumber)} raised`
-          : `${String(raised.length)} invoices raised`,
+          ? `Invoice #${String(raised[0]?.invoiceNumber)} ${allUpdated ? 'updated' : 'raised'}`
+          : `${String(raised.length)} invoices ${allUpdated ? 'updated' : 'raised'}`,
         blocked.length > 0
           ? `${blocked.map((invoice) => `#${String(invoice.invoiceNumber)}`).join(' and ')} needs a purchase order before it can be sent.`
           : 'Ready to send from the invoices screen.',
@@ -317,7 +343,11 @@ export function AdminJobDetailPage() {
                 disabled={raiseInvoice.isPending}
               >
                 <ReceiptIcon aria-hidden />
-                {raiseInvoice.isPending ? 'Raising…' : 'Raise invoice'}
+                {raiseInvoice.isPending
+                  ? 'Billing…'
+                  : job.invoiceStatus === 'not-invoiced'
+                    ? 'Raise invoice'
+                    : 'Bill new charges'}
               </Button>
             )}
           </>
@@ -328,8 +358,48 @@ export function AdminJobDetailPage() {
         <Alert variant="destructive" title="Futile pickup">
           The driver attended and could not collect
           {job.exceptionReason ? ` — ${EXCEPTION_REASON_LABELS[job.exceptionReason]}` : ''}. A $120
-          futile fee applies whether the job is rescheduled or cancelled, and the photos and GPS on
-          the exceptions tab are what make that stand up.
+          futile fee applies whether the job is rescheduled or cancelled, and the driver’s photos
+          and the GPS on the timeline are what make that stand up.
+          {/*
+            Where the decision actually lives. This job is terminal — rebooking
+            creates a NEW one, which only the review can do — so sending people
+            there beats leaving them hunting for a button that cannot exist.
+
+            ⚠️ Only while there is something to decide, and only as a link for
+            somebody who can open the queue. The link was shown to every role
+            (an allocator got the Forbidden page) and stayed after the review
+            was decided. The job stays `futile` either way, so its timeline is
+            what says it was decided — see `FUTILE_DECIDED_EVENT_LABELS`.
+          */}{' '}
+          {futileDecided ? (
+            'The futile review has been decided — see the timeline.'
+          ) : can('queues:action') ? (
+            <>
+              <Link
+                to="/admin/queues/futile"
+                className="font-medium underline underline-offset-4"
+              >
+                Decide it in Futile review
+              </Link>
+              , which books the new pickup.
+            </>
+          ) : (
+            'The office decides it in Futile review, which books the new pickup.'
+          )}
+        </Alert>
+      )}
+
+      {/*
+        Why the job was cancelled. The structured reason lives only on the job —
+        the "Job cancelled" timeline event carries the note but not the reason —
+        so this banner is the one place the office sees it.
+      */}
+      {job.status === 'cancelled' && job.exceptionReason !== null && (
+        <Alert
+          variant="neutral"
+          title={`Cancelled — ${EXCEPTION_REASON_LABELS[job.exceptionReason]}`}
+        >
+          {job.exceptionNote ?? 'No note was left when this job was cancelled.'}
         </Alert>
       )}
 
@@ -377,7 +447,6 @@ export function AdminJobDetailPage() {
             Compliance
           </TabsTrigger>
           {seesPricing && <TabsTrigger value="invoice">Invoice</TabsTrigger>}
-          <TabsTrigger value="exceptions">Exceptions</TabsTrigger>
         </TabsList>
 
         {/* ── Overview ─────────────────────────────────────────────────── */}
@@ -594,36 +663,18 @@ export function AdminJobDetailPage() {
         {/* ── Charges ──────────────────────────────────────────────────── */}
         <TabsPanel value="charges">
           <Card>
-            <CardHeader className="flex flex-wrap items-start justify-between gap-3">
-              <span>
-                <CardTitle>Itemised charges</CardTitle>
-                <CardDescription>
-                  Drivers raise contamination and futile pickups from their own screens. Anything
-                  the office decides is added here.
-                </CardDescription>
-              </span>
-              {/*
-                ⚠️ Hidden on a cancelled job rather than disabled-with-a-tooltip.
-                Nothing can be billed against one, and the server refuses it — a
-                button that is always there and never works reads as broken.
-              */}
-              {job.status !== 'cancelled' && (
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    setAddingCharge(true);
-                  }}
-                >
-                  <PlusIcon aria-hidden />
-                  Add charge
-                </Button>
-              )}
+            <CardHeader>
+              <CardTitle>Itemised charges</CardTitle>
+              <CardDescription>
+                The system prices the job itself. Drivers raise contamination and futile pickups
+                from their own screens.
+              </CardDescription>
             </CardHeader>
             <CardContent>
               {job.charges.length === 0 ? (
                 <EmptyState
                   title="No charges yet"
-                  description="Drivers raise theirs on completion. Add one here for anything the office decides."
+                  description="The job is priced on completion, and drivers raise any extras from site."
                 />
               ) : (
                 <div className="overflow-x-auto">
@@ -759,14 +810,6 @@ export function AdminJobDetailPage() {
               )}
             </CardContent>
           </Card>
-
-          <AddChargeDialog
-            jobId={job.id}
-            open={addingCharge}
-            onClose={() => {
-              setAddingCharge(false);
-            }}
-          />
         </TabsPanel>
 
         {/* ── Photos ───────────────────────────────────────────────────── */}
@@ -789,29 +832,15 @@ export function AdminJobDetailPage() {
                     — and if it cannot be closed, the cars still on site. That last one is
                     commercial defence against being blamed for leaving a site open.
                   </p>
-                  <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                    {job.photos.map((photo) => (
-                      <li
-                        key={photo.id}
-                        className="overflow-hidden rounded-lg border border-border"
-                      >
-                        {/*
-                          No image source in a UI-only build. A labelled
-                          placeholder is honest; a stock photo of a building site
-                          would imply data we do not have.
-                        */}
-                        <div className="grid aspect-4/3 place-items-center bg-muted text-muted-foreground">
-                          <ImageIcon aria-hidden className="size-6" />
-                        </div>
-                        <div className="p-2">
-                          <p className="truncate text-xs font-medium">{photo.caption}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {formatDateTime(photo.takenAt)}
-                          </p>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
+                  {/*
+                    The same grid the approvals and futile queues decide on,
+                    rather than a third copy of the tile. This tab used to render
+                    its own placeholder — captioned, but with no photograph —
+                    and that placeholder outlived the demo build it was written
+                    for: the bytes have been in S3 for some time, and only the
+                    missing `JobPhoto.url` kept them off the screen.
+                  */}
+                  <EvidenceGrid photos={job.photos} onStale={refetch} />
                 </>
               )}
             </CardContent>
@@ -889,39 +918,9 @@ export function AdminJobDetailPage() {
           </Card>
         </TabsPanel>
 
-        {/* ── Exceptions ───────────────────────────────────────────────── */}
         {/* ── Compliance (M4.8) ────────────────────────────────────────── */}
         <TabsPanel value="compliance">
           <ComplianceTab job={job} />
-        </TabsPanel>
-
-        <TabsPanel value="exceptions">
-          <Card>
-            <CardHeader>
-              <CardTitle>Exceptions</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {job.exceptionReason === null ? (
-                <EmptyState
-                  icon={TriangleAlertIcon}
-                  title="No exceptions"
-                  description="Delays, futile pickups, contamination and cancellations appear here with their reason codes."
-                />
-              ) : (
-                <DetailList
-                  columns={2}
-                  items={[
-                    { label: 'Reason', value: EXCEPTION_REASON_LABELS[job.exceptionReason] },
-                    {
-                      label: 'Recorded',
-                      value: job.status === 'futile' ? 'On site by driver' : 'By office',
-                    },
-                    { label: 'Note', value: job.exceptionNote ?? '—', wide: true },
-                  ]}
-                />
-              )}
-            </CardContent>
-          </Card>
         </TabsPanel>
       </Tabs>
 
@@ -1040,189 +1039,5 @@ export function AdminJobDetailPage() {
         </div>
       </Dialog>
     </div>
-  );
-}
-
-/**
- * Apply a configured extra to this job (M6.5).
- *
- * ── Why this dialog offers a LIST and not a form ──────────────────────────
- * It picks a code from the additional-services price list; it never asks for an
- * amount. The price belongs to the charge, on one screen, so the same fee costs
- * the same whoever adds it and repricing it stays a single edit. A free-typed
- * amount here would be a second, invisible price list that nobody maintains.
- *
- * ⚠️ Filtered to codes the application can actually store. `jobcharges.code` is
- * an enum, so a service configured under a code outside `CHARGE_CODES` cannot
- * reach a job — offering it here would produce a 422 nobody could act on. The
- * settings screen now refuses to create one, but rows predating that check can
- * still exist.
- */
-function AddChargeDialog({
-  jobId,
-  open,
-  onClose,
-}: {
-  jobId: string;
-  open: boolean;
-  onClose: () => void;
-}) {
-  const toast = useToast();
-  const add = useAddJobCharge();
-  const settings = useSettings();
-
-  const [code, setCode] = useState('');
-  const [quantity, setQuantity] = useState('1');
-  const [note, setNote] = useState('');
-  const [error, setError] = useState<string | null>(null);
-
-  const applicable = (settings.data?.pricing.additionalServices ?? []).filter((service) =>
-    (CHARGE_CODES as readonly string[]).includes(service.code),
-  );
-  const chosen = applicable.find((service) => service.code === code);
-
-  const submit = async () => {
-    if (code === '') return setError('Choose a charge');
-
-    const count = Number(quantity);
-    if (!Number.isInteger(count) || count < 1 || count > 999) {
-      return setError('How many? A whole number from 1 to 999');
-    }
-    setError(null);
-
-    try {
-      const charge = await add.mutateAsync({
-        id: jobId,
-        draft: {
-          code: code as ChargeCode,
-          quantity: count,
-          ...(note.trim() === '' ? {} : { note: note.trim() }),
-        },
-      });
-
-      /*
-       * The toast says which of the two happened, because they mean different
-       * things to the person who just clicked. `pending` is not on an invoice
-       * yet and somebody has to approve it; `not-required` is billable now.
-       */
-      toast.success(
-        `${charge.description} added`,
-        charge.approvalState === 'pending'
-          ? 'It needs approval before it can be invoiced — it is in the Approvals queue.'
-          : `${formatMoney(charge.amount)} ex GST, ready to invoice.`,
-      );
-
-      setCode('');
-      setQuantity('1');
-      setNote('');
-      onClose();
-    } catch (caught) {
-      const described = describeError(caught);
-      toast.error(described.title, described.detail);
-    }
-
-    return undefined;
-  };
-
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      title="Add charge"
-      description="An extra from the price list, applied to this job. The amount comes from Settings → Pricing."
-      footer={
-        <>
-          <Button variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button disabled={add.isPending} onClick={() => void submit()}>
-            {add.isPending && <Spinner className="text-current" />}
-            Add charge
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-4">
-        {error && <Alert variant="destructive" title={error} />}
-
-        {applicable.length === 0 ? (
-          <Alert variant="neutral" title="No charges are configured">
-            Add one under Settings → Pricing → Additional services first.
-          </Alert>
-        ) : (
-          <>
-            <Field id="charge-code" label="Charge" required>
-              {(aria) => (
-                <Select
-                  {...aria}
-                  value={code}
-                  onChange={(event) => {
-                    setCode(event.target.value);
-                    setError(null);
-                  }}
-                >
-                  <option value="">Choose a charge…</option>
-                  {applicable.map((service) => (
-                    <option key={service.code} value={service.code}>
-                      {service.label}
-                      {service.kind === 'fixed'
-                        ? ` — ${formatMoney(service.value)}`
-                        : ` — ${service.value}% of the job`}
-                    </option>
-                  ))}
-                </Select>
-              )}
-            </Field>
-
-            {/*
-              Hidden for a percentage charge, which is a proportion of the whole
-              job and has nothing to multiply. A quantity box there would accept
-              a number the server then ignores.
-            */}
-            {chosen?.kind === 'fixed' && (
-              <div className="sm:max-w-[10rem]">
-                <Field id="charge-quantity" label="How many" required hint="Prints as 2 × $30.00.">
-                  {(aria) => (
-                    <Input
-                      {...aria}
-                      value={quantity}
-                      inputMode="numeric"
-                      onChange={(event) => {
-                        setQuantity(event.target.value);
-                      }}
-                    />
-                  )}
-                </Field>
-              </div>
-            )}
-
-            <Field
-              id="charge-note"
-              label="Note"
-              hint="Why it was added. Read by whoever approves it."
-            >
-              {(aria) => (
-                <Textarea
-                  {...aria}
-                  rows={2}
-                  value={note}
-                  placeholder="Site could only be reached through the neighbouring lot."
-                  onChange={(event) => {
-                    setNote(event.target.value);
-                  }}
-                />
-              )}
-            </Field>
-
-            {chosen?.requiresApproval === true && (
-              <Alert variant="neutral" title="This one needs approving first">
-                It lands in the Approvals queue rather than straight on the invoice — the same route
-                a driver-raised charge takes.
-              </Alert>
-            )}
-          </>
-        )}
-      </div>
-    </Dialog>
   );
 }

@@ -14,7 +14,6 @@ import type {
   JobDocument,
   JobEvent,
   JobListItem,
-  JobPhoto,
   JobStatus,
   LocationSource,
   Money,
@@ -26,6 +25,10 @@ import type {
 import mongoose from 'mongoose';
 import { UNKNOWN_ZONE_LABEL, toObjectId, zoneLabels } from '../settings/zone-lookup.js';
 import { fromDecimal128, toDecimal128 } from '../../lib/money.js';
+import { toJobPhotoViews } from './job-photo.view.js';
+import { InvoiceLineModel } from '../invoices/invoice.model.js';
+// Read for the run's DATE — the day a truck is booked — and nothing else.
+import { RunModel } from '../dispatch/run.model.js';
 import {
   JobChargeModel,
   JobCommentModel,
@@ -86,9 +89,14 @@ export interface ReminderJob {
   accountId: string;
   accountName: string;
   siteName: string;
+  readyDate: string;
   targetDate: string;
+  /** The date of the run it is on — the day the truck is booked to come. */
+  runDate: string;
   siteContactEmail: string | null;
   siteContactMobile: string | null;
+  /** Who may see it in the portal besides the account's administrators. */
+  bookedByUserId: string | null;
 }
 
 export interface CreateJobInput {
@@ -161,6 +169,7 @@ export interface CreateCommentInput {
   visibility: JobComment['visibility'];
   deliveredAt: Date | null;
   fromDriver: boolean;
+  fromCustomer: boolean;
 }
 
 /* ── Raw document shapes ─────────────────────────────────────────────────── */
@@ -371,6 +380,14 @@ export const jobRepository = {
         JobRiskAssessmentModel.findOne({ jobId: row._id }).lean(),
       ]);
 
+    /*
+     * Which of those charges an invoice already carries — the answer to "is
+     * there money on this job nobody has billed?". A charge approved after the
+     * job's invoice was raised sat on the job unbilled, with nothing anywhere to
+     * say so.
+     */
+    const invoicedChargeIds = await invoicedCharges(charges.map((charge) => charge._id));
+
     return {
       ...toListItem(
         row,
@@ -383,7 +400,7 @@ export const jobRepository = {
       exceptionNote: row.exceptionNote,
       arrivedAt: row.arrivedAt ? row.arrivedAt.toISOString() : null,
       onSiteMinutes: row.onSiteMinutes,
-      charges: charges.map(toJobCharge),
+      charges: charges.map((charge) => toJobCharge(charge, invoicedChargeIds)),
       events: events.map((event): JobEvent => ({
         id: event._id.toHexString(),
         at: event.at.toISOString(),
@@ -394,14 +411,7 @@ export const jobRepository = {
         latitude: event.latitude ?? null,
         longitude: event.longitude ?? null,
       })),
-      photos: photos.map((photo): JobPhoto => ({
-        id: photo._id.toHexString(),
-        caption: photo.caption,
-        takenAt: photo.takenAt.toISOString(),
-        takenBy: photo.takenBy ?? '',
-        latitude: photo.latitude ?? null,
-        longitude: photo.longitude ?? null,
-      })),
+      photos: await toJobPhotoViews(photos),
       documents: documents.map((document): JobDocument => ({
         id: document._id.toHexString(),
         name: document.name,
@@ -454,7 +464,14 @@ export const jobRepository = {
 
   /** The status and driver of one job, without loading its whole history. */
   /**
-   * M8.3 — the jobs a readiness reminder is worth sending about.
+   * M8.3 — the jobs a readiness reminder is worth sending about: every open
+   * job on a run dated `runDate`.
+   *
+   * ⚠️ Selected by the RUN's date, not the job's `targetDate`. The target is
+   * the SLA deadline — ready date plus five business days — and nobody's truck
+   * is booked for it: a job on tomorrow's run with a later deadline was never
+   * asked, while a job with no truck at all was asked about "tomorrow's
+   * pickup". A run is the only record of the day a truck is actually going.
    *
    * ── Why only `booked` and `assigned` ──────────────────────────────────────
    * Everything further along has already left the depot: a truck in transit
@@ -466,17 +483,25 @@ export const jobRepository = {
    * comments — for each of them would be a page of joins to produce one line of
    * text.
    */
-  async dueForReadinessReminder(targetDate: string): Promise<ReminderJob[]> {
+  async dueForReadinessReminder(runDate: string): Promise<ReminderJob[]> {
+    const runs = await RunModel.find({ date: runDate }, { _id: 1 }).lean<
+      Array<{ _id: mongoose.Types.ObjectId }>
+    >();
+
+    if (runs.length === 0) return [];
+
     const rows = await JobModel.find(
-      { targetDate, status: { $in: ['booked', 'assigned'] } },
+      { runId: { $in: runs.map((run) => run._id) }, status: { $in: ['booked', 'assigned'] } },
       {
         jobNumber: 1,
         accountId: 1,
         accountName: 1,
         siteName: 1,
+        readyDate: 1,
         targetDate: 1,
         siteContactEmail: 1,
         siteContactMobile: 1,
+        bookedByUserId: 1,
       },
     )
       .sort({ siteName: 1 })
@@ -487,9 +512,11 @@ export const jobRepository = {
           accountId: mongoose.Types.ObjectId;
           accountName: string;
           siteName: string;
+          readyDate: string;
           targetDate: string;
           siteContactEmail: string | null;
           siteContactMobile: string | null;
+          bookedByUserId?: mongoose.Types.ObjectId | null;
         }>
       >();
 
@@ -499,10 +526,114 @@ export const jobRepository = {
       accountId: row.accountId.toHexString(),
       accountName: row.accountName,
       siteName: row.siteName,
+      readyDate: row.readyDate,
       targetDate: row.targetDate,
+      runDate,
       siteContactEmail: row.siteContactEmail,
       siteContactMobile: row.siteContactMobile,
+      bookedByUserId: row.bookedByUserId ? row.bookedByUserId.toHexString() : null,
     }));
+  },
+
+  /**
+   * The run a job is on — its date, and who is driving it. Null when the job
+   * is not on a run.
+   *
+   * Read when a job's date moves or it is cancelled: whether the driver has to
+   * be told, and whether the job can stay where it is, both depend on this.
+   */
+  async allocationOf(id: string): Promise<{
+    runId: string;
+    runNumber: number;
+    runName: string;
+    runDate: string;
+    driverId: string | null;
+    status: JobStatus;
+  } | null> {
+    if (!mongoose.isValidObjectId(id)) return null;
+
+    const job = await JobModel.findById(id, { runId: 1, driverId: 1, status: 1 }).lean<{
+      runId?: mongoose.Types.ObjectId | null;
+      driverId?: mongoose.Types.ObjectId | null;
+      status: JobStatus;
+    }>();
+    if (!job?.runId) return null;
+
+    const run = await RunModel.findById(job.runId, { runNumber: 1, name: 1, date: 1 }).lean<{
+      _id: mongoose.Types.ObjectId;
+      runNumber: number;
+      name: string;
+      date: string;
+    }>();
+    if (!run) return null;
+
+    return {
+      runId: run._id.toHexString(),
+      runNumber: run.runNumber,
+      runName: run.name,
+      runDate: run.date,
+      driverId: job.driverId ? job.driverId.toHexString() : null,
+      status: job.status,
+    };
+  },
+
+  /**
+   * Takes a job off its run, back into the allocator's "to plan" list.
+   *
+   * ── Why this is not the dispatch board's own "remove stop" ────────────────
+   * The board refuses to change a run that has a driver ("unassign it first"),
+   * so an allocator never edits a sheet under a driver's feet. This is the one
+   * exception, and it is not a planning edit: the job's ready date has moved
+   * past the run's day, so it CANNOT be collected on that run any more. Leaving
+   * it there keeps it on the driver's sheet for a day the site is not ready —
+   * the wasted trip the move was meant to prevent. The driver is texted.
+   *
+   * Every open status goes back to `booked`, in-transit and arrived included:
+   * a job with no run and no driver cannot honestly be "in transit".
+   *
+   * The stops left behind are renumbered, so the sheet never reads 1, 2, 4.
+   * Returns false when the job was no longer on that run.
+   */
+  async releaseFromRun(id: string, runId: string): Promise<boolean> {
+    if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(runId)) return false;
+
+    const run = new mongoose.Types.ObjectId(runId);
+
+    const released = await JobModel.updateOne(
+      {
+        _id: new mongoose.Types.ObjectId(id),
+        runId: run,
+        status: { $in: ['booked', 'assigned', 'in-transit', 'arrived'] },
+      },
+      {
+        $set: {
+          status: 'booked',
+          runId: null,
+          runSequence: null,
+          driverId: null,
+          driverName: null,
+        },
+      },
+    );
+
+    if (released.modifiedCount === 0) return false;
+
+    const remaining = await JobModel.find({ runId: run }, { _id: 1 })
+      .sort({ runSequence: 1 })
+      .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+
+    if (remaining.length > 0) {
+      await JobModel.bulkWrite(
+        remaining.map((stop, index) => ({
+          updateOne: {
+            filter: { _id: stop._id, runId: run },
+            update: { $set: { runSequence: index + 1 } },
+          },
+        })),
+      );
+    }
+
+    return true;
   },
 
   async findSummary(
@@ -515,6 +646,11 @@ export const jobRepository = {
     driverId: string | null;
     /** Ex-GST, and the base a percentage charge is a percentage OF. */
     totalExGst: Money;
+    /** Who a message on the customer thread is addressed to — see `addComment`. */
+    accountId: string;
+    accountName: string;
+    siteName: string;
+    bookedByUserId: string | null;
   } | null> {
     if (!mongoose.isValidObjectId(id)) return null;
 
@@ -526,7 +662,24 @@ export const jobRepository = {
       status: 1,
       driverId: 1,
       totalExGst: 1,
-    }).lean<Pick<RawJob, '_id' | 'jobNumber' | 'status' | 'driverId' | 'totalExGst'>>();
+      accountId: 1,
+      accountName: 1,
+      siteName: 1,
+      bookedByUserId: 1,
+    }).lean<
+      Pick<
+        RawJob,
+        | '_id'
+        | 'jobNumber'
+        | 'status'
+        | 'driverId'
+        | 'totalExGst'
+        | 'accountId'
+        | 'accountName'
+        | 'siteName'
+        | 'bookedByUserId'
+      >
+    >();
 
     if (!row) return null;
 
@@ -536,6 +689,10 @@ export const jobRepository = {
       status: row.status,
       driverId: row.driverId ? row.driverId.toHexString() : null,
       totalExGst: fromDecimal128(row.totalExGst),
+      accountId: row.accountId.toHexString(),
+      accountName: row.accountName,
+      siteName: row.siteName,
+      bookedByUserId: row.bookedByUserId ? row.bookedByUserId.toHexString() : null,
     };
   },
 
@@ -546,7 +703,7 @@ export const jobRepository = {
     const row = await JobChargeModel.findById(id).lean<RawJobCharge>();
     if (!row) return null;
 
-    return toJobCharge(row);
+    return toJobCharge(row, await invoicedCharges([row._id]));
   },
 
   async create(input: CreateJobInput): Promise<JobListItem> {
@@ -726,6 +883,58 @@ export const jobRepository = {
     return previous;
   },
 
+  /**
+   * M4.8b — carry an account's changed risk-assessment rule onto its open jobs.
+   *
+   * ⚠️ `inStatuses` is the whole boundary, and the service owns it. A job that
+   * is finished keeps the rule it was done under — an audit next year must see
+   * the rule that applied on the day, not today's.
+   *
+   * Returns the jobs that actually CHANGED, so the caller can put an entry on
+   * each one's trail. A job already carrying the new value is not touched and
+   * not returned, which also makes a repeated call a no-op.
+   */
+  async setRiskAssessmentOnOpenJobs(
+    accountId: string,
+    required: boolean,
+    inStatuses: readonly JobStatus[],
+  ): Promise<Array<{ id: string; jobNumber: number }>> {
+    if (!mongoose.isValidObjectId(accountId)) return [];
+
+    const filter = {
+      accountId: new mongoose.Types.ObjectId(accountId),
+      status: { $in: [...inStatuses] },
+      riskAssessmentRequired: { $ne: required },
+    };
+
+    const candidates = await JobModel.find(filter, { jobNumber: 1 }).lean<
+      Array<{ _id: mongoose.Types.ObjectId; jobNumber: number }>
+    >();
+    if (candidates.length === 0) return [];
+
+    const ids = candidates.map((row) => row._id);
+    const result = await JobModel.updateMany(
+      { ...filter, _id: { $in: ids } },
+      { $set: { riskAssessmentRequired: required } },
+    );
+
+    /*
+     * The filter is re-applied on the write, so a job that finished between
+     * the read and the write is left alone. In that rare case, re-read which
+     * ones now carry the new value rather than reporting a change that did not
+     * happen.
+     */
+    const changed =
+      result.modifiedCount === candidates.length
+        ? candidates
+        : await JobModel.find(
+            { _id: { $in: ids }, riskAssessmentRequired: required },
+            { jobNumber: 1 },
+          ).lean<Array<{ _id: mongoose.Types.ObjectId; jobNumber: number }>>();
+
+    return changed.map((row) => ({ id: row._id.toHexString(), jobNumber: row.jobNumber }));
+  },
+
   async addComment(input: CreateCommentInput): Promise<JobComment> {
     const created = await JobCommentModel.create({
       jobId: new mongoose.Types.ObjectId(input.jobId),
@@ -736,6 +945,7 @@ export const jobRepository = {
       visibility: input.visibility,
       deliveredAt: input.deliveredAt,
       fromDriver: input.fromDriver,
+      fromCustomer: input.fromCustomer,
     });
 
     return toComment(created.toObject());
@@ -904,7 +1114,7 @@ interface RawJobCharge {
  * differently from the same charge on the next `GET` is a bug that only shows
  * up after a refresh.
  */
-function toJobCharge(charge: RawJobCharge): JobCharge {
+function toJobCharge(charge: RawJobCharge, invoicedIds: ReadonlySet<string>): JobCharge {
   return {
     id: charge._id.toHexString(),
     code: charge.code,
@@ -921,7 +1131,22 @@ function toJobCharge(charge: RawJobCharge): JobCharge {
     decidedBy: charge.decidedBy ?? null,
     decidedAt: charge.decidedAt ? charge.decidedAt.toISOString() : null,
     decisionNote: charge.decisionNote ?? null,
+    invoiced: invoicedIds.has(charge._id.toHexString()),
   };
+}
+
+/** The ids, of those given, that some invoice line was raised from. One query. */
+async function invoicedCharges(ids: readonly mongoose.Types.ObjectId[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+
+  const lines = await InvoiceLineModel.find(
+    { sourceChargeId: { $in: ids } },
+    { sourceChargeId: 1 },
+  ).lean<Array<{ sourceChargeId: mongoose.Types.ObjectId | null }>>();
+
+  return new Set(
+    lines.flatMap((line) => (line.sourceChargeId ? [line.sourceChargeId.toHexString()] : [])),
+  );
 }
 
 function toListItem(
@@ -986,6 +1211,8 @@ interface RawComment {
   visibility: JobComment['visibility'];
   deliveredAt?: Date | null | undefined;
   fromDriver: boolean;
+  /** Absent on comments written before customers could reply. */
+  fromCustomer?: boolean | undefined;
 }
 
 function toComment(row: RawComment): JobComment {
@@ -997,6 +1224,7 @@ function toComment(row: RawComment): JobComment {
     visibility: row.visibility,
     deliveredAt: row.deliveredAt ? row.deliveredAt.toISOString() : null,
     fromDriver: row.fromDriver,
+    fromCustomer: row.fromCustomer === true,
   };
 }
 
@@ -1273,21 +1501,29 @@ export async function billableCharges(jobId: string): Promise<
   }));
 }
 
-/** Marks a job's invoice rollup, so the jobs grid agrees with the invoice list. */
+/**
+ * Marks a job's invoice rollup, so the jobs grid agrees with the invoice list.
+ *
+ * `invoiceNumber` left out keeps the one already recorded; `null` clears it,
+ * for the one case where a job ends up with no invoice at all — its only draft
+ * held nothing billable and was removed.
+ */
 export async function setInvoiceStatus(
   jobId: string,
   status: 'not-invoiced' | 'awaiting-po' | 'invoiced' | 'paid',
-  invoiceNumber?: number,
+  invoiceNumber?: number | null,
 ): Promise<void> {
   if (!mongoose.isValidObjectId(jobId)) return;
 
+  const numbering =
+    invoiceNumber === undefined
+      ? {}
+      : invoiceNumber === null
+        ? { invoiceNumber: null, invoicedAt: null }
+        : { invoiceNumber, invoicedAt: new Date() };
+
   await JobModel.updateOne(
     { _id: new mongoose.Types.ObjectId(jobId) },
-    {
-      $set: {
-        invoiceStatus: status,
-        ...(invoiceNumber === undefined ? {} : { invoiceNumber, invoicedAt: new Date() }),
-      },
-    },
+    { $set: { invoiceStatus: status, ...numbering } },
   );
 }

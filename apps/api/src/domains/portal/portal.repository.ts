@@ -227,11 +227,17 @@ export const portalRepository = {
     };
   },
 
-  /** One job, with the completion record. Null when out of scope. */
+  /**
+   * One job, with the completion record. Null when out of scope.
+   *
+   * `viewerUserId` only decides which messages read as "You" — it widens
+   * nothing. The scope does all the narrowing.
+   */
   async findJob(
     id: string,
     scope: PortalScope,
     canSeePricing: boolean,
+    viewerUserId: string,
   ): Promise<PortalJob | null> {
     if (!mongoose.isValidObjectId(id)) return null;
 
@@ -269,6 +275,20 @@ export const portalRepository = {
       notes: row.notes,
       driverName: row.driverName,
       arrivedAt: row.arrivedAt ? row.arrivedAt.toISOString() : null,
+      /*
+       * ⚠️ `url` is deliberately null here, where the office's screens now sign
+       * one.
+       *
+       * Showing a builder the photographs of their own site is a reasonable
+       * thing to want, and may well be the right thing to build — but it is a
+       * product decision about what the customer portal exposes, not a
+       * side-effect of fixing the office's evidence grids. Signing here would
+       * quietly publish every shot the driver took, including the ones taken to
+       * justify a charge against that same builder, to the person disputing it.
+       *
+       * So the portal keeps showing the caption, the time and the GPS fix it
+       * showed before. Change this on purpose, with a decision behind it.
+       */
       photos: photos.map(
         (photo): JobPhoto => ({
           id: photo._id.toHexString(),
@@ -277,6 +297,7 @@ export const portalRepository = {
           takenBy: photo.takenBy ?? '',
           latitude: photo.latitude ?? null,
           longitude: photo.longitude ?? null,
+          url: null,
         }),
       ),
       steps: events.map(
@@ -292,12 +313,18 @@ export const portalRepository = {
           by: null,
         }),
       ),
+      /*
+       * Both sides of the customer thread: the office's posts and the
+       * customer's replies. `fromCustomer` was hard-coded false here, which was
+       * true only while a customer had no way to reply.
+       */
       messages: comments.map((comment) => ({
         id: comment._id.toHexString(),
         body: comment.body,
         author: comment.author,
         at: comment.at.toISOString(),
-        fromCustomer: false,
+        fromCustomer: comment.fromCustomer === true,
+        mine: comment.authorId?.toHexString() === viewerUserId,
       })),
       // Issued by the reporting domain (M9.5); null until then.
       certificateReference: null,

@@ -1,16 +1,17 @@
-import type {
-  ExceptionReason,
-  Job,
-  JobCharge,
-  JobChargeDraft,
-  JobComment,
-  JobCommentDraft,
-  JobDraft,
-  JobListItem,
-  LocationSource,
-  PageMeta,
-  PricePreview,
-  Role,
+import {
+  FUTILE_DECIDED_EVENT_LABELS,
+  type ExceptionReason,
+  type Job,
+  type JobCharge,
+  type JobChargeDraft,
+  type JobComment,
+  type JobCommentDraft,
+  type JobDraft,
+  type JobListItem,
+  type LocationSource,
+  type PageMeta,
+  type PricePreview,
+  type Role,
 } from '@plastago/shared';
 import { env } from '../../config/env.js';
 import { AppError } from '../../lib/app-error.js';
@@ -20,7 +21,9 @@ import { getMapsProvider, isPrecise, type MapsProvider } from '../../integration
 import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
 import { logger } from '../../lib/logger.js';
 import { withTransaction } from '../../lib/transaction.js';
-import { jobNotices } from '../notifications/job-notices.service.js';
+import { formatDay, jobNotices } from '../notifications/job-notices.service.js';
+import { driverNotices } from '../notifications/driver-notices.service.js';
+import { notificationService } from '../notifications/notification.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { placeService } from '../places/place.service.js';
 import {
@@ -272,7 +275,7 @@ export const jobService = {
     // unreadable six months later.
     await jobRepository.appendEvent({
       jobId: originalJobId,
-      label: 'Rebooked after a futile attempt',
+      label: FUTILE_DECIDED_EVENT_LABELS.rescheduled,
       actor: caller.name,
       status: null,
       detail: `New pickup #${String(rebooked.jobNumber)}, ready ${newReadyDate}`,
@@ -298,6 +301,24 @@ export const jobService = {
     );
 
     return rebooked;
+  },
+
+  /**
+   * The futile review closed WITHOUT a new pickup — the other half of
+   * `rebookFromFutile`.
+   *
+   * A rebook always wrote on the original job's timeline; a cancel wrote
+   * nothing, so the job page went on telling people to "decide it in Futile
+   * review" after it had been decided. See `FUTILE_DECIDED_EVENT_LABELS`.
+   */
+  async recordFutileClosed(jobId: string, note: string | null, caller: Caller): Promise<void> {
+    await jobRepository.appendEvent({
+      jobId,
+      label: FUTILE_DECIDED_EVENT_LABELS.cancelled,
+      actor: caller.name,
+      status: null,
+      detail: note,
+    });
   },
 
   /**
@@ -447,12 +468,17 @@ export const jobService = {
              */
             appliedRate,
             /*
-             * M4.8b — the account's rule, resolved NOW and frozen on the job.
+             * M4.8b — the account's rule, resolved NOW and stored on the job.
              *
              * Never read live from the account afterwards: a job booked today
              * under today's rule must still show today's rule when it is audited
              * next year. Re-deriving it would let a settings change rewrite the
              * past and make a compliant job look like a gap.
+             *
+             * The one exception is deliberate: when the office changes the rule,
+             * `accountService.setRiskAssessmentRequired` carries it onto the
+             * account's OPEN jobs and notes it on each one's timeline. Finished
+             * jobs keep the rule they were done under.
              */
             riskAssessmentRequired: account.riskAssessmentRequired,
           })
@@ -574,6 +600,32 @@ export const jobService = {
       detail: note.trim() || null,
     });
 
+    /*
+     * M2.4 — tell the people still expecting it.
+     *
+     * The site contact holds a "pickup booked" message and keeps the pile back
+     * for a truck that is never coming. The driver, when it is on their run:
+     * a cancelled stop stays on the sheet, marked cancelled — which a driver
+     * already on the road only sees if they happen to open it.
+     *
+     * The same for every canceller: the office, a portal change request the
+     * office agreed to, and a builder's own call-up email.
+     *
+     * ⚠️ After the write and unable to throw: the cancel is the durable act.
+     */
+    await jobNotices.cancelled(id);
+
+    const allocation = await jobRepository.allocationOf(id);
+    if (allocation?.driverId) {
+      await driverNotices.jobCancelled({
+        driverId: allocation.driverId,
+        jobId: id,
+        jobNumber: job.jobNumber,
+        siteName: job.siteName,
+        runDate: allocation.runDate,
+      });
+    }
+
     log.info({ jobId: id, jobNumber: job.jobNumber, reason }, 'job cancelled');
   },
 
@@ -602,6 +654,69 @@ export const jobService = {
       status: null,
       detail: `Moved to ${readyDate}`,
     });
+
+    /*
+     * A run that no longer fits. The job's new ready date is after the day of
+     * the run it is on, so it cannot be collected on that run — and leaving it
+     * there keeps it on a driver's sheet for a day the site is not ready. That
+     * is exactly the wasted trip the move was meant to prevent.
+     *
+     * So it comes off, back into the jobs still to plan, the driver is texted,
+     * and the people who plan runs are told. A job moved EARLIER, or still ready
+     * in time for its run, stays where it is.
+     */
+    const allocation = await jobRepository.allocationOf(id);
+
+    if (allocation && allocation.runDate < readyDate) {
+      const released = await jobRepository.releaseFromRun(id, allocation.runId);
+
+      if (released) {
+        await jobRepository.appendEvent({
+          jobId: id,
+          label: 'Taken off run',
+          actor: caller.name,
+          status: 'booked',
+          detail: `${allocation.runName} on ${allocation.runDate} — the ready date moved to ${readyDate}`,
+        });
+
+        if (allocation.driverId) {
+          await driverNotices.jobMoved({
+            driverId: allocation.driverId,
+            jobId: id,
+            jobNumber: job.jobNumber,
+            siteName: job.siteName,
+            runDate: allocation.runDate,
+            newReadyDate: readyDate,
+          });
+        }
+
+        await notificationService.notifyOffice({
+          audience: 'planning',
+          category: 'exception',
+          severity: 'action',
+          title: `Job #${String(job.jobNumber)} taken off ${allocation.runName} — plan it again`,
+          body:
+            `${job.siteName} is now ready from ${formatDay(readyDate)}, so it came off the ` +
+            `${formatDay(allocation.runDate)} run` +
+            (allocation.driverId ? ' and the driver was texted.' : '.') +
+            ' It is back with the jobs to plan.',
+          href: '/admin/dispatch',
+          subjectKey: `job-off-run:${id}:${allocation.runId}`,
+          jobId: id,
+          jobNumber: job.jobNumber,
+          // Whoever moved it knows; the rest of the planners need telling.
+          exceptUserId: caller.userId,
+        });
+
+        log.info(
+          { jobId: id, jobNumber: job.jobNumber, runId: allocation.runId, readyDate },
+          'job taken off its run after a date change',
+        );
+      }
+    }
+
+    // And the customer: the site contact holds a message with the old date.
+    await jobNotices.moved(id);
 
     log.info({ jobId: id, jobNumber: job.jobNumber, readyDate, targetDate }, 'job rescheduled');
   },
@@ -632,8 +747,9 @@ export const jobService = {
     }
 
     const now = new Date();
+    const fromCustomer = isCustomer(caller);
 
-    return jobRepository.addComment({
+    const comment = await jobRepository.addComment({
       jobId,
       body: draft.body.trim(),
       author: caller.name,
@@ -644,7 +760,33 @@ export const jobService = {
       // null rather than a timestamp that would imply one.
       deliveredAt: draft.visibility === 'driver' ? now : null,
       fromDriver: false,
+      fromCustomer,
     });
+
+    /*
+     * The customer thread is a conversation, so each side is told when the
+     * other writes — in the bell and by email (see `jobNotices.messagePosted`).
+     * Without this an office message sat on a pickup page the customer had no
+     * reason to open, and a reply would have sat unread in the console.
+     * Internal and driver comments raise nothing here: the internal thread has
+     * no reader to tell, and the driver's arrives on their phone.
+     */
+    if (draft.visibility === 'customer') {
+      await jobNotices.messagePosted({
+        commentId: comment.id,
+        jobId,
+        jobNumber: job.jobNumber,
+        siteName: job.siteName,
+        accountId: job.accountId,
+        accountName: job.accountName,
+        bookedByUserId: job.bookedByUserId,
+        author: caller.name,
+        body: comment.body,
+        fromCustomer,
+      });
+    }
+
+    return comment;
   },
 
   /**
@@ -732,6 +874,7 @@ export const jobService = {
 function isCustomer(caller: Caller): boolean {
   return caller.roles.some((role) => CUSTOMER_ROLES.has(role));
 }
+
 
 /**
  * What this caller is allowed to see.

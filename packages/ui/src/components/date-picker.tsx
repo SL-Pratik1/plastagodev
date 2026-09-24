@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type FocusEvent,
 } from 'react';
 import { Calendar } from './calendar.js';
 import { Popover, PopoverContent, PopoverTrigger } from './popover.js';
@@ -28,12 +29,41 @@ import { cn } from '../lib/utils.js';
  * on the native element.
  */
 
-/** Display format. Fixed to en-AU so it never follows the viewer's OS locale. */
-const DISPLAY = new Intl.DateTimeFormat('en-AU', {
-  day: '2-digit',
-  month: 'short',
-  year: 'numeric',
-});
+/** `DD/MM/YYYY` — the same order the field accepts typed input in. */
+function formatForInput(date: Date): string {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${day}/${month}/${String(date.getFullYear())}`;
+}
+
+/**
+ * Turns whatever was typed into a `DD/MM/YYYY` draft, digits-only.
+ *
+ * Deliberately loose while typing — it only extracts digits and re-inserts
+ * the slashes, so pasting `20032027` and typing `20/03/2027` land on the same
+ * draft, and backspacing at the end removes one digit rather than fighting a
+ * cursor position the mask just changed.
+ */
+function maskDraft(raw: string): string {
+  const digits = raw.replace(/\D/g, '').slice(0, 8);
+  return [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4, 8)].filter(Boolean).join('/');
+}
+
+/** A complete, real calendar date, or `undefined` — never a "close enough" one. */
+function parseTyped(text: string): Date | undefined {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(text);
+  if (!match) return undefined;
+  const [, dd, mm, yyyy] = match;
+  const day = Number(dd);
+  const month = Number(mm);
+  const year = Number(yyyy);
+  const date = new Date(year, month - 1, day);
+  // `new Date(2027, 1, 31)` rolls over to March 3rd rather than throwing —
+  // this is what actually rejects `31/02/2027`.
+  const isRealDate =
+    date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+  return isRealDate ? date : undefined;
+}
 
 /**
  * Parses `yyyy-mm-dd` into a LOCAL date.
@@ -128,6 +158,13 @@ export function DatePicker({
   const current = isControlled ? String(value) : mirrored;
   const selected = parseIso(current);
 
+  // Non-null while the person is actively typing over the field. `null` means
+  // "show whatever `selected` resolves to" — the moment a keystroke lands this
+  // takes over, and it is cleared again once that keystroke's text is either
+  // committed or rejected, so a stale draft can never survive past one edit.
+  const [draft, setDraft] = useState<string | null>(null);
+  const displayValue = draft ?? (selected ? formatForInput(selected) : '');
+
   const commit = (next: string) => {
     const native = nativeRef.current;
 
@@ -149,6 +186,40 @@ export function DatePicker({
 
   const minDate = typeof min === 'string' ? parseIso(min) : undefined;
   const maxDate = typeof max === 'string' ? parseIso(max) : undefined;
+
+  /**
+   * Turns whatever is sitting in `draft` into a commit, or discards it.
+   *
+   * Runs on blur and on Enter. A date outside `min`/`max` is treated the same
+   * as an unparsable one — rejected, not clamped — because silently moving
+   * what somebody typed to the nearest allowed day is its own kind of wrong
+   * answer. Either way `draft` is cleared afterwards: a rejected edit reverts
+   * the field to the last real value rather than leaving bad text sitting in
+   * it, which is what "prevent invalid dates" means at the input level.
+   */
+  const commitDraft = () => {
+    if (draft === null) return;
+    if (draft === '') {
+      commit('');
+    } else {
+      const typed = parseTyped(draft);
+      const inRange = typed && !(minDate && typed < minDate) && !(maxDate && typed > maxDate);
+      if (typed && inRange) commit(toIso(typed));
+    }
+    setDraft(null);
+  };
+
+  /*
+   * The year dropdown needs bounds to build its option list. Left unset, the
+   * calendar defaults to 100 years back and only to the END of the current
+   * year — which would make a rego expiring next year, or any other
+   * forward-dated field, unreachable through the dropdown. A field that
+   * already has a `min`/`max` keeps that as its real bound; one that does not
+   * gets a generous but finite range instead of the library's default.
+   */
+  const today = new Date();
+  const fallbackStart = new Date(today.getFullYear() - 100, 0, 1);
+  const fallbackEnd = new Date(today.getFullYear() + 20, 11, 31);
 
   // Built as a list so a field with only `min` (the common case — "not in the
   // past") does not also pass an `after: undefined` matcher.
@@ -177,24 +248,49 @@ export function DatePicker({
       />
 
       <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger
-          id={triggerId}
-          disabled={disabled}
+        <div
           className={cn(
-            'flex h-9 w-full items-center justify-between gap-1.5 rounded-md border border-input bg-background py-1 pr-2.5 pl-3 text-sm shadow-xs transition-colors',
-            'hover:border-ring/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-            'data-[state=open]:border-ring data-[state=open]:ring-2 data-[state=open]:ring-ring/30',
-            'disabled:cursor-not-allowed disabled:opacity-50',
-            'aria-invalid:border-destructive aria-invalid:ring-destructive/30',
+            'flex h-9 w-full items-center gap-1.5 rounded-md border border-input bg-background py-1 pr-2.5 pl-3 text-sm shadow-xs transition-colors',
+            'has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-2 has-[input:focus-visible]:ring-ring',
+            'has-[[aria-invalid=true]]:border-destructive has-[[aria-invalid=true]]:ring-destructive/30',
+            disabled && 'cursor-not-allowed opacity-50',
             className,
           )}
-          {...(triggerProps as ComponentProps<typeof PopoverTrigger>)}
         >
-          <span className={cn('truncate', !selected && 'text-muted-foreground')}>
-            {selected ? DISPLAY.format(selected) : placeholder}
-          </span>
-          <CalendarIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-        </PopoverTrigger>
+          {/* Typed directly, DD/MM/YYYY — the calendar below is the alternative, not the only way in. */}
+          <input
+            id={triggerId}
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            disabled={disabled}
+            placeholder={placeholder === 'Choose a date' ? 'DD/MM/YYYY' : placeholder}
+            value={displayValue}
+            onChange={(event) => setDraft(maskDraft(event.target.value))}
+            onBlur={(event: FocusEvent<HTMLInputElement>) => {
+              commitDraft();
+              onBlur?.(event);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              commitDraft();
+            }}
+            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
+            {...triggerProps}
+          />
+
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              disabled={disabled}
+              aria-label="Open calendar"
+              className="focus-ring -mr-1 grid shrink-0 place-items-center rounded p-0.5 text-muted-foreground disabled:cursor-not-allowed"
+            >
+              <CalendarIcon aria-hidden className="size-4" />
+            </button>
+          </PopoverTrigger>
+        </div>
 
         <PopoverContent className="w-auto" container={portalContainer}>
           <Calendar
@@ -202,8 +298,8 @@ export function DatePicker({
             autoFocus
             selected={selected}
             defaultMonth={selected}
-            startMonth={minDate}
-            endMonth={maxDate}
+            startMonth={minDate ?? fallbackStart}
+            endMonth={maxDate ?? fallbackEnd}
             disabled={outOfRange.length > 0 ? outOfRange : undefined}
             onSelect={(date) => {
               // Radix keeps the popover open on re-render; close it ourselves so

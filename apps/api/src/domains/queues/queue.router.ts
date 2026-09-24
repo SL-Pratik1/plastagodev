@@ -38,6 +38,9 @@ import {
   ChargeDecisionBodySchema,
   QueueIdParamsSchema,
   QueueIdsSchema,
+  ApprovalListQuerySchema,
+  FutileListQuerySchema,
+  AwaitingPoListQuerySchema,
   QueueListQuerySchema,
 } from './queue.schemas.js';
 
@@ -64,7 +67,7 @@ queueRouter.get('/counts', asyncHandler(queueController.counts));
 
 queueRouter.get(
   '/futile',
-  validate({ query: QueueListQuerySchema }),
+  validate({ query: FutileListQuerySchema }),
   asyncHandler(queueController.futileList),
 );
 
@@ -86,9 +89,17 @@ queueRouter.post(
 
 /* ── M2.7 · Additional service approvals ─────────────────────────────────── */
 
+/**
+ * Charges awaiting a decision — and, on request, ones already decided.
+ *
+ * `approvalState` defaults to `pending`, so the queue stays a worklist. It is
+ * there because approving used to remove a charge from the only screen that
+ * lists charges, which made an approved charge impossible to look up again from
+ * the queue that approved it.
+ */
 queueRouter.get(
   '/approvals',
-  validate({ query: QueueListQuerySchema }),
+  validate({ query: ApprovalListQuerySchema }),
   asyncHandler(queueController.approvalList),
 );
 
@@ -124,13 +135,13 @@ queueRouter.post(
 
 queueRouter.get(
   '/awaiting-po',
-  validate({ query: QueueListQuerySchema }),
+  validate({ query: AwaitingPoListQuerySchema }),
   asyncHandler(queueController.awaitingPoList),
 );
 
 /**
- * Records that a chase went out, so ageing is measured against contact.
- * It does not send anything — somebody picks up the phone.
+ * Emails each billing contact asking for the purchase order, and records the
+ * chase so ageing is measured against contact.
  */
 queueRouter.post(
   '/awaiting-po/chase',

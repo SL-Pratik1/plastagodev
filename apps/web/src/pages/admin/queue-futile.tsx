@@ -54,7 +54,12 @@ import { useNow } from '@/lib/use-now';
  * entry has sat on it since 28 August 2025. Newest-first would put that entry on
  * the last page, which is precisely how it got there.
  */
-const FILTER_KEYS = ['outcome', 'reason', 'account', 'driver', 'zone', 'age'] as const;
+/*
+ * ⚠️ `zoneId`, not `zone`. The zone control below is keyed `zoneId` — the name
+ * the API takes — so listing it here as `zone` meant the controller never read
+ * or wrote that facet: picking a zone changed the dropdown and nothing else.
+ */
+const FILTER_KEYS = ['outcome', 'reason', 'account', 'driver', 'zoneId', 'age'] as const;
 
 /**
  * The filter bar, with the loaded zones spliced back where they were.
@@ -81,9 +86,18 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
   {
     key: 'outcome',
     label: 'Decision',
-    allLabel: 'Actioned and not',
+    /*
+     * ⚠️ The cleared state is PENDING, not everything — this is a worklist, and
+     * it is what the nav badge counts.
+     *
+     * It used to read "Actioned and not" while sending nothing, so the default
+     * view claimed to include decided reviews and never did. "Actioned and not"
+     * is now an explicit choice that sends `any`, which is the only value that
+     * actually widens the list.
+     */
+    allLabel: 'Awaiting decision',
     options: [
-      { value: 'pending', label: 'Awaiting decision' },
+      { value: 'any', label: 'Actioned and not' },
       { value: 'rescheduled', label: 'Rescheduled' },
       { value: 'cancelled', label: 'Cancelled' },
     ],
@@ -340,7 +354,7 @@ interface FutileDecisionDialogProps {
  */
 function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogProps) {
   const toast = useToast();
-  const { data: review, isPending, error } = useFutileReview(id ?? undefined);
+  const { data: review, isPending, error, refetch } = useFutileReview(id ?? undefined);
   const decide = useFutileDecide();
 
   const [outcome, setOutcome] = useState<'rescheduled' | 'cancelled'>('rescheduled');
@@ -480,7 +494,7 @@ function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogPr
 
           <div>
             <h3 className="mb-2 text-sm font-semibold">Evidence from site</h3>
-            <EvidenceGrid photos={review.photos} />
+            <EvidenceGrid photos={review.photos} onStale={refetch} />
           </div>
 
           {review.outcome !== 'pending' ? (

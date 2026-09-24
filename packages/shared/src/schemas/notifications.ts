@@ -25,7 +25,19 @@ import {
  * unactioned in TransVirtual since 28 August 2025 — a year, at $120. The system
  * has to chase.
  */
-export const NOTIFICATION_CATEGORIES = ['queue', 'exception', 'invoice', 'sync', 'system'] as const;
+/**
+ * `message` is a new post on a pickup's thread between the office and the
+ * customer — a reply for the office to answer, or an office message for the
+ * customer to read. Still "someone has to act": somebody was written to.
+ */
+export const NOTIFICATION_CATEGORIES = [
+  'queue',
+  'exception',
+  'invoice',
+  'sync',
+  'system',
+  'message',
+] as const;
 export const NotificationCategorySchema = z
   .enum(NOTIFICATION_CATEGORIES)
   .meta({ id: 'NotificationCategory' });
@@ -37,6 +49,7 @@ export const NOTIFICATION_CATEGORY_LABELS: Record<NotificationCategory, string> 
   invoice: 'Invoicing',
   sync: 'Driver sync',
   system: 'System',
+  message: 'Messages',
 };
 
 /**

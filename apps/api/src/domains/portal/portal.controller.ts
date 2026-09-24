@@ -3,6 +3,7 @@ import type {
   PortalBookingDraftSchema,
   PortalChangeRequestSchema,
   PortalJobEditSchema,
+  PortalJobMessageDraftSchema,
   ReadinessCertificationSchema,
 } from '@plastago/shared';
 import type { Response } from 'express';
@@ -140,6 +141,25 @@ export const portalController = {
         callerFrom(req),
       ),
     );
+  },
+
+  /** 201: a new message on the thread, returned so the portal can show it at once. */
+  postMessage: async (
+    req: ValidatedRequest<{
+      params: typeof PortalJobIdParamsSchema;
+      body: typeof PortalJobMessageDraftSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    res
+      .status(201)
+      .json(
+        await portalService.postMessage(
+          req.validated.params.id,
+          req.validated.body,
+          callerFrom(req),
+        ),
+      );
   },
 
   certifyReadiness: async (

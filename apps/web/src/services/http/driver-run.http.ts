@@ -1,14 +1,18 @@
 import type { ApiClient } from '@plastago/api-client';
 import {
   API_PREFIX,
+  ContaminationReportSchema,
   DriverJobSchema,
+  FutileReportSchema,
   RunSheetDaySchema,
   TipOffReconciliationSchema,
   type Completion,
   type ContaminationReport,
   type DefectReport,
+  type DriverJob,
   type DriverPhoto,
   type FutileReport,
+  type RunStop,
   type PreStartSubmission,
   type SiteRiskAssessment,
   type StatusUpdate,
@@ -16,7 +20,7 @@ import {
   type WeightCapture,
 } from '@plastago/shared';
 import * as z from 'zod';
-import { enqueue } from '@/offline/outbox';
+import { enqueue, queuedOperations } from '@/offline/outbox';
 import { ServiceError } from '../service-error.js';
 import type { DriverRunService } from '../driver-run.types.js';
 import { viaService } from './to-service-error.js';
@@ -38,6 +42,91 @@ import { viaService } from './to-service-error.js';
  * Reads are direct: a run sheet the phone has never seen cannot be invented, and
  * the driver app caches what it has already fetched.
  */
+
+/**
+ * What the phone has done to a job that the server has not heard yet.
+ *
+ * ── Why the reads need this ───────────────────────────────────────────────
+ * A report is queued, and the screen is patched the moment it is — but that
+ * patch lives in memory. Reload the app, or have the OS restart it, while the
+ * report is still waiting for signal, and the job comes back from the server
+ * exactly as it was before the driver acted: Can't collect and Contaminated
+ * offered again for a job already reported. So the queue itself is the record
+ * of what the driver did, and it is laid over the server's answer until it
+ * drains.
+ */
+interface QueuedForJob {
+  futile: FutileReport | null;
+  contamination: ContaminationReport | null;
+}
+
+/** `/api/v1/driver/jobs/<id>/<action>` — the job actions the queue can hold. */
+const JOB_ACTION_PATH = /\/driver\/jobs\/([0-9a-f]{24})\/([a-z-]+)/i;
+
+/** The statuses a futile report can still move a job out of. */
+const FUTILE_FROM: ReadonlySet<string> = new Set(['assigned', 'in-transit', 'arrived']);
+
+async function queuedByJob(): Promise<Map<string, QueuedForJob>> {
+  const byJob = new Map<string, QueuedForJob>();
+
+  for (const operation of await queuedOperations()) {
+    const match = JOB_ACTION_PATH.exec(operation.path);
+    const jobId = match?.[1];
+    const action = match?.[2];
+    if (!jobId || !action) continue;
+
+    const entry = byJob.get(jobId) ?? { futile: null, contamination: null };
+
+    if (action === 'futile') {
+      const parsed = FutileReportSchema.safeParse(operation.body);
+      if (parsed.success) entry.futile = parsed.data;
+    }
+    if (action === 'contamination') {
+      const parsed = ContaminationReportSchema.safeParse(operation.body);
+      if (parsed.success) entry.contamination = parsed.data;
+    }
+
+    byJob.set(jobId, entry);
+  }
+
+  return byJob;
+}
+
+/**
+ * A stop as it will read once its queued actions land.
+ *
+ * ⚠️ `futile` only over a status it can move out of. A job the office has
+ * cancelled meanwhile will refuse the report, and painting it futile would
+ * hide the cancellation from the one person who must not collect it.
+ */
+function withQueuedStop<T extends RunStop>(stop: T, queued: QueuedForJob | undefined): T {
+  if (!queued) return stop;
+
+  return {
+    ...stop,
+    // What the field was always meant to say; the server can only ever send false.
+    hasQueuedActions: true,
+    ...(queued.futile && FUTILE_FROM.has(stop.status) ? { status: 'futile' as const } : {}),
+  };
+}
+
+function withQueued(job: DriverJob, queued: QueuedForJob | undefined): DriverJob {
+  if (!queued) return job;
+
+  const stop = withQueuedStop(job, queued);
+  const futileNow = stop.status === 'futile' && job.status !== 'futile' && queued.futile;
+  const report = queued.contamination;
+
+  return {
+    ...stop,
+    ...(futileNow ? { completedAt: queued.futile?.occurredAt ?? job.completedAt } : {}),
+    contamination:
+      job.contamination ??
+      (report && job.status !== 'cancelled' && job.status !== 'futile'
+        ? { reportedAt: report.occurredAt, type: report.type, extent: report.extent }
+        : null),
+  };
+}
 
 /** The queue only needs to know the reply parsed. */
 const PresignPhotoResponseSchema = z.object({
@@ -61,16 +150,40 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
   return {
     /* ── Reads ────────────────────────────────────────────────────────────── */
 
-    runSheet: (date: string) =>
-      viaService(() =>
-        api.request(`${base}/run-sheet`, {
-          searchParams: { date },
-          schema: RunSheetDaySchema,
-        }),
-      ),
+    /*
+     * Both reads lay the phone's still-queued reports over what the server
+     * answered — see `withQueued`. Until the queue drains the server is
+     * answering from before the driver acted, and after a reload that answer
+     * is all the screen has.
+     */
+    runSheet: async (date: string) => {
+      const [day, queued] = await Promise.all([
+        viaService(() =>
+          api.request(`${base}/run-sheet`, {
+            searchParams: { date },
+            schema: RunSheetDaySchema,
+          }),
+        ),
+        queuedByJob(),
+      ]);
 
-    job: (jobId: string) =>
-      viaService(() => api.request(`${base}/jobs/${jobId}`, { schema: DriverJobSchema })),
+      if (queued.size === 0) return day;
+
+      const overlay = (stop: RunStop) => withQueuedStop(stop, queued.get(stop.jobId));
+      return {
+        ...day,
+        stops: day.stops.map(overlay),
+        runs: day.runs.map((run) => ({ ...run, stops: run.stops.map(overlay) })),
+      };
+    },
+
+    job: async (jobId: string) => {
+      const [job, queued] = await Promise.all([
+        viaService(() => api.request(`${base}/jobs/${jobId}`, { schema: DriverJobSchema })),
+        queuedByJob(),
+      ]);
+      return withQueued(job, queued.get(jobId));
+    },
 
     /*
      * A read, so it is direct rather than queued: the driver is standing at the

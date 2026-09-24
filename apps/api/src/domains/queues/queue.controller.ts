@@ -8,6 +8,9 @@ import type {
   ChargeDecisionBodySchema,
   QueueIdParamsSchema,
   QueueIdsSchema,
+  ApprovalListQuerySchema,
+  FutileListQuerySchema,
+  AwaitingPoListQuerySchema,
   QueueListQuerySchema,
 } from './queue.schemas.js';
 
@@ -40,7 +43,7 @@ export const queueController = {
   /* ── M2.6 · Futile review ──────────────────────────────────────────────── */
 
   futileList: async (
-    req: ValidatedRequest<{ query: typeof QueueListQuerySchema }>,
+    req: ValidatedRequest<{ query: typeof FutileListQuerySchema }>,
     res: Response,
   ): Promise<void> => {
     res.json(await queueService.futileList(req.validated.query, callerFrom(req)));
@@ -67,7 +70,7 @@ export const queueController = {
   /* ── M2.7 · Charge approvals ───────────────────────────────────────────── */
 
   approvalList: async (
-    req: ValidatedRequest<{ query: typeof QueueListQuerySchema }>,
+    req: ValidatedRequest<{ query: typeof ApprovalListQuerySchema }>,
     res: Response,
   ): Promise<void> => {
     res.json(await queueService.approvalList(req.validated.query, callerFrom(req)));
@@ -80,17 +83,22 @@ export const queueController = {
     res.json(await queueService.approvalGet(req.validated.params.id, callerFrom(req)));
   },
 
-  /** Returns the COUNT that changed — a bulk decision is expected to be partial. */
+  /**
+   * Returns the COUNT that changed — a bulk decision is expected to be partial —
+   * and, on an approval, where the money went (`ChargeDecisionOutcome`). The
+   * count stays at the top level, so a console that only reads `changed` still
+   * works.
+   */
   approvalDecide: async (
     req: ValidatedRequest<{ body: typeof ChargeDecisionBodySchema }>,
     res: Response,
   ): Promise<void> => {
-    const changed = await queueService.approvalDecide(
+    const outcome = await queueService.approvalDecide(
       req.validated.body.ids,
       { decision: req.validated.body.decision, note: req.validated.body.note },
       callerFrom(req),
     );
-    res.json({ changed });
+    res.json(outcome);
   },
 
 
@@ -121,7 +129,7 @@ export const queueController = {
   /* ── M7.3 · Awaiting a purchase order ──────────────────────────────────── */
 
   awaitingPoList: async (
-    req: ValidatedRequest<{ query: typeof QueueListQuerySchema }>,
+    req: ValidatedRequest<{ query: typeof AwaitingPoListQuerySchema }>,
     res: Response,
   ): Promise<void> => {
     res.json(await queueService.awaitingPoList(req.validated.query, callerFrom(req)));
@@ -131,7 +139,7 @@ export const queueController = {
     req: ValidatedRequest<{ body: typeof QueueIdsSchema }>,
     res: Response,
   ): Promise<void> => {
-    const changed = await queueService.awaitingPoChase(req.validated.body.ids, callerFrom(req));
-    res.json({ changed });
+    // `{ changed, emailed, noBillingEmail, failed }` — the screen reports all four.
+    res.json(await queueService.awaitingPoChase(req.validated.body.ids, callerFrom(req)));
   },
 };

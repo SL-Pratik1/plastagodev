@@ -86,6 +86,25 @@ export const InvoiceListItemSchema = z
 export type InvoiceListItem = z.infer<typeof InvoiceListItemSchema>;
 
 /**
+ * An invoice that billing a job produced or changed.
+ *
+ * ── Why "updated" exists ──────────────────────────────────────────────────
+ * Billing a job used to only ever CREATE, and refused once the job had an
+ * invoice of each kind. So a charge approved after the invoice was raised was
+ * never billed at all. Now a charge like that is added to the job's invoice
+ * while it is still unsent, and the caller is told which invoices were new and
+ * which were changed — "Invoice raised" over an invoice that already existed
+ * would send the office looking for a second document that is not there.
+ *
+ * Defaulted so a console updated before the API still reads the response.
+ */
+export const RaisedInvoiceSchema = InvoiceListItemSchema.extend({
+  change: z.enum(['created', 'updated']).default('created'),
+}).meta({ id: 'RaisedInvoice' });
+
+export type RaisedInvoice = z.infer<typeof RaisedInvoiceSchema>;
+
+/**
  * One invoice line.
  *
  * `quantity × unitRate = amount` is a functional GAIN over TransVirtual, which

@@ -1,11 +1,15 @@
-import type {
-  ChargeCode,
-  DefectSeverity,
-  DriverRun,
-  JobStatus,
-  LoadType,
-  RunStop,
-  WeightBasis,
+import {
+  photoPurpose,
+  type ChargeCode,
+  type ContaminationExtent,
+  type ContaminationType,
+  type DefectSeverity,
+  type DriverRun,
+  type JobStatus,
+  type LoadType,
+  type PhotoPurpose,
+  type RunStop,
+  type WeightBasis,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { UNKNOWN_ZONE_LABEL, zoneLabels } from '../settings/zone-lookup.js';
@@ -22,6 +26,8 @@ import {
 import { RunModel, RunTipOffModel } from '../dispatch/run.model.js';
 import { toDecimal128 } from '../../lib/money.js';
 import { VehicleModel } from '../fleet/vehicle.model.js';
+import { parseContaminationNote } from './contamination-note.js';
+import { ContaminationReportModel } from './contamination-report.model.js';
 import { VehicleDefectModel } from './defect.model.js';
 import type { ReconciliationStop } from './tipoff.js';
 
@@ -79,6 +85,10 @@ interface RawJobForDriver {
   recoveredWeightBasis: WeightBasis | null;
   /** Per-bag crane readings behind `recoveredWeightKg`. Empty on a hand load. */
   bagWeights?: number[];
+  /** When the driver saved the weights screen. Null until they do. */
+  weightsRecordedAt: Date | null;
+  /** The driver's own bagged/hand-load answer. Null until they save the weights screen. */
+  loadType?: LoadType | null;
   runId: mongoose.Types.ObjectId | null;
   runSequence: number | null;
   driverId: mongoose.Types.ObjectId | null;
@@ -86,7 +96,21 @@ interface RawJobForDriver {
   completedAt: Date | null;
 }
 
-export interface DriverStopRow extends Omit<RawJobForDriver, 'zoneId'> {
+/** A job's contamination report, as the service needs it. See `findContaminationReport`. */
+export interface ContaminationReportRow {
+  reportedAt: Date;
+  /** Null only on a report older than the record, whose charge note did not parse. */
+  type: ContaminationType | null;
+  extent: ContaminationExtent | null;
+  note: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  timelineRecordedAt: Date | null;
+  /** True when read back from the charge of a report made before the record existed. */
+  legacy: boolean;
+}
+
+export interface DriverStopRow extends Omit<RawJobForDriver, 'zoneId' | 'loadType'> {
   zoneId: RunStop['zoneId'];
   zoneLabel: RunStop['zoneLabel'];
   /** From the account — m²-only accounts never prompt for kilograms (M2.3). */
@@ -236,6 +260,8 @@ export const driverRepository = {
     /** Per-bag readings. Empty on a hand load or an m²-only account. */
     bagWeights: number[];
     craneScaleKg: number | null;
+    /** When the driver saved the screen — the phone's clock, so it survives a queued replay. */
+    recordedAt: Date;
   }): Promise<boolean> {
     const result = await JobModel.updateOne(
       {
@@ -252,6 +278,17 @@ export const driverRepository = {
           collectedBagCount: input.bagCount,
           loadType: input.loadType,
           bagWeights: input.bagWeights,
+          /*
+           * ⚠️ Stamped HERE, when the driver saves — not when the job
+           * completes. Completion is blocked until weights are recorded, so
+           * deriving this from `completedAt` made the two wait on each other
+           * and no job could be finished on the phone at all.
+           *
+           * Set for a hand load as well, which carries no kilograms: the
+           * question is whether the driver answered, not whether a scale was
+           * used.
+           */
+          weightsRecordedAt: input.recordedAt,
           recoveredWeightKg: input.craneScaleKg,
           /*
            * Matt, 56:11 — a crane-weighed load is ACTUAL; anything else is
@@ -486,6 +523,9 @@ export const driverRepository = {
     raisedAt: Date;
     photoCount: number;
     note: string | null;
+    /** M4.2 — where the driver was standing. Null for an office-raised charge. */
+    latitude: number | null;
+    longitude: number | null;
   }): Promise<string> {
     const created = await JobChargeModel.create({
       jobId: new mongoose.Types.ObjectId(input.jobId),
@@ -500,6 +540,8 @@ export const driverRepository = {
       raisedAt: input.raisedAt,
       photoCount: input.photoCount,
       note: input.note,
+      latitude: input.latitude,
+      longitude: input.longitude,
     });
 
     return created._id.toHexString();
@@ -631,6 +673,166 @@ export const driverRepository = {
       latitude: input.latitude,
       longitude: input.longitude,
     });
+  },
+
+  /**
+   * Whether the job's timeline already records it moving INTO `status`.
+   *
+   * The replay guard for a status event whose write can fail AFTER the status
+   * itself changed — see `markFutile`. Keyed on the event's `status`, which is
+   * structured, rather than its label, which is copy somebody may reword.
+   */
+  async hasStatusEvent(jobId: string, status: JobStatus): Promise<boolean> {
+    if (!mongoose.isValidObjectId(jobId)) return false;
+
+    const found = await JobEventModel.exists({
+      jobId: new mongoose.Types.ObjectId(jobId),
+      status,
+    });
+    return found !== null;
+  },
+
+  /**
+   * How many of a job's photos are evidence of one report (see `photoPurpose`).
+   *
+   * Counted from the photos themselves rather than trusted from the phone,
+   * which is what a replay has to do: it no longer has the capture screen's
+   * list in hand.
+   */
+  async countEvidencePhotos(jobId: string, purpose: PhotoPurpose): Promise<number> {
+    if (!mongoose.isValidObjectId(jobId)) return 0;
+
+    const rows = await JobPhotoModel.find(
+      { jobId: new mongoose.Types.ObjectId(jobId) },
+      { slot: 1, caption: 1 },
+    ).lean<Array<{ slot?: string | null; caption: string }>>();
+
+    return rows.filter((photo) => photoPurpose(photo) === purpose).length;
+  },
+
+  /* ── M4.7 · the contamination report ───────────────────────────────────── */
+
+  /**
+   * The report on a job, or null when there is none.
+   *
+   * ── Reports made before the record existed ────────────────────────────────
+   * Those left a driver-raised contamination CHARGE and no report row. Reading
+   * that charge as the report is what stops a job reported last week offering
+   * the form again the day this ships — the charge is only ever raised by a
+   * report, so its existence is the fact, and its note (written as
+   * "type · extent — note") is the detail where it still parses.
+   */
+  async findContaminationReport(jobId: string): Promise<ContaminationReportRow | null> {
+    if (!mongoose.isValidObjectId(jobId)) return null;
+    const _id = new mongoose.Types.ObjectId(jobId);
+
+    const report = await ContaminationReportModel.findOne({ jobId: _id }).lean<{
+      type: ContaminationType;
+      extent: ContaminationExtent;
+      note?: string | null;
+      reportedAt: Date;
+      latitude?: number | null;
+      longitude?: number | null;
+      timelineRecordedAt?: Date | null;
+    }>();
+
+    if (report) {
+      return {
+        reportedAt: report.reportedAt,
+        type: report.type,
+        extent: report.extent,
+        note: report.note ?? null,
+        latitude: report.latitude ?? null,
+        longitude: report.longitude ?? null,
+        timelineRecordedAt: report.timelineRecordedAt ?? null,
+        legacy: false,
+      };
+    }
+
+    const charge = await JobChargeModel.findOne({
+      jobId: _id,
+      code: 'contamination',
+      source: 'driver',
+    })
+      .sort({ raisedAt: 1 })
+      .lean<{
+        raisedAt: Date;
+        note?: string | null;
+        latitude?: number | null;
+        longitude?: number | null;
+      }>();
+
+    if (!charge) return null;
+
+    const parsed = parseContaminationNote(charge.note ?? null);
+
+    return {
+      reportedAt: charge.raisedAt,
+      type: parsed.type,
+      extent: parsed.extent,
+      note: parsed.note,
+      latitude: charge.latitude ?? null,
+      longitude: charge.longitude ?? null,
+      // The old path wrote its timeline line straight after the charge, and
+      // there is nothing to go back and finish on a report that old.
+      timelineRecordedAt: charge.raisedAt,
+      legacy: true,
+    };
+  },
+
+  /**
+   * Stores the report — once. Returns whether THIS call created it.
+   *
+   * ⚠️ `$setOnInsert` against the unique `jobId`, so two replays of one queued
+   * report landing together cannot both win: the loser matches the row the
+   * winner wrote and inserts nothing. A duplicate-key error from the same race
+   * on an older server means exactly that too, and is answered the same way.
+   */
+  async recordContaminationReport(input: {
+    jobId: string;
+    type: ContaminationType;
+    extent: ContaminationExtent;
+    note: string | null;
+    reportedAt: Date;
+    reportedByUserId: string;
+    reportedByName: string;
+    latitude: number | null;
+    longitude: number | null;
+  }): Promise<boolean> {
+    const jobId = new mongoose.Types.ObjectId(input.jobId);
+
+    try {
+      const result = await ContaminationReportModel.updateOne(
+        { jobId },
+        {
+          $setOnInsert: {
+            jobId,
+            type: input.type,
+            extent: input.extent,
+            note: input.note,
+            reportedAt: input.reportedAt,
+            reportedByUserId: new mongoose.Types.ObjectId(input.reportedByUserId),
+            reportedByName: input.reportedByName,
+            latitude: input.latitude,
+            longitude: input.longitude,
+            timelineRecordedAt: null,
+          },
+        },
+        { upsert: true },
+      );
+      return result.upsertedCount === 1;
+    } catch (error) {
+      if (error instanceof mongoose.mongo.MongoServerError && error.code === 11000) return false;
+      throw error;
+    }
+  },
+
+  /** Records that the job's timeline has the report — see `timelineRecordedAt`. */
+  async markContaminationOnTimeline(jobId: string, at: Date): Promise<void> {
+    await ContaminationReportModel.updateOne(
+      { jobId: new mongoose.Types.ObjectId(jobId), timelineRecordedAt: null },
+      { $set: { timelineRecordedAt: at } },
+    );
   },
 
   /* ── The driver's truck ────────────────────────────────────────────────── */
@@ -855,11 +1057,13 @@ async function decorate(jobs: RawJobForDriver[]): Promise<DriverStopRow[]> {
     zoneLabel: zones.get(job.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
     capturesWeight: captureByAccount.get(job.accountId.toHexString()) === 'area-and-weight',
     /*
-     * Bagged when the site has a crane to lift them, hand-load otherwise. A
-     * default rather than a guess: the driver sets it for real when capturing
-     * weights, and this only decides which prompt they see first.
+     * The driver's own answer wins, falling back to the office's booking guess
+     * (a crane on site means bagged) only until they have saved the screen.
+     *
+     * Using that guess unconditionally overwrote what the driver recorded: the
+     * run sheet kept saying "hand load" after they had saved six weighed bags.
      */
-    loadType: job.craneAvailable ? 'bagged' : 'hand-load',
+    loadType: job.loadType ?? (job.craneAvailable ? 'bagged' : 'hand-load'),
     photoCount: photosByJob.get(job._id.toHexString()) ?? 0,
     riskAssessmentDoneAt: sraByJob.get(job._id.toHexString()) ?? null,
   }));

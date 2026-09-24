@@ -28,6 +28,14 @@ let certified: CertifyCall[] = [];
 let changeRequests: Array<{ jobId: string; kind: string; requestedDate: string | null }> = [];
 let jobDrafts: Array<Record<string, unknown>> = [];
 let edits: Array<Record<string, unknown>> = [];
+/** The scope every "may this caller touch this pickup?" read was handed. */
+let forEditScopes: Array<{ accountId: string; bookedByUserId: string | null }> = [];
+/** What reached the job's comment path from the portal. */
+let postedComments: Array<{
+  id: string;
+  draft: { body: string; visibility: string };
+  caller: { userId: string; name: string; accountId: string | null };
+}> = [];
 
 /** What the repository reports back. Set per test. */
 let jobEditable = true;
@@ -93,10 +101,12 @@ vi.mock('../src/domains/portal/portal.repository.js', () => ({
       });
     },
     outstandingInvoices: () => Promise.resolve({ count: 2, totalIncGst: '773.86' }),
-    findJobForEdit: () =>
-      Promise.resolve(
+    findJobForEdit: (_id: string, scope: { accountId: string; bookedByUserId: string | null }) => {
+      forEditScopes.push(scope);
+      return Promise.resolve(
         jobFound ? { id: 'job1', status: jobStatus, editable: jobEditable, runId: null } : null,
-      ),
+      );
+    },
     editJob: (_id: string, _scope: unknown, input: Record<string, unknown>) => {
       if (!editApplied) return Promise.resolve(false);
       edits.push(input);
@@ -127,8 +137,8 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
  */
 vi.mock('../src/domains/notifications/notification.service.js', () => ({
   notificationService: {
-    notifyOffice: vi.fn(async () => undefined),
-    notifyAccount: vi.fn(async () => undefined),
+    notifyOffice: vi.fn(async () => []),
+    notifyJobAudience: vi.fn(async () => []),
   },
 }));
 
@@ -152,6 +162,23 @@ vi.mock('../src/domains/jobs/job.service.js', () => ({
     preview: (draft: Record<string, unknown>) => {
       jobDrafts.push(draft);
       return Promise.resolve({ subtotalExGst: '351.75', totalIncGst: '386.93' });
+    },
+    addComment: (
+      id: string,
+      draft: { body: string; visibility: string },
+      caller: { userId: string; name: string; accountId: string | null },
+    ) => {
+      postedComments.push({ id, draft, caller });
+      return Promise.resolve({
+        id: 'cmt0000000000000000000001',
+        body: draft.body,
+        author: caller.name,
+        at: '2026-09-24T01:00:00.000Z',
+        visibility: draft.visibility,
+        deliveredAt: null,
+        fromDriver: false,
+        fromCustomer: true,
+      });
     },
   },
 }));
@@ -213,6 +240,8 @@ beforeEach(() => {
   changeRequests = [];
   jobDrafts = [];
   edits = [];
+  forEditScopes = [];
+  postedComments = [];
   jobEditable = true;
   jobStatus = 'booked';
   jobFound = true;
@@ -571,6 +600,61 @@ describe('readiness (M5.2)', () => {
     await expect(
       portalService.certifyReadiness('job1', CERTIFICATION, ADMIN),
     ).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+/*
+ * M2.11 — the customer replies to the office on a pickup. Before this the
+ * portal could only show the office's messages, and only once one existed.
+ */
+describe('replying to the office (M2.11)', () => {
+  it('lands an administrator’s reply on the customer thread', async () => {
+    const message = await portalService.postMessage('job1', { body: 'Gate code is 2291' }, ADMIN);
+
+    expect(postedComments).toHaveLength(1);
+    expect(postedComments[0]?.draft).toEqual({ body: 'Gate code is 2291', visibility: 'customer' });
+    // Signed by the session, on the session's own account.
+    expect(postedComments[0]?.caller).toMatchObject({
+      userId: ADMIN.userId,
+      name: 'Angela Fitzgerald',
+      accountId: ACCOUNT.id,
+    });
+    expect(message).toMatchObject({ fromCustomer: true, mine: true, author: 'Angela Fitzgerald' });
+  });
+
+  it('lets a site supervisor reply — scoped to the pickups they booked', async () => {
+    await portalService.postMessage('job1', { body: 'Board is stacked' }, SUPERVISOR);
+
+    expect(forEditScopes[0]).toEqual({ accountId: ACCOUNT.id, bookedByUserId: SUPERVISOR.userId });
+    expect(postedComments).toHaveLength(1);
+  });
+
+  // The same answer as reading it: a 403 would confirm the pickup exists.
+  it('404s a pickup outside the caller’s scope, and posts nothing', async () => {
+    jobFound = false;
+
+    await expect(
+      portalService.postMessage('job1', { body: 'Hello?' }, SUPERVISOR),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(postedComments).toHaveLength(0);
+  });
+
+  it('refuses an account that is not active', async () => {
+    ACCOUNT.status = 'inactive';
+
+    await expect(
+      portalService.postMessage('job1', { body: 'Hello?' }, ADMIN),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(postedComments).toHaveLength(0);
+  });
+
+  // "Why was this one futile?" is asked after the fact.
+  it('allows a reply on a finished pickup', async () => {
+    jobStatus = 'futile';
+
+    await expect(
+      portalService.postMessage('job1', { body: 'Why was this futile?' }, ADMIN),
+    ).resolves.toMatchObject({ fromCustomer: true });
   });
 });
 

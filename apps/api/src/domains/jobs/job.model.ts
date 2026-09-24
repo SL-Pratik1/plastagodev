@@ -7,6 +7,7 @@ import {
   EXCEPTION_REASONS,
   FREIGHT_ITEMS,
   JOB_STATUSES,
+  LOAD_TYPES,
   SERVICE_LEVELS,
   SRA_STEP_STATES,
   WEIGHT_BASES,
@@ -281,6 +282,32 @@ const jobSchema = new Schema(
      * "zero kilograms" — read `recoveredWeightKg` for the weight.
      */
     bagWeights: { type: [Number], default: [] },
+    /**
+     * M4.3 — what the DRIVER found on site: bagged, or hand loaded.
+     *
+     * ⚠️ Not the same question as `freightItem`, which is what the office
+     * expected when the job was booked. The two disagree often enough to be
+     * worth keeping apart — a job booked as bagged that turns up loose is
+     * exactly the case the run sheet has to show honestly.
+     *
+     * It was missing from this schema while `recordWeights` set it, so strict
+     * mode dropped it on every save: the driver's choice was collected, sent,
+     * and silently discarded.
+     */
+    loadType: { type: String, enum: LOAD_TYPES, default: null },
+    /**
+     * M4.3 — when the weights screen was saved.
+     *
+     * ⚠️ This is the ONLY honest answer to "has the driver recorded what they
+     * collected?", and it has to be a stored fact. It was previously derived as
+     * `recoveredWeightBasis !== null && completedAt !== null`, which deadlocked
+     * the phone: completion is blocked until weights are recorded, and that
+     * expression could not be true until the job was already complete.
+     *
+     * Stamped for a hand load too, which has no kilograms at all — "recorded"
+     * means the driver answered the question, not that a scale was involved.
+     */
+    weightsRecordedAt: { type: Date, default: null },
     freightItem: { type: String, required: true, enum: FREIGHT_ITEMS },
 
     /* ── Money. `Decimal128`, never a float (§6A.10 #1). ─────────────── */
@@ -480,6 +507,22 @@ const jobChargeSchema = new Schema(
     raisedAt: { type: Date, required: true, default: Date.now },
     photoCount: { type: Number, required: true, min: 0, default: 0 },
     /**
+     * Where the driver was standing when they raised it (M4.2).
+     *
+     * ── Why a charge carries a position at all ─────────────────────────────
+     * The contamination screen tells the driver, in as many words, that "your
+     * photo, position and the time are what make the charge stand up". The phone
+     * has always sent all three; only the photo and the time were ever stored,
+     * so the approvals screen showed "Position when raised — Not captured" on
+     * every charge ever raised, including the ones raised standing in the mud.
+     *
+     * ⚠️ Null on anything raised before these fields existed, and deliberately
+     * not back-filled: the fix is to stop discarding the fix, not to invent one
+     * for history. An office charge typed at a desk is legitimately null too.
+     */
+    latitude: { type: Number, default: null },
+    longitude: { type: Number, default: null },
+    /**
      * What the DRIVER said they saw. Never overwritten by the office.
      *
      * The approval path used to `$set` the office’s reason straight over this
@@ -622,6 +665,12 @@ const jobCommentSchema = new Schema(
     deliveredAt: { type: Date, default: null },
     /** True when the driver wrote it, so the thread reads as a conversation. */
     fromDriver: { type: Boolean, required: true, default: false },
+    /**
+     * True when the customer wrote it — a reply from the portal, always on the
+     * `customer` thread. Defaults false, which is right for every comment
+     * written before customers could reply.
+     */
+    fromCustomer: { type: Boolean, required: true, default: false },
   },
   { collection: JOB_COMMENTS_COLLECTION, timestamps: true, versionKey: false },
 );

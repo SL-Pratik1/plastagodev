@@ -1,5 +1,22 @@
-import { ObjectIdSchema } from '@plastago/shared';
+import { ObjectIdSchema, RoleSchema } from '@plastago/shared';
 import * as z from 'zod';
+
+/**
+ * The role a signed-in user is asking to work as.
+ *
+ * `RoleSchema` only says the value is one of the seven that exist — whether it
+ * is one of THEIRS is a rule about a person, not about a string, so the service
+ * checks it against `roles` and refuses with a 403. Validating shape here and
+ * entitlement there is the split §6A.3 asks for, and it is the difference
+ * between a switcher and a role-granting endpoint.
+ */
+export const ActiveRoleSchema = z
+  .object({
+    role: RoleSchema,
+  })
+  .meta({ id: 'ActiveRoleRequest' });
+
+export type ActiveRoleRequest = z.infer<typeof ActiveRoleSchema>;
 
 /**
  * The resend request body.

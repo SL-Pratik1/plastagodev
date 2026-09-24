@@ -43,6 +43,57 @@ function portal(): string {
   return publicUrlFor('portal');
 }
 
+/* ── One SMS, not three ──────────────────────────────────────────────────── */
+
+/*
+ * The GSM-7 alphabet. A single character outside it — an em dash, a curly
+ * apostrophe, the ² in m² — switches the WHOLE message to UCS-2, where one SMS
+ * holds 70 characters instead of 160 and every send is billed two or three
+ * times over.
+ */
+const GSM_BASIC =
+  '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡' +
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà';
+/** These cost two characters each. */
+const GSM_EXTENDED = '^{}\\[~]|€';
+
+/** Whether `body` goes out as ONE standard SMS: GSM-7 and at most 160 characters. */
+export function fitsOneSms(body: string): boolean {
+  let length = 0;
+  for (const character of body) {
+    if (GSM_EXTENDED.includes(character)) length += 2;
+    else if (GSM_BASIC.includes(character)) length += 1;
+    else return false;
+  }
+  return length <= 160;
+}
+
+/**
+ * Typed text made safe for GSM-7 — the characters people's keyboards and
+ * address books slip in (curly quotes, dashes, a superscript two).
+ */
+function smsSafe(text: string): string {
+  return text
+    .replace(/[‘’‚‛`]/g, "'")
+    .replace(/[“”„]/g, '"')
+    .replace(/[‐‑‒–—―]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/²/g, '2')
+    .replace(/\s/g, ' ')
+    .replace(/[^\n\r -~£¥èéùìòÇØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ¤¡ÄÖÑÜ§¿äöñüà€]/g, '');
+}
+
+/**
+ * The first wording that fits one SMS.
+ *
+ * Candidates go longest first; the last one should be short enough to always
+ * fit. A site name is the usual reason a message overflows, so the fallbacks
+ * drop it and keep the job number, which is enough to find the job.
+ */
+function firstThatFits(candidates: readonly string[]): string {
+  return candidates.find(fitsOneSms) ?? candidates[candidates.length - 1] ?? '';
+}
+
 export interface InviteContext {
   /** The invited person's name, for the greeting. */
   name: string;
@@ -398,9 +449,27 @@ export function buildCertificateEmail(
 export interface JobNoticeContext {
   jobNumber: number;
   siteName: string;
-  /** Formatted for a person — "Tue 12 Sept", not an ISO date. */
+  /**
+   * Formatted for a person — "Tue 12 Sept", not an ISO date.
+   *
+   * On a booking this is the date we will collect BY (the SLA deadline); on a
+   * readiness reminder it is the day the truck is booked to come.
+   */
   when: string;
+  /**
+   * The customer's ready date, formatted. When present a booking reads "ready
+   * from 24 Sept, collected by 1 Oct" — the deadline on its own read as the
+   * day the truck was coming, which it is not.
+   */
+  readyFrom?: string | undefined;
   accountName: string;
+}
+
+/** "Ready from Thu 24 Sept, collected by Thu 1 Oct" — or the old one-date form. */
+function collectionWindow(context: JobNoticeContext): string {
+  if (!context.readyFrom) return `booked for ${context.when}`;
+  if (context.readyFrom === context.when) return `booked for ${context.when}`;
+  return `ready from ${context.readyFrom}, collected by ${context.when}`;
 }
 
 /**
@@ -413,9 +482,10 @@ export interface JobNoticeContext {
  */
 export function buildJobBookedEmail(to: string, context: JobNoticeContext): OutboundEmail {
   const url = `${portal()}/portal/jobs`;
+  const window = collectionWindow(context);
 
   const text = [
-    `${context.siteName} — plasterboard pickup booked for ${context.when}.`,
+    `${context.siteName} — plasterboard pickup ${window}.`,
     '',
     `Job #${String(context.jobNumber)} for ${context.accountName}.`,
     '',
@@ -425,25 +495,41 @@ export function buildJobBookedEmail(to: string, context: JobNoticeContext): Outb
   ].join('\n');
 
   const html = emailShell([
-    `<strong>${escapeHtml(context.siteName)}</strong> — plasterboard pickup booked for ` +
-      `<strong>${escapeHtml(context.when)}</strong>.`,
+    `<strong>${escapeHtml(context.siteName)}</strong> — plasterboard pickup ` +
+      `<strong>${escapeHtml(window)}</strong>.`,
     `Job #${escapeHtml(String(context.jobNumber))} for ${escapeHtml(context.accountName)}.`,
     'Please have the pile stacked and clear of cars, and the gate accessible.',
     emailButton(url, 'Track this pickup'),
   ]);
 
-  return { to, subject: `Pickup booked — ${context.siteName}, ${context.when}`, text, html };
+  const subject = context.readyFrom
+    ? `Pickup booked — ${context.siteName}, ready from ${context.readyFrom}`
+    : `Pickup booked — ${context.siteName}, ${context.when}`;
+
+  return { to, subject, text, html };
 }
 
 export function buildJobBookedSms(to: string, context: JobNoticeContext): OutboundSms {
-  const brand = env.OTP_SENDER_NAME;
+  const brand = smsSafe(env.OTP_SENDER_NAME);
+  const site = smsSafe(context.siteName);
+  const window = smsSafe(windowSentence(context));
+  const job = `Job #${String(context.jobNumber)}`;
 
   return {
     to,
-    body:
-      `${brand}: pickup booked for ${context.siteName} on ${context.when}. ` +
-      `Job #${String(context.jobNumber)}. Please keep the pile clear and the gate accessible.`,
+    body: firstThatFits([
+      `${brand}: pickup booked at ${site}. ${window}. ${job}. Please keep the pile clear and the gate open.`,
+      `${brand}: pickup booked at ${site}. ${window}. ${job}.`,
+      `${brand}: pickup booked. ${window}. ${job}.`,
+    ]),
   };
+}
+
+/** The collection window as a sentence of its own, for an SMS. */
+function windowSentence(context: JobNoticeContext): string {
+  return context.readyFrom && context.readyFrom !== context.when
+    ? `Ready from ${context.readyFrom}, collected by ${context.when}`
+    : `Collection ${context.when}`;
 }
 
 /** "The driver is on the way" — the message that stops the "where are they?" call. */
@@ -593,12 +679,383 @@ export function buildReadinessEmail(to: string, context: ReadinessContext): Outb
 }
 
 export function buildReadinessSms(to: string, context: ReadinessContext): OutboundSms {
-  const brand = env.OTP_SENDER_NAME;
+  const brand = smsSafe(env.OTP_SENDER_NAME);
+  const site = smsSafe(context.siteName);
+  const url = `${portal()}/portal/jobs/${context.jobId}`;
+  const job = `job #${String(context.jobNumber)}`;
 
   return {
     to,
-    body:
-      `${brand}: is ${context.siteName} ready for tomorrow's pickup? ` +
-      `If not, move it here: ${portal()}/portal/jobs/${context.jobId}`,
+    // The link is the point of the message, so it is never the part dropped.
+    body: firstThatFits([
+      `${brand}: is ${site} ready for tomorrow's pickup? If not, move it here: ${url}`,
+      `${brand}: is the site for ${job} ready for tomorrow's pickup? If not: ${url}`,
+      `${brand}: ${job} pickup is tomorrow. Not ready? ${url}`,
+    ]),
+  };
+}
+
+/* ── Messages on a pickup (M2.11) ────────────────────────────────────────── */
+
+export interface JobMessageContext {
+  jobId: string;
+  jobNumber: number;
+  siteName: string;
+  accountName: string;
+  /** Who wrote it, as the thread shows them. */
+  author: string;
+  /** The message, as typed. */
+  body: string;
+}
+
+/**
+ * The message itself, set apart from the sentence that introduces it.
+ *
+ * Escaped, with line breaks kept as `<br>` rather than left to `pre-wrap`,
+ * which some desktop mail clients ignore.
+ */
+function quotedMessage(body: string): string {
+  return (
+    '<span style="display:block;padding:12px 16px;border-left:3px solid #c9d3c4;' +
+    `background:#f5f7f4;border-radius:4px">${escapeHtml(body).replace(/\r?\n/g, '<br>')}</span>`
+  );
+}
+
+/**
+ * "The office wrote to you about a pickup" (M2.11).
+ *
+ * ── Why the whole message is in the email ─────────────────────────────────
+ * The point of emailing is that the customer can read it without signing in —
+ * a new gate time or a question about the pile is exactly what they need on
+ * their phone. The words are the office's own, written to them.
+ *
+ * ── Why it asks for the reply in the portal ───────────────────────────────
+ * An emailed reply lands in a mailbox, not on the job: the office would read
+ * it without the pickup it is about, and the thread on the job would be
+ * missing half the conversation. The button opens the thread itself.
+ */
+export function buildJobMessageToCustomerEmail(
+  to: string,
+  context: JobMessageContext,
+): OutboundEmail {
+  const url = `${portal()}/portal/jobs/${context.jobId}#messages`;
+  const job = `job #${String(context.jobNumber)}`;
+
+  const text = [
+    `${context.author} at PlastaGo wrote about ${context.siteName} (${job}):`,
+    '',
+    context.body,
+    '',
+    `Reply in the portal so it stays with the pickup: ${url}`,
+  ].join('\n');
+
+  const html = emailShell([
+    `<strong>${escapeHtml(context.author)}</strong> at PlastaGo wrote about ` +
+      `<strong>${escapeHtml(context.siteName)}</strong> (${escapeHtml(job)}):`,
+    quotedMessage(context.body),
+    emailButton(url, 'Reply in the portal'),
+    'Please reply in the portal rather than to this email, so your answer stays with the pickup.',
+  ]);
+
+  return { to, subject: `Message about ${context.siteName} — ${job}`, text, html };
+}
+
+/**
+ * "A customer wrote about a pickup" — the office's copy (M2.11).
+ *
+ * Links to the job's Customer thread in the console, where the reply belongs.
+ */
+export function buildJobMessageToOfficeEmail(to: string, context: JobMessageContext): OutboundEmail {
+  const url = `${publicUrlFor('admin')}/admin/jobs/${context.jobId}?tab=comments&thread=customer`;
+  const job = `job #${String(context.jobNumber)}`;
+
+  const text = [
+    `${context.author} at ${context.accountName} wrote about ${context.siteName} (${job}):`,
+    '',
+    context.body,
+    '',
+    `Answer on the job: ${url}`,
+  ].join('\n');
+
+  const html = emailShell([
+    `<strong>${escapeHtml(context.author)}</strong> at ${escapeHtml(context.accountName)} wrote ` +
+      `about <strong>${escapeHtml(context.siteName)}</strong> (${escapeHtml(job)}):`,
+    quotedMessage(context.body),
+    emailButton(url, 'Answer on the job'),
+  ]);
+
+  return { to, subject: `Message from ${context.accountName} — ${job}`, text, html };
+}
+
+/* ── When a pickup does not go ahead (M2.4 · M2.6) ───────────────────────── */
+
+export interface JobFutileContext extends JobNoticeContext {
+  jobId: string;
+  /** Why the driver could not collect, in words — "Site not ready". */
+  reason: string;
+}
+
+/**
+ * "We could not collect today."
+ *
+ * ── Why the customer is told the same day ─────────────────────────────────
+ * A futile pickup carries a fee, and until now the first the customer heard of
+ * it was the invoice — weeks later, with nobody on site remembering the day.
+ * Telling them while it is still fresh is what turns a dispute into "yes, the
+ * pile was not ready".
+ *
+ * ⚠️ No amount. Whether the fee stands is the office's decision on the futile
+ * review, and a figure in a text is a figure the customer argues with before
+ * anybody has rung them.
+ */
+export function buildJobFutileEmail(to: string, context: JobFutileContext): OutboundEmail {
+  const url = `${portal()}/portal/jobs/${context.jobId}`;
+  const job = `Job #${String(context.jobNumber)}`;
+
+  const text = [
+    `We could not collect the plasterboard at ${context.siteName} today.`,
+    '',
+    `Reason: ${context.reason}.`,
+    `${job} for ${context.accountName}.`,
+    '',
+    'The office will be in touch to book a new day. If the site is ready now, call',
+    '1300 395 438.',
+    '',
+    `See the job: ${url}`,
+  ].join('\n');
+
+  const html = emailShell([
+    `We could not collect the plasterboard at <strong>${escapeHtml(context.siteName)}</strong> today.`,
+    `Reason: <strong>${escapeHtml(context.reason)}</strong>. ${escapeHtml(job)} for ` +
+      `${escapeHtml(context.accountName)}.`,
+    'The office will be in touch to book a new day. If the site is ready now, call ' +
+      '<strong>1300 395 438</strong>.',
+    emailButton(url, 'See the job'),
+  ]);
+
+  return { to, subject: `We could not collect today — ${context.siteName}`, text, html };
+}
+
+export function buildJobFutileSms(to: string, context: JobFutileContext): OutboundSms {
+  const brand = smsSafe(env.OTP_SENDER_NAME);
+  const site = smsSafe(context.siteName);
+  const reason = smsSafe(context.reason);
+  const job = `job #${String(context.jobNumber)}`;
+
+  return {
+    to,
+    body: firstThatFits([
+      `${brand}: we could not collect at ${site} today (${reason}). The office will call you to rebook. Ph 1300 395 438`,
+      `${brand}: we could not collect ${job} today (${reason}). The office will call you to rebook. Ph 1300 395 438`,
+      `${brand}: we could not collect ${job} today. The office will call you to rebook.`,
+    ]),
+  };
+}
+
+/** "Your pickup has been cancelled." */
+export function buildJobCancelledEmail(to: string, context: JobNoticeContext): OutboundEmail {
+  const job = `Job #${String(context.jobNumber)}`;
+
+  const text = [
+    `The plasterboard pickup at ${context.siteName} has been cancelled.`,
+    '',
+    `${job} for ${context.accountName}. Nobody will come to the site for it.`,
+    '',
+    'If this is a mistake, call 1300 395 438.',
+  ].join('\n');
+
+  const html = emailShell([
+    `The plasterboard pickup at <strong>${escapeHtml(context.siteName)}</strong> has been ` +
+      '<strong>cancelled</strong>.',
+    `${escapeHtml(job)} for ${escapeHtml(context.accountName)}. Nobody will come to the site for it.`,
+    'If this is a mistake, call <strong>1300 395 438</strong>.',
+  ]);
+
+  return { to, subject: `Pickup cancelled — ${context.siteName}`, text, html };
+}
+
+export function buildJobCancelledSms(to: string, context: JobNoticeContext): OutboundSms {
+  const brand = smsSafe(env.OTP_SENDER_NAME);
+  const site = smsSafe(context.siteName);
+  const job = `job #${String(context.jobNumber)}`;
+
+  return {
+    to,
+    body: firstThatFits([
+      `${brand}: the pickup at ${site} (${job}) has been cancelled. If this is wrong, call 1300 395 438.`,
+      `${brand}: pickup ${job} has been cancelled. If this is wrong, call 1300 395 438.`,
+    ]),
+  };
+}
+
+/** "Your pickup has a new date." */
+export function buildJobMovedEmail(
+  to: string,
+  context: JobNoticeContext & { jobId: string },
+): OutboundEmail {
+  const url = `${portal()}/portal/jobs/${context.jobId}`;
+  const window = collectionWindow(context);
+  const job = `Job #${String(context.jobNumber)}`;
+
+  const text = [
+    `The plasterboard pickup at ${context.siteName} has a new date: ${window}.`,
+    '',
+    `${job} for ${context.accountName}.`,
+    '',
+    `Track it here: ${url}`,
+  ].join('\n');
+
+  const html = emailShell([
+    `The plasterboard pickup at <strong>${escapeHtml(context.siteName)}</strong> has a new date: ` +
+      `<strong>${escapeHtml(window)}</strong>.`,
+    `${escapeHtml(job)} for ${escapeHtml(context.accountName)}.`,
+    emailButton(url, 'Track this pickup'),
+  ]);
+
+  return { to, subject: `Pickup date changed — ${context.siteName}`, text, html };
+}
+
+export function buildJobMovedSms(to: string, context: JobNoticeContext): OutboundSms {
+  const brand = smsSafe(env.OTP_SENDER_NAME);
+  const site = smsSafe(context.siteName);
+  const window = smsSafe(windowSentence(context));
+  const job = `Job #${String(context.jobNumber)}`;
+
+  return {
+    to,
+    body: firstThatFits([
+      `${brand}: new date for the pickup at ${site}. ${window}. ${job}.`,
+      `${brand}: new pickup date. ${window}. ${job}.`,
+    ]),
+  };
+}
+
+/* ── To a driver, about a job on their run ───────────────────────────────── */
+
+export interface DriverJobContext {
+  jobNumber: number;
+  siteName: string;
+  /** The run's day, formatted — "Fri 25 Sept". */
+  runDay: string;
+  /** Only on a move: the new ready date, formatted. */
+  newReadyFrom?: string | undefined;
+}
+
+/**
+ * "Do not collect it." — the office cancelled a job that is on your run.
+ *
+ * ⚠️ SMS first, whatever else is on file. A driver reads a text in the cab; an
+ * email is found at the end of the day, after the wasted trip. The service only
+ * falls back to email for a driver with no mobile at all.
+ */
+export function buildDriverJobCancelledSms(to: string, context: DriverJobContext): OutboundSms {
+  const brand = smsSafe(env.OTP_SENDER_NAME);
+  const site = smsSafe(context.siteName);
+  const job = `job #${String(context.jobNumber)}`;
+  const day = smsSafe(context.runDay);
+
+  return {
+    to,
+    body: firstThatFits([
+      `${brand}: ${job} at ${site} on your ${day} run is CANCELLED. Do not collect it.`,
+      `${brand}: ${job} on your ${day} run is CANCELLED. Do not collect it.`,
+    ]),
+  };
+}
+
+export function buildDriverJobCancelledEmail(to: string, context: DriverJobContext): OutboundEmail {
+  const sms = buildDriverJobCancelledSms(to, context).body;
+  return {
+    to,
+    subject: `Job #${String(context.jobNumber)} cancelled — do not collect`,
+    text: sms,
+    html: emailShell([escapeHtml(sms)]),
+  };
+}
+
+/** The job's date moved past the run's day, so it came off the driver's run. */
+export function buildDriverJobMovedSms(to: string, context: DriverJobContext): OutboundSms {
+  const brand = smsSafe(env.OTP_SENDER_NAME);
+  const site = smsSafe(context.siteName);
+  const job = `job #${String(context.jobNumber)}`;
+  const day = smsSafe(context.runDay);
+  const moved = context.newReadyFrom ? ` has moved to ${smsSafe(context.newReadyFrom)} and` : '';
+
+  return {
+    to,
+    body: firstThatFits([
+      `${brand}: ${job} at ${site}${moved} is off your ${day} run. Do not collect it.`,
+      `${brand}: ${job}${moved} is off your ${day} run. Do not collect it.`,
+      `${brand}: ${job} is off your ${day} run. Do not collect it.`,
+    ]),
+  };
+}
+
+export function buildDriverJobMovedEmail(to: string, context: DriverJobContext): OutboundEmail {
+  const sms = buildDriverJobMovedSms(to, context).body;
+  return {
+    to,
+    subject: `Job #${String(context.jobNumber)} taken off your run — do not collect`,
+    text: sms,
+    html: emailShell([escapeHtml(sms)]),
+  };
+}
+
+/* ── Asking for a purchase order (M7.3) ──────────────────────────────────── */
+
+export interface PoRequestContext {
+  accountName: string;
+  /** As printed on the invoice, prefix included — "PGA-104234" or "104234". */
+  invoiceNumber: string;
+  totalIncGst: string;
+  /** What the PO is FOR — "Contamination — timber offcuts". */
+  chargeSummary: string;
+  jobNumber: number | null;
+  siteName: string | null;
+}
+
+/**
+ * "We need a purchase order for this invoice."
+ *
+ * Sent from the awaiting-PO queue's "Send reminder". It names what the PO is
+ * for, because "we need a PO for invoice 104234" is not something an accounts
+ * clerk can raise without asking what it covers.
+ */
+export function buildPoRequestEmail(to: string, context: PoRequestContext): OutboundEmail {
+  const brand = env.OTP_SENDER_NAME;
+  const where = [
+    context.jobNumber === null ? null : `job #${String(context.jobNumber)}`,
+    context.siteName,
+  ]
+    .filter((part): part is string => part !== null && part.trim() !== '' && part !== '—')
+    .join(', ');
+
+  const text = [
+    'Hello,',
+    '',
+    `We need a purchase order for invoice ${context.invoiceNumber} before we can send it.`,
+    '',
+    `${context.chargeSummary} — $${context.totalIncGst} including GST.`,
+    ...(where ? [`For ${where}.`] : []),
+    '',
+    'Please reply to this email with the PO number, or call 1300 395 438.',
+    '',
+    `— ${brand} accounts`,
+  ].join('\n');
+
+  const html = emailShell([
+    `We need a purchase order for invoice <strong>${escapeHtml(context.invoiceNumber)}</strong> ` +
+      'before we can send it.',
+    `${escapeHtml(context.chargeSummary)} — <strong>$${escapeHtml(context.totalIncGst)}</strong> ` +
+      'including GST.' +
+      (where ? ` For ${escapeHtml(where)}.` : ''),
+    'Please reply to this email with the PO number, or call <strong>1300 395 438</strong>.',
+  ]);
+
+  return {
+    to,
+    subject: `Purchase order needed — invoice ${context.invoiceNumber} — ${context.accountName}`,
+    text,
+    html,
   };
 }

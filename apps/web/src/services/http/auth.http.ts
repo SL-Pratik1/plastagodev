@@ -63,6 +63,24 @@ export function createHttpAuthService(api: ApiClient): AuthService {
         }),
       ),
 
+    /*
+     * The switch is a WRITE, which is the whole point of it being here.
+     *
+     * It used to be a `setState` in the auth provider, and that could not
+     * survive the one journey it exists for: the console and the driver app are
+     * separate origins (§6A.5), so moving between them is a page load, and a
+     * page load takes React state with it. The server now holds the answer, so
+     * whichever origin loads next reads the same one.
+     */
+    setActiveRole: (role) =>
+      viaService(() =>
+        api.request(`${base}/active-role`, {
+          method: 'POST',
+          body: { role },
+          schema: SessionSchema,
+        }),
+      ),
+
     signOut: async () => {
       await viaService(() =>
         api.request(`${base}/sign-out`, {
