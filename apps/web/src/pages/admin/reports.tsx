@@ -701,12 +701,6 @@ function CertificatesTab({
         have to be defensible under audit.
       </Alert>
 
-      <Alert variant="warning" title="Layout still pending a sample">
-        A sample certificate has been requested from the client so the exact data points and wording
-        match what their customers already accept. The figures here are real; the document layout is
-        not final.
-      </Alert>
-
       <Card className="overflow-hidden p-0">
         <DataTableToolbar
           controller={controller}

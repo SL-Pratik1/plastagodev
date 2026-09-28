@@ -35,6 +35,7 @@ import { useEffect, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
 import { PickupStatusBadge, ReadinessBadge } from '@/components/portal/pickup-status';
+import { EvidenceGrid } from '@/components/queues/evidence-grid';
 import {
   usePortalCertifyReadiness,
   usePortalJob,
@@ -50,7 +51,6 @@ import {
   formatDate,
   formatDateTime,
   formatMoney,
-  formatTime,
   formatWeight,
 } from '@/lib/format';
 import { useNow } from '@/lib/use-now';
@@ -101,7 +101,7 @@ export function PortalJobDetailPage() {
     );
   }
 
-  return <PickupDetail job={job} />;
+  return <PickupDetail job={job} onPhotosStale={() => void refetch()} />;
 }
 
 function BackLink() {
@@ -115,7 +115,14 @@ function BackLink() {
   );
 }
 
-function PickupDetail({ job }: { job: PortalJob }) {
+function PickupDetail({
+  job,
+  onPhotosStale,
+}: {
+  job: PortalJob;
+  /** Re-read the job so photo links arrive freshly signed. */
+  onPhotosStale: () => void;
+}) {
   const toast = useToast();
   const scope = usePortalScope();
   const now = useNow(300_000);
@@ -317,25 +324,11 @@ function PickupDetail({ job }: { job: PortalJob }) {
                   description="Photos are taken during the pickup and appear here once it is complete."
                 />
               ) : (
-                <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                  {job.photos.map((photo) => (
-                    <li
-                      key={photo.id}
-                      className="overflow-hidden rounded-lg border border-border bg-muted/40"
-                    >
-                      <div className="grid aspect-4/3 place-items-center bg-muted text-muted-foreground">
-                        <ImageIcon aria-hidden className="size-6" />
-                        <span className="sr-only">Photograph: {photo.caption}</span>
-                      </div>
-                      <div className="space-y-0.5 p-2">
-                        <p className="truncate text-xs font-medium">{photo.caption}</p>
-                        <p className="text-[11px] text-muted-foreground tabular-nums">
-                          {formatTime(photo.takenAt)}
-                        </p>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
+                /*
+                 * The office's grid, so a tile opens the full-size photo and
+                 * an expired link re-signs itself on a refetch.
+                 */
+                <EvidenceGrid photos={job.photos} onStale={onPhotosStale} />
               )}
             </CardContent>
           </Card>

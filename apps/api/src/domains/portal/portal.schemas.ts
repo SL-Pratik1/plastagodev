@@ -59,7 +59,9 @@ export const PortalInvoicesQuerySchema = z
      * office has not sent, and the repository refuses it regardless — this just
      * stops the request being made in the first place.
      */
-    status: z.enum(['awaiting-po', 'sent', 'paid', 'overdue']).optional(),
+    status: z.enum(['awaiting-po', 'sent', 'paid', 'overdue', 'outstanding']).optional(),
+    /** The screen's Type filter — a pickup invoice or an additional-charges one. */
+    kind: z.enum(['base', 'additional-charges']).optional(),
     /**
      * ⚠️ The screen has always had a search box; nothing behind it read the
      * term. A customer typed an invoice number, the list did not move, and the

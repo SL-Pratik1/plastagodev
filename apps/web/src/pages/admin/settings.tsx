@@ -31,6 +31,7 @@ import {
   CardTitle,
   Checkbox,
   ConfirmDialog,
+  DatePicker,
   Dialog,
   ErrorState,
   Field,
@@ -1893,9 +1894,8 @@ function NewRateCardDialog({
           hint="A job on or after this date is priced on these rates."
         >
           {(aria) => (
-            <Input
+            <DatePicker
               {...aria}
-              type="date"
               value={effectiveFrom}
               onChange={(event) => {
                 setEffectiveFrom(event.target.value);
@@ -2028,9 +2028,8 @@ function IssueScheduleDialog({
           hint="A job on or after this date is priced on the rates below."
         >
           {(aria) => (
-            <Input
+            <DatePicker
               {...aria}
-              type="date"
               value={effectiveFrom}
               onChange={(event) => {
                 setEffectiveFrom(event.target.value);

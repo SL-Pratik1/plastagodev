@@ -282,22 +282,33 @@ export const reportRepository = {
     filters: ReportFilters,
     groupBy: 'account' | 'zone',
   ): Promise<FinancialAggregate[]> {
-    const rows = await JobModel.aggregate<{
-      _id: string;
-      label: string;
-      jobs: number;
-      jobIds: mongoose.Types.ObjectId[];
-    }>([
-      { $match: matchStage(filters) },
-      {
-        $group: {
-          _id: groupBy === 'zone' ? '$zone' : { $toString: '$accountId' },
-          label: { $first: groupBy === 'zone' ? '$zone' : '$accountName' },
-          jobs: { $sum: 1 },
-          jobIds: { $push: '$_id' },
+    /*
+     * ⚠️ Zones are grouped on `zoneId` and named from the register, exactly as
+     * `byZone` does. This used to group on `$zone`, a field jobs stopped
+     * carrying when zones became records — every job fell into one null group,
+     * the null key failed the response schema, and the whole tab errored.
+     */
+    const [rows, zoneNames] = await Promise.all([
+      JobModel.aggregate<{
+        _id: string | mongoose.Types.ObjectId | null;
+        label: string;
+        jobs: number;
+        jobIds: mongoose.Types.ObjectId[];
+      }>([
+        { $match: matchStage(filters) },
+        {
+          $group: {
+            _id: groupBy === 'zone' ? '$zoneId' : { $toString: '$accountId' },
+            label: { $first: '$accountName' },
+            jobs: { $sum: 1 },
+            jobIds: { $push: '$_id' },
+          },
         },
-      },
-      { $sort: { jobs: -1 } },
+        { $sort: { jobs: -1 } },
+      ]),
+      groupBy === 'zone'
+        ? orderedZones().then((zones) => new Map(zones.map((zone) => [zone.id, zone.label])))
+        : null,
     ]);
 
     /*
@@ -318,9 +329,21 @@ export const reportRepository = {
         additionalCents += split?.additional ?? 0;
       }
 
+      /*
+       * A job with no zone is a data fault; it is shown as its own row rather
+       * than dropped, for the same reason `byZone` shows it — the revenue is
+       * real and has to reach the total.
+       */
+      const zoneId = zoneNames && row._id !== null ? row._id.toString() : null;
+      const { key, label } = zoneNames
+        ? zoneId === null
+          ? { key: 'none', label: 'No zone' }
+          : { key: zoneId, label: zoneNames.get(zoneId) ?? UNKNOWN_ZONE_LABEL }
+        : { key: String(row._id), label: row.label };
+
       return {
-        key: row._id,
-        label: row.label,
+        key,
+        label,
         jobs: row.jobs,
         baseRevenueCents,
         additionalCents,

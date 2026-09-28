@@ -3,9 +3,9 @@ import {
   Alert,
   Button,
   Card,
+  DatePicker,
   Dialog,
   Field,
-  Input,
   Pagination,
   Spinner,
   Textarea,
@@ -307,9 +307,8 @@ export function AdminQueueCallUpsPage(): React.JSX.Element {
             hint="The day the site is ready for us. The target date is worked out from it."
           >
             {(control) => (
-              <Input
+              <DatePicker
                 {...control}
-                type="date"
                 value={readyDate}
                 onChange={(event) => {
                   setReadyDate(event.target.value);

@@ -17,7 +17,6 @@ import {
   FileTextIcon,
   QrCodeIcon,
   ShieldAlertIcon,
-  UploadCloudIcon,
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
@@ -328,28 +327,30 @@ function RiskForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['d
         </div>
       </div>
 
-      {/* What happens after saving — stated, not simulated. */}
+      {/*
+       * What happens after saving.
+       *
+       * ⚠️ This listed five steps — a PDF, the SWMS attached as page 2, the
+       * document filed against the job, a copy for the driver, and a handoff to
+       * the builder's portal. NONE of them are built: nothing renders that PDF,
+       * nothing reads `uploadState`, and no sweep retries it. The assessment
+       * itself saves correctly and that is the whole of what happens.
+       *
+       * Promising the rest is worse than staying quiet about it — a driver who
+       * believes the builder has been sent it does not mention it to anyone, and
+       * the gap is invisible until an auditor asks. Say only what is true; put
+       * the five steps back when the code behind them exists.
+       */}
       <div className="rounded-xl border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
         <p className="flex items-center gap-1.5 font-medium text-foreground">
           <FileTextIcon aria-hidden className="size-3.5" />
           What happens next
         </p>
-        <ol className="mt-1.5 ml-4 list-decimal space-y-0.5">
-          <li>This assessment becomes page 1 of a PDF.</li>
-          <li>Our standard SWMS ({SWMS_VERSION}) is attached as page 2.</li>
-          <li>The PDF is filed against job #{job.jobNumber} for the office.</li>
-          <li>
-            You get your own copy to share
-            {online ? '' : ' — it appears as soon as you have signal'}.
-          </li>
-          <li>
-            It also goes to {job.accountName}&rsquo;s portal
-            {online ? '' : ' when you are back in coverage'}.
-          </li>
-        </ol>
-        <p className="mt-1.5 flex items-center gap-1.5">
-          <UploadCloudIcon aria-hidden className="size-3.5 shrink-0" />
-          Generation and the portal upload happen in the office system, not on this phone.
+        <p className="mt-1.5">
+          It is filed against job #{job.jobNumber} and the office can see it
+          {online ? ' straight away' : ' as soon as you have signal'}. If{' '}
+          {job.accountName} need a copy for their own records, ring the office — we do not send it
+          to them automatically yet.
         </p>
       </div>
 

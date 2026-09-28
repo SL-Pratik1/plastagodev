@@ -6,11 +6,11 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  DatePicker,
   Dialog,
   EmptyState,
   ErrorState,
   Field,
-  Input,
   Skeleton,
   Spinner,
   Textarea,
@@ -241,9 +241,8 @@ export function PortalPurchaseOrdersPage(): React.JSX.Element {
             hint="The day the site is clear for our truck."
           >
             {(control) => (
-              <Input
+              <DatePicker
                 {...control}
-                type="date"
                 value={readyDate}
                 onChange={(event) => {
                   setReadyDate(event.target.value);

@@ -1,5 +1,4 @@
 import type {
-  JobPhoto,
   PortalInvoice,
   JobStatus,
   PageMeta,
@@ -16,6 +15,7 @@ import {
   JobModel,
   JobPhotoModel,
 } from '../jobs/job.model.js';
+import { toJobPhotoViews } from '../jobs/job-photo.view.js';
 import { InvoiceModel } from '../invoices/invoice.model.js';
 import { ChangeRequestModel, ReadinessCertificationModel } from './portal.model.js';
 
@@ -276,30 +276,15 @@ export const portalRepository = {
       driverName: row.driverName,
       arrivedAt: row.arrivedAt ? row.arrivedAt.toISOString() : null,
       /*
-       * ⚠️ `url` is deliberately null here, where the office's screens now sign
-       * one.
+       * Signed exactly as the office's screens sign them — every photo,
+       * evidence shots included, for administrators and supervisors alike.
        *
-       * Showing a builder the photographs of their own site is a reasonable
-       * thing to want, and may well be the right thing to build — but it is a
-       * product decision about what the customer portal exposes, not a
-       * side-effect of fixing the office's evidence grids. Signing here would
-       * quietly publish every shot the driver took, including the ones taken to
-       * justify a charge against that same builder, to the person disputing it.
-       *
-       * So the portal keeps showing the caption, the time and the GPS fix it
-       * showed before. Change this on purpose, with a decision behind it.
+       * Decided 2026-09-25: the builder sees the photographs of their own
+       * site, and seeing the contamination or could-not-collect evidence is
+       * what explains a charge rather than what invites a dispute about it.
+       * Until then this returned `url: null` and the portal drew grey tiles.
        */
-      photos: photos.map(
-        (photo): JobPhoto => ({
-          id: photo._id.toHexString(),
-          caption: photo.caption,
-          takenAt: photo.takenAt.toISOString(),
-          takenBy: photo.takenBy ?? '',
-          latitude: photo.latitude ?? null,
-          longitude: photo.longitude ?? null,
-          url: null,
-        }),
-      ),
+      photos: await toJobPhotoViews(photos),
       steps: events.map(
         (event): PortalJobStep => ({
           id: event._id.toHexString(),
@@ -686,6 +671,7 @@ export async function listInvoices(
     page: number;
     pageSize: number;
     status?: string | undefined;
+    kind?: string | undefined;
     q?: string | undefined;
   },
 ): Promise<{ data: PortalInvoice[]; meta: PageMeta }> {
@@ -697,9 +683,14 @@ export async function listInvoices(
   // A facet may only ever NARROW what is already visible — never widen it to a
   // draft the office has not sent.
   const requested = query.status as PortalInvoice['status'] | undefined;
-  if (requested && VISIBLE_INVOICE_STATUSES.includes(requested)) {
+  if (query.status === 'outstanding') {
+    // Same definition as the dashboard's outstanding card: owed, not yet paid.
+    filter.status = { $in: ['sent', 'overdue'] };
+  } else if (requested && VISIBLE_INVOICE_STATUSES.includes(requested)) {
     filter.status = requested;
   }
+
+  if (query.kind) filter.kind = query.kind;
 
   /*
    * What a customer actually types into this box is an invoice number or

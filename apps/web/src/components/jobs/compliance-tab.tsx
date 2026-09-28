@@ -1,4 +1,4 @@
-import type { Job, JobCompliance, SraUploadState } from '@plastago/shared';
+import type { Job, JobCompliance } from '@plastago/shared';
 import { Alert, Badge, Card, CardContent, CardHeader, CardTitle, EmptyState } from '@plastago/ui';
 import {
   ClipboardCheckIcon,
@@ -50,12 +50,11 @@ export function ComplianceTab({ job }: { job: Job }) {
   );
 }
 
-const UPLOAD_STATE_LABELS: Record<SraUploadState, string> = {
-  pending: 'Not sent yet',
-  queued: 'Queued on the driver’s phone',
-  uploaded: 'Uploaded to the builder',
-  failed: 'Upload failed',
-};
+/*
+ * The state labels lived here, and every one of them described progress that
+ * cannot happen — there is no renderer, no uploader and no retry sweep behind
+ * `uploadState`. Bring them back with step 5, not before.
+ */
 
 function RiskAssessmentCard({
   compliance,
@@ -185,13 +184,22 @@ function RiskAssessmentCard({
               is the one that fails — and a failure here is invisible to the
               driver, who has long since driven away.
             */}
+            {/*
+              ⚠️ The handoff is NOT BUILT, so every state but `failed` used to
+              read as progress that is not happening. `queued` in particular said
+              "Queued on the driver's phone" — which reads as "it will go through
+              when they get signal", and nothing is holding it: no renderer, no
+              uploader, no retry sweep exists.
+              Told plainly, so the office knows to send it themselves. Restore
+              the state labels when step 5 is actually implemented.
+            */}
             {riskAssessment.uploadState === 'failed' ? (
               <Alert variant="destructive" title="Did not reach the builder’s portal">
                 The assessment is recorded here, but the handoff failed. It needs uploading by hand.
               </Alert>
             ) : (
               <p className="text-xs text-muted-foreground">
-                Builder portal: {UPLOAD_STATE_LABELS[riskAssessment.uploadState]}
+                Builder portal: not sent — send it by hand if the builder asks for it.
               </p>
             )}
           </>
