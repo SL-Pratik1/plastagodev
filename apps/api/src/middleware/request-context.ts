@@ -40,15 +40,31 @@ export const requestLogger: RequestHandler = pinoHttp({
     if (res.statusCode >= 400) return 'warn';
     return 'info';
   },
-  customSuccessMessage: (req, res) => `${req.method ?? '?'} ${req.url ?? '?'} → ${res.statusCode}`,
-  ...(terse
+  customSuccessMessage: (req, res) =>
+    `${req.method ?? '?'} ${redactUrl(req.url)} → ${res.statusCode}`,
+  serializers: terse
     ? {
-        serializers: {
-          // The method, path and status are already in the message above; what
-          // is left is the noise.
-          req: () => undefined,
-          res: () => undefined,
-        },
+        // The method, path and status are already in the message above; what
+        // is left is the noise.
+        req: () => undefined,
+        res: () => undefined,
       }
-    : {}),
+    : {
+        // The query is covered by the logger's `redact` paths; the URL is one
+        // string, so it has to be rewritten here.
+        req: (req: { url?: string }) => ({ ...req, url: redactUrl(req.url) }),
+      },
 });
+
+/**
+ * A URL with any credential in its query string replaced.
+ *
+ * ⚠️ The extractor's webhook authenticates with `?token=<secret>` because its
+ * configuration takes a URL and nothing else. The router is careful never to
+ * log what a caller presented — and this line printed it on every call anyway,
+ * into whatever log drain the deployment ships to.
+ */
+export function redactUrl(url: string | undefined): string {
+  if (!url) return '?';
+  return url.replace(/([?&](?:token|secret|signature|key)=)[^&#]*/gi, '$1[redacted]');
+}

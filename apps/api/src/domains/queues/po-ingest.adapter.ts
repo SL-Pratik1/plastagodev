@@ -1,10 +1,12 @@
-import type { ExtractedField, MatchCandidate } from '@plastago/shared';
+import { isValidAbn, type ExtractedField, type MatchCandidate } from '@plastago/shared';
+import { PDFDocument } from 'pdf-lib';
 import { buildKey, getStorage } from '../../integrations/storage.js';
 import { extractorClient, type ExtractorExtraction } from '../../integrations/extractor.js';
 import { logger } from '../../lib/logger.js';
 import { accountRepository } from '../accounts/account.repository.js';
 import { placeRepository } from '../places/place.repository.js';
 import type { IngestExtractionInput } from './po-extraction.repository.js';
+import { purchaseOrderRepository } from './purchase-order.repository.js';
 
 const log = logger.child({ module: 'po-ingest' });
 
@@ -54,6 +56,7 @@ export const FIELD_KEYS = {
   supervisorName: 'supervisor_name',
   supervisorMobile: 'supervisor_mobile',
   amountExGst: 'amount_ex_gst',
+  builderAbn: 'builder_abn',
   documentText: 'document_text',
 } as const;
 
@@ -111,7 +114,7 @@ export interface AdaptedExtraction {
   input: Omit<IngestExtractionInput, 'reason'>;
   /** For the log line, so a bad run is diagnosable without re-reading the PDF. */
   diagnostics: {
-    matchedBy: 'email-domain' | 'document-name' | 'none';
+    matchedBy: MatchedBy;
     suburbResolved: boolean;
     zone: string | null;
     storedOriginal: boolean;
@@ -149,7 +152,8 @@ export async function adaptExtraction(
 
   /* ── Which account ─────────────────────────────────────────────────────── */
 
-  const match = await matchAccount({ fromAddress, builderName });
+  const builderAbn = readAbn(data, FIELD_KEYS.builderAbn);
+  const match = await matchAccount({ fromAddress, builderName, builderAbn, poNumber });
 
   /* ── Which suburb, and therefore which zone ────────────────────────────── */
 
@@ -157,7 +161,7 @@ export async function adaptExtraction(
 
   /* ── The original, copied into our own storage ─────────────────────────── */
 
-  const storageKey = await storeOriginal(extraction);
+  const { key: storageKey, pageCount } = await storeOriginal(extraction);
 
   /*
    * The per-field breakdown the review screen renders beside the document.
@@ -197,9 +201,9 @@ export async function adaptExtraction(
       subject: context.subject ?? extraction.fileName,
       receivedAt: context.receivedAt,
       attachmentName: extraction.fileName,
-      // The vendor does not report a page count. One is the honest floor: every
-      // document has at least a first page, which is the one being reviewed.
-      pageCount: 1,
+      // Counted from the PDF itself (the vendor reports none). One is the honest
+      // floor when it cannot be read: every document has a first page.
+      pageCount: pageCount ?? 1,
       storageKey,
       documentText: readString(data, FIELD_KEYS.documentText, 200_000) ?? '',
 
@@ -210,6 +214,14 @@ export async function adaptExtraction(
       // The picked place wins over the typed line, because it is the one that
       // resolves to a zone. The raw address is kept when nothing resolved.
       extractedSiteAddress: siteAddress,
+      /*
+       * Kept on their own, as read. They were folded into the address display
+       * and then lost: the review form's Suburb started blank on every order
+       * (so the zone that prices the job was retyped by hand), and the postcode
+       * never reached the purchase order at all.
+       */
+      extractedSuburb: suburbText,
+      extractedPostcode: fourDigitPostcode(postcodeText),
       extractedLotNumber: lotNumber,
       extractedSupervisorName: supervisorName,
       extractedSupervisorMobile: supervisorMobile,
@@ -243,11 +255,14 @@ export async function adaptExtraction(
 
 /* ── Account matching ────────────────────────────────────────────────────── */
 
+/** How the account was decided, strongest first. For the log line and the tests. */
+type MatchedBy = 'abn' | 'existing-po' | 'email-domain' | 'document-name' | 'none';
+
 interface AccountMatch {
   accountId: string | null;
   accountName: string | null;
   candidates: MatchCandidate[];
-  matchedBy: 'email-domain' | 'document-name' | 'none';
+  matchedBy: MatchedBy;
 }
 
 /**
@@ -267,7 +282,48 @@ interface AccountMatch {
 async function matchAccount(input: {
   fromAddress: string;
   builderName: string | null;
+  builderAbn: string | null;
+  poNumber: string | null;
 }): Promise<AccountMatch> {
+  /*
+   * ── 1. The ABN printed on the order ─────────────────────────────────────
+   * Stronger than any name. The same Wisdom PDF was read as "Wisdom Homes" one
+   * day and "Wisdom Properties Group Pty Ltd" (from the terms) the next — and
+   * the second never matched. The ABN on the letterhead is the same every time.
+   * Exactly one active account under it is an answer; anything else falls
+   * through to the weaker signals rather than guessing.
+   */
+  if (input.builderAbn) {
+    const byAbn = await accountRepository.findActiveByAbn(input.builderAbn);
+    if (byAbn.length === 1 && byAbn[0]) {
+      return {
+        accountId: byAbn[0].id,
+        accountName: byAbn[0].name,
+        candidates: [toCandidate(byAbn[0])],
+        matchedBy: 'abn',
+      };
+    }
+  }
+
+  /*
+   * ── 2. An order already on file with this exact number ──────────────────
+   * A builder resending an order names itself by that number. Without this, a
+   * resend whose builder was read differently arrived as "No matching account"
+   * and the office only learned it was a duplicate when Confirm refused it.
+   * Picking the account here lets the service say "Duplicate PO" up front.
+   */
+  if (input.poNumber) {
+    const holders = await purchaseOrderRepository.accountsHoldingPoNumber(input.poNumber);
+    if (holders.length === 1 && holders[0]) {
+      return {
+        accountId: holders[0].id,
+        accountName: holders[0].name,
+        candidates: [toCandidate(holders[0])],
+        matchedBy: 'existing-po',
+      };
+    }
+  }
+
   const domain = domainOf(input.fromAddress);
 
   /*
@@ -294,6 +350,18 @@ async function matchAccount(input: {
      * `resolveReason` turns two near-equal candidates into `ambiguous-account`.
      */
     if (found.length > 1) {
+      // Several hits, but only one carrying every word of the domain is still
+      // one answer — see `onlyAgreeing`.
+      const agreeing = needle ? onlyAgreeing(found, needle) : null;
+      if (agreeing) {
+        return {
+          accountId: agreeing.id,
+          accountName: agreeing.name,
+          candidates: [toCandidate(agreeing)],
+          matchedBy: 'email-domain',
+        };
+      }
+
       return {
         accountId: null,
         accountName: null,
@@ -360,12 +428,40 @@ async function matchAccount(input: {
     };
   }
 
+  const agreeing = onlyAgreeing(found, needle);
+  if (agreeing) {
+    return {
+      accountId: agreeing.id,
+      accountName: agreeing.name,
+      // Alone, so the service does not read the "Homes"-only hits it beat as a
+      // second candidate and call a clear answer ambiguous.
+      candidates: [toCandidate(agreeing)],
+      matchedBy: 'document-name',
+    };
+  }
+
   return {
     accountId: null,
     accountName: null,
     candidates: found.slice(0, 5).map((row) => toCandidate(row)),
     matchedBy: 'none',
   };
+}
+
+/**
+ * The ONE hit whose name carries every identifying word, or null.
+ *
+ * ⚠️ The other half of the "Homes" rule above. A text search for "domaine
+ * homes" also returns every other "… Homes" account, and treating any second
+ * hit as ambiguity meant an order from Domaine Homes found "Domaine Homes (NSW)
+ * Pty Ltd" by name and still arrived as "No matching account" — on any real
+ * account book, where "Homes" is everywhere, nearly every order did. The same
+ * agreement test decides here: exactly one agreeing hit is the answer, and two
+ * (a genuine near-duplicate) stay a question for the reviewer.
+ */
+function onlyAgreeing<T extends { name: string }>(found: T[], needle: string): T | null {
+  const agreeing = found.filter((row) => nameAgrees(needle, row.name));
+  return agreeing.length === 1 ? (agreeing[0] ?? null) : null;
 }
 
 /** Active accounts matching a free-text needle. Office scope — no tenant limit. */
@@ -542,11 +638,17 @@ function pick(place: { id: string; label: string; zoneId: string; zoneLabel: str
  * the original email. Dropping the row instead would lose a real purchase order
  * because a download timed out.
  */
-async function storeOriginal(extraction: ExtractorExtraction): Promise<string | null> {
-  if (!extraction.fileUrl) return null;
+async function storeOriginal(
+  extraction: ExtractorExtraction,
+): Promise<{ key: string | null; pageCount: number | null }> {
+  if (!extraction.fileUrl) return { key: null, pageCount: null };
+
+  let pageCount: number | null = null;
 
   try {
     const file = await extractorClient.downloadFile(extraction.fileUrl);
+
+    pageCount = await countPages(file.body, file.contentType);
 
     /*
      * `buildKey` demands a 24-character hex owner id, and the vendor's
@@ -561,12 +663,36 @@ async function storeOriginal(extraction: ExtractorExtraction): Promise<string | 
     });
 
     await getStorage().put(key, file.body, file.contentType);
-    return key;
+    return { key, pageCount };
   } catch (error) {
     log.warn(
       { extractionId: extraction.id, error: (error as Error).message },
       'could not copy the extracted document into storage — the row is still queued',
     );
+    return { key: null, pageCount };
+  }
+}
+
+/** An Australian postcode is four digits; anything else read off the page is noise. */
+function fourDigitPostcode(text: string | null): string | null {
+  const digits = text?.replace(/\D/g, '') ?? '';
+  return digits.length === 4 ? digits : null;
+}
+
+/**
+ * How many pages the original has, read off the bytes themselves.
+ *
+ * The vendor reports none, and "1 page" on a three-page order tells a reviewer
+ * the terms pages were never received. Null when the file is not a PDF or will
+ * not parse — the caller falls back to one, the honest floor.
+ */
+async function countPages(body: Buffer, contentType: string): Promise<number | null> {
+  if (contentType.startsWith('image/')) return 1;
+
+  try {
+    const pdf = await PDFDocument.load(body, { ignoreEncryption: true, updateMetadata: false });
+    return pdf.getPageCount();
+  } catch {
     return null;
   }
 }
@@ -581,6 +707,21 @@ async function storeOriginal(extraction: ExtractorExtraction): Promise<string | 
  * accepts a string or a number and does its own coercion. Trusting the declared
  * type would put "823.41 m2" into a numeric field as `NaN`.
  */
+
+/**
+ * PlastaGo's own ABNs. Printed in the vendor box of every order ("Plasta-Go Pty
+ * Ltd ABN: 22669797915"), so a model that read the wrong box must not turn
+ * PlastaGo into the customer.
+ */
+const OWN_ABNS = new Set(['22669797915']);
+
+/** The builder's ABN as 11 digits, or null if it is absent, invalid, or ours. */
+function readAbn(data: Record<string, unknown>, key: string): string | null {
+  const digits = readString(data, key, 40)?.replace(/\D/g, '') ?? '';
+  if (digits.length !== 11 || OWN_ABNS.has(digits) || !isValidAbn(digits)) return null;
+  return digits;
+}
+
 function readString(
   data: Record<string, unknown>,
   key: string,

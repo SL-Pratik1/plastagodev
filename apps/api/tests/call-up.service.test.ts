@@ -1,5 +1,7 @@
 import type { JobDraft, Role } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AppError } from '../src/lib/app-error.js';
+import { todayInSydney } from '../src/lib/business-day.js';
 
 /**
  * M2.12b — the call-up, the message that actually schedules the work.
@@ -32,6 +34,7 @@ interface StoredCallUp {
   source: string;
   externalId: string | null;
   resolvedBy: string | null;
+  refusal: string | null;
   note: string;
 }
 
@@ -56,10 +59,26 @@ let callUps: StoredCallUp[] = [];
 let orders: StoredOrder[] = [];
 /** Suburbs the places table knows. The zone comes from here, so this gates pricing. */
 let knownSuburbs: string[] = [];
-let created: Array<{ draft: JobDraft; callerRoles: readonly Role[] }> = [];
+let created: Array<{ draft: JobDraft; callerRoles: readonly Role[]; callerName: string }> = [];
 let rescheduled: Array<{ jobId: string; readyDate: string }> = [];
 let cancelled: Array<{ jobId: string; reason: string; note: string }> = [];
 let nextJobNumber = 61500;
+/** Set to make the booking itself refuse — as pricing does for an unrated date. */
+let createRefusal: Error | null = null;
+
+/**
+ * Dates relative to TODAY, because the portal now refuses a day that has
+ * passed — the fixed dates these tests used went stale the day they passed.
+ */
+function sydneyDay(offsetDays: number): string {
+  const today = todayInSydney();
+  const date = new Date(`${today}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + offsetDays);
+  return date.toISOString().slice(0, 10);
+}
+const SOON = sydneyDay(7);
+const LATER = sydneyDay(14);
+const YESTERDAY = sydneyDay(-1);
 
 let idCounter = 0;
 const nextId = (): string => {
@@ -90,6 +109,7 @@ vi.mock('../src/domains/queues/call-up.repository.js', () => ({
         source: input.source as string,
         externalId,
         resolvedBy: null,
+        refusal: null,
         note: (input.note as string) ?? '',
       };
       callUps.push(row);
@@ -104,6 +124,7 @@ vi.mock('../src/domains/queues/call-up.repository.js', () => ({
       row.jobId = (outcome.jobId as string | null) ?? null;
       row.jobNumber = (outcome.jobNumber as number | null) ?? null;
       row.resolvedBy = (outcome.resolvedBy as string | null) ?? null;
+      row.refusal = (outcome.refusal as string | null) ?? null;
       if (outcome.previousReadyDate !== undefined) {
         row.previousReadyDate = outcome.previousReadyDate as string | null;
       }
@@ -117,9 +138,21 @@ vi.mock('../src/domains/queues/call-up.repository.js', () => ({
       return Promise.resolve(true);
     },
 
+    remove: (id: string) => {
+      callUps = callUps.filter((row) => !(row.id === id && row.source !== 'email'));
+      return Promise.resolve();
+    },
+
     findById: (id: string) => Promise.resolve(callUps.find((row) => row.id === id) ?? null),
     findMatches: (poNumber: string) =>
       Promise.resolve(orders.filter((order) => order.poNumber === poNumber.trim())),
+    // Mirrors the real anchoring: "<job>/" at the start, and never for a number with a slash.
+    findMatchesByJobNumber: (jobNumber: string) =>
+      Promise.resolve(
+        jobNumber.includes('/')
+          ? []
+          : orders.filter((order) => order.poNumber.startsWith(`${jobNumber.trim()}/`)),
+      ),
     findOrder: (id: string) => Promise.resolve(orders.find((order) => order.id === id) ?? null),
     list: () =>
       Promise.resolve({ data: [], meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 } }),
@@ -174,8 +207,9 @@ vi.mock('../src/domains/places/place.repository.js', () => ({
 
 vi.mock('../src/domains/jobs/job.service.js', () => ({
   jobService: {
-    create: (draft: JobDraft, caller: { roles: readonly Role[] }) => {
-      created.push({ draft, callerRoles: caller.roles });
+    create: (draft: JobDraft, caller: { roles: readonly Role[]; name: string }) => {
+      if (createRefusal) return Promise.reject(createRefusal);
+      created.push({ draft, callerRoles: caller.roles, callerName: caller.name });
       nextJobNumber += 1;
       return Promise.resolve({ id: nextId(), jobNumber: nextJobNumber });
     },
@@ -257,6 +291,7 @@ beforeEach(() => {
   rescheduled = [];
   cancelled = [];
   nextJobNumber = 61500;
+  createRefusal = null;
 });
 
 /* ── The happy path, which is most of the traffic ─────────────────────────── */
@@ -581,11 +616,95 @@ describe('what it will not guess', () => {
     expect(created).toHaveLength(1);
   });
 
-  it('queues a booking with no readable date', async () => {
+  it('queues a booking with no readable date, and says so', async () => {
     const outcome = await callUpService.record(email({ readyDate: null }));
 
     expect(outcome.state).toBe('needs-review');
+    // Was "no-job-to-change", which sent the office looking for a missing job.
+    expect(outcome.reason).toBe('no-date');
     expect(created).toHaveLength(0);
+  });
+
+  /*
+   * An email has nobody to show a refusal to, so it is KEPT — with a reason,
+   * and the refusal itself on the note so the office knows what to fix.
+   */
+  it('keeps an emailed call-up that could not be booked, with the refusal beside it', async () => {
+    createRefusal = AppError.validation('No rate covers Kellyville on that day');
+
+    const outcome = await callUpService.record(email());
+
+    expect(outcome.state).toBe('needs-review');
+    expect(outcome.reason).toBe('cannot-book');
+    expect(latest()?.refusal).toBe('No rate covers Kellyville on that day');
+    // Not on the note — the note becomes the job's notes when it books.
+    expect(latest()?.note).not.toContain('No rate covers');
+  });
+
+  /*
+   * Seen live: job #61311 was booked by Try again and its notes still ended
+   * "No rate covers Wollongong on 2026-09-17" — long after the rate was fixed.
+   */
+  it('books the job without the old refusal, and clears it', async () => {
+    createRefusal = AppError.validation('No rate covers Kellyville on that day');
+    const first = await callUpService.record(email({ note: 'Please attend site' }));
+    createRefusal = null;
+
+    const retried = await callUpService.retry(first.id, OFFICE);
+
+    expect(retried.state).toBe('applied');
+    expect(created[0]?.draft.notes).toBe('Please attend site');
+    expect(latest()?.refusal).toBeNull();
+  });
+});
+
+/* ── A notice that names the builder's JOB, not the order ──────────────── */
+
+/*
+ * The client's real Domaine "Construction Notification" prints "Job Details
+ * 79903057" and no PO number; their orders are numbered "79903057/080".
+ */
+describe('a call-up that gives the builder’s job number', () => {
+  const DOMAINE_PO = 'po00000000000000000000d1';
+
+  it('matches the job number to the order under it', async () => {
+    orders = [order({ id: DOMAINE_PO, poNumber: '79903057/080' })];
+
+    const outcome = await callUpService.record(email({ poNumber: '79903057' }));
+
+    expect(outcome.state).toBe('applied');
+    expect(created[0]?.draft.purchaseOrderId).toBe(DOMAINE_PO);
+  });
+
+  it('still prefers an order whose number matches exactly', async () => {
+    orders = [
+      order({ id: 'po00000000000000000000e1', poNumber: '79903057' }),
+      order({ id: DOMAINE_PO, poNumber: '79903057/080' }),
+    ];
+
+    await callUpService.record(email({ poNumber: '79903057' }));
+
+    expect(created[0]?.draft.purchaseOrderId).toBe('po00000000000000000000e1');
+  });
+
+  it('queues two orders under one job rather than choosing', async () => {
+    orders = [
+      order({ id: DOMAINE_PO, poNumber: '79903057/080' }),
+      order({ id: 'po00000000000000000000d2', poNumber: '79903057/081' }),
+    ];
+
+    const outcome = await callUpService.record(email({ poNumber: '79903057' }));
+
+    expect(outcome.reason).toBe('ambiguous-po');
+    expect(created).toHaveLength(0);
+  });
+
+  it('does not stretch a shorter number into a longer job', async () => {
+    orders = [order({ id: DOMAINE_PO, poNumber: '79903057/080' })];
+
+    const outcome = await callUpService.record(email({ poNumber: '7990305' }));
+
+    expect(outcome.reason).toBe('no-matching-po');
   });
 });
 
@@ -595,13 +714,110 @@ describe('calling an order up by hand', () => {
   it('lets a site supervisor book their own account’s order', async () => {
     const outcome = await callUpService.callUpByHand(
       'po00000000000000000000w1',
-      { readyDate: '2026-09-21', note: '' },
+      { readyDate: SOON, note: '' },
       SUPERVISOR,
     );
 
     expect(outcome.state).toBe('applied');
     expect(created).toHaveLength(1);
     expect(latest()?.source).toBe('portal');
+  });
+
+  /*
+   * A supervisor giving a date is telling us when to come; a day that has
+   * passed is a slip of the calendar. Refused on the date field, and nothing is
+   * left behind in the office queue.
+   */
+  it('refuses a day that has passed from the portal, on the date field', async () => {
+    await expect(
+      callUpService.callUpByHand(
+        'po00000000000000000000w1',
+        { readyDate: YESTERDAY, note: '' },
+        SUPERVISOR,
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      issues: [expect.objectContaining({ path: 'readyDate' })],
+    });
+
+    expect(created).toHaveLength(0);
+    expect(callUps).toHaveLength(0);
+  });
+
+  /* The office is relaying "the site has been ready since Monday". */
+  it('lets the office relay a ready date that has passed', async () => {
+    const outcome = await callUpService.callUpByHand(
+      'po00000000000000000000w1',
+      { readyDate: YESTERDAY, note: '' },
+      OFFICE,
+    );
+
+    expect(outcome.state).toBe('applied');
+  });
+
+  /*
+   * ⚠️ These used to stay in "Call-ups to check" as needs-review with no reason
+   * — and "Try again" could only fail the same way. The person who asked sees
+   * the refusal on the dialog instead, and the queue stays clean.
+   */
+  it('leaves nothing in the queue when the booking is refused on the spot', async () => {
+    createRefusal = AppError.validation('No rate covers Newcastle on that day', [
+      { path: 'readyDate', message: 'Rates start later' },
+    ]);
+
+    await expect(
+      callUpService.callUpByHand(
+        'po00000000000000000000w1',
+        { readyDate: SOON, note: '' },
+        OFFICE,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+
+    expect(callUps).toHaveLength(0);
+  });
+
+  /* The same line the portal draws around a supervisor's jobs. */
+  it('limits a supervisor-only login to orders that name them', async () => {
+    await expect(
+      callUpService.callUpByHand(
+        'po00000000000000000000w1',
+        { readyDate: SOON, note: '' },
+        SUPERVISOR,
+        { siteSupervisorUserId: 'usr-somebody-else' },
+      ),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(created).toHaveLength(0);
+
+    const own = await callUpService.callUpByHand(
+      'po00000000000000000000w1',
+      { readyDate: SOON, note: '' },
+      SUPERVISOR,
+      { siteSupervisorUserId: 'usr00000000000000000mf1' },
+    );
+    expect(own.state).toBe('applied');
+  });
+
+  /*
+   * The job's history printed "Call-up email" for a job the office phoned in
+   * or a supervisor booked in the portal. The ROLES stay the system's — only
+   * the name, which is what the history shows, is the person's.
+   */
+  it('names the person, and how they asked, in the job’s history', async () => {
+    await callUpService.callUpByHand(
+      'po00000000000000000000w1',
+      { readyDate: SOON, note: '' },
+      SUPERVISOR,
+    );
+    expect(created[0]?.callerName).toBe('Dane Whitfield · portal');
+    expect(created[0]?.callerRoles).toEqual(['operations']);
+
+    orders = [order({ id: 'po00000000000000000000w2', poNumber: '4500999999' })];
+    await callUpService.callUpByHand(
+      'po00000000000000000000w2',
+      { readyDate: SOON, note: '' },
+      OFFICE,
+    );
+    expect(created[1]?.callerName).toBe('Renee Boyle · phoned in');
   });
 
   /*
@@ -615,7 +831,7 @@ describe('calling an order up by hand', () => {
     await expect(
       callUpService.callUpByHand(
         'po00000000000000000000w1',
-        { readyDate: '2026-09-21', note: '' },
+        { readyDate: SOON, note: '' },
         SUPERVISOR,
       ),
     ).rejects.toMatchObject({ status: 404 });
@@ -628,7 +844,7 @@ describe('calling an order up by hand', () => {
 
     const outcome = await callUpService.callUpByHand(
       'po00000000000000000000w1',
-      { readyDate: '2026-09-21', note: 'Called in by the builder' },
+      { readyDate: SOON, note: 'Called in by the builder' },
       OFFICE,
     );
 
@@ -642,16 +858,16 @@ describe('calling an order up by hand', () => {
    */
   it('moves the date when the order already has a job', async () => {
     orders = [
-      order({ jobId: 'job1', jobNumber: 61501, jobStatus: 'booked', jobReadyDate: '2026-09-21' }),
+      order({ jobId: 'job1', jobNumber: 61501, jobStatus: 'booked', jobReadyDate: SOON }),
     ];
 
     await callUpService.callUpByHand(
       'po00000000000000000000w1',
-      { readyDate: '2026-09-28', note: '' },
+      { readyDate: LATER, note: '' },
       SUPERVISOR,
     );
 
-    expect(rescheduled).toEqual([{ jobId: 'job1', readyDate: '2026-09-28' }]);
+    expect(rescheduled).toEqual([{ jobId: 'job1', readyDate: LATER }]);
     expect(created).toHaveLength(0);
   });
 
@@ -659,7 +875,7 @@ describe('calling an order up by hand', () => {
     await expect(
       callUpService.callUpByHand(
         'po0000000000000000000zzz',
-        { readyDate: '2026-09-21', note: '' },
+        { readyDate: SOON, note: '' },
         OFFICE,
       ),
     ).rejects.toMatchObject({ status: 404 });
@@ -770,6 +986,66 @@ describe('working the queue', () => {
     await expect(
       callUpService.retry('ffffffffffffffffffffffff', OFFICE),
     ).rejects.toMatchObject({ status: 404 });
+  });
+
+  /*
+   * ⚠️ One that already names an order stays on it. Re-resolving by number
+   * turned an item raised against ONE order into "More than one order has that
+   * number" the moment another builder used the same string.
+   */
+  it('retries against the order it was raised on, not every order sharing the number', async () => {
+    knownSuburbs = ['Kellyville'];
+    orders = [order({ suburb: 'Bendigo' })];
+
+    const queued = await callUpService.callUpByHand(
+      'po00000000000000000000w1',
+      { readyDate: SOON, note: '' },
+      OFFICE,
+    );
+    expect(queued.reason).toBe('unknown-suburb');
+
+    // Another builder happens to use the same number; the suburb is then added.
+    orders = [
+      order({ suburb: 'Bendigo' }),
+      order({ id: 'po00000000000000000000x9', accountId: 'acc-other', accountName: 'Other' }),
+    ];
+    knownSuburbs = ['Kellyville', 'Bendigo'];
+
+    const retried = await callUpService.retry(queued.id, OFFICE);
+
+    expect(retried.state).toBe('applied');
+    expect(created[0]?.draft.purchaseOrderId).toBe('po00000000000000000000w1');
+  });
+
+  /* A retry the booking still refuses says why on the item, not as an error. */
+  it('parks a retry the booking refuses, with the refusal beside it', async () => {
+    const id = await queueOne();
+    orders = [order()];
+    createRefusal = AppError.validation('No rate covers Kellyville on that day');
+
+    const retried = await callUpService.retry(id, OFFICE);
+
+    expect(retried.state).toBe('needs-review');
+    expect(retried.reason).toBe('cannot-book');
+    expect(latest()?.refusal).toBe('No rate covers Kellyville on that day');
+  });
+});
+
+/* ── The schema, because a mocked repository cannot see it ───────────────── */
+
+describe('the call-up record itself', () => {
+  /*
+   * ⚠️ Regression for 15 Sept. `externalId` was deleted from the schema and
+   * `resolvedAt`/`resolvedBy` were commented out by a dangling `/**`. With
+   * `strictQuery` on, `findOne({ externalId })` then matched the FIRST row, so
+   * every call-up email after the first was "already seen" and dropped.
+   */
+  it('declares every field the repository filters or writes on', async () => {
+    const { CallUpModel } = await import('../src/domains/queues/call-up.model.js');
+
+    for (const path of ['externalId', 'resolvedAt', 'resolvedBy', 'raisedBy', 'note']) {
+      expect(CallUpModel.schema.path(path), path).toBeDefined();
+    }
   });
 });
 

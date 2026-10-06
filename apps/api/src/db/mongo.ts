@@ -15,8 +15,13 @@ const log = logger.child({ module: 'mongo' });
  *  #1  Every monetary field is `Decimal128`, never `double`. Mongoose will
  *      happily store a JS number as a double — the schema is the only guard.
  *
- * `strictQuery` is on so a typo in a filter key throws instead of silently
- * matching every document.
+ * `strictQuery` is on, which does NOT throw on an unknown filter key — it
+ * silently STRIPS it. A filter on a field the schema does not declare therefore
+ * matches every document: `findOne({ notDeclared: x })` is `findOne({})`. So
+ * every field a query filters on must be declared on its schema, even one that
+ * is only ever written conditionally (the call-up `externalId` was dropped from
+ * its schema once, and every call-up email after the first was treated as a
+ * duplicate of the first).
  */
 mongoose.set('strictQuery', true);
 

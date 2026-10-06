@@ -53,15 +53,22 @@ import { formatDate, formatDateTime } from '@/lib/format';
  */
 const FILTER_KEYS = ['state'] as const;
 
+/*
+ * ⚠️ The unset filter IS "Needs review", so it is labelled that.
+ *
+ * It read "All call-ups" while listing only what needs review — and choosing
+ * "All call-ups" cleared the filter, which is the same needs-review list again,
+ * so there was no way to see everything at once. "All" is now its own value.
+ */
 const STATE_FILTER: readonly FilterDefinition[] = [
   {
     key: 'state',
     label: 'State',
-    allLabel: 'All call-ups',
+    allLabel: CALL_UP_STATE_LABELS['needs-review'],
     options: [
-      { value: 'needs-review', label: CALL_UP_STATE_LABELS['needs-review'] },
       { value: 'applied', label: CALL_UP_STATE_LABELS.applied },
       { value: 'rejected', label: CALL_UP_STATE_LABELS.rejected },
+      { value: 'all', label: 'All call-ups' },
     ],
   },
 ];
@@ -95,8 +102,15 @@ export function AdminQueueCallUpReviewPage(): React.JSX.Element {
     | 'rejected'
     | undefined;
 
+  /*
+   * The state filter is resolved HERE and sent as `state` alone. Left in the
+   * generic filters it went to the API verbatim — "all" included, which the
+   * API rightly refuses as not a state.
+   */
+  const { state: _rawState, ...otherFilters } = controller.query.filters ?? {};
   const { data, error, isPending, isFetching, refetch } = useCallUps({
     ...controller.query,
+    filters: otherFilters,
     state: controller.filters.state === 'all' ? undefined : state,
   });
 
@@ -208,6 +222,10 @@ export function AdminQueueCallUpReviewPage(): React.JSX.Element {
           <span className="block text-sm">
             {row.reason === null ? '—' : CALL_UP_REVIEW_REASON_LABELS[row.reason]}
           </span>
+          {/* What exactly was refused — kept apart from the builder's note. */}
+          {row.state === 'needs-review' && row.refusal && (
+            <span className="block text-xs text-warning">{row.refusal}</span>
+          )}
           {row.note !== '' && (
             <span className="block truncate text-xs text-muted-foreground" title={row.note}>
               {row.note}

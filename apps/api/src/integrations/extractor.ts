@@ -49,8 +49,10 @@ export interface ExtractorExtraction {
    * that may expire, and the PDF is the evidence the confirmation rests on.
    */
   fileUrl: string | null;
-  /** The mailbox the PO arrived from, when the extraction came from email. */
+  /** The address the PO was sent FROM, when the extraction came from email. */
   email: string | null;
+  /** The email's subject line, when the extraction came from email. */
+  emailSubject: string | null;
   createdAt: string | null;
 }
 
@@ -198,7 +200,8 @@ export const extractorClient = {
       documentId: str(raw.documentId) ?? documentIdOf(raw.document),
       documentName: documentNameOf(raw.document),
       fileUrl: str(raw.fileUrl),
-      email: str(raw.email),
+      email: senderOf(raw.email),
+      emailSubject: isRecord(raw.email) ? str(raw.email.subject) : null,
       createdAt: str(raw.createdAt),
     };
   },
@@ -712,6 +715,26 @@ function documentIdOf(value: unknown): string | null {
 
 function documentNameOf(value: unknown): string | null {
   return isRecord(value) ? str(value.name) : null;
+}
+
+/**
+ * The sender's address.
+ *
+ * ⚠️ The vendor sends the email as a Microsoft Graph message OBJECT —
+ * `{ subject, from: { emailAddress: { name, address } }, … }` — not the string
+ * its guide shows. Read as a string it was always null, so every PO arrived
+ * "from unknown@unknown" and matching by the builder's own email domain (the
+ * strongest signal there is) never ran. A plain string is still accepted, in
+ * case an older extraction or another envelope carries one.
+ */
+function senderOf(value: unknown): string | null {
+  const plain = str(value);
+  if (plain) return plain.toLowerCase();
+  if (!isRecord(value)) return null;
+
+  const from = isRecord(value.from) ? value.from : null;
+  const address = from && isRecord(from.emailAddress) ? str(from.emailAddress.address) : null;
+  return address ? address.toLowerCase() : null;
 }
 
 /**

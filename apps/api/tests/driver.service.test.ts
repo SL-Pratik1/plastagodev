@@ -123,6 +123,17 @@ vi.mock('../src/domains/notifications/notification.repository.js', () => ({
 }));
 
 /*
+ * The notice checks the site contact against the account's contacts for their
+ * notification switches (M8.4). None are on file here, so nothing is switched
+ * off — and the read is faked so it does not wait on a MongoDB that is absent.
+ */
+vi.mock('../src/domains/accounts/account.repository.js', () => ({
+  accountRepository: {
+    findById: () => Promise.resolve({ id: 'acc0000000000000000000a1', contacts: [] }),
+  },
+}));
+
+/*
  * The notice needs the SITE CONTACT, which the driver's own read model does not
  * carry — the phone is told about a stop, not about who to text. So the notice
  * module reads the job, and that read is faked here.

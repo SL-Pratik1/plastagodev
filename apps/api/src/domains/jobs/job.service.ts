@@ -186,6 +186,63 @@ export const jobService = {
   },
 
   /**
+   * Jobs on an account that a newly confirmed purchase order could attach to —
+   * booked before the order arrived, not cancelled, and not yet invoiced.
+   *
+   * Office only: this is the PO review screen's job picker. Phrased as picker
+   * rows so the screen renders them as it renders account candidates.
+   */
+  async withoutPurchaseOrder(
+    accountId: string,
+  ): Promise<Array<{ id: string; label: string; detail: string }>> {
+    const rows = await jobRepository.listWithoutPurchaseOrder(accountId);
+
+    return rows.map((row) => ({
+      id: row.id,
+      label: `#${String(row.jobNumber)} · ${row.siteName}`,
+      detail: `${row.status} · ready ${row.readyDate}`,
+    }));
+  },
+
+  /**
+   * Attaches a confirmed purchase order to a job that was booked without one.
+   *
+   * ⚠️ The job keeps its own area and bags. They were agreed when it was booked
+   * and may already be priced or collected; the order's figures are what the
+   * reviewer just checked against the document, and invoicing reads the order
+   * through `purchaseOrderId` — so the link, not an overwrite, is the change.
+   */
+  async attachPurchaseOrder(
+    jobId: string,
+    order: { id: string; poNumber: string; accountId: string },
+    caller: Caller,
+  ): Promise<void> {
+    const attached = await jobRepository.attachPurchaseOrder({
+      jobId,
+      accountId: order.accountId,
+      purchaseOrderId: order.id,
+      poNumber: order.poNumber,
+    });
+
+    if (!attached) {
+      throw AppError.conflict(
+        'That job can no longer take this purchase order — it was cancelled, invoiced or given another one',
+      );
+    }
+
+    await jobRepository.appendEvent({
+      jobId,
+      label: 'Purchase order attached',
+      actor: caller.name,
+      status: null,
+      detail:
+        attached.previousPoNumber && attached.previousPoNumber !== order.poNumber
+          ? `PO ${order.poNumber} (was "${attached.previousPoNumber}")`
+          : `PO ${order.poNumber}`,
+    });
+  },
+
+  /**
    * M2.1 / M6.9 — the estimate shown BEFORE saving.
    *
    * Runs the same `pricingService.quote` the create below runs, on purpose: if

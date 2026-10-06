@@ -173,6 +173,19 @@ export function usePoExtraction(id: string | undefined) {
   });
 }
 
+/**
+ * The job picker on the review screen, for the account the reviewer has chosen
+ * — which is often NOT the one the extraction matched, or there was none.
+ */
+export function usePoReviewJobCandidates(accountId: string) {
+  const { queues } = useServices();
+  return useQuery({
+    queryKey: queryKeys.queues.poReviewJobs(accountId),
+    queryFn: () => queues.poReviewJobCandidates(accountId),
+    enabled: accountId !== '',
+  });
+}
+
 export function usePoReviewConfirm() {
   const { queues } = useServices();
   return useQueueMutation(({ id, input }: { id: string; input: PoConfirmation }) =>

@@ -1,11 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import type { Surface } from '@plastago/shared';
-import {
-  AuthIdentifierSchema,
-  channelForIdentifier,
-  ROLE_LABELS,
-  ROLE_SURFACE,
-} from '@plastago/shared';
+import { AuthIdentifierSchema, channelForIdentifier } from '@plastago/shared';
 import {
   Button,
   Card,
@@ -13,7 +7,6 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-  cn,
   Field,
   Input,
   Spinner,
@@ -22,8 +15,6 @@ import { ArrowRightIcon, MailIcon, SmartphoneIcon } from 'lucide-react';
 import { useForm, useWatch } from 'react-hook-form';
 import { useLocation, useNavigate } from 'react-router';
 import * as z from 'zod';
-import type { SeededIdentity } from '@/config/seeded-identities';
-import { SEEDED_IDENTITIES } from '@/config/seeded-identities';
 import { useAuth } from '@/features/auth/auth-context';
 import { describeAuthError } from '@/features/auth/auth-messages';
 
@@ -57,8 +48,6 @@ export function SignInPage() {
     handleSubmit,
     control,
     setError,
-    setValue,
-    setFocus,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(FormSchema),
@@ -74,22 +63,6 @@ export function SignInPage() {
   // value.
   const identifier = useWatch({ control, name: 'identifier' });
   const channel = identifier.trim() ? channelForIdentifier(identifier) : null;
-
-  /**
-   * Tap-to-fill: the demo panel writes into the one field rather than signing
-   * in behind the user's back. The flow being demonstrated is the one-time-code
-   * flow, so jumping straight to the code screen would show something the
-   * product does not do — and would hide which identifier a role actually uses,
-   * which is the whole point of a driver and a supervisor being on mobile.
-   */
-  const fillIdentifier = (identity: SeededIdentity) => {
-    setValue('identifier', identity.email ?? identity.mobile ?? '', {
-      shouldValidate: true,
-      shouldDirty: true,
-      shouldTouch: true,
-    });
-    setFocus('identifier');
-  };
 
   const onSubmit = async (values: FormValues) => {
     try {
@@ -200,81 +173,6 @@ export function SignInPage() {
         >
           1300 395 438
         </a>
-      </p>
-
-      <SeededIdentityPanel onPick={fillIdentifier} />
-    </div>
-  );
-}
-
-/**
- * Demo affordance, not a feature.
- *
- * A UI-only build has no directory to authenticate against, so without this
- * nobody — including the client in the demo meeting — can get past this screen.
- * Tapping a role fills the field above rather than signing in, so what is being
- * demonstrated stays the real one-time-code flow.
- *
- * It is deliberately conspicuous and clearly labelled so it cannot be mistaken
- * for product, and it is the single thing to delete when the real auth endpoints
- * land: this panel, and the `mocks/fixtures` folder it reads from.
- */
-
-/**
- * Dot colour by surface, not by role.
- *
- * Seven colours for seven roles is a legend nobody reads. Three say the thing
- * that actually changes when you tap: which application you land in.
- */
-const SURFACE_DOT: Record<Surface, string> = {
-  admin: 'bg-brand-600',
-  portal: 'bg-info',
-  driver: 'bg-warning',
-};
-
-function SeededIdentityPanel({ onPick }: { onPick: (identity: SeededIdentity) => void }) {
-  return (
-    <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgb(16_24_16/0.04)]">
-      <p className="text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
-        Seeded accounts — tap to fill
-      </p>
-
-      <ul className="mt-3 flex flex-wrap gap-2">
-        {SEEDED_IDENTITIES.map((identity) => {
-          const identifier = identity.email ?? identity.mobile ?? '';
-          return (
-            <li key={identity.role}>
-              <button
-                type="button"
-                onClick={() => {
-                  onPick(identity);
-                }}
-                // The identifier is what the tap actually does, so it belongs in
-                // the accessible name — the chip only has room for the role, and
-                // a screen reader would otherwise hear seven buttons that differ
-                // by a colour it cannot see.
-                aria-label={`Fill ${identifier} — ${identity.name}, ${ROLE_LABELS[identity.role]}`}
-                title={`${identity.name} · ${identifier}`}
-                className="focus-ring flex items-center gap-2 rounded-full border border-border bg-background py-1.5 pr-3.5 pl-3 text-xs font-medium text-foreground transition-colors hover:border-primary hover:bg-accent"
-              >
-                <span
-                  aria-hidden
-                  className={cn(
-                    'size-2 shrink-0 rounded-full',
-                    SURFACE_DOT[ROLE_SURFACE[identity.role]],
-                  )}
-                />
-                {ROLE_LABELS[identity.role]}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-
-      <p className="mt-3 border-t border-border pt-3 text-xs text-muted-foreground">
-        Development build. These are the accounts <code className="font-mono">seed:auth</code>{' '}
-        creates — tap one to fill the field, then send a real code. Email codes are printed by the
-        API when <code className="font-mono">MAIL_PROVIDER=stub</code>.
       </p>
     </div>
   );

@@ -47,6 +47,8 @@ export interface IngestExtractionInput {
   extractedAreaM2: number | null;
   extractedBagAllowance: number | null;
   extractedSiteAddress: string | null;
+  extractedSuburb: string | null;
+  extractedPostcode: string | null;
   extractedLotNumber: string | null;
   extractedSupervisorName: string | null;
   extractedSupervisorMobile: string | null;
@@ -92,6 +94,8 @@ interface RawExtraction {
   extractedAreaM2: number | null;
   extractedBagAllowance: number | null;
   extractedSiteAddress: string | null;
+  extractedSuburb: string | null;
+  extractedPostcode: string | null;
   extractedLotNumber: string | null;
   extractedSupervisorName: string | null;
   extractedSupervisorMobile: string | null;
@@ -106,6 +110,7 @@ interface RawExtraction {
   state: PoReviewState;
   reviewedAt: Date | null;
   reviewedBy: string | null;
+  rejectionNote?: string | null;
 }
 
 function toItem(row: RawExtraction): PoExtractionItem {
@@ -125,6 +130,9 @@ function toItem(row: RawExtraction): PoExtractionItem {
     extractedAreaM2: row.extractedAreaM2,
     extractedBagAllowance: row.extractedBagAllowance,
     extractedSiteAddress: row.extractedSiteAddress,
+    // Absent on rows ingested before these were kept.
+    extractedSuburb: row.extractedSuburb ?? null,
+    extractedPostcode: row.extractedPostcode ?? null,
     extractedLotNumber: row.extractedLotNumber,
     extractedSupervisorName: row.extractedSupervisorName,
     extractedSupervisorMobile: row.extractedSupervisorMobile,
@@ -201,6 +209,7 @@ export const poExtractionRepository = {
       jobCandidates: row.jobCandidates,
       reviewedAt: row.reviewedAt ? row.reviewedAt.toISOString() : null,
       reviewedBy: row.reviewedBy,
+      rejectionNote: row.rejectionNote ?? null,
     };
   },
 

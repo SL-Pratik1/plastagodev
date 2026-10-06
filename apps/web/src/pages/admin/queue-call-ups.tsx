@@ -20,6 +20,7 @@ import { useListQuery } from '@/components/data-table/use-list-query';
 import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
 import { useAwaitingCallUps, useCallUpOrder } from '@/features/queues/queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { isServiceError } from '@/services/service-error';
 import { formatDateTime } from '@/lib/format';
@@ -224,7 +225,7 @@ export function AdminQueueCallUpsPage(): React.JSX.Element {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Waiting for a call-up"
+        title="Waiting for a date"
         description="Purchase orders we have confirmed and nobody has given us a date for. A call-up email normally books these; this is where you do it by hand when one does not arrive."
       />
 
@@ -317,6 +318,18 @@ export function AdminQueueCallUpsPage(): React.JSX.Element {
               />
             )}
           </Field>
+
+          {/*
+            Allowed from the office — it is relaying "the site has been ready
+            since Monday" — but said out loud first: a past ready date puts the
+            job straight onto the overdue list. The portal refuses one outright.
+          */}
+          {readyDate !== '' && readyDate < todayInSydney() && (
+            <Alert variant="warning" title="That day has already passed">
+              The job will be due straight away. Book it only if the site really has been ready
+              since then — otherwise pick today or later.
+            </Alert>
+          )}
 
           <Field
             id="call-up-note"

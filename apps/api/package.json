@@ -32,6 +32,7 @@
     "migrate:call-up-index": "tsx src/scripts/migrate-call-up-index.ts",
     "migrate:photo-uploaded-at": "tsx src/scripts/migrate-photo-uploaded-at.ts",
     "migrate:run-stop-drivers": "tsx src/scripts/migrate-run-stop-drivers.ts",
+    "migrate:supervisor-mobiles": "tsx src/scripts/migrate-supervisor-mobiles.ts",
     "migrate:tv-reference-data": "tsx src/scripts/migrate-tv-reference-data.ts",
     "migrate:tv-accounts": "tsx src/scripts/migrate-tv-accounts.ts",
     "migrate:tv-fleet-staff": "tsx src/scripts/migrate-tv-fleet-staff.ts",

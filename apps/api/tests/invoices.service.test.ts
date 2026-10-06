@@ -302,6 +302,30 @@ describe('what the customer receives', () => {
   });
 
   /*
+   * ⚠️ The email said INV-104312 while the PDF it carried said PGA-104312 and
+   * asked for that as the payment reference. One number, from one context.
+   */
+  it('calls the invoice by the number printed on its PDF', async () => {
+    const draft = invoices.seed({ status: 'draft' });
+
+    await invoiceService.send([draft.id], OFFICE);
+
+    const number = `PGA-${String(draft.invoiceNumber)}`;
+    expect(sentMessages[0]?.subject).toContain(`Invoice ${number}`);
+    expect(sentMessages[0]?.body).toContain(`Invoice ${number}`);
+    expect(sentMessages[0]?.subject).not.toContain('INV-');
+  });
+
+  /* It asks for a reply, so it must come from where replies are read. */
+  it('goes from the accounts mailbox', async () => {
+    const draft = invoices.seed({ status: 'draft' });
+
+    await invoiceService.send([draft.id], OFFICE);
+
+    expect(sentMessages[0]?.mailbox).toBe('accounts');
+  });
+
+  /*
    * ⚠️ Only the rows that actually moved. A grid selection routinely holds
    * invoices that were sent last week, and a second covering email for one of
    * them reads as a duplicate bill.

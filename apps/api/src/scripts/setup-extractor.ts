@@ -53,7 +53,7 @@ const TEMPLATE_FIELDS = [
     key: FIELD_KEYS.builderName,
     type: 'String',
     description:
-      'The building company that ISSUED this order — the company whose logo and ABN are in the letterhead. Examples: "Wisdom Homes", "Domaine Homes (NSW) Pty Ltd". CRITICAL: this is NOT the vendor. Never return "PlastaGo", "Plasta-Go", "PLASTA GO", "Plasta Go Pty Ltd" or "EasyLift" — those are the supplier being ordered from. Also never return the homebuyer or client name.',
+      'The building company that ISSUED this order, as named in its LOGO or letterhead at the top of page one. Examples: "Wisdom Homes", "Domaine Homes (NSW) Pty Ltd". Use the trading name shown in the logo, NOT a legal entity named only in the terms and conditions — on a Wisdom order return "Wisdom Homes", never "Wisdom Properties Group Pty Ltd", and never the job group heading such as "Spec Homes". CRITICAL: this is NOT the vendor. Never return "PlastaGo", "Plasta-Go", "PLASTA GO", "Plasta Go Pty Ltd" or "EasyLift" — those are the supplier being ordered from. Also never return the homebuyer or client name.',
   },
   {
     id: '3',
@@ -145,6 +145,65 @@ const TEMPLATE_FIELDS = [
       { id: '14d', key: 'amount', type: 'String', description: 'The line amount, plain number, no currency symbol.' },
     ],
   },
+  {
+    id: '15',
+    key: FIELD_KEYS.builderAbn,
+    type: 'String',
+    description:
+      'The ABN of the building company that issued this order, from ITS letterhead — 11 digits. Examples: "82 089 425 829" (Wisdom Homes), "19 080 788 969" (Domaine Homes). CRITICAL: never return the ABN printed in the vendor / "TO" box — that is PlastaGo\'s own ABN (22 669 797 915). Return null if the builder prints no ABN.',
+  },
+] as const;
+
+/**
+ * The call-up template (M2.12b) — the builder's "when", a week out.
+ *
+ * Written against the client's real Domaine "Construction Notification": one
+ * page, no prices, a supervisor block, "Job Details 79903057" and the site,
+ * then "Date Required 17/09/2026". Keys match `call-up-ingest.adapter.ts`.
+ *
+ * ⚠️ The description says what it is NOT as loudly as what it is. The
+ * extractor sorts every PDF in the mailbox into a template by itself, and a
+ * call-up read as a purchase order lands in PO review as an order with no
+ * area, no bags and no value.
+ */
+const CALL_UP_TEMPLATE_NAME = 'PlastaGo Call-up';
+
+const CALL_UP_TEMPLATE_FIELDS = [
+  {
+    id: '1',
+    key: 'po_number',
+    type: 'String',
+    description:
+      'The builder\'s purchase order number, or — when the notice gives none — the JOB number it names. On a Domaine "Construction Notification" this is the number beside "Job Details", e.g. "79903057". Return it exactly as printed, including any slash or dots. Never return the Message ID, the supervisor number at the foot of the page, or a phone number.',
+  },
+  {
+    id: '2',
+    key: 'ready_date',
+    type: 'Date',
+    description:
+      'The day the site is ready for pickup — labelled "Date Required", "Required Date", "Pick-up Date" or "Ready". Australian documents use DAY/MONTH/YEAR: "17/09/2026" is 17 September 2026. Return ISO format YYYY-MM-DD. Do NOT return the date the notice was sent, which is printed at the top right beside the time.',
+  },
+  {
+    id: '3',
+    key: 'notification_type',
+    type: 'String',
+    description:
+      'What the notice asks for, as exactly one word: "new" for a new pickup or construction notification, "reschedule" if it moves a pickup already booked (words like rescheduled, date changed, moved, new date), or "cancel" if it cancels one.',
+  },
+  {
+    id: '4',
+    key: 'site_address',
+    type: 'String',
+    description:
+      'The site as printed under the job details: lot, street, suburb, state and postcode. Example: "Lot 158, 49 Pastureland Street STREAM HILL NSW 2526". Never the builder\'s office address or PlastaGo\'s.',
+  },
+  {
+    id: '5',
+    key: 'note',
+    type: 'String',
+    description:
+      'The job instructions, if any, as printed — e.g. "Please attend site and pick up excess Plasterboard for recycling." Include the supervisor\'s name and mobile if shown, as "Supervisor: Brett Cerchi 0418 166 800". Leave out the PlastaGo address block and page numbers.',
+  },
 ] as const;
 
 async function onboard(): Promise<void> {
@@ -217,9 +276,40 @@ async function main(): Promise<void> {
     );
   }
 
-  /* ── The template ─────────────────────────────────────────────────────── */
-
   const existing = await extractorClient.listDocuments();
+
+  /* ── The call-up template ─────────────────────────────────────────────── */
+
+  const callUpMatch = existing.find((row) => row.name === CALL_UP_TEMPLATE_NAME);
+  const callUpDocumentId = await extractorClient.upsertDocument({
+    id: callUpMatch?.id ?? null,
+    name: CALL_UP_TEMPLATE_NAME,
+    description:
+      'A builder\'s call-up — a "Construction Notification" or pickup notice asking PlastaGo to collect plasterboard from a site on a date. One page: a supervisor block, the job number and site address, the task and the date required. It is NOT a purchase order: it has no prices, no quantities, no line items and no order total.',
+    fields: CALL_UP_TEMPLATE_FIELDS,
+  });
+
+  log.info({ documentId: callUpDocumentId, updated: callUpMatch !== undefined }, 'call-up template saved');
+
+  /*
+   * `--call-up-only` stops here: the purchase-order template and the webhook
+   * are left exactly as they are, so adding call-ups cannot disturb the order
+   * pipeline that is already live.
+   */
+  if (process.argv.includes('--call-up-only')) {
+    // eslint-disable-next-line no-console
+    console.log(`
+Template "${CALL_UP_TEMPLATE_NAME}" ${callUpMatch ? 'updated' : 'created'} with ${String(CALL_UP_TEMPLATE_FIELDS.length)} fields.
+
+Add this to apps/api/.env so call-up emails are routed to the call-up queue:
+
+  EXTRACTOR_CALL_UP_DOCUMENT_ID=${callUpDocumentId}
+`);
+    return;
+  }
+
+  /* ── The purchase-order template ──────────────────────────────────────── */
+
   const match = existing.find((row) => row.name === TEMPLATE_NAME);
 
   const documentId = await extractorClient.upsertDocument({
@@ -257,10 +347,12 @@ async function main(): Promise<void> {
   // eslint-disable-next-line no-console
   console.log(`
 Template "${TEMPLATE_NAME}" ${match ? 'updated' : 'created'} with ${String(TEMPLATE_FIELDS.length)} fields.
+Template "${CALL_UP_TEMPLATE_NAME}" ${callUpMatch ? 'updated' : 'created'} with ${String(CALL_UP_TEMPLATE_FIELDS.length)} fields.
 
-Add this to apps/api/.env so callbacks for other document types are ignored:
+Add these to apps/api/.env so each document type reaches its own queue:
 
   EXTRACTOR_DOCUMENT_ID=${documentId}
+  EXTRACTOR_CALL_UP_DOCUMENT_ID=${callUpDocumentId}
 
 ${
   reachable

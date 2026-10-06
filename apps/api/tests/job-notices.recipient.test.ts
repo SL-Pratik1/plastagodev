@@ -13,11 +13,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface SendRequest {
   event: string;
-  recipient: { email: string | null; mobile: string | null };
+  recipient: {
+    email: string | null;
+    mobile: string | null;
+    notifyByEmail?: boolean;
+    notifyBySms?: boolean;
+  };
 }
 
 let sent: SendRequest[] = [];
-let contacts: Array<{ role: string; email: string | null; mobile: string | null }> = [];
+let contacts: Array<{
+  role: string;
+  email: string | null;
+  mobile: string | null;
+  notifyByEmail?: boolean;
+  notifyBySms?: boolean;
+}> = [];
 
 vi.mock('../src/domains/notifications/outbound.service.js', () => ({
   outboundService: {
@@ -40,9 +51,15 @@ vi.mock('../src/domains/notifications/notification.service.js', () => ({
   },
 }));
 
+/** Set to make the account read fail, as a database hiccup would. */
+let accountReadFails = false;
+
 vi.mock('../src/domains/accounts/account.repository.js', () => ({
   accountRepository: {
-    findById: () => Promise.resolve({ id: 'acc1', contacts }),
+    findById: () =>
+      accountReadFails
+        ? Promise.reject(new Error('database unavailable'))
+        : Promise.resolve({ id: 'acc1', contacts }),
   },
 }));
 
@@ -67,6 +84,7 @@ const job = (over: Partial<Record<string, unknown>> = {}) => ({
 beforeEach(() => {
   sent = [];
   audiences = [];
+  accountReadFails = false;
   contacts = [
     { role: 'accounts', email: 'accounts@allcastle.com.au', mobile: null },
     { role: 'site', email: 'site@allcastle.com.au', mobile: '0430942011' },
@@ -111,6 +129,91 @@ describe('who a pickup notice reaches', () => {
 
     await expect(jobNotices.booked(job())).resolves.toBeUndefined();
     expect(sent[0]?.recipient).toEqual({ email: null, mobile: null });
+  });
+});
+
+/*
+ * M8.4 — the switches on the portal's Account page.
+ *
+ * ⚠️ They were dropped on the way to the send, so a customer who switched
+ * email off kept receiving every pickup email while the page promised
+ * "notifications will follow these settings".
+ */
+describe("a contact's notification switches", () => {
+  it('carries them with the fallback contact, so "off" is honoured', async () => {
+    contacts = [
+      {
+        role: 'accounts',
+        email: 'accounts@allcastle.com.au',
+        mobile: null,
+        notifyByEmail: false,
+        notifyBySms: false,
+      },
+    ];
+
+    await jobNotices.booked(job());
+
+    // Returned WITH the switch, so the send log says "turned off".
+    expect(sent[0]?.recipient).toMatchObject({
+      email: 'accounts@allcastle.com.au',
+      notifyByEmail: false,
+    });
+  });
+
+  it('passes over a contact who switched everything off for one who did not', async () => {
+    contacts = [
+      { role: 'site', email: 'quiet@allcastle.com.au', mobile: null, notifyByEmail: false, notifyBySms: false },
+      { role: 'accounts', email: 'accounts@allcastle.com.au', mobile: null, notifyByEmail: true, notifyBySms: false },
+    ];
+
+    await jobNotices.booked(job());
+
+    expect(sent[0]?.recipient.email).toBe('accounts@allcastle.com.au');
+  });
+
+  it("applies a contact's email switch when the job names the same address", async () => {
+    contacts = [
+      { role: 'accounts', email: 'Boss@ThisSite.com.au', mobile: null, notifyByEmail: false, notifyBySms: false },
+    ];
+
+    await jobNotices.booked(job({ siteContactEmail: 'boss@thissite.com.au' }));
+
+    expect(sent[0]?.recipient.notifyByEmail).toBe(false);
+  });
+
+  /*
+   * ⚠️ Per address. Every accounts contact is created with SMS off and no
+   * mobile; that must not silence a site mobile typed onto the job.
+   */
+  it('does not let an SMS switch silence a mobile the contact never gave', async () => {
+    contacts = [
+      { role: 'accounts', email: 'accounts@allcastle.com.au', mobile: null, notifyByEmail: true, notifyBySms: false },
+    ];
+
+    await jobNotices.booked(
+      job({ siteContactEmail: 'accounts@allcastle.com.au', siteContactMobile: '0430942011' }),
+    );
+
+    expect(sent[0]?.recipient.notifyBySms).toBeUndefined();
+  });
+
+  /* The switches are a refinement; losing them must not lose the notice. */
+  it('still tells the site when the contact switches cannot be read', async () => {
+    accountReadFails = true;
+
+    await jobNotices.booked(job({ siteContactMobile: '0430942011' }));
+
+    expect(sent[0]?.recipient).toEqual({ email: null, mobile: '0430942011' });
+  });
+
+  it('matches a mobile however it was typed', async () => {
+    contacts = [
+      { role: 'site', email: null, mobile: '0430942011', notifyByEmail: false, notifyBySms: false },
+    ];
+
+    await jobNotices.booked(job({ siteContactMobile: '+61 430 942 011' }));
+
+    expect(sent[0]?.recipient.notifyBySms).toBe(false);
   });
 });
 

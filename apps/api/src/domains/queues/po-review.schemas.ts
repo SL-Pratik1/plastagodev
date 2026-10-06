@@ -10,6 +10,11 @@ export const ExtractionIdParamsSchema = z
   .object({ id: ObjectIdSchema })
   .meta({ id: 'ExtractionIdParams' });
 
+/** Which account's open jobs the review screen's job picker should offer. */
+export const PoReviewJobCandidatesQuerySchema = z
+  .object({ accountId: ObjectIdSchema })
+  .meta({ id: 'PoReviewJobCandidatesQuery' });
+
 export const ListExtractionsQuerySchema = z
   .object({
     page: z.coerce.number().int().min(1).default(1),
@@ -128,6 +133,13 @@ export const IngestExtractionSchema = z
     extractedAreaM2: z.number().nonnegative().max(100_000).nullable(),
     extractedBagAllowance: z.number().int().nonnegative().max(200).nullable(),
     extractedSiteAddress: z.string().trim().max(200).nullable(),
+    extractedSuburb: z.string().trim().max(80).nullable().default(null),
+    extractedPostcode: z
+      .string()
+      .trim()
+      .regex(/^\d{4}$/, 'A postcode is four digits')
+      .nullable()
+      .default(null),
     extractedLotNumber: z.string().trim().max(30).nullable(),
     extractedSupervisorName: z.string().trim().max(80).nullable(),
     extractedSupervisorMobile: z.string().trim().max(20).nullable(),

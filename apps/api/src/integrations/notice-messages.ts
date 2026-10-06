@@ -273,7 +273,15 @@ export function buildWelcomeEmail(to: string, context: WelcomeContext): Outbound
 
 export interface InvoiceNoticeContext {
   accountName: string;
-  invoiceNumber: number;
+  /**
+   * As printed on the PDF — `PGA-104312`, prefix included.
+   *
+   * ⚠️ Formatted by the caller from the same render context as the attached
+   * PDF. This used to be the bare number with `INV-` hardcoded in front, so the
+   * email said INV-104312 while the PDF beneath it said PGA-104312 and asked
+   * the customer to quote that as their payment reference.
+   */
+  invoiceNumber: string;
   totalIncGst: string;
   dueOn: string | null;
   paymentTermsDays: number;
@@ -301,7 +309,7 @@ export interface InvoiceNoticeContext {
 export function buildInvoiceEmail(to: string, context: InvoiceNoticeContext): OutboundEmail {
   const brand = env.OTP_SENDER_NAME;
   const url = `${portal()}/portal/invoices`;
-  const number = `INV-${String(context.invoiceNumber)}`;
+  const number = `Invoice ${context.invoiceNumber}`;
 
   const terms = context.dueOn
     ? `Due ${context.dueOn}`
@@ -339,6 +347,8 @@ export function buildInvoiceEmail(to: string, context: InvoiceNoticeContext): Ou
     subject: `${number} — ${context.accountName} — $${context.totalIncGst}`,
     text,
     html,
+    // It asks for a reply, so it comes from where replies are read.
+    mailbox: 'accounts',
   };
 }
 
@@ -1057,5 +1067,7 @@ export function buildPoRequestEmail(to: string, context: PoRequestContext): Outb
     subject: `Purchase order needed — invoice ${context.invoiceNumber} — ${context.accountName}`,
     text,
     html,
+    // The PO number comes back as a reply, so this goes from accounts@.
+    mailbox: 'accounts',
   };
 }

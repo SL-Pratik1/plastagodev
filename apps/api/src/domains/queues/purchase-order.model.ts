@@ -81,6 +81,9 @@ const poExtractionSchema = new Schema(
     extractedAreaM2: { type: Number, default: null, min: 0 },
     extractedBagAllowance: { type: Number, default: null, min: 0 },
     extractedSiteAddress: { type: String, default: null, trim: true },
+    /** As read off the page — the review form pre-fills from it, confirm carries the postcode. */
+    extractedSuburb: { type: String, default: null, trim: true },
+    extractedPostcode: { type: String, default: null, trim: true },
     extractedLotNumber: { type: String, default: null, trim: true },
     extractedSupervisorName: { type: String, default: null, trim: true },
     extractedSupervisorMobile: { type: String, default: null, trim: true },

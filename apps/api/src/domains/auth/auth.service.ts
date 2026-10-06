@@ -11,6 +11,7 @@ import {
 } from '@plastago/shared';
 import { getAuth } from '../../auth/better-auth.js';
 import { takeOtpCode } from '../../auth/otp-peek.js';
+import { isTestLogin } from '../../auth/test-login.js';
 import { env, revealUnknownIdentifier } from '../../config/env.js';
 import { AppError, isAppError } from '../../lib/app-error.js';
 import { authError } from '../../lib/auth-error.js';
@@ -83,6 +84,13 @@ export const authService = {
         throw authError('ACCOUNT_SUSPENDED', 'Account is suspended');
       }
       return issueDecoy(normalised, channel, ctx);
+    }
+
+    // The fixed-code test login opens a driver-only account and nothing else —
+    // on an office or admin account a fixed code would be a back door.
+    if (isTestLogin(normalised) && !user.roles.every((role) => role === 'driver')) {
+      log.error({ userId: user.id, roles: user.roles }, 'test login refused: not a driver-only account');
+      throw AppError.forbidden('The test login only works for a driver account');
     }
 
     await sendCode(normalised, channel);
@@ -445,6 +453,10 @@ function wrongCode(attemptsRemaining: number): AppError {
 
 /** Per-identifier ceiling, independent of the IP-based limiter on the router. */
 async function assertSendAllowed(identifier: string): Promise<void> {
+  // Sends nothing and costs nothing, and the app developer signs in and out
+  // all day — six an hour would lock them out by mid-morning.
+  if (isTestLogin(identifier)) return;
+
   const since = new Date(Date.now() - 60 * 60 * 1000);
   const sends = await authRepository.countRecentSends(identifier, since);
 

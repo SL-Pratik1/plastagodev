@@ -1,4 +1,4 @@
-import type { Job } from '@plastago/shared';
+import { normaliseMobile, type Job } from '@plastago/shared';
 import { logger } from '../../lib/logger.js';
 import {
   buildJobBookedEmail,
@@ -21,7 +21,7 @@ import {
 import { accountRepository } from '../accounts/account.repository.js';
 import { jobRepository } from '../jobs/job.repository.js';
 import { notificationService } from './notification.service.js';
-import { outboundService } from './outbound.service.js';
+import { outboundService, type NoticeRecipient } from './outbound.service.js';
 
 const log = logger.child({ module: 'job-notices' });
 
@@ -496,22 +496,93 @@ async function loadJob(jobId: string, event: string): Promise<CompletedJob | nul
  * already resolves recipients this way. Order matters: the SITE contact is
  * preferred over the accounts contact, because "your pickup is booked" is
  * operational news for whoever is on site, not for whoever pays.
+ *
+ * ── Why the contact's preferences travel with it (M8.4) ────────────────────
+ * ⚠️ They used to be dropped here, so a customer who switched email off on the
+ * portal's Account page — which promises "notifications will follow these
+ * settings" — kept receiving every pickup email. A contact who has switched
+ * every channel off is passed over for one who has not; if nobody is left, the
+ * first reachable contact is returned WITH its preferences, so the send log
+ * says "turned off" rather than "no email or mobile on file".
  */
-async function recipientFor(job: NoticeJob): Promise<{ email: string | null; mobile: string | null }> {
+async function recipientFor(job: NoticeJob): Promise<NoticeRecipient> {
   if (job.siteContactEmail || job.siteContactMobile) {
-    return { email: job.siteContactEmail, mobile: job.siteContactMobile };
+    /*
+     * ⚠️ A failed read must not cost the site its notice. The job already
+     * names who to tell; the account is only consulted for their switches, so
+     * losing it means "no preference known" — which defaults to sending.
+     */
+    const contacts = await accountRepository
+      .findById(job.accountId, { accountId: null })
+      .then((account) => account?.contacts ?? [])
+      .catch((error: unknown) => {
+        log.warn({ err: error, jobId: job.id }, 'contact switches unavailable — sending anyway');
+        return [];
+      });
+
+    return {
+      email: job.siteContactEmail,
+      mobile: job.siteContactMobile,
+      ...preferencesFor(contacts, job.siteContactEmail, job.siteContactMobile),
+    };
   }
 
   const account = await accountRepository.findById(job.accountId, { accountId: null });
   const contacts = account?.contacts ?? [];
 
   const reachable = (contact: (typeof contacts)[number]) => contact.email ?? contact.mobile;
-  const onSite = contacts.find((contact) => contact.role === 'site' && reachable(contact));
-  const fallback = onSite ?? contacts.find(reachable);
+  const allowed = (contact: (typeof contacts)[number]) =>
+    (contact.email !== null && contact.notifyByEmail !== false) ||
+    (contact.mobile !== null && contact.notifyBySms !== false);
+
+  const fallback =
+    contacts.find((contact) => contact.role === 'site' && allowed(contact)) ??
+    contacts.find(allowed) ??
+    contacts.find(reachable);
 
   if (!fallback) return { email: null, mobile: null };
 
-  return { email: fallback.email, mobile: fallback.mobile };
+  return {
+    email: fallback.email,
+    mobile: fallback.mobile,
+    notifyByEmail: fallback.notifyByEmail,
+    notifyBySms: fallback.notifyBySms,
+  };
+}
+
+/**
+ * The preferences that apply to a site contact typed onto the job.
+ *
+ * ⚠️ Per ADDRESS, not per person. A contact's "SMS off" says nothing about a
+ * mobile they never gave us — every accounts contact is created with SMS off
+ * and no mobile — so a preference is applied only to the address it was set
+ * against. Without that, typing the AP clerk's email and the site's mobile onto
+ * a job would silence the site.
+ */
+function preferencesFor(
+  contacts: ReadonlyArray<{
+    email: string | null;
+    mobile: string | null;
+    notifyByEmail: boolean;
+    notifyBySms: boolean;
+  }>,
+  email: string | null,
+  mobile: string | null,
+): Pick<NoticeRecipient, 'notifyByEmail' | 'notifyBySms'> {
+  const wantedEmail = email?.trim().toLowerCase() || null;
+  const wantedMobile = mobile ? normaliseMobile(mobile) : null;
+
+  const byEmail = wantedEmail
+    ? contacts.find((contact) => contact.email?.trim().toLowerCase() === wantedEmail)
+    : undefined;
+  const bySms = wantedMobile
+    ? contacts.find((contact) => contact.mobile && normaliseMobile(contact.mobile) === wantedMobile)
+    : undefined;
+
+  return {
+    ...(byEmail ? { notifyByEmail: byEmail.notifyByEmail } : {}),
+    ...(bySms ? { notifyBySms: bySms.notifyBySms } : {}),
+  };
 }
 
 /**

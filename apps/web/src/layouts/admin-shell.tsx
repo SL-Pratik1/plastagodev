@@ -349,7 +349,7 @@ export function AdminShell() {
         </main>
 
         <footer className="border-t border-border px-4 py-3 text-center text-xs text-muted-foreground sm:px-6">
-          PlastaGo console · demo build on sample data · all times Australia/Sydney
+          PlastaGo console · all times Australia/Sydney
         </footer>
       </div>
 

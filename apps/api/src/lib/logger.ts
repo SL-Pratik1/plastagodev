@@ -17,6 +17,8 @@ export const logger = pino({
       'req.headers.cookie',
       'req.body.otp',
       'req.body.token',
+      // The extractor webhook's shared secret travels in the query string.
+      'req.query.token',
       'res.headers["set-cookie"]',
     ],
     censor: '[redacted]',

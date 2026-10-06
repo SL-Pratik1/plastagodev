@@ -33,6 +33,27 @@ function extraction(data: Record<string, unknown>): ExtractorExtraction {
 const read = (data: Record<string, unknown>) =>
   adaptCallUp(extraction(data), { receivedAt: new Date('2026-09-14T02:00:00.000Z') });
 
+/*
+ * The note opened "Email: CallupReport_External.PDF" — the attachment's name —
+ * when what the office searches its inbox for is the email's subject.
+ */
+describe('which email a call-up came from', () => {
+  it('names the email by its subject, with the attachment alongside', () => {
+    const adapted = adaptCallUp(
+      { ...extraction({ po_number: '79903057', ready_date: '17/09/2026' }), emailSubject: 'Testing extraction' },
+      { receivedAt: new Date('2026-09-14T02:00:00.000Z') },
+    );
+
+    expect(adapted?.input.note).toContain('Email: Testing extraction (Call up 4500123456.pdf)');
+  });
+
+  it('falls back to the file name for a PDF uploaded by hand', () => {
+    expect(read({ po_number: '79903057', ready_date: '17/09/2026' })?.input.note).toContain(
+      'Email: Call up 4500123456.pdf',
+    );
+  });
+});
+
 describe('the date on a call-up', () => {
   /*
    * ⚠️ The one that matters most. Read as month-first this is 12 September —

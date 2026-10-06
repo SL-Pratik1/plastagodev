@@ -36,8 +36,14 @@ import { PageHeader } from '@/components/page-header';
 import { AgeBadge } from '@/components/queues/age-badge';
 
 import { useAccountOptions } from '@/features/lookups/queries';
-import { usePoExtraction, usePoReviewConfirm, usePoReviewReject } from '@/features/queues/queries';
+import {
+  usePoExtraction,
+  usePoReviewConfirm,
+  usePoReviewJobCandidates,
+  usePoReviewReject,
+} from '@/features/queues/queries';
 import { describeError } from '@/lib/error-message';
+import { isServiceError } from '@/services/service-error';
 import { formatDateTime, formatMoney } from '@/lib/format';
 
 /**
@@ -306,7 +312,9 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
   );
   const [lotNumber, setLotNumber] = useState(extraction.extractedLotNumber ?? '');
   const [addressLine, setAddressLine] = useState(extraction.extractedSiteAddress ?? '');
-  const [suburb, setSuburb] = useState('');
+  // As read off the page. It started blank on every order, so the suburb that
+  // sets the zone — and the zone sets the price — was retyped by hand each time.
+  const [suburb, setSuburb] = useState(extraction.extractedSuburb ?? '');
   const [supervisorName, setSupervisorName] = useState(
     extraction.extractedSupervisorName ?? '',
   );
@@ -328,6 +336,22 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
 
   const decided = extraction.state !== 'needs-review';
   const busy = confirm.isPending || reject.isPending;
+
+  /*
+   * ⚠️ The jobs for the account the reviewer has CHOSEN, fetched live.
+   *
+   * The picker used to list `extraction.jobCandidates` only — what matched when
+   * the email arrived, which is always nothing (orders precede the work) — so
+   * it was disabled on every order, and a job booked before its order arrived
+   * could not be attached from here at all.
+   */
+  const openJobs = usePoReviewJobCandidates(decided ? '' : accountId);
+  const jobOptions = [
+    ...extraction.jobCandidates,
+    ...(openJobs.data ?? []).filter(
+      (job) => !extraction.jobCandidates.some((candidate) => candidate.id === job.id),
+    ),
+  ];
 
   const submit = async () => {
     const next: Record<string, string> = {};
@@ -384,14 +408,20 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
           amountExGst: amount.trim() || null,
         },
       });
+      const chosenJob = jobOptions.find((job) => job.id === jobId);
       toast.success(
         `PO ${poNumber.trim()} confirmed`,
-        jobId
-          ? 'Anything that was waiting on this purchase order has been released.'
+        chosenJob
+          ? `Attached to job ${chosenJob.label}.`
           : 'Held against the account. The call-up email will turn it into a job.',
       );
       await navigate('/admin/queues/po-review');
     } catch (caught) {
+      // A job that can no longer take the order is said at the field, like the rest.
+      if (isServiceError(caught) && caught.fieldErrors.jobId) {
+        setErrors((current) => ({ ...current, jobId: caught.fieldErrors.jobId ?? '' }));
+        return;
+      }
       const described = describeError(caught);
       toast.error(described.title, described.detail);
     }
@@ -464,6 +494,10 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
           title={`Already ${PO_REVIEW_STATE_LABELS[extraction.state].toLowerCase()}`}
         >
           {extraction.reviewedBy} reviewed this on {formatDateTime(extraction.reviewedAt)}.
+          {/* Why, not only who and when — the reason was saved and never shown. */}
+          {extraction.state === 'rejected' && extraction.rejectionNote && (
+            <> Reason: {extraction.rejectionNote}</>
+          )}
         </Alert>
       )}
 
@@ -720,7 +754,10 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
                     disabled={decided}
                     onChange={(event) => {
                       setAccountId(event.target.value);
-                      setErrors(({ accountId: _drop, ...rest }) => rest);
+                      // A job belongs to one account; one picked for the last
+                      // account cannot be attached to this one.
+                      setJobId('');
+                      setErrors(({ accountId: _drop, jobId: _job, ...rest }) => rest);
                     }}
                   >
                     <option value="">Choose an account…</option>
@@ -777,20 +814,24 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
                 id="po-review-job"
                 label="Job"
                 error={errors.jobId}
-                hint="Open jobs on that account. Attaching releases anything waiting on this PO."
+                hint={
+                  accountId === ''
+                    ? 'Choose the account first — its jobs with no purchase order are listed here.'
+                    : 'Only if the work was booked before this order arrived. Most orders have no job yet.'
+                }
               >
                 {(control) => (
                   <Select
                     {...control}
                     value={jobId}
-                    disabled={decided || extraction.jobCandidates.length === 0}
+                    disabled={decided || jobOptions.length === 0}
                     onChange={(event) => {
                       setJobId(event.target.value);
                       setErrors(({ jobId: _drop, ...rest }) => rest);
                     }}
                   >
-                    <option value="">Choose a job…</option>
-                    {extraction.jobCandidates.map((candidate) => (
+                    <option value="">No job — hold it against the account</option>
+                    {jobOptions.map((candidate) => (
                       <option key={candidate.id} value={candidate.id}>
                         {candidate.label} — {candidate.detail}
                       </option>
@@ -799,13 +840,21 @@ function PoReviewDetail({ extraction }: { extraction: PoExtraction }) {
                 )}
               </Field>
 
-              {extraction.jobCandidates.length === 0 && (
-                <Alert variant="warning" title="No candidate jobs on this account">
-                  Nothing on this account is waiting for a purchase order. Either the PO is for work
-                  not yet booked, or it belongs to a different account — check the sender before
-                  attaching.
-                </Alert>
-              )}
+              {/*
+                Said only once an account is chosen and its jobs have loaded.
+                This showed on every order before anything was picked — "on this
+                account" about no account at all.
+              */}
+              {!decided &&
+                accountId !== '' &&
+                !openJobs.isPending &&
+                jobOptions.length === 0 && (
+                  <Alert variant="info" title="No jobs waiting on this account">
+                    Nothing booked on this account is missing a purchase order, which is normal —
+                    orders usually arrive before the work. It will be held against the account
+                    until a call-up books it.
+                  </Alert>
+                )}
 
               <DetailList
                 columns={2}

@@ -9,6 +9,7 @@ import type {
   ExtractorWebhookSchema,
   IngestExtractionSchema,
   ListExtractionsQuerySchema,
+  PoReviewJobCandidatesQuerySchema,
   RejectExtractionSchema,
 } from './po-review.schemas.js';
 
@@ -38,6 +39,15 @@ export const poReviewController = {
     res: Response,
   ): Promise<void> => {
     res.json(await poReviewService.get(req.validated.params.id, callerFrom(req)));
+  },
+
+  jobCandidates: async (
+    req: ValidatedRequest<{ query: typeof PoReviewJobCandidatesQuerySchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json({
+      data: await poReviewService.jobCandidates(req.validated.query.accountId, callerFrom(req)),
+    });
   },
 
   /** 202: accepted into the queue. It is not a purchase order until confirmed. */

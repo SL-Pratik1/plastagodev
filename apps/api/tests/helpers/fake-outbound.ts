@@ -26,6 +26,8 @@ export interface SentMessage {
   to: string;
   subject: string;
   body: string;
+  /** Which of PlastaGo's mailboxes it went from; absent = the default. */
+  mailbox?: string;
 }
 
 /** Everything a provider was asked to send during the current test file. */
@@ -142,6 +144,8 @@ export function recordingProviders(): {
           to: email.to,
           subject: email.subject,
           body: email.text,
+          // Only when set, so exact-shape assertions on other emails still hold.
+          ...(email.mailbox ? { mailbox: email.mailbox } : {}),
         });
         return Promise.resolve();
       },

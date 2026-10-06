@@ -30,6 +30,7 @@ import {
   ExtractionIdParamsSchema,
   IngestExtractionSchema,
   ListExtractionsQuerySchema,
+  PoReviewJobCandidatesQuerySchema,
   RejectExtractionSchema,
 } from './po-review.schemas.js';
 import { queueController } from './queue.controller.js';
@@ -222,6 +223,16 @@ queueRouter.get(
   '/po-review',
   validate({ query: ListExtractionsQuerySchema }),
   asyncHandler(poReviewController.list),
+);
+
+/**
+ * The job picker on the review screen, for whichever account the reviewer
+ * chose. ⚠️ Declared before `/po-review/:id` so "jobs" is not read as an id.
+ */
+queueRouter.get(
+  '/po-review/jobs',
+  validate({ query: PoReviewJobCandidatesQuerySchema }),
+  asyncHandler(poReviewController.jobCandidates),
 );
 
 queueRouter.get(

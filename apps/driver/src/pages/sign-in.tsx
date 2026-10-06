@@ -194,11 +194,6 @@ export function SignInPage() {
             </div>
           </>
         )}
-
-        <p className="border-t border-border pt-4 text-xs text-muted-foreground">
-          Demo build — sign in as <span className="font-mono">0455 112 233</span> with code{' '}
-          <span className="font-mono">123456</span>.
-        </p>
       </CardContent>
     </Card>
   );

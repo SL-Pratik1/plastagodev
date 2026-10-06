@@ -205,6 +205,31 @@ describe('quoting a job', () => {
     ).rejects.toMatchObject({ status: 503 });
   });
 
+  /*
+   * A date before the zone's rates begin is the PERSON's to fix, so it is said
+   * to them, on the date. As a 503 it reached every screen as "something went
+   * wrong", and a supervisor who picked last week saw an outage.
+   */
+  it('tells the person when the date is before the zone’s rates start', async () => {
+    await expect(
+      pricingService.quote({
+        rateCardId: 'default',
+        zoneId: ZONE.newcastle,
+        expectedAreaM2: 100,
+        bagCount: 0,
+        onDate: '2019-06-01',
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      issues: [
+        expect.objectContaining({
+          path: 'readyDate',
+          message: expect.stringContaining('start on 2020-01-01'),
+        }),
+      ],
+    });
+  });
+
   it('looks up the card it was asked for', async () => {
     await pricingService.quote({
       rateCardId: 'wisdom',

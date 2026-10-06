@@ -577,6 +577,14 @@ export const CALL_UP_REVIEW_REASONS = [
   'unknown-suburb',
   /** A new booking for an order that already produced a job. */
   'already-booked',
+  /** A new booking or reschedule that named no date to book it on. */
+  'no-date',
+  /**
+   * The order matched and the date was read, but the booking itself was refused
+   * — most often no rate covers that zone on that date. The refusal is kept on
+   * the call-up's note so the office can see what to fix before trying again.
+   */
+  'cannot-book',
 ] as const;
 export const CallUpReviewReasonSchema = z
   .enum(CALL_UP_REVIEW_REASONS)
@@ -590,6 +598,8 @@ export const CALL_UP_REVIEW_REASON_LABELS: Record<CallUpReviewReason, string> = 
   'job-finished': 'That job is already finished',
   'unknown-suburb': 'The order’s suburb is not one we service',
   'already-booked': 'That order already has a job',
+  'no-date': 'The call-up did not give a date',
+  'cannot-book': 'It could not be booked — see the note',
 };
 
 export const CallUpSchema = z
@@ -626,6 +636,13 @@ export const CallUpSchema = z
     jobId: ObjectIdSchema.nullable(),
     jobNumber: z.number().int().positive().nullable(),
     note: z.string(),
+    /**
+     * Why the last attempt to book it was refused — "No rate covers Wollongong
+     * on 2026-09-17". Kept apart from `note` on purpose: the note is what the
+     * builder sent and becomes the job's notes, and a refusal that has since
+     * been fixed must not ride along onto the job. Cleared once it books.
+     */
+    refusal: z.string().nullable(),
     resolvedAt: IsoDateTimeSchema.nullable(),
     resolvedBy: z.string().nullable(),
   })
@@ -731,6 +748,9 @@ export const PoExtractionItemSchema = z
     extractedAreaM2: z.number().nonnegative().nullable(),
     extractedBagAllowance: z.number().int().nonnegative().nullable(),
     extractedSiteAddress: z.string().nullable(),
+    /** The site suburb as read — what the review form pre-fills. */
+    extractedSuburb: z.string().nullable(),
+    extractedPostcode: z.string().nullable(),
     extractedLotNumber: z.string().nullable(),
     extractedSupervisorName: z.string().nullable(),
     extractedSupervisorMobile: z.string().nullable(),
@@ -764,6 +784,12 @@ export const PoExtractionSchema = PoExtractionItemSchema.extend({
   jobCandidates: z.array(MatchCandidateSchema),
   reviewedAt: IsoDateTimeSchema.nullable(),
   reviewedBy: z.string().nullable(),
+  /**
+   * Why it was set aside, as the reviewer wrote it. Saved on every rejection
+   * and never sent back, so a rejected order said who and when but not why —
+   * the one thing the next person opening it needs.
+   */
+  rejectionNote: z.string().nullable(),
 }).meta({ id: 'PoExtraction' });
 
 /**

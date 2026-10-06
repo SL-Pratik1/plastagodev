@@ -1,3 +1,4 @@
+import { PDFDocument } from 'pdf-lib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZONE } from './helpers/fake-settings.js';
 
@@ -45,6 +46,12 @@ let places: Array<{
 
 let stored: Array<{ key: string; contentType: string }> = [];
 let downloadFails = false;
+/** What the vendor download returns. Null → a stub that is not a parsable PDF. */
+let downloadBody: Buffer | null = null;
+/** Accounts by ABN (digits). Set per test. */
+let accountsByAbn: Record<string, AccountRow[]> = {};
+/** Accounts already holding a confirmed order, by PO number. Set per test. */
+let poHolders: Record<string, AccountRow[]> = {};
 
 vi.mock('../src/domains/accounts/account.repository.js', () => ({
   accountRepository: {
@@ -55,6 +62,13 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
         meta: { page: 1, pageSize: 5, total: accounts.length, totalPages: 1 },
       });
     },
+    findActiveByAbn: (abn: string) => Promise.resolve(accountsByAbn[abn.replace(/\D/g, '')] ?? []),
+  },
+}));
+
+vi.mock('../src/domains/queues/purchase-order.repository.js', () => ({
+  purchaseOrderRepository: {
+    accountsHoldingPoNumber: (poNumber: string) => Promise.resolve(poHolders[poNumber] ?? []),
   },
 }));
 
@@ -89,7 +103,10 @@ vi.mock('../src/integrations/extractor.js', () => ({
     enabled: true,
     downloadFile: () => {
       if (downloadFails) return Promise.reject(new Error('vendor timeout'));
-      return Promise.resolve({ body: Buffer.from('%PDF-1.4'), contentType: 'application/pdf' });
+      return Promise.resolve({
+        body: downloadBody ?? Buffer.from('%PDF-1.4'),
+        contentType: 'application/pdf',
+      });
     },
   },
   TERMINAL_FAILURES: new Set(['failed']),
@@ -117,6 +134,7 @@ function extraction(
     documentName: 'PlastaGo Purchase Order',
     fileUrl: 'https://vendor.example/file.pdf',
     email: 'orders@domainehomes.com.au',
+    emailSubject: null,
     createdAt: '2026-07-28T06:20:00.000Z',
     ...overrides,
   };
@@ -170,7 +188,133 @@ beforeEach(() => {
   places = [CATHERINE_FIELD];
   stored = [];
   downloadFails = false;
+  downloadBody = null;
   lastAccountQuery = undefined;
+  accountsByAbn = {};
+  poHolders = {};
+});
+
+/* ── The two signals that do not depend on how the name was read ───────────── */
+
+describe('matching on what does not change between reads', () => {
+  const WISDOM_ACCOUNT = { id: 'accW', name: 'Wisdom Homes Pty Ltd', code: 'WIS001' };
+
+  /*
+   * Seen live: the same Wisdom PDF read as "Wisdom Homes" one day and
+   * "Wisdom Properties Group Pty Ltd" the next, and the second never matched.
+   */
+  it('picks the account by the ABN on the letterhead, whatever name was read', async () => {
+    accountsByAbn['82089425829'] = [WISDOM_ACCOUNT];
+    accounts = [];
+
+    const { input, diagnostics } = await adaptExtraction(
+      extraction(
+        { ...WISDOM, builder_name: 'Wisdom Properties Group Pty Ltd', builder_abn: '82 089 425 829' },
+        { email: 'bob@gmail.com' },
+      ),
+      context,
+    );
+
+    expect(input.suggestedAccountId).toBe('accW');
+    expect(diagnostics.matchedBy).toBe('abn');
+  });
+
+  it('never matches on PlastaGo’s own ABN from the vendor box', async () => {
+    accountsByAbn['22669797915'] = [{ id: 'accP', name: 'Plasta-Go Pty Ltd', code: 'PLA001' }];
+
+    const { input } = await adaptExtraction(
+      extraction({ ...WISDOM, builder_abn: '22669797915' }, { email: 'bob@gmail.com' }),
+      context,
+    );
+
+    expect(input.suggestedAccountId).not.toBe('accP');
+  });
+
+  it('ignores an ABN that fails the checksum', async () => {
+    accountsByAbn['82089425828'] = [WISDOM_ACCOUNT];
+
+    const { diagnostics } = await adaptExtraction(
+      extraction({ ...WISDOM, builder_abn: '82 089 425 828' }, { email: 'bob@gmail.com' }),
+      context,
+    );
+
+    expect(diagnostics.matchedBy).not.toBe('abn');
+  });
+
+  /*
+   * A resend names its builder by the order number: one already on file says
+   * who it belongs to, so the service can call it a duplicate straight away.
+   */
+  it('takes the account from an order already on file with the same number', async () => {
+    poHolders['208918.321.01'] = [WISDOM_ACCOUNT];
+    accounts = [];
+
+    const { input, diagnostics } = await adaptExtraction(
+      extraction({ ...WISDOM, builder_name: 'Wisdom Properties Group Pty Ltd' }, { email: 'bob@gmail.com' }),
+      context,
+    );
+
+    expect(input.suggestedAccountId).toBe('accW');
+    expect(diagnostics.matchedBy).toBe('existing-po');
+  });
+
+  it('does not choose when two builders hold the same number', async () => {
+    poHolders['208918.321.01'] = [WISDOM_ACCOUNT, { id: 'accX', name: 'Other Homes', code: 'OTH001' }];
+    accounts = [];
+
+    const { input } = await adaptExtraction(
+      extraction(WISDOM, { email: 'bob@gmail.com' }),
+      context,
+    );
+
+    expect(input.suggestedAccountId).toBeNull();
+  });
+});
+
+/* ── What the review form pre-fills from ──────────────────────────────────── */
+
+describe('keeping what the page said', () => {
+  /*
+   * The Domaine order is three pages. "1 page" told the reviewer the terms
+   * pages never arrived.
+   */
+  it('counts the pages of the original', async () => {
+    const pdf = await PDFDocument.create();
+    pdf.addPage();
+    pdf.addPage();
+    pdf.addPage();
+    downloadBody = Buffer.from(await pdf.save());
+
+    const { input } = await adaptExtraction(extraction(DOMAINE), context);
+
+    expect(input.pageCount).toBe(3);
+  });
+
+  it('falls back to one page when the file will not parse', async () => {
+    const { input } = await adaptExtraction(extraction(DOMAINE), context);
+
+    expect(input.pageCount).toBe(1);
+  });
+
+  /*
+   * Both were read and then dropped: the form's Suburb started blank on every
+   * order, and the postcode never reached the purchase order.
+   */
+  it('keeps the suburb and postcode as read, even where the suburb is not serviced', async () => {
+    const { input } = await adaptExtraction(extraction(DOMAINE), context);
+
+    expect(input.extractedSuburb).toBe('EDGEWORTH');
+    expect(input.extractedPostcode).toBe('2285');
+  });
+
+  it('does not keep a postcode that is not four digits', async () => {
+    const { input } = await adaptExtraction(
+      extraction({ ...DOMAINE, postcode: 'NSW' }),
+      context,
+    );
+
+    expect(input.extractedPostcode).toBeNull();
+  });
 });
 
 /* ── The figures that decide the price ────────────────────────────────────── */
@@ -342,20 +486,49 @@ describe('deciding which customer an order belongs to', () => {
   });
 
   /*
-   * Two candidates is not an answer. `resolveReason` turns this into
-   * `ambiguous-account`, which is a more useful thing to tell a reviewer than
-   * "low confidence" — "Domain" and "Domaine" are different builders.
+   * Two candidates that BOTH carry every word is not an answer. `resolveReason`
+   * turns this into `ambiguous-account` — two genuine Domaine accounts is a
+   * question only the reviewer can settle.
    */
-  it('suggests nothing when several accounts fit, but carries the candidates', async () => {
+  it('suggests nothing when several accounts genuinely fit, but carries the candidates', async () => {
     accounts = [
       { id: 'acc1', name: 'Domaine Homes', code: 'DOM001' },
-      { id: 'acc2', name: 'Domain Homes', code: 'DMN001' },
+      { id: 'acc2', name: 'Domaine Homes QLD', code: 'DOM002' },
     ];
 
     const { input } = await adaptExtraction(extraction(DOMAINE), context);
 
     expect(input.suggestedAccountId).toBeNull();
     expect(input.accountCandidates).toHaveLength(2);
+  });
+
+  /*
+   * ⚠️ The other side of the same rule, seen on the first real email. A search
+   * for "domaine homes" also returns every other "… Homes" account; only one
+   * carries "domaine". "Domain" and "Domaine" are different builders — so the
+   * one that agrees IS the answer, and it arrives alone so the service does not
+   * call it ambiguous.
+   */
+  it('picks the one account that carries every word, out of several "Homes" hits', async () => {
+    accounts = [
+      { id: 'acc1', name: 'Domaine Homes (NSW) Pty Ltd', code: 'DOM001' },
+      { id: 'acc2', name: 'Domain Homes', code: 'DMN001' },
+      { id: 'acc3', name: 'Westbrook Homes Pty Ltd', code: 'PWB001' },
+    ];
+
+    const byDomain = await adaptExtraction(extraction(DOMAINE), context);
+    expect(byDomain.input.suggestedAccountId).toBe('acc1');
+    expect(byDomain.input.accountCandidates).toEqual([
+      { id: 'acc1', label: 'Domaine Homes (NSW) Pty Ltd', detail: 'DOM001' },
+    ]);
+    expect(byDomain.diagnostics.matchedBy).toBe('email-domain');
+
+    const byName = await adaptExtraction(
+      extraction(DOMAINE, { email: 'bob@gmail.com' }),
+      context,
+    );
+    expect(byName.input.suggestedAccountId).toBe('acc1');
+    expect(byName.diagnostics.matchedBy).toBe('document-name');
   });
 
   /*

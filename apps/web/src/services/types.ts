@@ -36,6 +36,7 @@ import type {
   LeadPipelineStats,
   LeadUpdate,
   PoConfirmation,
+  MatchCandidate,
   PoExtraction,
   PoExtractionItem,
   QueueCounts,
@@ -836,6 +837,8 @@ export interface QueueService {
 
   poReviewList: (query: ListQuery) => Promise<ListResult<PoExtractionItem>>;
   poReviewGet: (id: string) => Promise<PoExtraction>;
+  /** The account's jobs a confirmed order could attach to (booked, not invoiced). */
+  poReviewJobCandidates: (accountId: string) => Promise<MatchCandidate[]>;
   poReviewConfirm: (id: string, input: PoConfirmation) => Promise<void>;
   poReviewReject: (id: string, note: string) => Promise<void>;
 

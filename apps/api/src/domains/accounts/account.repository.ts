@@ -265,6 +265,29 @@ export const accountRepository = {
     };
   },
 
+  /**
+   * Active accounts registered under an ABN — the purchase-order matcher's
+   * strongest signal, because a builder prints its ABN on every order and it
+   * never changes with how the name happens to be read.
+   *
+   * Matched on the digits, in either stored form ("82089425829" or
+   * "82 089 425 829"), so an account keyed in with spaces is still found.
+   */
+  async findActiveByAbn(abn: string): Promise<Array<{ id: string; name: string; code: string }>> {
+    const digits = abn.replace(/\D/g, '');
+    if (digits.length !== 11) return [];
+
+    const spaced = `${digits.slice(0, 2)} ${digits.slice(2, 5)} ${digits.slice(5, 8)} ${digits.slice(8)}`;
+    const rows = await AccountModel.find(
+      { abn: { $in: [digits, spaced] }, status: 'active' },
+      { name: 1, code: 1 },
+    )
+      .limit(5)
+      .lean<Array<{ _id: mongoose.Types.ObjectId; name: string; code: string }>>();
+
+    return rows.map((row) => ({ id: row._id.toHexString(), name: row.name, code: row.code }));
+  },
+
   /** True when the code is already taken. Used before an insert, for a clear error. */
   async codeExists(code: string): Promise<boolean> {
     const existing = await AccountModel.exists({ code: code.trim().toUpperCase() });

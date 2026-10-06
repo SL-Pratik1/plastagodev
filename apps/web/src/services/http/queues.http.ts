@@ -18,6 +18,7 @@ import {
   LeadPipelineStatsSchema,
   LeadSchema,
   InvitationResultSchema,
+  MatchCandidateSchema,
   ObjectIdSchema,
   PoExtractionItemSchema,
   PoExtractionSchema,
@@ -253,6 +254,16 @@ export function createHttpQueueService(api: ApiClient): QueueService {
 
     poReviewGet: (id: string) =>
       viaService(() => api.request(`${base}/po-review/${id}`, { schema: PoExtractionSchema })),
+
+    poReviewJobCandidates: async (accountId: string) => {
+      const page = await viaService(() =>
+        api.request(`${base}/po-review/jobs`, {
+          searchParams: { accountId },
+          schema: z.object({ data: z.array(MatchCandidateSchema) }),
+        }),
+      );
+      return page.data;
+    },
 
     poReviewConfirm: async (id: string, input: PoConfirmation) => {
       await viaService(() =>

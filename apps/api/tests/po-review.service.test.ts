@@ -23,8 +23,34 @@ interface IngestCall {
 interface ConfirmCall {
   extractionId: string;
   correctedFields: string[];
-  order: { poNumber: string; accountId: string; expectedAreaM2: number | null };
+  order: {
+    poNumber: string;
+    accountId: string;
+    expectedAreaM2: number | null;
+    postcode: string | null;
+  };
 }
+
+/* ── The job picker (a job booked before its order arrived) ──────────────── */
+
+/** The account's jobs that could still take an order. Set per test. */
+let openJobs: Array<{ id: string; label: string; detail: string }> = [];
+/** Attachments the confirm made. */
+let attached: Array<{ jobId: string; purchaseOrderId: string; poNumber: string }> = [];
+let attachFails = false;
+/** What the supervisor lookup was asked for, to prove the mobile is normalised. */
+let lookedUp: Array<{ email: string | null; mobile: string | null }> = [];
+
+vi.mock('../src/domains/jobs/job.service.js', () => ({
+  jobService: {
+    withoutPurchaseOrder: () => Promise.resolve(openJobs),
+    attachPurchaseOrder: (jobId: string, order: { id: string; poNumber: string }) => {
+      if (attachFails) return Promise.reject(new Error('taken meanwhile'));
+      attached.push({ jobId, purchaseOrderId: order.id, poNumber: order.poNumber });
+      return Promise.resolve();
+    },
+  },
+}));
 
 let ingested: IngestCall[] = [];
 let confirmed: ConfirmCall[] = [];
@@ -102,7 +128,10 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
  */
 vi.mock('../src/domains/portal/supervisor.repository.js', () => ({
   supervisorRepository: {
-    findExisting: () => Promise.resolve(existingLogin),
+    findExisting: (input: { email: string | null; mobile: string | null }) => {
+      lookedUp.push(input);
+      return Promise.resolve(existingLogin);
+    },
     invite: (input: { accountId: string; name: string; email: string | null; mobile: string | null }) => {
       invited.push(input);
       return Promise.resolve('usr00000000000000000mf1');
@@ -187,6 +216,8 @@ function extraction(overrides: Record<string, unknown> = {}) {
     extractedAreaM2: 823.41,
     extractedBagAllowance: 2,
     extractedSiteAddress: '46 Allambie Circuit',
+    extractedSuburb: 'Kellyville',
+    extractedPostcode: '2155',
     extractedLotNumber: '214',
     extractedSupervisorName: 'Matthew French',
     extractedSupervisorMobile: '0412345678',
@@ -234,6 +265,8 @@ function ingestInput(overrides: Record<string, unknown> = {}) {
     extractedAreaM2: 823.41,
     extractedBagAllowance: 2,
     extractedSiteAddress: '46 Allambie Circuit',
+    extractedSuburb: 'Kellyville',
+    extractedPostcode: '2155',
     extractedLotNumber: '214',
     extractedSupervisorName: 'Matthew French',
     extractedSupervisorMobile: '0412345678',
@@ -265,6 +298,80 @@ beforeEach(() => {
   confirmMatches = true;
   rejectMatches = true;
   accountFound = true;
+  openJobs = [];
+  attached = [];
+  attachFails = false;
+  lookedUp = [];
+});
+
+/* ── What the review used to drop ─────────────────────────────────────────── */
+
+describe('what the confirm carries onto the order', () => {
+  /* The postcode was read and then hard-coded to null on every order. */
+  it('keeps the postcode read off the page when the suburb was left as read', async () => {
+    await poReviewService.confirm(ID, confirmation({ suburb: 'KELLYVILLE' }), OFFICE);
+
+    expect(confirmed[0]?.order.postcode).toBe('2155');
+    // "KELLYVILLE" as printed and "Kellyville" as read are the same place.
+    expect(confirmed[0]?.correctedFields).not.toContain('suburb');
+  });
+
+  it('drops the postcode when the reviewer changed the suburb', async () => {
+    await poReviewService.confirm(ID, confirmation({ suburb: 'Rouse Hill' }), OFFICE);
+
+    expect(confirmed[0]?.order.postcode).toBeNull();
+    expect(confirmed[0]?.correctedFields).toContain('suburb');
+  });
+});
+
+describe('attaching the order to a job booked before it arrived', () => {
+  /*
+   * ⚠️ `jobId` was validated and then dropped, while the screen promised
+   * "Attaching releases anything waiting on this PO".
+   */
+  it('attaches the job the reviewer picked', async () => {
+    openJobs = [{ id: 'job1', label: '#61301 · Lot 214', detail: 'booked · ready 2026-10-06' }];
+
+    await poReviewService.confirm(ID, confirmation({ jobId: 'job1' }), OFFICE);
+
+    expect(attached).toEqual([{ jobId: 'job1', purchaseOrderId: 'po1', poNumber: '4500123456' }]);
+  });
+
+  it('refuses a job that cannot take this order, before writing anything', async () => {
+    openJobs = [];
+
+    await expect(
+      poReviewService.confirm(ID, confirmation({ jobId: 'job9' }), OFFICE),
+    ).rejects.toMatchObject({
+      status: 422,
+      issues: [expect.objectContaining({ path: 'jobId' })],
+    });
+    expect(confirmed).toHaveLength(0);
+  });
+
+  /*
+   * The order is the commercial fact, so it stays confirmed — and the supervisor
+   * login is still made — but the reviewer is told the job did not take it.
+   */
+  it('keeps the order and says so when the job was taken meanwhile', async () => {
+    openJobs = [{ id: 'job1', label: '#61301', detail: '' }];
+    attachFails = true;
+
+    await expect(
+      poReviewService.confirm(ID, confirmation({ jobId: 'job1' }), OFFICE),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(confirmed).toHaveLength(1);
+    expect(invited).toHaveLength(1);
+  });
+
+  it('offers the chosen account’s open jobs to office staff only', async () => {
+    openJobs = [{ id: 'job1', label: '#61301 · Lot 214', detail: 'booked' }];
+
+    await expect(poReviewService.jobCandidates('acc1', OFFICE)).resolves.toEqual(openJobs);
+    await expect(poReviewService.jobCandidates('acc1', DRIVER)).rejects.toMatchObject({
+      status: 403,
+    });
+  });
 });
 
 describe('an extraction is never trusted', () => {
@@ -590,6 +697,33 @@ describe('the supervisor the order named (M5.14, Matt 33:25)', () => {
    */
   it('provisions nobody it has no way to reach', async () => {
     await poReviewService.confirm(ID, confirmation({ siteSupervisorMobile: null }), OFFICE);
+
+    expect(invited).toHaveLength(0);
+    expect(confirmed).toHaveLength(1);
+  });
+
+  /*
+   * ⚠️ Seen on the first real order: "0427 821 430" was saved as printed, and
+   * sign-in — which normalises what is typed — could never find it. The next
+   * order printing it without spaces then made the same man a second login.
+   */
+  it('stores and looks up the mobile the way sign-in does', async () => {
+    await poReviewService.confirm(
+      ID,
+      confirmation({ siteSupervisorMobile: '0412 345 678' }),
+      OFFICE,
+    );
+
+    expect(lookedUp[0]?.mobile).toBe('0412345678');
+    expect(invited[0]?.mobile).toBe('0412345678');
+  });
+
+  it('does not make a site landline a sign-in identifier', async () => {
+    await poReviewService.confirm(
+      ID,
+      confirmation({ siteSupervisorMobile: '02 9999 1234' }),
+      OFFICE,
+    );
 
     expect(invited).toHaveLength(0);
     expect(confirmed).toHaveLength(1);

@@ -103,8 +103,6 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
     allLabel: 'Anyone',
     options: [
       { value: 'unassigned', label: 'Unassigned' },
-      { value: 'Matthew Browne', label: 'Matthew Browne' },
-      { value: 'Priya Raman', label: 'Priya Raman' },
     ],
   },
   {

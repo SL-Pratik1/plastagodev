@@ -1,4 +1,4 @@
-import type { Role } from '@plastago/shared';
+import { isAustralianMobile, normaliseMobile, type Role } from '@plastago/shared';
 import { logger } from '../../lib/logger.js';
 import { buildInviteEmail, buildInviteSms } from '../../integrations/notice-messages.js';
 import { outboundService } from '../notifications/outbound.service.js';
@@ -77,7 +77,23 @@ export const supervisorProvisioning = {
     if (name === '') return { status: 'not-named' };
 
     const email = input.email?.trim().toLowerCase() || null;
-    const mobile = input.mobile?.trim() || null;
+
+    /*
+     * ⚠️ Stored the way sign-in LOOKS IT UP, never as printed.
+     *
+     * A purchase order prints "0427 821 430". Sign-in normalises whatever is
+     * typed to "0427821430" and matches exactly, so a login saved with the
+     * spaces could never be signed in to — the supervisor got an SMS invite and
+     * then "we don't recognise that mobile" whichever way they typed it. And
+     * the next order printing the number differently missed the duplicate check
+     * below and made them a second login.
+     *
+     * A number that is not an Australian mobile (a site office landline) cannot
+     * receive a code, so it is not an identifier at all.
+     */
+    const printedMobile = input.mobile?.trim() || null;
+    const mobile =
+      printedMobile && isAustralianMobile(printedMobile) ? normaliseMobile(printedMobile) : null;
 
     /*
      * No way to reach them means no way to sign in: a code is sent to the

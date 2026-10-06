@@ -9,6 +9,7 @@ import { logger } from '../lib/logger.js';
 import { getMailer, getSmsSender } from '../integrations/messaging.js';
 import { buildOtpEmail, buildOtpSms } from '../integrations/otp-messages.js';
 import { rememberOtpCode } from './otp-peek.js';
+import { isTestLogin, pinTestLoginCode } from './test-login.js';
 import { USERS_COLLECTION } from '../domains/auth/auth.model.js';
 
 const log = logger.child({ module: 'better-auth' });
@@ -206,7 +207,15 @@ function buildAuth(transactionsAvailable: boolean) {
         // Reuses the shared validator, so the API and the sign-in form agree on
         // what an Australian mobile is.
         phoneNumberValidator: (value: string) => isAustralianMobile(value),
-        sendOTP: async ({ phoneNumber: to, code }) => {
+        sendOTP: async ({ phoneNumber: to, code }, ctx) => {
+          // The fixed-code test login: no SMS, and the stored code swapped for
+          // the configured one. See `test-login.ts`.
+          if (isTestLogin(to)) {
+            if (!ctx) throw new Error('Better Auth called sendOTP without its context');
+            await pinTestLoginCode(to, ctx.context.internalAdapter);
+            log.info('test login: fixed code pinned, no SMS sent');
+            return;
+          }
           rememberOtpCode(to, code);
           await getSmsSender().send(buildOtpSms(to, code));
         },

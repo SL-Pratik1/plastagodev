@@ -1,6 +1,6 @@
 # Microsoft 365 Email Setup — Instructions for Your IT Team
 
-**Purpose:** allow the PlastaGo platform to send transactional email (sign-in codes, invoices, job notifications) from one of your mailboxes.
+**Purpose:** allow the PlastaGo platform to send transactional email from two of your mailboxes: invoices and purchase-order requests from `accounts@plastago.com.au`, and everything else (job updates, sign-in codes, invitations, certificates) from `noreply@plastago.com.au`.
 
 **Audience:** your Microsoft 365 / Entra ID administrator.
 
@@ -19,7 +19,9 @@
 | 2, 3, 4 | **Application Administrator** or **Cloud Application Administrator** (Global Administrator also works) |
 | 5 | **Exchange Administrator** |
 
-**The mailbox must be in Exchange Online.** This method does not work for a mailbox still hosted on an on-premises Exchange server. If you run a hybrid setup, please confirm that `noreply@plastago.com.au` is a cloud mailbox, or let us know and we will discuss alternatives.
+**Both mailboxes must be in Exchange Online.** This method does not work for a mailbox still hosted on an on-premises Exchange server. If you run a hybrid setup, please confirm that `noreply@plastago.com.au` and `accounts@plastago.com.au` are cloud mailboxes, or let us know and we will discuss alternatives.
+
+**Both must be real mailboxes, each under its own address.** A user mailbox or a shared mailbox both work. A distribution list, a Microsoft 365 group, or an alias added to someone else's mailbox does **not**: the application can only send as a mailbox whose primary address is exactly `accounts@plastago.com.au`. If `accounts@` is currently one of those, please let us know before starting.
 
 **PowerShell module.** Step 5 needs the Exchange Online management module. If it is not already installed:
 
@@ -31,26 +33,34 @@ Install-Module -Name ExchangeOnlineManagement -Scope CurrentUser
 
 ## 1. What we are asking for, and what we are not
 
-We need app-only ("daemon") access to Microsoft Graph so our platform can send mail from one specific mailbox without a signed-in user.
+We need app-only ("daemon") access to Microsoft Graph so our platform can send mail from two specific mailboxes without a signed-in user.
 
 | | |
 |---|---|
-| **Mailbox in scope** | `noreply@plastago.com.au` — only this one |
-| **Access level** | Send mail from that mailbox |
+| **Mailboxes in scope** | `noreply@plastago.com.au` and `accounts@plastago.com.au` — only these two |
+| **Access level** | Send mail from those mailboxes |
 | **Not requested** | Access to any other mailbox, user data, files, Teams, SharePoint, or directory data |
 | **Not requested** | Read access to any mailbox — the application only sends |
 | **Not requested** | Tenant-wide `Mail.Send` consent (see the note in step 3 — we specifically do *not* want this) |
 
-The setup below is scoped in Exchange Online, so the credential we receive is only ever able to reach that one mailbox. You can revoke it at any time in one step (see section 7).
+The setup below is scoped in Exchange Online, so the credential we receive is only ever able to reach those two mailboxes. You can revoke it at any time in one step (see section 7).
+
+**What each mailbox is used for:**
+
+| Mailbox | Used for |
+|---|---|
+| `accounts@plastago.com.au` | Sends invoices and purchase-order requests. Customers reply to these, so replies reach your accounts team. A copy of each is kept in its Sent Items. |
+| `noreply@plastago.com.au` | Sends everything else: job status updates, completion emails, pickup reminders, sign-in codes, invitations and recycling certificates. No copies are kept. |
+| `builderdocprocessing@plastago.com.au` | **Not part of this setup.** It receives purchase orders and call-ups, which our document-reading service collects through a separate connection. We will arrange that with you separately. |
 
 ---
 
-## 2. Create the mailbox
+## 2. Create the mailboxes
 
-Skip this if `noreply@plastago.com.au` already exists.
+Skip any mailbox that already exists. `accounts@plastago.com.au` most likely does; please check it meets the note in section 0.
 
 1. Go to the **Microsoft 365 admin center** → **Teams & groups** → **Shared mailboxes**.
-2. Create `noreply@plastago.com.au`.
+2. Create `noreply@plastago.com.au` (and `accounts@plastago.com.au`, if it does not exist).
 
 **Shared mailboxes are free and require no licence**, so this adds nothing to your bill. A regular licensed mailbox works equally well if you prefer.
 
@@ -70,7 +80,7 @@ Skip this if `noreply@plastago.com.au` already exists.
 >
 > Leave the **API permissions** section empty. Granting `Mail.Send` there applies it **tenant-wide**, which would let the application send mail as *every* mailbox in your organisation. We do not want that level of access.
 >
-> Instead, the next step grants send rights on the one named mailbox only, using Exchange Online role-based access control.
+> Instead, section 5 grants send rights on the two named mailboxes only, using Exchange Online role-based access control.
 
 ---
 
@@ -86,7 +96,7 @@ You now have three values: the tenant ID, the client ID, and this service princi
 
 ---
 
-## 5. Scope access to the mailbox (RBAC for Applications)
+## 5. Scope access to the two mailboxes (RBAC for Applications)
 
 This uses **RBAC for Applications**, which is Microsoft's current and supported method for limiting an application to specific mailboxes. It replaces the older Application Access Policy approach, which Microsoft has marked as legacy and will deprecate.
 
@@ -103,10 +113,10 @@ $sp = New-ServicePrincipal `
         -ObjectId "<ENTERPRISE_APP_OBJECT_ID>" `
         -DisplayName "PlastaGo Mail Integration"
 
-# Define exactly which mailbox the app may touch.
+# Define exactly which two mailboxes the app may touch.
 New-ManagementScope `
   -Name "PlastaGo Mailboxes" `
-  -RecipientRestrictionFilter "EmailAddresses -eq 'noreply@plastago.com.au'"
+  -RecipientRestrictionFilter "PrimarySmtpAddress -eq 'noreply@plastago.com.au' -or PrimarySmtpAddress -eq 'accounts@plastago.com.au'"
 
 # Grant send rights on that scope, and nothing else.
 New-ManagementRoleAssignment `
@@ -115,12 +125,24 @@ New-ManagementRoleAssignment `
   -CustomResourceScope "PlastaGo Mailboxes"
 ```
 
-**Verify it resolves correctly:**
+**Verify it resolves correctly — once for each mailbox.** Both should report `InScope` as `True`:
 
 ```powershell
 Test-ServicePrincipalAuthorization `
   -Identity "<APPLICATION_CLIENT_ID>" `
   -Resource "noreply@plastago.com.au"
+
+Test-ServicePrincipalAuthorization `
+  -Identity "<APPLICATION_CLIENT_ID>" `
+  -Resource "accounts@plastago.com.au"
+```
+
+It is also worth checking that the scope does **not** reach anyone else. Any other mailbox should report `InScope` as `False`:
+
+```powershell
+Test-ServicePrincipalAuthorization `
+  -Identity "<APPLICATION_CLIENT_ID>" `
+  -Resource "<any other mailbox, e.g. your own>"
 ```
 
 > **Please note:** RBAC changes can take up to about **one hour** to take effect on live Microsoft Graph API calls, even once the test command above reports success. If our first test send fails immediately after setup, this is usually why.
@@ -151,9 +173,11 @@ Please fill in the four values below and return this page to us.
 
 &nbsp;&nbsp;&nbsp;&nbsp;`________________________________________`
 
-**3. Sending mailbox**
+**3. Sending mailboxes**
 
 &nbsp;&nbsp;&nbsp;&nbsp;`________________________________________` (expected: `noreply@plastago.com.au`)
+
+&nbsp;&nbsp;&nbsp;&nbsp;`________________________________________` (expected: `accounts@plastago.com.au`)
 
 **4. Client secret expiry date**
 
@@ -163,7 +187,7 @@ Please fill in the four values below and return this page to us.
 
 **How to send the client secret:** please share it through a password manager link (1Password, Keeper, Bitwarden, LastPass or similar) or your organisation's approved secrets tool.
 
-Please **do not** send the secret by email, chat, SMS, or in a document alongside the client ID. Anyone who obtains the secret together with the tenant and client IDs can send mail from that mailbox until it is revoked.
+Please **do not** send the secret by email, chat, SMS, or in a document alongside the client ID. Anyone who obtains the secret together with the tenant and client IDs can send mail from those two mailboxes until it is revoked.
 
 ---
 
@@ -189,6 +213,8 @@ Nothing else in your Microsoft 365 configuration is modified by this setup.
 ## 8. Good to know
 
 **Sending limits.** Exchange Online applies roughly 10,000 recipients per day and about 30 messages per minute per mailbox, and app-only sends count toward these limits. This is comfortably above our expected volume. We will let you know in advance if that changes.
+
+**Copies of invoices.** Invoices and purchase-order requests sent from `accounts@` are saved in that mailbox's Sent Items, so your accounts team can see exactly what each customer received, next to their replies. Nothing is saved for `noreply@`, so it does not fill up with sign-in codes and notifications.
 
 **Deliverability.** Because mail will be sent from your domain, please make sure SPF, DKIM and DMARC are configured for it. This is standard Microsoft 365 configuration and most likely already in place.
 

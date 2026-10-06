@@ -595,6 +595,15 @@ describe('awaiting a purchase order (M7.3)', () => {
     expect(sentMessages[0]?.body).toContain('job #61473');
   });
 
+  /* The PO number comes back as a reply — to accounts@, not noreply@. */
+  it('sends the request from the accounts mailbox', async () => {
+    chaseInvoices = [chaseInvoice()];
+
+    await queueService.awaitingPoChase([ID], OFFICE);
+
+    expect(sentMessages[0]?.mailbox).toBe('accounts');
+  });
+
   it('sends a new email on the next chase, not the same one again', async () => {
     chaseInvoices = [chaseInvoice({ chaseCount: 0 })];
     await queueService.awaitingPoChase([ID], OFFICE);

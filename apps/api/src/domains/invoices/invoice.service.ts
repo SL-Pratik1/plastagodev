@@ -916,16 +916,6 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
   );
   const recipients = payable.length > 0 ? payable : contacts.filter((contact) => contact.email);
 
-  const context = {
-    accountName: invoice.accountName,
-    invoiceNumber: invoice.invoiceNumber,
-    totalIncGst: invoice.totalIncGst,
-    dueOn: invoice.dueOn,
-    paymentTermsDays: invoice.paymentTermsDays,
-    jobNumber: invoice.jobNumber,
-    poNumber: invoice.poNumber,
-  };
-
   /*
    * M7.6 — the PDF the customer actually files.
    *
@@ -940,6 +930,19 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
   const renderContext = await invoiceRenderService.context();
   const pdf = await invoiceRenderService.bytesForSending(invoice, renderContext);
 
+  // The number exactly as the attached PDF prints it, from the same context.
+  const invoiceNumber = `${renderContext.invoiceNumberPrefix}${String(invoice.invoiceNumber)}`;
+
+  const context = {
+    accountName: invoice.accountName,
+    invoiceNumber,
+    totalIncGst: invoice.totalIncGst,
+    dueOn: invoice.dueOn,
+    paymentTermsDays: invoice.paymentTermsDays,
+    jobNumber: invoice.jobNumber,
+    poNumber: invoice.poNumber,
+  };
+
   const attachments =
     pdf === null
       ? undefined
@@ -947,7 +950,7 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
           {
             // Named for a filing system, not for a URL: this is what the
             // recipient sees in their inbox and searches for a year later.
-            filename: `Invoice ${renderContext.invoiceNumberPrefix}${String(invoice.invoiceNumber)}.pdf`,
+            filename: `Invoice ${invoiceNumber}.pdf`,
             contentType: 'application/pdf',
             content: pdf,
           },
@@ -991,7 +994,7 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
     accountId: invoice.accountId,
     category: 'invoice',
     severity: 'action',
-    title: `Invoice INV-${String(invoice.invoiceNumber)} — ${invoice.totalIncGst}`,
+    title: `Invoice ${invoiceNumber} — ${invoice.totalIncGst}`,
     body: invoice.dueOn
       ? `Due ${invoice.dueOn}.${invoice.poNumber ? ` Purchase order ${invoice.poNumber}.` : ''}`
       : `Payment terms ${String(invoice.paymentTermsDays)} days.`,

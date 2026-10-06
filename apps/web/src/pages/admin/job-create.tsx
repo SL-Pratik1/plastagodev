@@ -24,7 +24,7 @@ import {
   useToast,
 } from '@plastago/ui';
 import { CircleDollarSignIcon } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Controller, useForm, useWatch } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router';
 import * as z from 'zod';
@@ -122,6 +122,8 @@ export function AdminJobCreatePage() {
     handleSubmit,
     control,
     setError,
+    setValue,
+    getValues,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(FormSchema),
@@ -238,6 +240,50 @@ export function AdminJobCreatePage() {
   ]);
 
   const preview = useJobPricePreview(priceDraft);
+
+  /** How far the estimate runs past the chosen order's value, in dollars — or null. */
+  const overOrderBy = useMemo(() => {
+    if (!preview.data || !chosenOrder?.amountExGst) return null;
+    const estimate = Number(preview.data.subtotalExGst);
+    const ordered = Number(chosenOrder.amountExGst);
+    if (!Number.isFinite(estimate) || !Number.isFinite(ordered) || estimate <= ordered) return null;
+    return (estimate - ordered).toFixed(2);
+  }, [preview.data, chosenOrder]);
+
+  /*
+   * ⚠️ Show the ORDER's figures in the locked boxes, and bring its site across.
+   *
+   * The locked m² and bag boxes kept the form's default 0, with the order's
+   * value only as a placeholder behind it — so the office read "0 m²" directly
+   * under "priced on 823.41 m²". And the lot, street and supervisor the reviewer
+   * had just checked on the order were retyped here by hand. The site fields
+   * are filled only where empty: nothing somebody typed is overwritten.
+   */
+  useEffect(() => {
+    if (!chosenOrder) return;
+
+    setValue('expectedAreaM2', chosenOrder.expectedAreaM2 ?? 0);
+    setValue('bagCount', chosenOrder.bagAllowance ?? 0);
+    setValue('poNumber', chosenOrder.poNumber);
+
+    const current = getValues();
+    const fill = (
+      name: 'siteName' | 'lotNumber' | 'addressLine' | 'siteContactName' | 'siteContactMobile',
+      value: string | null,
+    ) => {
+      if (value && !current[name]) setValue(name, value, { shouldValidate: true });
+    };
+
+    fill('lotNumber', chosenOrder.lotNumber);
+    fill('addressLine', chosenOrder.addressLine);
+    // The same rule a call-up uses: drivers find a new-estate house by its lot.
+    fill(
+      'siteName',
+      chosenOrder.lotNumber ? `Lot ${chosenOrder.lotNumber}` : chosenOrder.addressLine,
+    );
+    fill('siteContactName', chosenOrder.siteSupervisorName);
+    fill('siteContactMobile', chosenOrder.siteSupervisorMobile);
+  }, [chosenOrder, getValues, setValue]);
 
   const onSubmit = async (values: FormValues) => {
     const draft: JobDraft = {
@@ -389,7 +435,11 @@ export function AdminJobCreatePage() {
                       label="Suburb"
                       required
                       error={errors.placeId?.message}
-                      hint="Decides the zone, and the zone decides the rate."
+                      hint={
+                        chosenOrder?.suburb && !place
+                          ? `The order says ${chosenOrder.suburb} — pick it from the list. It decides the zone, and the zone decides the rate.`
+                          : 'Decides the zone, and the zone decides the rate.'
+                      }
                     >
                       {(aria) => (
                         <PlacePicker
@@ -810,6 +860,21 @@ export function AdminJobCreatePage() {
                     {preview.data.caveat && (
                       <Alert variant="warning" title="Estimate is incomplete">
                         {preview.data.caveat}
+                      </Alert>
+                    )}
+
+                    {/*
+                      ⚠️ The builder pays the ORDER, not the estimate. Domaine's
+                      order read $474.68 while this priced the job at $865.22 and
+                      nothing said so — an invoice they would refuse, weeks later.
+                      A warning, not a block: the rate card may be right and the
+                      order out of date, and that is the office's call to make.
+                    */}
+                    {overOrderBy !== null && chosenOrder?.amountExGst && (
+                      <Alert variant="warning" title="This is more than the purchase order">
+                        The estimate is {formatMoney(overOrderBy)} over PO {chosenOrder.poNumber}{' '}
+                        ({formatMoney(chosenOrder.amountExGst)} ex GST). The builder may refuse an
+                        invoice above their order — check the rate card or ask them to amend it.
                       </Alert>
                     )}
 

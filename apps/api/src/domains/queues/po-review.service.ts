@@ -1,4 +1,5 @@
 import type {
+  MatchCandidate,
   PageMeta,
   PoConfirmation,
   PoExtraction,
@@ -11,6 +12,7 @@ import { logger } from '../../lib/logger.js';
 import { extractorClient, TERMINAL_FAILURES } from '../../integrations/extractor.js';
 import { getStorage } from '../../integrations/storage.js';
 import { accountRepository } from '../accounts/account.repository.js';
+import { jobService } from '../jobs/job.service.js';
 import { supervisorProvisioning } from '../portal/supervisor-provisioning.service.js';
 import { adaptCallUp } from './call-up-ingest.adapter.js';
 import { callUpService } from './call-up.service.js';
@@ -231,7 +233,8 @@ export const poReviewService = {
 
     const { input, diagnostics } = await adaptExtraction(extraction, {
       receivedAt: extraction.createdAt ? new Date(extraction.createdAt) : new Date(),
-      subject: extraction.fileName,
+      // The email's own subject where there is one; a file uploaded by hand has none.
+      subject: extraction.emailSubject ?? extraction.fileName,
     });
 
     const reason = await resolveReason({ ...input, reason: 'awaiting-check' });
@@ -298,7 +301,35 @@ export const poReviewService = {
       );
     }
 
+    /*
+     * The job, when one was picked, is checked BEFORE anything is written: it
+     * must be this account's, have no order yet, and not be invoiced. Checked
+     * again atomically when attaching — this is the early, field-level answer.
+     */
+    if (input.jobId) {
+      const open = await jobService.withoutPurchaseOrder(input.accountId);
+      if (!open.some((job) => job.id === input.jobId)) {
+        throw AppError.validation('That job cannot take this purchase order', [
+          {
+            path: 'jobId',
+            message:
+              'Choose one of this account’s jobs that has no purchase order and is not invoiced yet',
+          },
+        ]);
+      }
+    }
+
     const corrected = whatChanged(extraction, input);
+
+    /*
+     * The postcode read off the page only belongs to the suburb read off the
+     * page. Kept when the reviewer left the suburb as read; dropped if they
+     * changed it, rather than pairing a new suburb with the old postcode.
+     */
+    const suburbAsRead =
+      extraction.extractedSuburb !== null &&
+      input.suburb !== null &&
+      extraction.extractedSuburb.trim().toLowerCase() === input.suburb.trim().toLowerCase();
 
     const result = await poExtractionRepository.confirm({
       extractionId: id,
@@ -313,7 +344,8 @@ export const poReviewService = {
         lotNumber: input.lotNumber,
         addressLine: input.addressLine,
         suburb: input.suburb,
-        postcode: null,
+        // Was hard-coded null, so the postcode the extractor read never arrived.
+        postcode: suburbAsRead ? extraction.extractedPostcode : null,
         expectedAreaM2: input.expectedAreaM2,
         bagAllowance: input.bagAllowance,
         siteSupervisorName: input.siteSupervisorName,
@@ -329,6 +361,32 @@ export const poReviewService = {
       // The claim did not match, which means somebody else reviewed it between
       // the read above and the write.
       throw AppError.conflict('That extraction was reviewed by somebody else — reload the queue');
+    }
+
+    /*
+     * ⚠️ The job the reviewer picked is now actually attached.
+     *
+     * `jobId` was accepted, validated by the schema, and then dropped — the
+     * screen said "Attaching releases anything waiting on this PO" and nothing
+     * was attached. The order is written first (it is the commercial fact); a
+     * job that lost a race since the check above is reported, not hidden.
+     */
+    let attachFailed = false;
+    if (input.jobId) {
+      try {
+        await jobService.attachPurchaseOrder(
+          input.jobId,
+          { id: result.purchaseOrderId, poNumber: input.poNumber, accountId: input.accountId },
+          { ...caller, accountId: null },
+        );
+      } catch (caught) {
+        // Reported at the END: the supervisor login below must still happen.
+        attachFailed = true;
+        log.warn(
+          { extractionId: id, jobId: input.jobId, error: (caught as Error).message },
+          'purchase order confirmed but the chosen job could not take it',
+        );
+      }
     }
 
     /*
@@ -374,10 +432,31 @@ export const poReviewService = {
         // The accuracy metric. Which fields the model got wrong, per document.
         correctedFields: corrected,
         correctionCount: corrected.length,
+        jobId: input.jobId,
+        attached: input.jobId ? !attachFailed : null,
         by: caller.name,
       },
       'purchase order confirmed from extraction',
     );
+
+    if (attachFailed) {
+      throw AppError.conflict(
+        `PO ${input.poNumber} is confirmed, but that job changed in the meantime so the order was not attached to it`,
+      );
+    }
+  },
+
+  /**
+   * The picker behind "Job" on the review screen: the chosen account's jobs
+   * that could take this order (booked before it arrived, not yet invoiced).
+   *
+   * Asked for per ACCOUNT, because the reviewer often picks the account by
+   * hand — the extraction's own candidates only knew what matched on arrival,
+   * and an order that matched nothing arrived with none at all.
+   */
+  async jobCandidates(accountId: string, caller: Caller): Promise<MatchCandidate[]> {
+    assertReviewer(caller);
+    return jobService.withoutPurchaseOrder(accountId);
   },
 
   /**
@@ -517,6 +596,12 @@ function whatChanged(extraction: PoExtraction, input: PoConfirmation): string[] 
   compare('expectedAreaM2', extraction.extractedAreaM2, input.expectedAreaM2);
   compare('bagAllowance', extraction.extractedBagAllowance, input.bagAllowance);
   compare('lotNumber', extraction.extractedLotNumber, input.lotNumber);
+  // Case-folded: "EDGEWORTH" as printed and "Edgeworth" as retyped are the same place.
+  compare(
+    'suburb',
+    extraction.extractedSuburb?.trim().toLowerCase() ?? null,
+    input.suburb?.trim().toLowerCase() ?? null,
+  );
   compare('siteSupervisorName', extraction.extractedSupervisorName, input.siteSupervisorName);
   compare('siteSupervisorMobile', extraction.extractedSupervisorMobile, input.siteSupervisorMobile);
   compare('amountExGst', extraction.amountExGst, input.amountExGst);

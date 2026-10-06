@@ -151,6 +151,8 @@ export const queryKeys = {
     callUpDetail: (id: string) => [...queryKeys.queues.all, 'call-ups', 'detail', id] as const,
     poReviewList: (query: ListQuery) => [...queryKeys.queues.all, 'po-review', query] as const,
     poReviewDetail: (id: string) => [...queryKeys.queues.all, 'po-review', 'detail', id] as const,
+    poReviewJobs: (accountId: string) =>
+      [...queryKeys.queues.all, 'po-review', 'jobs', accountId] as const,
     leadList: (query: ListQuery) => [...queryKeys.queues.all, 'leads', query] as const,
     leadStats: () => [...queryKeys.queues.all, 'leads', 'stats'] as const,
     leadDetail: (id: string) => [...queryKeys.queues.all, 'leads', 'detail', id] as const,

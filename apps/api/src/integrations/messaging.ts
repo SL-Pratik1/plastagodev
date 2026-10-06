@@ -36,6 +36,32 @@ export interface OutboundEmail {
    * the whole send.
    */
   attachments?: readonly OutboundAttachment[];
+  /**
+   * Which of PlastaGo's mailboxes it goes out from. Omitted on almost every
+   * message, which then comes from the default (`noreply@`).
+   *
+   * `accounts` is for the emails that ask for a reply — the invoice and the
+   * purchase-order request — so the reply lands where the accounts team reads
+   * it (Matthew, 30/09/2026). Set by the message builder, not the caller, so a
+   * new path that sends an invoice cannot forget it.
+   */
+  mailbox?: SendingMailbox;
+}
+
+export type SendingMailbox = 'default' | 'accounts';
+
+/**
+ * The address a mailbox sends as, or null when mail is not configured.
+ *
+ * `accounts` falls back to the default sender while
+ * `MS_GRAPH_ACCOUNTS_SENDER` is unset — the state before the client's IT has
+ * granted send rights on it, where sending from it would fail outright.
+ */
+export function senderAddress(mailbox: SendingMailbox = 'default'): string | null {
+  if (mailbox === 'accounts' && env.MS_GRAPH_ACCOUNTS_SENDER) {
+    return env.MS_GRAPH_ACCOUNTS_SENDER;
+  }
+  return env.MS_GRAPH_MAIL_SENDER ?? null;
 }
 
 /**
@@ -155,12 +181,17 @@ function extractCode(text: string): string | null {
 function createStubMailer(): Mailer {
   return {
     name: 'stub',
-    send({ to, subject, text, attachments }) {
+    send({ to, subject, text, attachments, mailbox }) {
+      // Printed so "which mailbox would this have come from?" is answerable on
+      // a laptop — it is the whole point of the accounts mailbox.
+      const from = `${mailbox ?? 'default'} mailbox (${senderAddress(mailbox) ?? 'MS_GRAPH_MAIL_SENDER unset'})`;
+
       log.info(
-        { to, subject, provider: 'stub', attachments: attachments?.length ?? 0 },
+        { to, from, subject, provider: 'stub', attachments: attachments?.length ?? 0 },
         'email not sent (MAIL_PROVIDER=stub)',
       );
       printBox('EMAIL — not sent (MAIL_PROVIDER=stub)', [
+        `from    : ${from}`,
         `to      : ${to}`,
         `subject : ${subject}`,
         /*

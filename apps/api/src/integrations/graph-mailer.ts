@@ -2,7 +2,12 @@ import { ClientSecretCredential } from '@azure/identity';
 import { env } from '../config/env.js';
 import { AppError } from '../lib/app-error.js';
 import { logger } from '../lib/logger.js';
-import { MAX_ATTACHMENT_BYTES, type Mailer, type OutboundEmail } from './messaging.js';
+import {
+  MAX_ATTACHMENT_BYTES,
+  senderAddress,
+  type Mailer,
+  type OutboundEmail,
+} from './messaging.js';
 
 const log = logger.child({ module: 'graph-mailer' });
 
@@ -37,14 +42,22 @@ export function createGraphMailer(): Mailer {
   const tenantId = required(env.MS_GRAPH_TENANT_ID, 'MS_GRAPH_TENANT_ID');
   const clientId = required(env.MS_GRAPH_CLIENT_ID, 'MS_GRAPH_CLIENT_ID');
   const clientSecret = required(env.MS_GRAPH_CLIENT_SECRET, 'MS_GRAPH_CLIENT_SECRET');
-  const sender = required(env.MS_GRAPH_MAIL_SENDER, 'MS_GRAPH_MAIL_SENDER');
+  const defaultSender = required(env.MS_GRAPH_MAIL_SENDER, 'MS_GRAPH_MAIL_SENDER');
 
   const credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
 
   return {
     name: 'graph',
 
-    async send({ to, subject, text, html, attachments }: OutboundEmail): Promise<void> {
+    async send({ to, subject, text, html, attachments, mailbox }: OutboundEmail): Promise<void> {
+      /*
+       * Per message: invoices and PO requests go from the accounts mailbox,
+       * everything else from the default. Graph sends AS whichever mailbox is
+       * in the URL, which the client's IT has scoped this app to.
+       */
+      const sender = senderAddress(mailbox) ?? defaultSender;
+      const fromAccounts = sender !== defaultSender;
+
       const token = await credential.getToken(GRAPH_SCOPE);
       if (!token) {
         throw AppError.dependencyUnavailable('Could not obtain a Microsoft Graph token');
@@ -101,9 +114,14 @@ export function createGraphMailer(): Mailer {
                   }
                 : {}),
             },
-            // A sign-in code is not correspondence. Keeping it out of Sent Items
-            // avoids filling the mailbox with thousands of one-time codes.
-            saveToSentItems: false,
+            /*
+             * A sign-in code is not correspondence. Keeping it out of Sent Items
+             * avoids filling the mailbox with thousands of one-time codes.
+             *
+             * An invoice IS correspondence: the accounts team needs to see what
+             * went out, beside the replies it prompts.
+             */
+            saveToSentItems: fromAccounts,
           }),
           // Longer than the 10s a bare message gets: an invoice PDF has to
           // cross the wire, and a timeout here loses a send that would have
@@ -115,8 +133,10 @@ export function createGraphMailer(): Mailer {
       // Graph answers 202 Accepted with an empty body on success.
       if (!response.ok) {
         const detail = await response.text().catch(() => '');
+        // `from` matters here: a 403 on the accounts mailbox means the client's
+        // IT has not yet granted send rights on it.
         log.error(
-          { status: response.status, detail: detail.slice(0, 500), to },
+          { status: response.status, detail: detail.slice(0, 500), to, from: sender },
           'Graph sendMail failed',
         );
         throw AppError.dependencyUnavailable('Could not send the email');
@@ -125,7 +145,7 @@ export function createGraphMailer(): Mailer {
       // `text` is unused by Graph's HTML message but kept on the interface so a
       // future SMTP or plain-text provider needs no signature change.
       void text;
-      log.debug({ to, subject }, 'sent via Graph');
+      log.debug({ to, from: sender, subject }, 'sent via Graph');
     },
   };
 }

@@ -322,8 +322,19 @@ export const portalService = {
      * route takes an account id, which is what stops a URL widening what a
      * customer can see — see the note on the router.
      */
+    /*
+     * ⚠️ And a site supervisor sees only the orders that name THEM, the same
+     * line the portal draws around their jobs (`scopeFor`). Account-wide, one
+     * supervisor saw — and could book — every other supervisor's sites on the
+     * builder's account. An administrator keeps the account-wide view.
+     */
     return callUpService.listAwaiting(
-      { accountId: account.id, page: query.page, pageSize: query.pageSize },
+      {
+        accountId: account.id,
+        siteSupervisorUserId: isSupervisorOnly(caller) ? caller.userId : null,
+        page: query.page,
+        pageSize: query.pageSize,
+      },
       { ...caller, accountId: account.id },
     );
   },
@@ -344,10 +355,12 @@ export const portalService = {
 
     // Scoped in the service by `accountId`, so an order belonging to another
     // account is a 404 here exactly as it is in the office queue.
-    return callUpService.callUpByHand(purchaseOrderId, request, {
-      ...caller,
-      accountId: account.id,
-    });
+    return callUpService.callUpByHand(
+      purchaseOrderId,
+      request,
+      { ...caller, accountId: account.id },
+      isSupervisorOnly(caller) ? { siteSupervisorUserId: caller.userId } : null,
+    );
   },
 
   async quote(draft: PortalBookingDraft, caller: Caller): Promise<PricePreview> {

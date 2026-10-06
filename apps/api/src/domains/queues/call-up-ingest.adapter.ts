@@ -115,7 +115,11 @@ export function adaptCallUp(
     declaredKind: readString(data, FIELD_KEYS.kind, 40),
     address: readString(data, FIELD_KEYS.siteAddress, 200),
     extra: readString(data, FIELD_KEYS.note, 300),
-    subject: extraction.fileName,
+    // The email's own subject is what the office searches their inbox for; the
+    // attachment name stays alongside it for finding the PDF.
+    subject: extraction.emailSubject
+      ? `${extraction.emailSubject} (${extraction.fileName})`
+      : extraction.fileName,
     missing,
   });
 

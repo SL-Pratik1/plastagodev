@@ -798,6 +798,85 @@ export const jobRepository = {
     ]);
   },
 
+  /**
+   * An account's jobs that could still take a purchase order.
+   *
+   * Not cancelled, no order linked yet, and not invoiced — an invoice already
+   * raised carries its own PO state and is released by approval, not by this.
+   */
+  async listWithoutPurchaseOrder(
+    accountId: string,
+  ): Promise<
+    Array<{ id: string; jobNumber: number; siteName: string; readyDate: string; status: string }>
+  > {
+    if (!mongoose.isValidObjectId(accountId)) return [];
+
+    const rows = await JobModel.find(
+      {
+        accountId: new mongoose.Types.ObjectId(accountId),
+        purchaseOrderId: null,
+        status: { $ne: 'cancelled' },
+        invoiceStatus: 'not-invoiced',
+      },
+      { jobNumber: 1, siteName: 1, readyDate: 1, status: 1 },
+    )
+      .sort({ readyDate: -1 })
+      .limit(50)
+      .lean<
+        Array<{
+          _id: mongoose.Types.ObjectId;
+          jobNumber: number;
+          siteName: string;
+          readyDate: string;
+          status: string;
+        }>
+      >();
+
+    return rows.map((row) => ({
+      id: row._id.toHexString(),
+      jobNumber: row.jobNumber,
+      siteName: row.siteName,
+      readyDate: row.readyDate,
+      status: row.status,
+    }));
+  },
+
+  /**
+   * Links a confirmed purchase order to a job booked before it arrived.
+   *
+   * Every precondition is in the FILTER, so two reviewers attaching different
+   * orders to one job cannot both win — and the unique index on
+   * `purchaseOrderId` stops one order landing on two jobs. Returns the job's
+   * previous PO text for the history line, or null when nothing matched.
+   */
+  async attachPurchaseOrder(input: {
+    jobId: string;
+    accountId: string;
+    purchaseOrderId: string;
+    poNumber: string;
+  }): Promise<{ previousPoNumber: string | null } | null> {
+    if (!mongoose.isValidObjectId(input.jobId)) return null;
+
+    const before = await JobModel.findOneAndUpdate(
+      {
+        _id: new mongoose.Types.ObjectId(input.jobId),
+        accountId: new mongoose.Types.ObjectId(input.accountId),
+        purchaseOrderId: null,
+        status: { $ne: 'cancelled' },
+        invoiceStatus: 'not-invoiced',
+      },
+      {
+        $set: {
+          purchaseOrderId: new mongoose.Types.ObjectId(input.purchaseOrderId),
+          poNumber: input.poNumber,
+        },
+      },
+      { returnDocument: 'before', projection: { poNumber: 1 } },
+    ).lean<{ poNumber?: string | null }>();
+
+    return before ? { previousPoNumber: before.poNumber ?? null } : null;
+  },
+
   async appendEvent(input: AppendEventInput): Promise<void> {
     await JobEventModel.create({
       jobId: new mongoose.Types.ObjectId(input.jobId),

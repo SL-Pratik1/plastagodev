@@ -255,6 +255,18 @@ const EnvSchema = z
     MS_GRAPH_CLIENT_SECRET: z.string().min(1).optional(),
     /** The mailbox Graph sends AS, e.g. `noreply@plastago.com.au`. */
     MS_GRAPH_MAIL_SENDER: z.string().email().optional(),
+    /**
+     * The mailbox invoices and purchase-order requests are sent AS, e.g.
+     * `accounts@plastago.com.au` (Matthew, 30/09/2026).
+     *
+     * Those are the two emails that ask the customer to REPLY — with a question
+     * or a PO number — and a reply to `noreply@` reaches nobody.
+     *
+     * ⚠️ Optional, and set only AFTER the client's IT has granted this app send
+     * rights on the mailbox: until then Graph refuses (403) every invoice email.
+     * Unset, both go from `MS_GRAPH_MAIL_SENDER` exactly as before.
+     */
+    MS_GRAPH_ACCOUNTS_SENDER: z.string().email().optional(),
 
     /** I2 — SMS to drivers and site supervisors. */
     CLICKSEND_USERNAME: z.string().min(1).optional(),

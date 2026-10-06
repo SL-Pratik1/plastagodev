@@ -20,8 +20,10 @@ import { CalendarCheckIcon, CalendarPlusIcon } from 'lucide-react';
 import { useState } from 'react';
 import { PageHeader } from '@/components/page-header';
 import { usePortalAwaitingCallUp, usePortalCallUp } from '@/features/portal/queries';
+import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatDate } from '@/lib/format';
+import { isServiceError } from '@/services/service-error';
 
 /**
  * Orders waiting for a date, and the button that books one (M2.12b).
@@ -101,6 +103,15 @@ export function PortalPurchaseOrdersPage(): React.JSX.Element {
 
       setTarget(null);
     } catch (caught) {
+      /*
+       * The server's own sentence, on the date. A refused date — one that has
+       * passed, or one no rate covers — reached the supervisor as "Something
+       * went wrong", which reads as an outage and says nothing they can fix.
+       */
+      if (isServiceError(caught) && caught.fieldErrors.readyDate) {
+        setDateError(caught.fieldErrors.readyDate);
+        return;
+      }
       const described = describeError(caught);
       toast.error(described.title, described.detail);
     }
@@ -244,6 +255,9 @@ export function PortalPurchaseOrdersPage(): React.JSX.Element {
               <DatePicker
                 {...control}
                 value={readyDate}
+                // A supervisor is telling us when to come; a day that has
+                // passed is a slip of the calendar. The server refuses one too.
+                min={todayInSydney()}
                 onChange={(event) => {
                   setReadyDate(event.target.value);
                   setDateError(null);

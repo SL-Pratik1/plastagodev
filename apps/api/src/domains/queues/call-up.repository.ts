@@ -39,6 +39,7 @@ interface RawCallUp {
   jobId: mongoose.Types.ObjectId | null;
   jobNumber: number | null;
   note: string;
+  refusal?: string | null;
   resolvedAt: Date | null;
   resolvedBy: string | null;
 }
@@ -60,6 +61,7 @@ function toCallUp(row: RawCallUp): CallUp {
     jobId: row.jobId ? row.jobId.toHexString() : null,
     jobNumber: row.jobNumber ?? null,
     note: row.note ?? '',
+    refusal: row.refusal ?? null,
     resolvedAt: row.resolvedAt ? row.resolvedAt.toISOString() : null,
     resolvedBy: row.resolvedBy ?? null,
   };
@@ -166,6 +168,8 @@ export const callUpRepository = {
       jobNumber: number | null;
       previousReadyDate?: string | null;
       resolvedBy: string | null;
+      /** Why booking was refused, or null — every outcome rewrites it, so a fixed problem is never shown. */
+      refusal?: string | null;
     },
   ): Promise<boolean> {
     if (!mongoose.isValidObjectId(id)) return false;
@@ -181,8 +185,10 @@ export const callUpRepository = {
           ...(outcome.previousReadyDate === undefined
             ? {}
             : { previousReadyDate: outcome.previousReadyDate }),
-          resolvedAt: outcome.state === 'applied' ? new Date() : null,
+          // Settled either way — booked or set aside. Only an item still waiting has none.
+          resolvedAt: outcome.state === 'needs-review' ? null : new Date(),
           resolvedBy: outcome.resolvedBy,
+          refusal: outcome.refusal ?? null,
         },
       },
     );
@@ -211,6 +217,22 @@ export const callUpRepository = {
     );
 
     return result.matchedCount === 1;
+  },
+
+  /**
+   * Removes a call-up that a person raised and was refused on the spot.
+   *
+   * Only ever for the office or portal doors, where the refusal was shown to
+   * the person who asked and nothing was booked. An emailed call-up is never
+   * removed — it is the only record the builder asked.
+   */
+  async remove(id: string): Promise<void> {
+    if (!mongoose.isValidObjectId(id)) return;
+    await CallUpModel.deleteOne({
+      _id: new mongoose.Types.ObjectId(id),
+      source: { $ne: 'email' },
+      state: 'needs-review',
+    });
   },
 
   async findById(id: string): Promise<CallUp | null> {
@@ -285,61 +307,22 @@ export const callUpRepository = {
   async findMatches(poNumber: string): Promise<MatchedOrder[]> {
     const trimmed = poNumber.trim();
     if (trimmed === '') return [];
+    return matchOrders({ poNumber: trimmed });
+  },
 
-    const orders = await PurchaseOrderModel.find({ poNumber: trimmed }).lean<
-      Array<{
-        _id: mongoose.Types.ObjectId;
-        poNumber: string;
-        accountId: mongoose.Types.ObjectId;
-        accountName: string;
-        lotNumber: string | null;
-        addressLine: string | null;
-        suburb: string | null;
-        siteSupervisorName: string | null;
-        siteSupervisorMobile: string | null;
-        siteSupervisorUserId: mongoose.Types.ObjectId | null;
-      }>
-    >();
-
-    if (orders.length === 0) return [];
-
-    const jobs = await JobModel.find(
-      { purchaseOrderId: { $in: orders.map((order) => order._id) } },
-      { purchaseOrderId: 1, jobNumber: 1, status: 1, readyDate: 1 },
-    ).lean<
-      Array<{
-        _id: mongoose.Types.ObjectId;
-        purchaseOrderId: mongoose.Types.ObjectId;
-        jobNumber: number;
-        status: string;
-        readyDate: string;
-      }>
-    >();
-
-    const byOrder = new Map(jobs.map((job) => [job.purchaseOrderId.toHexString(), job]));
-
-    return orders.map((order) => {
-      const job = byOrder.get(order._id.toHexString());
-
-      return {
-        id: order._id.toHexString(),
-        poNumber: order.poNumber,
-        accountId: order.accountId.toHexString(),
-        accountName: order.accountName,
-        lotNumber: order.lotNumber ?? null,
-        addressLine: order.addressLine ?? null,
-        suburb: order.suburb ?? null,
-        siteSupervisorName: order.siteSupervisorName ?? null,
-        siteSupervisorMobile: order.siteSupervisorMobile ?? null,
-        siteSupervisorUserId: order.siteSupervisorUserId
-          ? order.siteSupervisorUserId.toHexString()
-          : null,
-        jobId: job ? job._id.toHexString() : null,
-        jobNumber: job ? job.jobNumber : null,
-        jobStatus: job ? job.status : null,
-        jobReadyDate: job ? job.readyDate : null,
-      };
-    });
+  /**
+   * The orders under one builder JOB number — "79903057" → "79903057/080".
+   *
+   * Domaine's call-up ("Construction Notification") names the job, not the
+   * order: its PO numbers are `<job>/<suffix>` and the notice prints only the
+   * job. Anchored at the start and at the slash, so "7990305" cannot match
+   * "79903057/080". The service only asks this when the exact number found
+   * nothing, and still refuses to choose between two orders on one job.
+   */
+  async findMatchesByJobNumber(jobNumber: string): Promise<MatchedOrder[]> {
+    const trimmed = jobNumber.trim();
+    if (trimmed === '' || trimmed.includes('/')) return [];
+    return matchOrders({ poNumber: { $regex: `^${escapeRegex(trimmed)}/` } });
   },
 
   /** One order by id, for a call-up raised against a specific order. */
@@ -365,12 +348,16 @@ export const callUpRepository = {
    */
   async listAwaiting(query: {
     accountId?: string | null;
+    siteSupervisorUserId?: string | null;
     q?: string | null;
     page: number;
     pageSize: number;
   }): Promise<{ data: Omit<AwaitingCallUp, 'serviceable'>[]; meta: PageMeta }> {
     const match: Record<string, unknown> = {};
     if (query.accountId) match.accountId = new mongoose.Types.ObjectId(query.accountId);
+    if (query.siteSupervisorUserId) {
+      match.siteSupervisorUserId = new mongoose.Types.ObjectId(query.siteSupervisorUserId);
+    }
 
     /*
      * Anchored nowhere and case-insensitive, because a PO number is quoted in
@@ -450,6 +437,64 @@ export const callUpRepository = {
     };
   },
 };
+
+/** Orders matching a filter, each with the job (if any) already booked against it. */
+async function matchOrders(filter: Record<string, unknown>): Promise<MatchedOrder[]> {
+  const orders = await PurchaseOrderModel.find(filter).lean<
+    Array<{
+      _id: mongoose.Types.ObjectId;
+      poNumber: string;
+      accountId: mongoose.Types.ObjectId;
+      accountName: string;
+      lotNumber: string | null;
+      addressLine: string | null;
+      suburb: string | null;
+      siteSupervisorName: string | null;
+      siteSupervisorMobile: string | null;
+      siteSupervisorUserId: mongoose.Types.ObjectId | null;
+    }>
+  >();
+
+  if (orders.length === 0) return [];
+
+  const jobs = await JobModel.find(
+    { purchaseOrderId: { $in: orders.map((order) => order._id) } },
+    { purchaseOrderId: 1, jobNumber: 1, status: 1, readyDate: 1 },
+  ).lean<
+    Array<{
+      _id: mongoose.Types.ObjectId;
+      purchaseOrderId: mongoose.Types.ObjectId;
+      jobNumber: number;
+      status: string;
+      readyDate: string;
+    }>
+  >();
+
+  const byOrder = new Map(jobs.map((job) => [job.purchaseOrderId.toHexString(), job]));
+
+  return orders.map((order) => {
+    const job = byOrder.get(order._id.toHexString());
+
+    return {
+      id: order._id.toHexString(),
+      poNumber: order.poNumber,
+      accountId: order.accountId.toHexString(),
+      accountName: order.accountName,
+      lotNumber: order.lotNumber ?? null,
+      addressLine: order.addressLine ?? null,
+      suburb: order.suburb ?? null,
+      siteSupervisorName: order.siteSupervisorName ?? null,
+      siteSupervisorMobile: order.siteSupervisorMobile ?? null,
+      siteSupervisorUserId: order.siteSupervisorUserId
+        ? order.siteSupervisorUserId.toHexString()
+        : null,
+      jobId: job ? job._id.toHexString() : null,
+      jobNumber: job ? job.jobNumber : null,
+      jobStatus: job ? job.status : null,
+      jobReadyDate: job ? job.readyDate : null,
+    };
+  });
+}
 
 /** Local, as in `queue.repository` — an unescaped `(` from the search box
  *  would otherwise reach Mongo as an invalid expression and 500 the list. */

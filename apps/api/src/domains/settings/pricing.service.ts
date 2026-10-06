@@ -7,6 +7,7 @@ import type {
   Zone,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
+import { todayInSydney } from '../../lib/business-day.js';
 import { logger } from '../../lib/logger.js';
 import { applyRate, centsToMoney, moneyToCents } from '../../lib/money.js';
 import { settingsRepository } from './settings.repository.js';
@@ -108,6 +109,30 @@ export const pricingService = {
        * them anything they can act on. One extra read, on a failure path only.
        */
       const zoneLabel = (await settingsRepository.findZoneLabel(input.zoneId)) ?? 'that zone';
+
+      /*
+       * ⚠️ The back-dated case is the PERSON's to fix, so it is said to them.
+       *
+       * As a 503 it reached every screen as "a service is down / something
+       * went wrong", and the sentence above never arrived — a supervisor who
+       * picked last week saw an outage. When the zone IS priced from today,
+       * the date is the problem: a 422 on `readyDate`, which the booking form
+       * and both call-up dialogs put on the date field. A zone with no rate at
+       * all is still a configuration gap and still refused as one.
+       */
+      const current = await settingsRepository.resolveRate(
+        input.rateCardId,
+        input.zoneId,
+        todayInSydney(),
+      );
+      if (current && input.onDate < current.scheduleFrom) {
+        throw AppError.validation(`No rate covers ${zoneLabel} on ${input.onDate}`, [
+          {
+            path: 'readyDate',
+            message: `Rates for ${zoneLabel} start on ${current.scheduleFrom}. Pick that day or later, or ask the office to add an earlier rate.`,
+          },
+        ]);
+      }
 
       throw AppError.dependencyUnavailable(
         `No rate is configured for ${zoneLabel} on ${input.onDate}. The office needs to set one before this can be priced.`,

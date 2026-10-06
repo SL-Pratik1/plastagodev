@@ -71,17 +71,26 @@ const callUpSchema = new Schema(
     jobId: { type: Schema.Types.ObjectId, default: null, ref: 'Job' },
     jobNumber: { type: Number, default: null },
     note: { type: String, default: '', trim: true },
+    /** Why the last booking attempt was refused. Never copied onto the job. */
+    refusal: { type: String, default: null, trim: true },
 
     /**
      * REFERENCE → the vendor's extraction id, where this came from an email.
      *
      * ⚠️ The idempotency key. Unique where present, so a retried webhook cannot
-     * produce a second call-up for one email — see reason 1 above. Null for one
-     * raised in the portal or over the phone, and a sparse index is what lets
-     * many of those coexist.
+     * produce a second call-up for one email — see reason 1 above. ABSENT, not
+     * null, for one raised in the portal or over the phone: the partial index
+     * below only covers rows that carry a string, which is what lets many of
+     * those coexist.
+     *
+     * ⚠️ This field must stay declared. With `strictQuery` on, Mongoose strips
+     * a filter key the schema does not know, so `findOne({ externalId })` on an
+     * undeclared field matched the FIRST call-up in the collection — every
+     * email after the first was treated as already seen and silently dropped.
      */
-    /**
+    externalId: { type: String },
 
+    /** When a human (or the system) settled it — applied, or set aside. */
     resolvedAt: { type: Date, default: null },
     resolvedBy: { type: String, default: null, trim: true },
     /** Who raised it, for a portal or phone call-up. */

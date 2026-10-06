@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { fromDecimal128 } from '../../lib/money.js';
+import { AccountModel } from '../accounts/account.model.js';
 import { PurchaseOrderModel } from './purchase-order.model.js';
 
 /**
@@ -110,6 +111,37 @@ export const purchaseOrderRepository = {
     );
 
     return result.matchedCount === 1;
+  },
+
+  /**
+   * The accounts that already hold a confirmed order with exactly this number.
+   *
+   * For the matcher: a resend of an order already on file names its builder as
+   * surely as any text on the page does. Distinct accounts, so the caller can
+   * tell "one builder" (an answer) from "two builders share the string" (not).
+   */
+  async accountsHoldingPoNumber(
+    poNumber: string,
+  ): Promise<Array<{ id: string; name: string; code: string }>> {
+    const trimmed = poNumber.trim();
+    if (trimmed === '') return [];
+
+    const orders = await PurchaseOrderModel.find({ poNumber: trimmed }, { accountId: 1 })
+      .limit(10)
+      .lean<Array<{ accountId: mongoose.Types.ObjectId }>>();
+    if (orders.length === 0) return [];
+
+    const ids = [...new Set(orders.map((order) => order.accountId.toHexString()))];
+    const accounts = await AccountModel.find(
+      { _id: { $in: ids.map((id) => new mongoose.Types.ObjectId(id)) } },
+      { name: 1, code: 1 },
+    ).lean<Array<{ _id: mongoose.Types.ObjectId; name: string; code: string }>>();
+
+    return accounts.map((account) => ({
+      id: account._id.toHexString(),
+      name: account.name,
+      code: account.code,
+    }));
   },
 
   /**

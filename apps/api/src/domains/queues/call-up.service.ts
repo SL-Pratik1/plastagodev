@@ -12,6 +12,7 @@ import type {
   Role,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
+import { todayInSydney } from '../../lib/business-day.js';
 import { logger } from '../../lib/logger.js';
 import { placeRepository } from '../places/place.repository.js';
 import { jobService, type Caller } from '../jobs/job.service.js';
@@ -67,6 +68,33 @@ const SYSTEM_CALLER: Caller = {
   accountId: null,
 };
 
+/** How each door reads in a job's history, after the person's name. */
+const SOURCE_SUFFIX: Record<CallUpSource, string> = {
+  email: 'call-up email',
+  phone: 'phoned in',
+  portal: 'portal',
+};
+
+/**
+ * The caller the job service sees — still the office identity, with a true name.
+ *
+ * ⚠️ The ROLES stay the system's on purpose (see `SYSTEM_CALLER`): a portal
+ * supervisor passed through as a customer caller would re-scope the job. Only
+ * the NAME changes, because it is what the job's history prints, and "Call-up
+ * email" on a job the office phoned in or a supervisor booked in the portal
+ * answers "who booked this?" wrongly — the one question that history is for.
+ */
+function actorFor(source: CallUpSource, raisedBy: string | null | undefined): Caller {
+  if (!raisedBy) return SYSTEM_CALLER;
+  return { ...SYSTEM_CALLER, name: `${raisedBy} · ${SOURCE_SUFFIX[source]}` };
+}
+
+/** The refusal to keep on a call-up's note, in words the office can act on. */
+function refusalOf(caught: unknown): string {
+  if (caught instanceof AppError) return caught.message;
+  return 'The booking failed unexpectedly. Try again, and tell support if it keeps happening.';
+}
+
 /** Statuses a call-up may still move or cancel. */
 const CHANGEABLE = new Set(['booked', 'assigned', 'in-transit', 'arrived']);
 
@@ -107,7 +135,7 @@ export const callUpService = {
       ? [await callUpRepository.findOrder(input.purchaseOrderId)].filter(
           (order): order is MatchedOrder => order !== null,
         )
-      : await callUpRepository.findMatches(input.poNumber);
+      : await ordersFor(input.poNumber);
 
     const order = matches.length === 1 ? matches[0] : null;
 
@@ -152,7 +180,33 @@ export const callUpService = {
       };
     }
 
-    const outcome = await this.apply(recorded.id, matches, input);
+    let outcome: CallUpOutcome;
+    try {
+      outcome = await this.apply(recorded.id, matches, input);
+    } catch (caught) {
+      /*
+       * ⚠️ The two doors fail differently, on purpose.
+       *
+       * A person at the office or in the portal is looking at the dialog: the
+       * refusal belongs THERE, on the date they picked, and the row is removed
+       * so the queue does not fill with reason-less items that "Try again" can
+       * only fail the same way. Nothing was booked, so nothing is lost.
+       *
+       * An EMAIL has nobody to tell. It is the only record that the builder
+       * asked, so it is kept — with a reason and the refusal on its note — and
+       * the office fixes whatever was missing and tries again.
+       */
+      if (input.source !== 'email') {
+        await callUpRepository.remove(recorded.id);
+        throw caught;
+      }
+
+      log.warn(
+        { callUpId: recorded.id, poNumber: input.poNumber, error: refusalOf(caught) },
+        'call-up email matched an order but could not be booked',
+      );
+      outcome = await this.holdForOffice(recorded.id, caught);
+    }
 
     log.info(
       {
@@ -177,10 +231,40 @@ export const callUpService = {
    * they have fixed whatever made it ambiguous — a missing order, a suburb
    * nobody had added — without the email having to arrive again.
    */
+  /**
+   * Parks a call-up that matched an order but whose booking was refused.
+   *
+   * The refusal is kept, because the reason alone ("could not be booked") does
+   * not say what to fix and the message does — "No rate covers Wollongong on
+   * 2026-09-17". ⚠️ In its own field, NOT on the note: the note becomes the
+   * job's notes when it books, and a booked job carried "No rate covers…" long
+   * after the rate had been fixed. Every later outcome rewrites the field.
+   */
+  async holdForOffice(callUpId: string, caught: unknown): Promise<CallUpOutcome> {
+    const existing = await callUpRepository.findById(callUpId);
+
+    await callUpRepository.setOutcome(callUpId, {
+      state: 'needs-review',
+      reason: 'cannot-book',
+      jobId: existing?.jobId ?? null,
+      jobNumber: existing?.jobNumber ?? null,
+      resolvedBy: null,
+      refusal: refusalOf(caught),
+    });
+
+    return {
+      id: callUpId,
+      state: 'needs-review',
+      reason: 'cannot-book',
+      jobId: existing?.jobId ?? null,
+      jobNumber: existing?.jobNumber ?? null,
+    };
+  },
+
   async apply(
     callUpId: string,
     matches: MatchedOrder[],
-    input: Pick<RecordCallUpInput, 'kind' | 'readyDate' | 'note' | 'raisedBy'>,
+    input: Pick<RecordCallUpInput, 'kind' | 'readyDate' | 'note' | 'raisedBy' | 'source'>,
   ): Promise<CallUpOutcome> {
     const review = async (reason: CallUpReviewReason): Promise<CallUpOutcome> => {
       await callUpRepository.setOutcome(callUpId, {
@@ -212,7 +296,7 @@ export const callUpService = {
   async book(
     callUpId: string,
     order: MatchedOrder,
-    input: Pick<RecordCallUpInput, 'readyDate' | 'note' | 'raisedBy'>,
+    input: Pick<RecordCallUpInput, 'readyDate' | 'note' | 'raisedBy' | 'source'>,
   ): Promise<CallUpOutcome> {
     const review = async (reason: CallUpReviewReason): Promise<CallUpOutcome> => {
       await callUpRepository.setOutcome(callUpId, {
@@ -235,7 +319,10 @@ export const callUpService = {
       return review('already-booked');
     }
 
-    if (input.readyDate === null) return review('no-job-to-change');
+    // Said as what it is. This read "No job booked against that order yet",
+    // which sent the office looking for a missing job when the email simply
+    // named no day.
+    if (input.readyDate === null) return review('no-date');
 
     /*
      * The zone prices the job, and it comes from the place — never from the
@@ -287,7 +374,7 @@ export const callUpService = {
       notes: input.note,
     };
 
-    const job = await jobService.create(draft, SYSTEM_CALLER);
+    const job = await jobService.create(draft, actorFor(input.source, input.raisedBy));
 
     await callUpRepository.setOutcome(callUpId, {
       state: 'applied',
@@ -310,7 +397,7 @@ export const callUpService = {
   async change(
     callUpId: string,
     order: MatchedOrder,
-    input: Pick<RecordCallUpInput, 'kind' | 'readyDate' | 'note' | 'raisedBy'>,
+    input: Pick<RecordCallUpInput, 'kind' | 'readyDate' | 'note' | 'raisedBy' | 'source'>,
   ): Promise<CallUpOutcome> {
     const review = async (reason: CallUpReviewReason): Promise<CallUpOutcome> => {
       await callUpRepository.setOutcome(callUpId, {
@@ -341,6 +428,8 @@ export const callUpService = {
       return review('job-finished');
     }
 
+    const actor = actorFor(input.source, input.raisedBy);
+
     if (input.kind === 'cancel') {
       /*
        * Ten in four years (Matt, 24:24) — and each one is a truck that would
@@ -350,11 +439,11 @@ export const callUpService = {
         order.jobId,
         'customer-request',
         input.note.trim() === '' ? 'Cancelled by the builder’s call-up' : input.note,
-        SYSTEM_CALLER,
+        actor,
       );
     } else {
-      if (input.readyDate === null) return review('no-job-to-change');
-      await jobService.reschedule(order.jobId, input.readyDate, SYSTEM_CALLER);
+      if (input.readyDate === null) return review('no-date');
+      await jobService.reschedule(order.jobId, input.readyDate, actor);
     }
 
     await callUpRepository.setOutcome(callUpId, {
@@ -400,9 +489,20 @@ export const callUpService = {
     purchaseOrderId: string,
     request: CallUpRequest,
     caller: Caller,
+    /**
+     * Set by the portal for a site supervisor who is not also an
+     * administrator: they may only call up orders naming THEM as supervisor —
+     * the same line the portal already draws around their jobs.
+     */
+    scope: { siteSupervisorUserId: string } | null = null,
   ): Promise<CallUpOutcome> {
     const order = await callUpRepository.findOrder(purchaseOrderId);
     if (!order) throw AppError.notFound('No such purchase order');
+
+    // 404, not 403: whether another supervisor's order exists is not theirs to learn.
+    if (scope && order.siteSupervisorUserId !== scope.siteSupervisorUserId) {
+      throw AppError.notFound('No such purchase order');
+    }
 
     const isReviewer = caller.roles.some((role) => REVIEWER_ROLES.has(role));
 
@@ -416,6 +516,23 @@ export const callUpService = {
      */
     if (!isReviewer && caller.accountId !== order.accountId) {
       throw AppError.notFound('No such purchase order');
+    }
+
+    /*
+     * A day that has passed, from the portal, is a slip of the calendar — a
+     * supervisor giving us a date is telling us when to come. The office is
+     * allowed one (it is relaying "the site has been ready since Monday", and
+     * the target is worked out from it) and the builder's own email keeps
+     * whatever the builder said; the office screen warns before booking it.
+     */
+    if (!isReviewer && request.readyDate < todayInSydney()) {
+      throw AppError.validation('Pick today or a later day', [
+        {
+          path: 'readyDate',
+          message:
+            'That day has already passed. If the site is ready now, pick today — we plan the pickup from it.',
+        },
+      ]);
     }
 
     /*
@@ -475,14 +592,33 @@ export const callUpService = {
       );
     }
 
-    const matches = await callUpRepository.findMatches(callUp.poNumber);
+    /*
+     * An item that already names ONE order stays on it. Re-resolving it by
+     * number turned a call-up the office raised against a specific order into
+     * "More than one order has that number" the moment another builder used
+     * the same string — a question it had already answered. Only an unmatched
+     * one (`no-matching-po`) is looked up afresh.
+     */
+    const pinned = callUp.purchaseOrderId
+      ? await callUpRepository.findOrder(callUp.purchaseOrderId)
+      : null;
+    const matches = pinned ? [pinned] : await ordersFor(callUp.poNumber);
 
-    const outcome = await this.apply(id, matches, {
+    const input = {
       kind: callUp.kind,
       readyDate: callUp.readyDate,
       note: callUp.note,
       raisedBy: caller.name,
-    });
+      source: callUp.source,
+    };
+
+    let outcome: CallUpOutcome;
+    try {
+      outcome = await this.apply(id, matches, input);
+    } catch (caught) {
+      // Still not bookable — say why on the item rather than failing the click.
+      outcome = await this.holdForOffice(id, caught);
+    }
 
     log.info(
       {
@@ -569,7 +705,14 @@ export const callUpService = {
    * know that BEFORE the email arrives, not from a queue item afterwards.
    */
   async listAwaiting(
-    query: { accountId?: string | null; q?: string | null; page: number; pageSize: number },
+    query: {
+      accountId?: string | null;
+      /** Narrows to one supervisor's orders — the portal, for a supervisor-only login. */
+      siteSupervisorUserId?: string | null;
+      q?: string | null;
+      page: number;
+      pageSize: number;
+    },
     caller: Caller,
   ): Promise<{ data: AwaitingCallUp[]; meta: PageMeta }> {
     /*
@@ -601,6 +744,22 @@ export const callUpService = {
 };
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
+
+/**
+ * The orders a call-up's number names.
+ *
+ * The PO number exactly, first. Failing that, the builder's JOB number: a
+ * Domaine "Construction Notification" prints "Job Details 79903057" and no PO
+ * number at all, while their orders are numbered "79903057/080". Matching only
+ * exactly, every such notice arrived as "No purchase order on file". Two orders
+ * under one job still come back as two — and are queued as ambiguous, not
+ * guessed between.
+ */
+async function ordersFor(number: string): Promise<MatchedOrder[]> {
+  const exact = await callUpRepository.findMatches(number);
+  if (exact.length > 0) return exact;
+  return callUpRepository.findMatchesByJobNumber(number);
+}
 
 function assertReviewer(caller: Caller): void {
   if (!caller.roles.some((role) => REVIEWER_ROLES.has(role))) {
