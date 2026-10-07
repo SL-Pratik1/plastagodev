@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import { API_PREFIX } from '@plastago/shared';
 import { initAuth } from './auth/better-auth.js';
+import { ensureFirstSuperAdmin } from './auth/first-super-admin.js';
 import { env } from './config/env.js';
 import { connectMongo, disconnectMongo, isMongoConnected } from './db/mongo.js';
 import { authRepository } from './domains/auth/auth.repository.js';
@@ -74,6 +75,14 @@ async function prepareDatabase(): Promise<void> {
   } catch (error) {
     log.error({ err: error }, 'database preparation failed');
     if (env.NODE_ENV === 'production') throw error;
+  }
+
+  // Separate, and never fatal: an API that cannot make the first admin should
+  // still serve, and say so loudly, rather than refuse to boot.
+  try {
+    await ensureFirstSuperAdmin();
+  } catch (error) {
+    log.error({ err: error }, 'could not create the first super-admin');
   }
 }
 

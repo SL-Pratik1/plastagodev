@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import type { Surface } from '@plastago/shared';
 import * as z from 'zod';
+import { pemFromSetting, pemProblem } from '../lib/pem.js';
 
 /**
  * Environment is validated once, at boot, and never read from `process.env`
@@ -253,6 +254,21 @@ const EnvSchema = z
     MS_GRAPH_TENANT_ID: z.string().min(1).optional(),
     MS_GRAPH_CLIENT_ID: z.string().min(1).optional(),
     MS_GRAPH_CLIENT_SECRET: z.string().min(1).optional(),
+    /**
+     * The certificate AND its private key, instead of a client secret — the
+     * client's IT chose this ("Option A" in the setup guide, 07/10/2026).
+     *
+     * Microsoft holds only the public `.cer`; the private key never leaves this
+     * setting. Accepted as the PEM itself, the PEM with `\n` for line breaks,
+     * or the whole PEM file base64-encoded onto one line (see `lib/pem.ts`).
+     *
+     * ⚠️ Takes precedence over `MS_GRAPH_CLIENT_SECRET` when both are set.
+     */
+    MS_GRAPH_CLIENT_CERTIFICATE: z
+      .string()
+      .min(1)
+      .optional()
+      .transform((value) => (value === undefined ? undefined : pemFromSetting(value))),
     /** The mailbox Graph sends AS, e.g. `noreply@plastago.com.au`. */
     MS_GRAPH_MAIL_SENDER: z.string().email().optional(),
     /**
@@ -572,12 +588,7 @@ const EnvSchema = z
     // Selecting a provider without its credentials would fail at the moment a
     // user tries to sign in — i.e. in front of them. Fail at boot instead.
     if (value.MAIL_PROVIDER === 'graph') {
-      for (const key of [
-        'MS_GRAPH_TENANT_ID',
-        'MS_GRAPH_CLIENT_ID',
-        'MS_GRAPH_CLIENT_SECRET',
-        'MS_GRAPH_MAIL_SENDER',
-      ] as const) {
+      for (const key of ['MS_GRAPH_TENANT_ID', 'MS_GRAPH_CLIENT_ID', 'MS_GRAPH_MAIL_SENDER'] as const) {
         if (!value[key]) {
           ctx.addIssue({
             code: 'custom',
@@ -585,6 +596,27 @@ const EnvSchema = z
             message: 'Required when MAIL_PROVIDER=graph',
           });
         }
+      }
+
+      // One way of proving who we are: a secret, or a certificate.
+      if (!value.MS_GRAPH_CLIENT_SECRET && !value.MS_GRAPH_CLIENT_CERTIFICATE) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['MS_GRAPH_CLIENT_CERTIFICATE'],
+          message:
+            'MS_GRAPH_CLIENT_CERTIFICATE or MS_GRAPH_CLIENT_SECRET is required when MAIL_PROVIDER=graph',
+        });
+      }
+    }
+
+    /*
+     * Checked at boot, not at the first send: a certificate missing its private
+     * key would otherwise surface as nobody receiving a sign-in code.
+     */
+    if (value.MS_GRAPH_CLIENT_CERTIFICATE) {
+      const problem = pemProblem(value.MS_GRAPH_CLIENT_CERTIFICATE);
+      if (problem) {
+        ctx.addIssue({ code: 'custom', path: ['MS_GRAPH_CLIENT_CERTIFICATE'], message: problem });
       }
     }
 

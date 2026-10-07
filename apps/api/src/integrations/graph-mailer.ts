@@ -1,7 +1,12 @@
-import { ClientSecretCredential } from '@azure/identity';
+import {
+  ClientCertificateCredential,
+  ClientSecretCredential,
+  type TokenCredential,
+} from '@azure/identity';
 import { env } from '../config/env.js';
 import { AppError } from '../lib/app-error.js';
 import { logger } from '../lib/logger.js';
+import { certificateExpiry } from '../lib/pem.js';
 import {
   MAX_ATTACHMENT_BYTES,
   senderAddress,
@@ -41,10 +46,9 @@ export function createGraphMailer(): Mailer {
   // fails loudly at construction rather than on someone's sign-in attempt.
   const tenantId = required(env.MS_GRAPH_TENANT_ID, 'MS_GRAPH_TENANT_ID');
   const clientId = required(env.MS_GRAPH_CLIENT_ID, 'MS_GRAPH_CLIENT_ID');
-  const clientSecret = required(env.MS_GRAPH_CLIENT_SECRET, 'MS_GRAPH_CLIENT_SECRET');
   const defaultSender = required(env.MS_GRAPH_MAIL_SENDER, 'MS_GRAPH_MAIL_SENDER');
 
-  const credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
+  const credential = graphCredential(tenantId, clientId);
 
   return {
     name: 'graph',
@@ -148,6 +152,50 @@ export function createGraphMailer(): Mailer {
       log.debug({ to, from: sender, subject }, 'sent via Graph');
     },
   };
+}
+
+/** How far ahead an expiring certificate starts being shouted about. */
+const EXPIRY_WARNING_DAYS = 30;
+
+/**
+ * Who we are to Microsoft: a certificate where one is configured, else a secret.
+ *
+ * ── Why a certificate is preferred ────────────────────────────────────────
+ * The client's IT chose it (07/10/2026), and it is the better trade: Microsoft
+ * holds only the public half, so nothing that could send mail as PlastaGo ever
+ * travels between the two companies — where a client secret has to be handed
+ * over and then exists in two places.
+ */
+function graphCredential(tenantId: string, clientId: string): TokenCredential {
+  const certificate = env.MS_GRAPH_CLIENT_CERTIFICATE;
+
+  if (certificate) {
+    warnIfExpiring(certificate);
+    log.info('Microsoft Graph credential: certificate');
+    return new ClientCertificateCredential(tenantId, clientId, { certificate });
+  }
+
+  const secret = required(env.MS_GRAPH_CLIENT_SECRET, 'MS_GRAPH_CLIENT_SECRET');
+  log.info('Microsoft Graph credential: client secret');
+  return new ClientSecretCredential(tenantId, clientId, secret);
+}
+
+/**
+ * ⚠️ An expired certificate stops every email — sign-in codes included — with
+ * no other symptom. It is logged when the mailer starts, so the renewal is due
+ * before the outage rather than discovered by it.
+ */
+function warnIfExpiring(pem: string): void {
+  const expiresAt = certificateExpiry(pem);
+  if (!expiresAt) return;
+
+  const daysLeft = Math.floor((expiresAt.getTime() - Date.now()) / 86_400_000);
+
+  if (daysLeft < 0) {
+    log.error({ expiresAt }, 'Microsoft Graph certificate has EXPIRED — no email will send');
+  } else if (daysLeft <= EXPIRY_WARNING_DAYS) {
+    log.warn({ expiresAt, daysLeft }, 'Microsoft Graph certificate expires soon — renew it');
+  }
 }
 
 function required(value: string | undefined, name: string): string {

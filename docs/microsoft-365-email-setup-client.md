@@ -153,7 +153,13 @@ Test-ServicePrincipalAuthorization `
 
 Go to the app registration → **Certificates & secrets**.
 
-**Option A — certificate (preferred).** Upload a certificate rather than using a shared secret. Certificates are the more secure option and typically have longer validity. Let us know if you would like to use this route and we will send you a certificate signing request.
+**Option A — certificate (preferred).** Upload a certificate rather than using a shared secret. Certificates are the more secure option and typically have longer validity. We send you a certificate file (`PlastaGo-Mail-Integration.cer`) — it contains only the public half, so it is safe to receive by email; the private key never leaves us, and nothing secret needs to be sent back.
+
+1. Select the **Certificates** tab → **Upload certificate**.
+2. Choose `PlastaGo-Mail-Integration.cer`, give it the description `PlastaGo Mail Integration`, and select **Add**.
+3. Check that the **Thumbprint** shown matches the one we send with the file.
+
+With Option A, skip the secret steps below: only items 1–3 of the list need to come back to us.
 
 **Option B — client secret.** Select **New client secret**, give it the description `PlastaGo Mail Integration` and the longest expiry your policy permits.
 
@@ -179,11 +185,11 @@ Please fill in the four values below and return this page to us.
 
 &nbsp;&nbsp;&nbsp;&nbsp;`________________________________________` (expected: `accounts@plastago.com.au`)
 
-**4. Client secret expiry date**
+**4. Client secret expiry date** *(Option B only)*
 
 &nbsp;&nbsp;&nbsp;&nbsp;`________________________________________`
 
-**5. Client secret value** — please do **not** write it here. Send it separately, as described below.
+**5. Client secret value** *(Option B only)* — please do **not** write it here. Send it separately, as described below.
 
 **How to send the client secret:** please share it through a password manager link (1Password, Keeper, Bitwarden, LastPass or similar) or your organisation's approved secrets tool.
 

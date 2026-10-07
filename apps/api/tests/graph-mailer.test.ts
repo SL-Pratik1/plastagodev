@@ -30,13 +30,25 @@ vi.mock('../src/config/env.js', async (importOriginal) => {
 // The mocked module's own object — what the mailer reads at send time.
 const { env } = await import('../src/config/env.js');
 
-vi.mock('@azure/identity', () => ({
-  ClientSecretCredential: class {
-    getToken() {
-      return Promise.resolve({ token: 'graph-token', expiresOnTimestamp: Date.now() + 60_000 });
-    }
-  },
-}));
+/** Which credential the mailer built, and with what. */
+const built = vi.hoisted(() => ({ kind: '', args: [] as unknown[] }));
+
+vi.mock('@azure/identity', () => {
+  const credential = (kind: string) =>
+    class {
+      constructor(...args: unknown[]) {
+        built.kind = kind;
+        built.args = args;
+      }
+      getToken() {
+        return Promise.resolve({ token: 'graph-token', expiresOnTimestamp: Date.now() + 60_000 });
+      }
+    };
+  return {
+    ClientSecretCredential: credential('secret'),
+    ClientCertificateCredential: credential('certificate'),
+  };
+});
 
 const { createGraphMailer } = await import('../src/integrations/graph-mailer.js');
 
@@ -47,6 +59,39 @@ beforeEach(() => {
   fetchMock.mockResolvedValue(new Response(null, { status: 202 }));
   vi.stubGlobal('fetch', fetchMock);
   env.MS_GRAPH_ACCOUNTS_SENDER = 'accounts@plastago.com.au';
+  env.MS_GRAPH_CLIENT_SECRET = 'secret';
+  env.MS_GRAPH_CLIENT_CERTIFICATE = undefined;
+});
+
+/*
+ * Option A of the setup guide (the client's choice, 07/10/2026): Microsoft
+ * holds the public certificate, and we sign in with the private key.
+ */
+describe('how the mailer proves who it is', () => {
+  const PEM = '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----';
+
+  it('signs in with the certificate when one is configured', () => {
+    env.MS_GRAPH_CLIENT_CERTIFICATE = PEM;
+
+    createGraphMailer();
+
+    expect(built).toEqual({ kind: 'certificate', args: ['tenant', 'client', { certificate: PEM }] });
+  });
+
+  it('prefers the certificate over a secret left behind', () => {
+    env.MS_GRAPH_CLIENT_CERTIFICATE = PEM;
+    env.MS_GRAPH_CLIENT_SECRET = 'old-secret';
+
+    createGraphMailer();
+
+    expect(built.kind).toBe('certificate');
+  });
+
+  it('falls back to the client secret when there is no certificate', () => {
+    createGraphMailer();
+
+    expect(built).toEqual({ kind: 'secret', args: ['tenant', 'client', 'secret'] });
+  });
 });
 
 const email = {
