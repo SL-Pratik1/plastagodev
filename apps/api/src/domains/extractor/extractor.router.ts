@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
 import { requireAuth, requireRole } from '../../middleware/require-auth.js';
+import { validate } from '../../middleware/validate.js';
 import { extractorController } from './extractor.controller.js';
+import { RestoreEmbedTokenSchema } from './extractor.schemas.js';
 
 /**
  * Router layer — paths and middleware only. No logic.
@@ -37,3 +39,14 @@ extractorRouter.use(requireRole('super-admin'));
 extractorRouter.post('/session', asyncHandler(extractorController.session));
 
 extractorRouter.delete('/session', asyncHandler(extractorController.forget));
+
+/*
+ * Carries the tenant's existing embed token onto a database that has none —
+ * insert-only, and proven with the vendor before anything is written. See
+ * `extractorService.restoreToken`.
+ */
+extractorRouter.post(
+  '/token',
+  validate({ body: RestoreEmbedTokenSchema }),
+  asyncHandler(extractorController.restoreToken),
+);

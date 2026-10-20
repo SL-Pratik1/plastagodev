@@ -22,6 +22,7 @@ import {
 import { Link } from 'react-router';
 import { todayInSydney } from '@/lib/geolocation';
 import { useRunSheet } from '@/features/driver/queries';
+import { formatBookedArea } from '@/components/driver/area';
 
 /**
  * Today's run (M4.1 · W35, W31, W38).
@@ -259,7 +260,7 @@ function StopCard({
         <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
           <span>{JOB_STATUS_LABELS[stop.status]}</span>
           <span aria-hidden>·</span>
-          <span>{stop.expectedAreaM2.toLocaleString('en-AU')} m²</span>
+          <span>{formatBookedArea(stop.expectedAreaM2)}</span>
           <span aria-hidden>·</span>
           {/* Once weighed this is what was collected; before that, what to expect. */}
           <span>

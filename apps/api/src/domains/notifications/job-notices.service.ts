@@ -142,7 +142,15 @@ export const jobNotices = {
         // `info`: there is nothing to do about a booking that is going to plan.
         severity: 'info',
         title: `Pickup booked — ${job.siteName}`,
-        body: `Job #${String(job.jobNumber)} is booked for ${context.when}.`,
+        /*
+         * Both dates, as the SMS and email give them. `when` alone is the
+         * collect-BY date, so a pickup asked for on the 6th read "booked for the
+         * 13th" — a week later than the supervisor asked for.
+         */
+        body:
+          context.readyFrom && context.readyFrom !== context.when
+            ? `Job #${String(job.jobNumber)}: ready from ${context.readyFrom}, collected by ${context.when}.`
+            : `Job #${String(job.jobNumber)} is booked for ${context.when}.`,
         href: `/portal/jobs/${job.id}`,
         subjectKey: `job-booked:${job.id}`,
         jobId: job.id,

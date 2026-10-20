@@ -59,7 +59,13 @@ let callUps: StoredCallUp[] = [];
 let orders: StoredOrder[] = [];
 /** Suburbs the places table knows. The zone comes from here, so this gates pricing. */
 let knownSuburbs: string[] = [];
-let created: Array<{ draft: JobDraft; callerRoles: readonly Role[]; callerName: string }> = [];
+let created: Array<{
+  draft: JobDraft;
+  callerRoles: readonly Role[];
+  callerName: string;
+  /** Which door `jobService.create` was told the booking came through. */
+  source: string | undefined;
+}> = [];
 let rescheduled: Array<{ jobId: string; readyDate: string }> = [];
 let cancelled: Array<{ jobId: string; reason: string; note: string }> = [];
 let nextJobNumber = 61500;
@@ -207,9 +213,13 @@ vi.mock('../src/domains/places/place.repository.js', () => ({
 
 vi.mock('../src/domains/jobs/job.service.js', () => ({
   jobService: {
-    create: (draft: JobDraft, caller: { roles: readonly Role[]; name: string }) => {
+    create: (
+      draft: JobDraft,
+      caller: { roles: readonly Role[]; name: string },
+      source?: string,
+    ) => {
       if (createRefusal) return Promise.reject(createRefusal);
-      created.push({ draft, callerRoles: caller.roles, callerName: caller.name });
+      created.push({ draft, callerRoles: caller.roles, callerName: caller.name, source });
       nextJobNumber += 1;
       return Promise.resolve({ id: nextId(), jobNumber: nextJobNumber });
     },
@@ -810,6 +820,8 @@ describe('calling an order up by hand', () => {
     );
     expect(created[0]?.callerName).toBe('Dane Whitfield · portal');
     expect(created[0]?.callerRoles).toEqual(['operations']);
+    // Booked as the office identity, but recorded as the portal booking it was.
+    expect(created[0]?.source).toBe('portal');
 
     orders = [order({ id: 'po00000000000000000000w2', poNumber: '4500999999' })];
     await callUpService.callUpByHand(
@@ -818,6 +830,37 @@ describe('calling an order up by hand', () => {
       OFFICE,
     );
     expect(created[1]?.callerName).toBe('Renee Boyle · phoned in');
+    expect(created[1]?.source).toBe('office');
+  });
+
+  /*
+   * ⚠️ Every call-up was recorded as an office booking, so a builder's email
+   * read "Created in the admin console" in the job's history and "Office" in
+   * the jobs list — which has had a "Call-up email" label all along.
+   */
+  it('records an emailed call-up as booked from a call-up email', async () => {
+    await callUpService.record(email());
+
+    expect(created[0]?.source).toBe('call-up');
+    expect(created[0]?.callerName).toBe('Call-up email');
+  });
+
+  /*
+   * ⚠️ The office pressing Try again on an email does not make it the office's
+   * booking. Crediting the person put PlastaGo's own staff in the portal's
+   * "Booked by" column; who retried it stays on the call-up, for the office.
+   */
+  it('keeps an emailed call-up the builder’s when the office retries it', async () => {
+    orders = [];
+    const queued = await callUpService.record(email());
+    expect(queued.reason).toBe('no-matching-po');
+
+    orders = [order()];
+    await callUpService.retry(queued.id, OFFICE);
+
+    expect(created[0]?.callerName).toBe('Call-up email');
+    expect(created[0]?.source).toBe('call-up');
+    expect(latest()?.resolvedBy).toBe('Renee Boyle');
   });
 
   /*

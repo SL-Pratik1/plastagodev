@@ -152,21 +152,84 @@ describe('a missing area is not zero', () => {
     expect(result.lines.every((line) => line.imputedKg === null)).toBe(true);
   });
 
-  it('does not treat an unweighed bagged job as zero kilograms', () => {
+  /*
+   * ⚠️ A bagged job nobody weighed is still on the truck and still in the
+   * docket. It used to take no share, so the hand load beside it was credited
+   * with both jobs' board — every bagged job for an m²-only account, which is
+   * never asked for kilograms. It now shares the leftover by size, as an
+   * estimate, exactly like a hand load.
+   */
+  it('shares the leftover with a bagged job that was never weighed', () => {
     const result = reconcileTipOff({
       ...RUN,
       totalKg: 1000,
       stops: [
         stop({ jobNumber: 1, loadType: 'bagged', craneScaleKg: null, expectedAreaM2: 400 }),
-        stop({ jobNumber: 2, expectedAreaM2: 500 }),
+        stop({ jobNumber: 2, expectedAreaM2: 600 }),
       ],
     });
 
-    // It contributes nothing to `measuredKg` and takes no share — it is an
-    // unknown, and the remainder belongs to the hand loads.
+    // Not measured — there is no crane figure to stand behind.
     expect(result.measuredKg).toBe(0);
     expect(result.lines[0]?.measuredKg).toBeNull();
-    expect(result.lines[1]?.imputedKg).toBe(1000);
+    // 400 : 600 of the 1,000 kg.
+    expect(result.lines[0]?.imputedKg).toBe(400);
+    expect(result.lines[1]?.imputedKg).toBe(600);
+    expect(result.handLoadJobCount).toBe(2);
+    expect(result.warning).toBeNull();
+  });
+
+  /* The run QA found it on: 1,450 kg, a 600 m² hand load and an 823.41 m² bag. */
+  it('splits the QA run by size instead of handing it all to the hand load', () => {
+    const result = reconcileTipOff({
+      ...RUN,
+      totalKg: 1450,
+      stops: [
+        stop({ jobNumber: 61312, expectedAreaM2: 600 }),
+        stop({ jobNumber: 61313, expectedAreaM2: null }),
+        stop({ jobNumber: 61314, loadType: 'bagged', craneScaleKg: null, expectedAreaM2: 823.41 }),
+      ],
+    });
+
+    expect(result.lines.map((line) => line.imputedKg)).toEqual([611, null, 839]);
+    expect(result.warning).toMatch(/1 stop without a crane weight has no expected m²/);
+  });
+
+  /* Weighed bags still stand as weighed; only the unweighed share the rest. */
+  it('keeps a weighed bag as measured beside an unweighed one', () => {
+    const result = reconcileTipOff({
+      ...RUN,
+      totalKg: 1500,
+      stops: [
+        stop({ jobNumber: 1, loadType: 'bagged', craneScaleKg: 500, expectedAreaM2: 300 }),
+        stop({ jobNumber: 2, loadType: 'bagged', craneScaleKg: null, expectedAreaM2: 250 }),
+        stop({ jobNumber: 3, expectedAreaM2: 750 }),
+      ],
+    });
+
+    expect(result.measuredKg).toBe(500);
+    expect(result.remainderKg).toBe(1000);
+    expect(result.lines[0]).toMatchObject({ measuredKg: 500, imputedKg: null });
+    expect(result.lines[1]).toMatchObject({ measuredKg: null, imputedKg: 250 });
+    expect(result.lines[2]).toMatchObject({ measuredKg: null, imputedKg: 750 });
+  });
+
+  /*
+   * A run of nothing but unweighed bags — an m²-only builder's whole day — used
+   * to be refused outright ("no hand-load stops to attribute it to").
+   */
+  it('splits a run where no bag was weighed at all', () => {
+    const result = reconcileTipOff({
+      ...RUN,
+      totalKg: 900,
+      stops: [
+        stop({ jobNumber: 1, loadType: 'bagged', craneScaleKg: null, expectedAreaM2: 200 }),
+        stop({ jobNumber: 2, loadType: 'bagged', craneScaleKg: null, expectedAreaM2: 100 }),
+      ],
+    });
+
+    expect(result.looksWrong).toBe(false);
+    expect(result.lines.map((line) => line.imputedKg)).toEqual([600, 300]);
   });
 });
 

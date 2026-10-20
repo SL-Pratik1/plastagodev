@@ -51,6 +51,7 @@ import {
   useUpdateStatus,
 } from '@/features/driver/queries';
 import { currentPosition } from '@/lib/geolocation';
+import { formatBookedArea } from '@/components/driver/area';
 
 /**
  * One job (M4.1) and its status actions (M4.2).
@@ -294,7 +295,7 @@ function JobScreen({ job }: { job: DriverJob }) {
           <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
             <div>
               <dt className="text-xs text-muted-foreground">Expected</dt>
-              <dd className="font-medium">{job.expectedAreaM2.toLocaleString('en-AU')} m²</dd>
+              <dd className="font-medium">{formatBookedArea(job.expectedAreaM2)}</dd>
             </div>
             <div>
               <dt className="text-xs text-muted-foreground">Load</dt>
@@ -575,9 +576,7 @@ function JobScreen({ job }: { job: DriverJob }) {
             <div className="flex justify-between">
               <dt className="text-muted-foreground">Collected</dt>
               <dd className="font-medium">
-                {job.capturedAreaM2 === null
-                  ? '—'
-                  : `${job.capturedAreaM2.toLocaleString('en-AU')} m²`}
+                {job.capturedAreaM2 === null ? '—' : formatBookedArea(job.capturedAreaM2)}
               </dd>
             </div>
             {job.craneScaleKg !== null && (

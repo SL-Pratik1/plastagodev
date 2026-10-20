@@ -1,5 +1,7 @@
 import type { Request, Response } from 'express';
 import { AppError } from '../../lib/app-error.js';
+import type { ValidatedRequest } from '../../middleware/validate.js';
+import type { RestoreEmbedTokenSchema } from './extractor.schemas.js';
 import { extractorService, type Caller } from './extractor.service.js';
 
 /** Controller layer — HTTP in, HTTP out. No business rules, no Mongoose. */
@@ -37,5 +39,18 @@ export const extractorController = {
   forget: async (req: Request, res: Response): Promise<void> => {
     await extractorService.forget(callerFrom(req));
     res.status(204).send();
+  },
+
+  /**
+   * Stores the tenant's existing embed token on a database that has none.
+   *
+   * The answer never echoes the token — only that it was saved, and for which
+   * owner and app.
+   */
+  restoreToken: async (
+    req: ValidatedRequest<{ body: typeof RestoreEmbedTokenSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.status(201).json(await extractorService.restoreToken(req.validated.body, callerFrom(req)));
   },
 };

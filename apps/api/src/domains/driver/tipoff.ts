@@ -91,18 +91,26 @@ function withinScaleTolerance(differenceKg: number, totalKg: number): boolean {
 }
 
 export function reconcileTipOff(input: ReconciliationInput): TipOffReconciliation {
-  const bagged = input.stops.filter((stop) => stop.loadType === 'bagged');
-  const handLoads = input.stops.filter((stop) => stop.loadType === 'hand-load');
-
   /*
-   * Only bagged stops that were ACTUALLY weighed count as measured. A bagged
-   * stop the driver never got a crane figure for is not zero kilograms — it is
-   * an unknown, and treating it as zero would inflate the remainder that gets
-   * shared out to everybody else.
+   * Only bagged stops that were ACTUALLY weighed count as measured. Everything
+   * else — every hand load, and every bagged stop with no crane figure — is
+   * still on the truck and still in the docket, so it shares the remainder by
+   * size.
+   *
+   * ⚠️ A bagged stop with no crane figure used to take NO share, and its weight
+   * went to the hand loads beside it. That is every bagged stop for an
+   * `area-only` account, which is never asked for kilograms: on a test run a
+   * 600 m² job took all 1,450 kg while the 823 m² bagged job next to it got
+   * none — and was labelled "Actual · Crane scale". The weights screen promises
+   * the driver "the tip-off figure still covers the whole load"; this is what
+   * keeps that promise, and keeps one builder's tonnage off another's report.
    */
-  const measuredKg = roundKg(
-    bagged.reduce((sum, stop) => sum + (stop.craneScaleKg ?? 0), 0),
+  const weighed = input.stops.filter(
+    (stop) => stop.loadType === 'bagged' && stop.craneScaleKg !== null,
   );
+  const unweighed = input.stops.filter((stop) => !weighed.includes(stop));
+
+  const measuredKg = roundKg(weighed.reduce((sum, stop) => sum + (stop.craneScaleKg ?? 0), 0));
 
   const remainderKg = roundKg(input.totalKg - measuredKg);
 
@@ -110,7 +118,7 @@ export function reconcileTipOff(input: ReconciliationInput): TipOffReconciliatio
    * The denominator. Stops with no area are excluded rather than counted as
    * zero — see the warning on `expectedAreaM2`.
    */
-  const splittable = handLoads.filter(
+  const splittable = unweighed.filter(
     (stop) => stop.expectedAreaM2 !== null && stop.expectedAreaM2 > 0,
   );
   const handLoadAreaM2 = splittable.reduce((sum, stop) => sum + (stop.expectedAreaM2 ?? 0), 0);
@@ -119,7 +127,7 @@ export function reconcileTipOff(input: ReconciliationInput): TipOffReconciliatio
     totalKg: input.totalKg,
     measuredKg,
     remainderKg,
-    handLoadCount: handLoads.length,
+    handLoadCount: unweighed.length,
     splittableCount: splittable.length,
     handLoadAreaM2,
   });
@@ -150,7 +158,8 @@ export function reconcileTipOff(input: ReconciliationInput): TipOffReconciliatio
     totalKg: input.totalKg,
     measuredKg,
     remainderKg,
-    handLoadJobCount: handLoads.length,
+    // Named for the contract; it counts every stop sharing the remainder.
+    handLoadJobCount: unweighed.length,
     handLoadAreaM2,
     looksWrong,
     warning,
@@ -231,7 +240,7 @@ function assess(input: {
   }
 
   /*
-   * Hand loads exist but none carries an area, so there is no basis for a
+   * Unweighed stops exist but none carries an area, so there is no basis for a
    * proportional split. Refusing beats splitting equally: an equal share is a
    * different claim, and it would be indistinguishable from a real one later.
    */
@@ -239,7 +248,7 @@ function assess(input: {
     return {
       looksWrong: true,
       warning:
-        'None of the hand-load stops on this run has an expected m², so the leftover weight cannot be split by size. Add the areas in the office first.',
+        'None of the stops without a crane weight has an expected m², so the leftover weight cannot be split by size. Add the areas in the office first.',
     };
   }
 
@@ -248,7 +257,7 @@ function assess(input: {
     const missing = input.handLoadCount - input.splittableCount;
     return {
       looksWrong: false,
-      warning: `${String(missing)} hand-load ${missing === 1 ? 'stop has' : 'stops have'} no expected m², so ${missing === 1 ? 'it is' : 'they are'} excluded from the split.`,
+      warning: `${String(missing)} ${missing === 1 ? 'stop' : 'stops'} without a crane weight ${missing === 1 ? 'has' : 'have'} no expected m², so ${missing === 1 ? 'it is' : 'they are'} excluded from the split.`,
     };
   }
 

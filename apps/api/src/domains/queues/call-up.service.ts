@@ -15,7 +15,7 @@ import { AppError } from '../../lib/app-error.js';
 import { todayInSydney } from '../../lib/business-day.js';
 import { logger } from '../../lib/logger.js';
 import { placeRepository } from '../places/place.repository.js';
-import { jobService, type Caller } from '../jobs/job.service.js';
+import { jobService, type Caller, type JobBookingSource } from '../jobs/job.service.js';
 import { callUpRepository, type MatchedOrder } from './call-up.repository.js';
 
 const log = logger.child({ module: 'call-up' });
@@ -69,9 +69,15 @@ const SYSTEM_CALLER: Caller = {
 };
 
 /** How each door reads in a job's history, after the person's name. */
-const SOURCE_SUFFIX: Record<CallUpSource, string> = {
-  email: 'call-up email',
+const SOURCE_SUFFIX: Record<Exclude<CallUpSource, 'email'>, string> = {
   phone: 'phoned in',
+  portal: 'portal',
+};
+
+/** Which door the job records itself as booked through, per call-up source. */
+const BOOKING_SOURCE: Record<CallUpSource, JobBookingSource> = {
+  email: 'call-up',
+  phone: 'office',
   portal: 'portal',
 };
 
@@ -85,7 +91,14 @@ const SOURCE_SUFFIX: Record<CallUpSource, string> = {
  * answers "who booked this?" wrongly — the one question that history is for.
  */
 function actorFor(source: CallUpSource, raisedBy: string | null | undefined): Caller {
-  if (!raisedBy) return SYSTEM_CALLER;
+  /*
+   * ⚠️ An emailed call-up is the BUILDER's booking, even when the office had to
+   * press Retry on it. Crediting whoever pressed it put "Matthew Browne ·
+   * call-up email" in the portal's "Booked by" column — PlastaGo's own staff,
+   * named to the customer as the person who booked their pickup. Who retried it
+   * is kept on the call-up itself (`resolvedBy`), which only the office sees.
+   */
+  if (source === 'email' || !raisedBy) return SYSTEM_CALLER;
   return { ...SYSTEM_CALLER, name: `${raisedBy} · ${SOURCE_SUFFIX[source]}` };
 }
 
@@ -374,7 +387,11 @@ export const callUpService = {
       notes: input.note,
     };
 
-    const job = await jobService.create(draft, actorFor(input.source, input.raisedBy));
+    const job = await jobService.create(
+      draft,
+      actorFor(input.source, input.raisedBy),
+      BOOKING_SOURCE[input.source],
+    );
 
     await callUpRepository.setOutcome(callUpId, {
       state: 'applied',

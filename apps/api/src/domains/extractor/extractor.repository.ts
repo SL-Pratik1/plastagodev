@@ -65,6 +65,31 @@ export const extractorRepository = {
   },
 
   /**
+   * Stores a token only where none exists. False when a row was already there.
+   *
+   * ── Why not `saveToken` ───────────────────────────────────────────────────
+   * `saveToken` upserts, so it replaces. The restore path must never replace a
+   * live credential, and checking first is not enough on its own: two requests
+   * can both see an empty collection. The unique index settles that race, and
+   * the loser gets `false` instead of a raw E11000.
+   */
+  async insertToken(input: {
+    tenantId: string;
+    appName: string;
+    token: string;
+    appId: string | null;
+    ownerEmail: string;
+  }): Promise<boolean> {
+    try {
+      await EmbedTokenModel.create({ ...input, tokenId: null, organizationId: null });
+      return true;
+    } catch (error) {
+      if (error instanceof mongoose.mongo.MongoServerError && error.code === 11000) return false;
+      throw error;
+    }
+  },
+
+  /**
    * Drops a token the vendor no longer recognises.
    *
    * Deleted rather than flagged: a dead credential has no diagnostic value, and

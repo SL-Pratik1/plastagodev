@@ -393,6 +393,30 @@ describe('booking a job', () => {
     // This is what they will be scoped by when they come back to look at it.
     expect(repo.calls.lastCreate?.bookedByUserId).toBe(SUPERVISOR.userId);
     expect(repo.calls.lastCreate?.bookedBySource).toBe('portal');
+    expect(repo.calls.events[0]?.detail).toBe('Booked in the customer portal');
+  });
+
+  /*
+   * A call-up books as the OFFICE identity whatever door it came through, so it
+   * names the door itself. Without that, a builder's call-up email and a
+   * supervisor's portal call-up both read "Created in the admin console".
+   */
+  it('records the door a call-up says it came through', async () => {
+    await jobService.create(draft(), OFFICE, 'call-up');
+
+    expect(repo.calls.lastCreate?.bookedBySource).toBe('call-up');
+    expect(repo.calls.events[0]?.detail).toBe('Booked from a call-up email');
+
+    await jobService.create(draft(), OFFICE, 'portal');
+
+    expect(repo.calls.lastCreate?.bookedBySource).toBe('portal');
+    expect(repo.calls.events[1]?.detail).toBe('Booked in the customer portal');
+  });
+
+  it('says an office booking was made in the console', async () => {
+    await jobService.create(draft(), OFFICE);
+
+    expect(repo.calls.events[0]?.detail).toBe('Created in the admin console');
   });
 
   it('refuses to book against an inactive account', async () => {

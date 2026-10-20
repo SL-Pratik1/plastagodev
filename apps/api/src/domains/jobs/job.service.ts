@@ -76,6 +76,16 @@ const CUSTOMER_ROLES = new Set<Role>([CUSTOMER_ADMIN, SITE_SUPERVISOR]);
 /** Roles that may book, cancel and reschedule on anyone's behalf. */
 const OFFICE_ROLES = new Set<Role>(['super-admin', 'operations', 'office-staff', 'allocator']);
 
+/** Which door a booking came through — the job's `bookedBySource`. */
+export type JobBookingSource = 'portal' | 'office' | 'call-up';
+
+/** What the "Job created" line in a job's history says, per door. */
+const CREATED_DETAIL: Record<JobBookingSource, string> = {
+  portal: 'Booked in the customer portal',
+  office: 'Created in the admin console',
+  'call-up': 'Booked from a call-up email',
+};
+
 /**
  * An id that matches nothing, for a customer whose session carries no account.
  *
@@ -386,8 +396,18 @@ export const jobService = {
    * receive the same number (M1.4). The cost is that a failed create burns a
    * number — a gap in the sequence. That is the right trade: a gap is a
    * curiosity, a collision is a reconciliation nobody can unpick.
+   *
+   * ── `source` — which door the booking came through ────────────────────────
+   * Read off the caller by default: a customer booked in the portal, anyone else
+   * in the console. A call-up books as the OFFICE identity whatever door it came
+   * through (see `actorFor` in the call-up service), so it says so here —
+   * otherwise a supervisor's portal call-up and a builder's email were both
+   * recorded as "Created in the admin console". Never taken from a request body:
+   * it is not on `JobDraft`, so nobody can claim a door they did not use.
    */
-  async create(draft: JobDraft, caller: Caller): Promise<JobListItem> {
+  async create(draft: JobDraft, caller: Caller, source?: JobBookingSource): Promise<JobListItem> {
+    const bookedVia: JobBookingSource = source ?? (isCustomer(caller) ? 'portal' : 'office');
+
     // Before anything is priced off it — the quote below is taken ON this date.
     assertPlausibleReadyDate(draft.readyDate);
 
@@ -496,7 +516,7 @@ export const jobService = {
             bookedByUserId: isCustomer(caller)
               ? caller.userId
               : (purchaseOrder?.siteSupervisorUserId ?? null),
-            bookedBySource: isCustomer(caller) ? 'portal' : 'office',
+            bookedBySource: bookedVia,
             readyDate: draft.readyDate,
             // M2.4a — the SLA is in BUSINESS days, from the customer's ready date.
             targetDate: addBusinessDays(draft.readyDate, slaBusinessDays),
@@ -570,9 +590,7 @@ export const jobService = {
               label: 'Job created',
               actor: caller.name,
               status: 'booked',
-              detail: isCustomer(caller)
-                ? 'Booked in the customer portal'
-                : 'Created in the admin console',
+              detail: CREATED_DETAIL[bookedVia],
             });
 
             return job;

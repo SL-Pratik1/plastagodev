@@ -40,7 +40,12 @@ vi.mock('../src/domains/notifications/outbound.service.js', () => ({
 }));
 
 /** Who each portal notice was raised for. Asserted in the last describe. */
-let audiences: Array<{ accountId: string; bookedByUserId: string | null; title: string }> = [];
+let audiences: Array<{
+  accountId: string;
+  bookedByUserId: string | null;
+  title: string;
+  body?: string;
+}> = [];
 
 vi.mock('../src/domains/notifications/notification.service.js', () => ({
   notificationService: {
@@ -242,6 +247,23 @@ describe('who sees a pickup notice in the portal', () => {
     await jobNotices.booked(job({ bookedByUserId: null }));
 
     expect(audiences[0]?.bookedByUserId).toBeNull();
+  });
+
+  /*
+   * ⚠️ The bell said "booked for" the collect-BY date alone, so a pickup asked
+   * for on Tuesday the 6th read "booked for Tue, 13 Oct" — while the SMS and
+   * email beside it gave both dates.
+   */
+  it('gives both dates on "Pickup booked" when the pickup has a window', async () => {
+    await jobNotices.booked(job({ readyDate: '2026-10-06', targetDate: '2026-10-13' }));
+
+    expect(audiences[0]?.body).toBe('Job #61489: ready from Tue, 6 Oct, collected by Tue, 13 Oct.');
+  });
+
+  it('gives the one date when the pickup is ready on its collect-by day', async () => {
+    await jobNotices.booked(job({ readyDate: '2026-10-13', targetDate: '2026-10-13' }));
+
+    expect(audiences[0]?.body).toBe('Job #61489 is booked for Tue, 13 Oct.');
   });
 
   it('does the same for "Ready for tomorrow?"', async () => {

@@ -72,6 +72,16 @@ export interface Caller {
   name: string;
 }
 
+/** What a token restore answers with. Never the token itself. */
+export interface RestoredToken {
+  saved: true;
+  ownerEmail: string;
+  appId: string | null;
+}
+
+const ALREADY_ON_FILE =
+  'An extractor key is already on file for this database. It is never replaced from here.';
+
 /**
  * Points the vendor client at the embed-token collection.
  *
@@ -205,7 +215,99 @@ export const extractorService = {
   async forget(caller: Caller): Promise<void> {
     await extractorRepository.deleteSession(TENANT_ID, caller.userId);
   },
+
+  /**
+   * Puts the tenant's EXISTING embed token onto a database that has none.
+   *
+   * ── Why this exists ───────────────────────────────────────────────────────
+   * A new database starts with an empty `embedtokens`, and nothing here may
+   * fill it by onboarding — that mints a second tenant (see `currentToken`).
+   * The token has to be carried across from the database that holds it, and
+   * when nobody has a network route to the new database, the API is the one
+   * process that does.
+   *
+   * ── What keeps it safe ────────────────────────────────────────────────────
+   *  - Insert-only. A row already on file is never replaced; rotating a live
+   *    token is a different operation and not this one.
+   *  - Proven before stored: a real session is minted AS the owner with this
+   *    token. A wrong token, or the right token with the wrong owner, is
+   *    refused and nothing is written.
+   *  - Super-admin only, at the router.
+   */
+  async restoreToken(
+    input: { token: string; ownerEmail: string },
+    caller: Caller,
+  ): Promise<RestoredToken> {
+    if (!extractorClient.enabled) {
+      throw AppError.dependencyUnavailable(
+        'The document extractor is not configured for this deployment',
+      );
+    }
+
+    if (await extractorRepository.findToken(TENANT_ID, APP_NAME)) {
+      throw AppError.conflict(ALREADY_ON_FILE);
+    }
+
+    const proof = await extractorClient.createSessionWithToken(input.ownerEmail, input.token);
+    if (!proof.ok) throw refusedRestore(proof);
+
+    const appId = env.EXTRACTOR_APP_ID ?? null;
+    const inserted = await extractorRepository.insertToken({
+      tenantId: TENANT_ID,
+      appName: APP_NAME,
+      token: input.token,
+      appId,
+      ownerEmail: input.ownerEmail,
+    });
+
+    // Lost a race with a second request; whichever landed first is the row.
+    if (!inserted) throw AppError.conflict(ALREADY_ON_FILE);
+
+    log.info(
+      { userId: caller.userId, ownerEmail: input.ownerEmail, appId },
+      'embed token restored onto this database',
+    );
+
+    return { saved: true, ownerEmail: input.ownerEmail, appId };
+  },
 };
+
+/**
+ * Why the vendor refused a restored token, in words the person restoring it
+ * can act on — and always saying that nothing was saved.
+ *
+ * ⚠️ The vendor's own message is logged, not returned, as in `unwrapOrThrow`.
+ * It is classified instead, because "refused" alone would leave the caller
+ * unable to tell a wrong key from a wrong app secret on this server.
+ */
+function refusedRestore(result: { status: number; detail: string }): AppError {
+  log.warn({ status: result.status, detail: result.detail }, 'a restored embed token was refused');
+
+  const detail = result.detail.toLowerCase();
+
+  if (detail.includes('app secret') || detail.includes('application not found')) {
+    return AppError.dependencyUnavailable(
+      "The extractor refused this server's EXTRACTOR_APP_ID or EXTRACTOR_APP_SECRET. Nothing was saved.",
+    );
+  }
+  if (meansStaleToken(result)) {
+    return AppError.validation('The extractor did not accept this key. Nothing was saved.');
+  }
+  if (meansNotAMember(result)) {
+    return AppError.validation(
+      'This owner email is not in the extractor account. Nothing was saved.',
+    );
+  }
+  if (result.status === 401 || result.status === 403 || result.status === 404) {
+    return AppError.validation(
+      'The extractor did not accept this key and owner email. Nothing was saved.',
+    );
+  }
+
+  return AppError.dependencyUnavailable(
+    'The document extractor is unavailable right now. Nothing was saved — try again shortly.',
+  );
+}
 
 /* ── The token, from cache or from onboarding ────────────────────────────── */
 

@@ -26,6 +26,7 @@ import {
 } from '@/features/driver/queries';
 import { todayInSydney } from '@/lib/geolocation';
 import { currentPosition } from '@/lib/geolocation';
+import { formatBookedArea } from '@/components/driver/area';
 
 /**
  * Tip-off weight and end-of-run reconciliation (M4.4).
@@ -405,7 +406,7 @@ export function DriverTipOffPage() {
                 </div>
                 <div className="flex justify-between">
                   <dt className="text-muted-foreground">
-                    Shared across {preview.data.handLoadJobCount} hand-load job
+                    Shared across {preview.data.handLoadJobCount} unweighed job
                     {preview.data.handLoadJobCount === 1 ? '' : 's'}, by size
                   </dt>
                   <dd className="font-display text-base font-semibold tabular-nums">
@@ -453,7 +454,7 @@ export function DriverTipOffPage() {
                           <TableCell>
                             <span className="block text-xs font-medium">#{line.jobNumber}</span>
                             <span className="block truncate text-[11px] text-muted-foreground">
-                              {line.siteName} · {line.areaM2.toLocaleString('en-AU')} m²
+                              {line.siteName} · {formatBookedArea(line.areaM2)}
                             </span>
                           </TableCell>
                           <TableCell>
@@ -463,10 +464,10 @@ export function DriverTipOffPage() {
                              * "estimated" where it came out of this split.
                              */}
                             <span className="block text-xs">
-                              {line.loadType === 'bagged' ? 'Actual' : 'Estimated'}
+                              {line.measuredKg !== null ? 'Actual' : 'Estimated'}
                             </span>
                             <span className="block text-[11px] text-muted-foreground">
-                              {line.loadType === 'bagged'
+                              {line.measuredKg !== null
                                 ? 'Crane scale'
                                 : line.shareOfRemainder === null
                                   ? 'Share of leftover'

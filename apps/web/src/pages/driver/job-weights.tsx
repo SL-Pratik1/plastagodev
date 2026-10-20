@@ -15,6 +15,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useCaptureWeights, useDriverJob } from '@/features/driver/queries';
 import { currentPosition } from '@/lib/geolocation';
+import { formatBookedArea } from '@/components/driver/area';
 
 /**
  * What was collected (M4.3 · F34, W30, W44).
@@ -232,7 +233,7 @@ function WeightsForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>
           <p className="text-xs text-muted-foreground">Set in the office · you do not enter this</p>
         </div>
         <p className="font-display text-lg font-semibold tabular-nums">
-          {job.expectedAreaM2.toLocaleString('en-AU')} m²
+          {formatBookedArea(job.expectedAreaM2)}
         </p>
       </div>
 

@@ -304,11 +304,6 @@ export function AdminInvoiceDetailPage() {
                 </tfoot>
               </table>
             </div>
-
-            <p className="mt-4 text-xs text-muted-foreground">
-              Quantity × rate = amount, on every line. TransVirtual cannot render quantities — this
-              is a functional gain, not parity.
-            </p>
           </CardContent>
         </Card>
 

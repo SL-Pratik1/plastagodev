@@ -56,9 +56,17 @@ import { useAuth } from '@/features/auth/auth-context';
 import { JobCommentThreads } from '@/features/jobs/components/comment-thread';
 import { useRaiseInvoiceForJob } from '@/features/invoices/queries';
 import { useCancelJob, useJob, useRescheduleJob } from '@/features/jobs/queries';
+import { useSettings } from '@/features/settings/queries';
 import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
-import { formatArea, formatDate, formatDateTime, formatMoney, formatWeight } from '@/lib/format';
+import {
+  formatArea,
+  formatDate,
+  formatDateTime,
+  formatInvoiceNumber,
+  formatMoney,
+  formatWeight,
+} from '@/lib/format';
 
 const TABS = [
   'overview',
@@ -126,6 +134,7 @@ export function AdminJobDetailPage() {
    * Until it did, the numbers arrived anyway and were one devtools panel away.
    */
   const seesPricing = can('pricing:view');
+  const invoicePrefix = useSettings().data?.invoicing.invoiceNumberPrefix ?? '';
 
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState<ExceptionReason>('customer-request');
@@ -265,12 +274,16 @@ export function AdminJobDetailPage() {
       // "Updated" where a late charge joined an invoice that already existed —
       // "raised" would send the office looking for a second document.
       const allUpdated = raised.every((invoice) => invoice.change === 'updated');
+      // Numbered as the invoices screen numbers them — "PGA-104104", not "#104104".
+      const numbered = (invoice: { invoiceNumber: number }) =>
+        formatInvoiceNumber(invoice.invoiceNumber, invoicePrefix);
+      const [only] = raised;
       toast.success(
-        raised.length === 1
-          ? `Invoice #${String(raised[0]?.invoiceNumber)} ${allUpdated ? 'updated' : 'raised'}`
+        raised.length === 1 && only
+          ? `Invoice ${numbered(only)} ${allUpdated ? 'updated' : 'raised'}`
           : `${String(raised.length)} invoices ${allUpdated ? 'updated' : 'raised'}`,
         blocked.length > 0
-          ? `${blocked.map((invoice) => `#${String(invoice.invoiceNumber)}`).join(' and ')} needs a purchase order before it can be sent.`
+          ? `${blocked.map(numbered).join(' and ')} needs a purchase order before it can be sent.`
           : 'Ready to send from the invoices screen.',
       );
     } catch (caught) {
@@ -900,7 +913,9 @@ export function AdminJobDetailPage() {
                   {
                     label: 'Invoice number',
                     value:
-                      job.invoiceNumber === null ? 'Not issued' : `#${String(job.invoiceNumber)}`,
+                      job.invoiceNumber === null
+                        ? 'Not issued'
+                        : formatInvoiceNumber(job.invoiceNumber, invoicePrefix),
                   },
                   { label: 'Issued', value: formatDateTime(job.invoicedAt) },
                   { label: 'Purchase order', value: job.poNumber ?? 'Not supplied' },
