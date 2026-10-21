@@ -13,3 +13,40 @@ body,
 #root {
   height: 100%;
 }
+
+/*
+ * The support bubble on the driver's phone (see `components/support/sortd-widget.tsx`).
+ *
+ * Below `md` the driver shell has a fixed tab bar — 56px of glove-sized targets
+ * plus the home-indicator inset — and the bubble's default corner sits on the
+ * Report tab. So while the widget is up it is lifted clear of the bar, the open
+ * panel is lifted with it so it never covers the bubble that closes it, and the
+ * run sheet gains the bottom padding to scroll its last action out from under
+ * the bubble.
+ *
+ * The selectors outrank `embed.js`'s own `#sortd-support-root` rules by
+ * specificity, not by load order, because the loader injects its <style> later.
+ * Keyed off a body attribute the widget sets only while it is mounted, so a
+ * driver with no bubble keeps the layout they had.
+ */
+@media (width < 48rem) {
+  body[data-support-placement='above-tab-bar'] #sortd-support-root {
+    bottom: calc(3.5rem + 1px + 1rem + env(safe-area-inset-bottom));
+  }
+
+  body[data-support-placement='above-tab-bar'] #sortd-support-root .sortd-panel {
+    max-height: calc(100dvh - 10rem - env(safe-area-inset-bottom));
+  }
+
+  body[data-support-placement='above-tab-bar'] #driver-main {
+    padding-bottom: calc(9rem + env(safe-area-inset-bottom));
+  }
+}
+
+/* At phone width the loader pins the open panel to the viewport instead. */
+@media (width <= 480px) {
+  body[data-support-placement='above-tab-bar'] #sortd-support-root .sortd-panel {
+    bottom: calc(9rem + 1px + env(safe-area-inset-bottom));
+    max-height: none;
+  }
+}

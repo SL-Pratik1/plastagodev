@@ -1,5 +1,7 @@
-import { buildOpenApiDocument } from '@plastago/shared';
+import { API_PREFIX, buildOpenApiDocument } from '@plastago/shared';
 import express, { type Express } from 'express';
+import { sortdController } from './domains/sortd/sortd.controller.js';
+import { asyncHandler } from './lib/async-handler.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { notFound } from './middleware/not-found.js';
 import { requestId, requestLogger } from './middleware/request-context.js';
@@ -15,6 +17,7 @@ import { mountRoutes } from './routes.js';
  *   2. requestLogger  — must see the id, and must see the final status code
  *   3. security       — reject bad origins and floods before parsing a body
  *   4. body parsers   — with a size cap; photos go direct to S3 (§6A.10 #9)
+ *                       (the Sortd webhook is registered just before them, raw)
  *   5. routes
  *   6. notFound       — after all routers
  *   7. errorHandler   — last, always
@@ -28,6 +31,23 @@ export function createServer(): Express {
   app.use(requestLogger);
 
   applySecurity(app);
+
+  /*
+   * The Sortd webhook — the one route that must see the RAW body.
+   *
+   * Sortd signs `${timestamp}.${rawBody}`, and `express.json()` re-serialises,
+   * which changes the bytes and fails every signature. So it is registered
+   * ahead of the parsers, and `type: () => true` keeps the body a Buffer
+   * whatever content type arrives. It also sits outside the `/api/v1` router's
+   * session gates, because its authentication IS the signature — see
+   * `lib/sortd-webhook.ts`, which refuses everything while a surface's secret
+   * is unset.
+   */
+  app.post(
+    `${API_PREFIX}/webhooks/sortd/:surface`,
+    express.raw({ type: () => true, limit: '1mb' }),
+    asyncHandler(sortdController.webhook),
+  );
 
   // 1 MB is generous for JSON. Photo and document uploads must NEVER stream
   // through the API — they use presigned direct-to-S3 uploads (§6A.10 #9).

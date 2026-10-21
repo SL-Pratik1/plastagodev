@@ -919,6 +919,30 @@ export interface ExtractorSession {
 }
 
 /**
+ * The support bubble (Sortd) — one session per person, per surface.
+ *
+ * The API picks the Sortd app from the caller's active role; the browser
+ * never names a surface and never sees a key, only the opaque session id.
+ */
+export interface SupportService {
+  /** `enabled: false` is a normal answer: this surface has no bubble. */
+  session(): Promise<SupportSession>;
+  /** Ends the caller's support sessions. Called on sign-out, before it. */
+  revoke(): Promise<void>;
+}
+
+export type SupportSession =
+  | { enabled: false }
+  | {
+      enabled: true;
+      /** Where `embed.js` and the widget's frame load from. */
+      baseUrl: string;
+      sessionId: string;
+      /** ISO 8601. Sortd sessions last a day. */
+      expiresAt: string;
+    };
+
+/**
  * I1 · M7.8 — the Xero connection.
  *
  * Three methods and no invoice traffic: pushing invoices happens on the server
@@ -1003,6 +1027,7 @@ export interface Services {
   readonly notifications: NotificationService;
   readonly settings: SettingsService;
   readonly extractor: ExtractorService;
+  readonly support: SupportService;
   readonly xero: XeroService;
   readonly queues: QueueService;
   readonly portal: CustomerPortalService;

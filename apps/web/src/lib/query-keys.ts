@@ -129,6 +129,17 @@ export const queryKeys = {
   },
 
   /**
+   * The support bubble's session. Keyed by person AND active role, because the
+   * role decides which Sortd app the session belongs to — a role switch must
+   * never be answered from the other app's cache.
+   */
+  support: {
+    all: ['support'] as const,
+    session: (userId: string, role: string) =>
+      [...queryKeys.support.all, 'session', userId, role] as const,
+  },
+
+  /**
    * The five office queues. One domain key, because one decision usually moves
    * more than one queue — approving a charge on a PO-required account empties a
    * row from approvals and adds one to awaiting-PO.

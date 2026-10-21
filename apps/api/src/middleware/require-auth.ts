@@ -37,6 +37,7 @@ export const requireAuth: RequestHandler = (req, _res, next) => {
         // job event.
         name: session.user.name,
         roles: session.user.roles,
+        role: session.user.role,
         // Carried so repositories can scope by it without a second lookup.
         accountId: session.user.accountId,
       };

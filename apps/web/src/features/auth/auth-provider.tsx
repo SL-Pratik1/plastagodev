@@ -20,7 +20,7 @@ import { can, type Capability } from './permissions';
  * challenge rather than to whichever component happens to be mounted.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { auth } = useServices();
+  const { auth, support } = useServices();
 
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [session, setSession] = useState<Session | null>(null);
@@ -100,12 +100,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async () => {
+    /*
+     * End the support sessions FIRST, while the cookie still says who this is —
+     * afterwards the call cannot be attributed to anyone and would 401, leaving
+     * the session alive at Sortd for the rest of its day.
+     *
+     * Allowed to fail without blocking the sign-out: being unable to reach the
+     * API or Sortd is not a reason to keep somebody signed in.
+     */
+    await support.revoke().catch(() => undefined);
     await auth.signOut();
     setSession(null);
     setStatus('anonymous');
     setChallenge(null);
     setIdentifier(null);
-  }, [auth]);
+  }, [auth, support]);
 
   /**
    * Change the active role.

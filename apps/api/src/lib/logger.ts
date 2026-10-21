@@ -19,6 +19,9 @@ export const logger = pino({
       'req.body.token',
       // The extractor webhook's shared secret travels in the query string.
       'req.query.token',
+      // Only valid with its exact body inside a five-minute window, but a
+      // signature is still a credential for that window.
+      'req.headers["x-sortd-signature"]',
       'res.headers["set-cookie"]',
     ],
     censor: '[redacted]',

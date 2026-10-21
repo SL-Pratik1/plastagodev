@@ -18,6 +18,7 @@ import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { visiblePortalNav } from '@/config/portal-navigation';
 import { SessionExpiry } from '@/features/auth/session-expiry';
+import { SortdWidget } from '@/components/support/sortd-widget';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
 import { usePortalScope } from '@/features/portal/queries';
 
@@ -278,6 +279,9 @@ export function PortalLayout() {
       </nav>
 
       <SessionExpiry />
+
+      {/* Support. Mounted on the shell: everywhere behind sign-in, nowhere before it. */}
+      <SortdWidget />
 
       <ConfirmDialog
         open={signOutOpen}

@@ -28,6 +28,7 @@ import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
 import { switchLabel, useRoleSwitch } from '@/features/auth/use-role-switch';
 import { SessionExpiry } from '@/features/auth/session-expiry';
+import { SortdWidget } from '@/components/support/sortd-widget';
 import { runKeys } from '@/features/driver/queries';
 import { flushOutbox, onOutboxSynced, startOutboxSync } from '@/offline/outbox';
 import { useOutboxSummary } from '@/offline/use-offline-state';
@@ -433,6 +434,12 @@ export function DriverShell() {
       </nav>
 
       <SessionExpiry />
+
+      {/*
+        Support. Lifted above the tab bar on a phone — its default corner is
+        the Report tab, the one target a driver must never miss.
+      */}
+      <SortdWidget placement="above-tab-bar" />
 
       <ConfirmDialog
         open={signOutOpen}

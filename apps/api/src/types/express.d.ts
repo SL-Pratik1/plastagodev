@@ -34,6 +34,14 @@ declare global {
         name: string;
         roles: readonly string[];
         /**
+         * The role they are WORKING AS right now — always one of `roles`.
+         *
+         * Not an authorisation input: `requireRole` checks the full set. It says
+         * which surface the caller is on, which is what the support widget
+         * needs — an allocator covering a driver's shift is on the driver app.
+         */
+        role: string;
+        /**
          * The account this caller belongs to — set only for the two customer
          * roles, null for office and admin.
          *

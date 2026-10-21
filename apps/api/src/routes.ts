@@ -20,6 +20,7 @@ import { portalRouter } from './domains/portal/portal.router.js';
 import { poWebhookRouter } from './domains/queues/po-webhook.router.js';
 import { queueRouter } from './domains/queues/queue.router.js';
 import { settingsRouter } from './domains/settings/settings.router.js';
+import { sortdRouter } from './domains/sortd/sortd.router.js';
 import { userRouter } from './domains/users/user.router.js';
 import { storageRouter } from './domains/storage/storage.router.js';
 
@@ -103,6 +104,14 @@ export function mountRoutes(app: Express): void {
    * single-use `state` row is what authorises it. See the router.
    */
   v1.use('/xero', xeroRouter);
+
+  /*
+   * The support bubble's session broker (Sortd). Every authenticated user on
+   * every surface; it mints a third party's credential for the browser without
+   * the key that mints it ever reaching one. Its webhook is NOT here — it needs
+   * the raw body, so it is mounted in `server.ts`.
+   */
+  v1.use('/sortd', sortdRouter);
 
   // M5 — the customer portal. Scoped entirely from the session; no route here
   // takes an account id, so no URL can widen what a customer sees.

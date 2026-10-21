@@ -1071,3 +1071,63 @@ export function buildPoRequestEmail(to: string, context: PoRequestContext): Outb
     mailbox: 'accounts',
   };
 }
+
+/* ── Support (Sortd) ─────────────────────────────────────────────────────── */
+
+export interface SupportTicketContext {
+  /** Sortd's display id, e.g. `PLA-0042`, or "A new ticket" when it sent none. */
+  reference: string;
+  /** Which surface it came from, in words — "the driver app". */
+  from: string;
+  summary: string | null;
+  /** Why the agent escalated, in words. */
+  reason: string | null;
+  /** The screen the person was on, when Sortd knows it. */
+  reportedFrom: string | null;
+  /** The Sortd portal, where the ticket is answered. Null when unset. */
+  sortdUrl: string | null;
+}
+
+/**
+ * "Somebody is waiting on a person" — the Sortd agent could not answer.
+ *
+ * Every field but `from` arrives from the webhook, so every one is escaped:
+ * the summary is written from what the person typed, and a signed payload is
+ * not the same as a safe one.
+ */
+export function buildSupportTicketEmail(to: string, context: SupportTicketContext): OutboundEmail {
+  const named = context.reference !== 'A new ticket';
+  const headline = named
+    ? `Support ticket ${context.reference} from ${context.from} needs a person.`
+    : `A new support ticket from ${context.from} needs a person.`;
+
+  const details: [string, string][] = [
+    ...(context.reason ? ([['Escalated because', context.reason]] as [string, string][]) : []),
+    ...(context.reportedFrom ? ([['Raised from', context.reportedFrom]] as [string, string][]) : []),
+  ];
+
+  const text = [
+    headline,
+    '',
+    ...(context.summary ? [context.summary, ''] : []),
+    ...details.map(([label, value]) => `${label}: ${value}`),
+    ...(details.length > 0 ? [''] : []),
+    ...(context.sortdUrl ? [`Answer it in Sortd: ${context.sortdUrl}`] : []),
+  ].join('\n');
+
+  const html = emailShell([
+    escapeHtml(headline),
+    ...(context.summary ? [escapeHtml(context.summary)] : []),
+    ...details.map(([label, value]) => `<strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}`),
+    ...(context.sortdUrl ? [emailButton(context.sortdUrl, 'Answer it in Sortd')] : []),
+  ]);
+
+  return {
+    to,
+    subject: named
+      ? `Support ticket ${context.reference} — ${context.from}`
+      : `New support ticket — ${context.from}`,
+    text,
+    html,
+  };
+}

@@ -29,7 +29,7 @@ const OFFICE_ROLES: readonly Role[] = ['super-admin', 'operations', 'office-staf
  * screens. Each audience below is the set of roles that can open the screen
  * the alert links to — keep it in step with `apps/web/.../permissions.ts`.
  */
-export type StaffAudience = 'office' | 'dispatch' | 'planning' | 'fleet' | 'sales';
+export type StaffAudience = 'office' | 'dispatch' | 'planning' | 'fleet' | 'sales' | 'support';
 
 const AUDIENCE_ROLES: Record<StaffAudience, readonly Role[]> = {
   /** Money and customer conversations. Never the allocator, who sees no prices. */
@@ -42,6 +42,12 @@ const AUDIENCE_ROLES: Record<StaffAudience, readonly Role[]> = {
   fleet: ['super-admin', 'operations', 'allocator'],
   /** Enquiries. The roles that can open the lead queue (`leads:manage`). */
   sales: ['super-admin', 'operations'],
+  /**
+   * A support ticket the Sortd agent could not answer. The administrator alone
+   * for now: the ticket is worked in the Sortd portal rather than in any
+   * PlastaGo screen, so there is nothing here for the other roles to open.
+   */
+  support: ['super-admin'],
 };
 
 /**

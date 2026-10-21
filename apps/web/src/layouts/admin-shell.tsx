@@ -26,6 +26,7 @@ import { BrandMark } from '@/components/brand/brand-mark';
 import { NotificationsMenu } from '@/components/notifications-menu';
 import { InstallButton } from '@/components/pwa/install-button';
 import { SessionExpiry } from '@/features/auth/session-expiry';
+import { SortdWidget } from '@/components/support/sortd-widget';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import {
   ALL_BRANDS,
@@ -376,6 +377,9 @@ export function AdminShell() {
 
       {/* Warns before the 8-hour session lapses, then handles the expiry. */}
       <SessionExpiry />
+
+      {/* Support. Mounted on the shell: everywhere behind sign-in, nowhere before it. */}
+      <SortdWidget />
 
       <ConfirmDialog
         open={signOutOpen}
