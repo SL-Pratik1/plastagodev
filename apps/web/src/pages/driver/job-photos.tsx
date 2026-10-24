@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { PhotoGrid } from '@/components/driver/photo-grid';
 import { jobPhotos, missingRequiredPhotos } from '@/components/driver/photo-rules';
 import { currentPosition } from '@/lib/geolocation';
+import { photoUploadFailure } from '@/features/driver/photo-upload-error';
 import { useAddPhoto, useDriverJob, useRemovePhoto } from '@/features/driver/queries';
 
 /**
@@ -90,10 +91,8 @@ export function DriverJobPhotosPage() {
          * go back and retake it.
          */
         toast.success('Photo uploaded');
-      } catch {
-        // The honest failure, and the only driver action that genuinely needs
-        // signal — worth saying so rather than a bare "try again".
-        toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
+      } catch (error) {
+        toast.error('Could not upload that photo', photoUploadFailure(error));
       } finally {
         setBusySlot(null);
       }
@@ -153,7 +152,7 @@ export function DriverJobPhotosPage() {
       <header>
         <h1 className="font-display text-lg font-semibold tracking-tight">Photos</h1>
         <p className="text-sm text-muted-foreground">
-          {photos.length} taken. These are what defend the charges, so the standard shots are listed
+          {photos.filter((photo) => photo.uploaded).length} taken. These are what defend the charges, so the standard shots are listed
           rather than left to memory.
         </p>
       </header>

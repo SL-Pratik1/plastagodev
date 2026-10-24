@@ -164,6 +164,25 @@ export function PortalCertificatesPage() {
     },
   ];
 
+  /*
+   * Matt, 21 Oct: certificates go "only to certain customers". The nav hides
+   * this page for the rest; this covers a bookmark or a typed address.
+   */
+  if (scope.data && !scope.data.receivesCertificates) {
+    return (
+      <div className="space-y-5">
+        <header>
+          <h1 className="font-display text-xl font-semibold tracking-tight">
+            Certificates of Recycling
+          </h1>
+        </header>
+        <Alert variant="info" title="Certificates are not part of your account">
+          Ask PlastaGo if you need Certificates of Recycling for your pickups.
+        </Alert>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       <header>

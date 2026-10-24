@@ -36,7 +36,15 @@ import { currentPosition } from '@/lib/geolocation';
  */
 
 /** The five the doc names, in the order a driver meets them. */
-const DRIVER_REASONS: readonly ExceptionReason[] = [
+/*
+ * ⚠️ Keyed to the LABEL map, not to `ExceptionReason`.
+ *
+ * `ExceptionReason` widened to a free string when the driver's can't-collect
+ * list became editable (Matt, 21 Oct), so it no longer indexes the fixed label
+ * map. This superseded app has no editable list behind it — it offers the five
+ * built-in reasons and nothing else — so the narrower type is the true one.
+ */
+const DRIVER_REASONS: readonly (keyof typeof EXCEPTION_REASON_LABELS)[] = [
   'site-not-ready',
   'access-blocked',
   'nobody-on-site',

@@ -1,9 +1,11 @@
 import {
+  DRIVER_LIST_DEFAULTS,
   EXCEPTION_REASONS,
   EXCEPTION_REASON_LABELS,
   FUTILE_OUTCOME_LABELS,
-  type ExceptionReason,
+  type DriverLists,
   type FutileReviewItem,
+  type OfficeCancelReason,
 } from '@plastago/shared';
 import {
   Alert,
@@ -33,6 +35,8 @@ import { AgeBadge } from '@/components/queues/age-badge';
 import { EvidenceGrid } from '@/components/queues/evidence-grid';
 import { useAccountOptions, useDriverOptions, useZoneOptions } from '@/features/lookups/queries';
 import { useFutileDecide, useFutileList, useFutileReview } from '@/features/queues/queries';
+import { reasonLabel } from '@/features/settings/driver-list-labels';
+import { useDriverLists } from '@/features/settings/queries';
 import { addDays, todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatDate, formatDateTime, formatMoney } from '@/lib/format';
@@ -67,7 +71,10 @@ const FILTER_KEYS = ['outcome', 'reason', 'account', 'driver', 'zoneId', 'age'] 
  * See `jobs.tsx:filtersWithZones` for why the position is fixed rather than
  * appended.
  */
-function filtersWithZones(zones: readonly ZoneOption[]): FilterDefinition[] {
+function filtersWithZones(
+  zones: readonly ZoneOption[],
+  lists: DriverLists | undefined,
+): FilterDefinition[] {
   const zoneFilter: FilterDefinition = {
     key: 'zoneId',
     label: 'Zone',
@@ -78,8 +85,18 @@ function filtersWithZones(zones: readonly ZoneOption[]): FilterDefinition[] {
     })),
   };
 
-  const index = STATIC_FILTERS.findIndex((filter) => filter.key === 'age');
-  return [...STATIC_FILTERS.slice(0, index), zoneFilter, ...STATIC_FILTERS.slice(index)];
+  // The driver's reasons are edited in Settings (21 Oct); a switched-off one
+  // still filters the reviews filed under it.
+  const reasonOptions = (lists ?? DRIVER_LIST_DEFAULTS).cantCollectReasons.map((option) => ({
+    value: option.key,
+    label: option.active ? option.label : `${option.label} (switched off)`,
+  }));
+  const statics = STATIC_FILTERS.map((filter) =>
+    filter.key === 'reason' ? { ...filter, options: reasonOptions } : filter,
+  );
+
+  const index = statics.findIndex((filter) => filter.key === 'age');
+  return [...statics.slice(0, index), zoneFilter, ...statics.slice(index)];
 }
 
 const STATIC_FILTERS: readonly FilterDefinition[] = [
@@ -106,10 +123,8 @@ const STATIC_FILTERS: readonly FilterDefinition[] = [
     key: 'reason',
     label: 'Reason',
     allLabel: 'Any reason',
-    options: EXCEPTION_REASONS.map((reason) => ({
-      value: reason,
-      label: EXCEPTION_REASON_LABELS[reason],
-    })),
+    // Filled from the editable list — see `filtersWithZones`.
+    options: [],
   },
   {
     key: 'age',
@@ -140,12 +155,13 @@ export function AdminQueueFutilePage() {
    * first-paint concern on one screen, not a recurring one.
    */
   const zones = useZoneOptions().data ?? [];
+  const driverLists = useDriverLists().data;
 
 
   const [reviewingId, setReviewingId] = useState<string | null>(null);
 
   const filters: readonly FilterDefinition[] = [
-    ...filtersWithZones(zones),
+    ...filtersWithZones(zones, driverLists),
     { key: 'account', label: 'Customer', allLabel: 'All customers', options: accounts.data ?? [] },
     { key: 'driver', label: 'Driver', allLabel: 'All drivers', options: drivers.data ?? [] },
   ];
@@ -190,7 +206,7 @@ export function AdminQueueFutilePage() {
       priority: 'secondary',
       cell: (row) => (
         <span className="block">
-          <Badge variant="outline">{EXCEPTION_REASON_LABELS[row.reason]}</Badge>
+          <Badge variant="outline">{reasonLabel(driverLists, row.reason)}</Badge>
           {row.photoCount > 0 && (
             <span className="mt-1 block text-xs text-muted-foreground">
               {row.photoCount} photo{row.photoCount === 1 ? '' : 's'}
@@ -356,10 +372,11 @@ function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogPr
   const toast = useToast();
   const { data: review, isPending, error, refetch } = useFutileReview(id ?? undefined);
   const decide = useFutileDecide();
+  const driverLists = useDriverLists().data;
 
   const [outcome, setOutcome] = useState<'rescheduled' | 'cancelled'>('rescheduled');
   const [newReadyDate, setNewReadyDate] = useState('');
-  const [cancelReason, setCancelReason] = useState<ExceptionReason | ''>('');
+  const [cancelReason, setCancelReason] = useState<OfficeCancelReason | ''>('');
   const [note, setNote] = useState('');
   const [fieldError, setFieldError] = useState<string | null>(null);
 
@@ -409,7 +426,7 @@ function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogPr
         decision: {
           outcome,
           newReadyDate: outcome === 'rescheduled' ? newReadyDate : null,
-          cancelReason: outcome === 'cancelled' ? (cancelReason as ExceptionReason) : null,
+          cancelReason: outcome === 'cancelled' ? (cancelReason as OfficeCancelReason) : null,
           note: note.trim(),
         },
       });
@@ -460,7 +477,7 @@ function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogPr
             items={[
               {
                 label: 'Reason given',
-                value: <Badge variant="outline">{EXCEPTION_REASON_LABELS[review.reason]}</Badge>,
+                value: <Badge variant="outline">{reasonLabel(driverLists, review.reason)}</Badge>,
               },
               {
                 label: 'Marked futile',
@@ -571,7 +588,7 @@ function FutileDecisionDialog({ id, onClose, onDecided }: FutileDecisionDialogPr
                       {...control}
                       value={cancelReason}
                       onChange={(event) => {
-                        setCancelReason(event.target.value as ExceptionReason);
+                        setCancelReason(event.target.value as OfficeCancelReason);
                         setFieldError(null);
                       }}
                     >

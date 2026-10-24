@@ -70,11 +70,12 @@ const COLUMNS: readonly DataTableColumn<DriverListItem>[] = [
   },
   {
     id: 'vehicle',
-    header: 'Vehicle',
+    header: 'Vehicle today',
     priority: 'secondary',
+    // The vehicle the driver chose in the driver app today (Matt, 21 Oct).
     cell: (row) =>
       row.vehicleRego === null ? (
-        <span className="text-muted-foreground">Unassigned</span>
+        <span className="text-muted-foreground">Not chosen</span>
       ) : (
         <span className="block">
           <span className="font-mono text-xs">{row.vehicleRego}</span>

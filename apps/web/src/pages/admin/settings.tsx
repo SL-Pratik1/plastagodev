@@ -10,6 +10,7 @@ import {
   type AdditionalServiceSetting,
   type BrandId,
   type ChargeCode,
+  type DriverListName,
   type InvoiceLayout,
   type InvoiceTemplate,
   type InvoiceTemplateWrite,
@@ -17,8 +18,10 @@ import {
   type RateCardSummary,
   type RateSchedule,
   type Settings,
-  type ZoneSummary,
+  type WeightChargeKind,
+  type ZoneRate,
   type ZoneRateInput,
+  type ZoneSummary,
 } from '@plastago/shared';
 import {
   Alert,
@@ -85,6 +88,7 @@ import {
   useSettings,
   useUpdateAdditionalService,
   useUpdateInvoiceTemplate,
+  useActiveOptionCounts,
   useArchiveZone,
   useCreateZone,
   useRenameZone,
@@ -92,12 +96,14 @@ import {
   useRestoreZone,
 } from '@/features/settings/queries';
 import { SuburbsSection } from '@/features/suburbs/components/suburbs-section';
+import { TermsLibraryCard } from '@/features/terms/components/terms-library-card';
+import { DriverListsCard } from '@/features/settings/components/driver-lists-card';
 import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import { formatMoney } from '@/lib/format';
 import { useUnsavedChanges } from '@/lib/use-unsaved-changes';
 
-const TABS = ['roles', 'pricing', 'invoicing'] as const;
+const TABS = ['roles', 'pricing', 'invoicing', 'terms', 'driver-lists'] as const;
 type TabKey = (typeof TABS)[number];
 
 /** The tab shown when the URL carries no `?tab=`, and the one it omits. */
@@ -127,6 +133,15 @@ const INVOICING_SECTIONS = [
 ] as const;
 
 type InvoicingSection = (typeof INVOICING_SECTIONS)[number];
+
+/** The four lists the driver app asks from, one sub-tab each (23 Oct). */
+const DRIVER_LIST_SECTIONS = ['hazards', 'controls', 'cant-collect', 'contamination'] as const;
+const DRIVER_LIST_OF: Record<(typeof DRIVER_LIST_SECTIONS)[number], DriverListName> = {
+  hazards: 'siteHazards',
+  controls: 'riskControls',
+  'cant-collect': 'cantCollectReasons',
+  contamination: 'contaminationTypes',
+};
 
 /**
  * The sub-tab inside a tab, held in `?section=` so a reload, the back button
@@ -283,6 +298,8 @@ export function AdminSettingsPage() {
             in one place and its second consumer in another.
           */}
           <TabsTrigger value="invoicing">Invoicing &amp; certificates</TabsTrigger>
+          <TabsTrigger value="terms">Terms &amp; conditions</TabsTrigger>
+          <TabsTrigger value="driver-lists">Driver lists</TabsTrigger>
         </TabsList>
 
         {/*
@@ -310,6 +327,12 @@ export function AdminSettingsPage() {
             comparison.
           */}
           <InvoicingSection key={JSON.stringify(writable(data.invoicing))} settings={data} />
+        </TabsPanel>
+        <TabsPanel value="terms">
+          <TermsLibraryCard />
+        </TabsPanel>
+        <TabsPanel value="driver-lists">
+          <DriverListsPanel />
         </TabsPanel>
       </Tabs>
     </div>
@@ -1352,7 +1375,7 @@ function RateCardRow({
               <span key={zone.zoneId}>
                 <span className="block">{zone.zoneLabel}</span>
                 <span className="block font-medium text-foreground">
-                  {formatMoney(zone.serviceCharge)} + ${zone.ratePerM2}/m²
+                  {formatMoney(zone.serviceCharge)} + {weightChargeText(zone)}
                 </span>
               </span>
             ))}
@@ -1507,6 +1530,13 @@ function RateCardRow({
   );
 }
 
+/** A zone line's second charge as one phrase — "$0.16/m²" or "$112.00 fixed". */
+function weightChargeText(zone: ZoneRate): string {
+  return zone.weightChargeKind === 'fixed'
+    ? `${formatMoney(zone.fixedWeightCharge ?? '0')} fixed`
+    : `$${zone.ratePerM2}/m²`;
+}
+
 /** Which schedule is in force today, by the same rule the server applies. */
 function currentScheduleFrom(card: RateCardSummary): string | undefined {
   const today = todayInSydney();
@@ -1601,7 +1631,10 @@ function ScheduleTable({
                 Service charge
               </th>
               <th scope="col" className="py-1.5 text-right text-xs font-medium">
-                Rate per m²
+                Weight charge
+              </th>
+              <th scope="col" className="py-1.5 text-right text-xs font-medium">
+                Hook bins 5 · 10 · 15 m³
               </th>
             </tr>
           </thead>
@@ -1612,7 +1645,12 @@ function ScheduleTable({
                 <td className="py-1.5 text-right tabular-nums">
                   {formatMoney(zone.serviceCharge)}
                 </td>
-                <td className="py-1.5 text-right tabular-nums">${zone.ratePerM2}</td>
+                <td className="py-1.5 text-right tabular-nums">{weightChargeText(zone)}</td>
+                <td className="py-1.5 text-right tabular-nums text-muted-foreground">
+                  {[zone.hookBin5, zone.hookBin10, zone.hookBin15]
+                    .map((price) => (price === null ? '—' : formatMoney(price)))
+                    .join(' · ')}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1631,8 +1669,62 @@ function ScheduleTable({
  * from `ZONES`, so it could not be empty; it can be now, and `zoneRateErrors`
  * below has a check for exactly that.
  */
-function emptyZoneRates(zones: readonly ZoneOption[]): ZoneRateInput[] {
-  return zones.map((zone) => ({ zoneId: zone.value, serviceCharge: '', ratePerM2: '' }));
+function emptyZoneRates(zones: readonly ZoneOption[]): ZoneRateRow[] {
+  return zones.map((zone) => rowFrom(zone.value, undefined));
+}
+
+/**
+ * One zone line as typed — every figure a string, blanks allowed until submit.
+ *
+ * Matt, 21 Oct: the second charge is either per m² or a fixed amount, and hook
+ * bins carry a set price per zone. Blank hook-bin boxes mean the card does not
+ * offer that bin.
+ */
+interface ZoneRateRow {
+  zoneId: string;
+  serviceCharge: string;
+  weightChargeKind: WeightChargeKind;
+  ratePerM2: string;
+  fixedWeightCharge: string;
+  hookBin5: string;
+  hookBin10: string;
+  hookBin15: string;
+}
+
+const HOOK_BIN_BOXES = [
+  { field: 'hookBin5', label: '5 m³' },
+  { field: 'hookBin10', label: '10 m³' },
+  { field: 'hookBin15', label: '15 m³' },
+] as const;
+
+/** A row seeded from a stored rate, or blank where there is none. */
+function rowFrom(zoneId: string, rate: ZoneRate | undefined): ZoneRateRow {
+  return {
+    zoneId,
+    serviceCharge: rate?.serviceCharge ?? '',
+    weightChargeKind: rate?.weightChargeKind ?? 'per-m2',
+    ratePerM2: rate && rate.weightChargeKind !== 'fixed' ? rate.ratePerM2 : '',
+    fixedWeightCharge: rate?.fixedWeightCharge ?? '',
+    hookBin5: rate?.hookBin5 ?? '',
+    hookBin10: rate?.hookBin10 ?? '',
+    hookBin15: rate?.hookBin15 ?? '',
+  };
+}
+
+/** What the server is sent for one row. Only the active weight charge travels. */
+function toZoneRateInput(row: ZoneRateRow): ZoneRateInput {
+  const fixed = row.weightChargeKind === 'fixed';
+  const optional = (value: string) => (value.trim() === '' ? null : value.trim());
+  return {
+    zoneId: row.zoneId,
+    serviceCharge: row.serviceCharge.trim(),
+    weightChargeKind: row.weightChargeKind,
+    ratePerM2: fixed ? '0' : row.ratePerM2.trim(),
+    fixedWeightCharge: fixed ? row.fixedWeightCharge.trim() : null,
+    hookBin5: optional(row.hookBin5),
+    hookBin10: optional(row.hookBin10),
+    hookBin15: optional(row.hookBin15),
+  };
 }
 
 /**
@@ -1656,9 +1748,9 @@ function sanitizeAmountInput(raw: string): string {
  * second copy is how the create form ends up accepting a precision the issue
  * form rejects.
  *
- * ⚠️ `labels` is threaded in rather than looked up here. The rows are
- * `ZoneRateInput`, which carries only the id — it is a WRITE shape, and the
- * server does not want a name it would have to ignore.
+ * ⚠️ `labels` is threaded in rather than looked up here. The rows carry only
+ * the zone id — they become a WRITE shape, and the server does not want a name
+ * it would have to ignore.
  */
 function ZoneRateFields({
   zones,
@@ -1666,55 +1758,118 @@ function ZoneRateFields({
   onChange,
   disabled,
 }: {
-  zones: readonly ZoneRateInput[];
+  zones: readonly ZoneRateRow[];
   labels: ReadonlyMap<string, string>;
-  onChange: (next: ZoneRateInput[]) => void;
+  onChange: (next: ZoneRateRow[]) => void;
   disabled?: boolean;
 }) {
-  const setZone = (index: number, patch: Partial<ZoneRateInput>) => {
+  const setZone = (index: number, patch: Partial<ZoneRateRow>) => {
     onChange(zones.map((zone, i) => (i === index ? { ...zone, ...patch } : zone)));
   };
 
   return (
     <div className="space-y-3">
-      {zones.map((zone, index) => (
-        <div
-          key={zone.zoneId}
-          className="grid grid-cols-1 gap-2 sm:grid-cols-[8rem_1fr_1fr] sm:items-center"
-        >
-          <span className="text-sm font-medium">{labels.get(zone.zoneId) ?? 'Unknown zone'}</span>
+      {zones.map((zone, index) => {
+        const name = labels.get(zone.zoneId) ?? 'this zone';
+        const fixed = zone.weightChargeKind === 'fixed';
 
-          <label className="text-xs text-muted-foreground">
-            Service charge
-            <Input
-              value={zone.serviceCharge}
-              disabled={disabled}
-              inputMode="decimal"
-              placeholder="220.00"
-              className="mt-1 font-mono"
-              aria-label={`Service charge for ${labels.get(zone.zoneId) ?? 'this zone'}`}
-              onChange={(event) => {
-                setZone(index, { serviceCharge: sanitizeAmountInput(event.target.value) });
-              }}
-            />
-          </label>
+        return (
+          <div key={zone.zoneId} className="space-y-2 rounded-lg border border-border p-3">
+            <p className="text-sm font-medium">{labels.get(zone.zoneId) ?? 'Unknown zone'}</p>
 
-          <label className="text-xs text-muted-foreground">
-            Rate per m²
-            <Input
-              value={zone.ratePerM2}
-              disabled={disabled}
-              inputMode="decimal"
-              placeholder="0.1600"
-              className="mt-1 font-mono"
-              aria-label={`Rate per square metre for ${labels.get(zone.zoneId) ?? 'this zone'}`}
-              onChange={(event) => {
-                setZone(index, { ratePerM2: sanitizeAmountInput(event.target.value) });
-              }}
-            />
-          </label>
-        </div>
-      ))}
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <label className="text-xs text-muted-foreground">
+                Service charge
+                <Input
+                  value={zone.serviceCharge}
+                  disabled={disabled}
+                  inputMode="decimal"
+                  placeholder="220.00"
+                  className="mt-1 font-mono"
+                  aria-label={`Service charge for ${name}`}
+                  onChange={(event) => {
+                    setZone(index, { serviceCharge: sanitizeAmountInput(event.target.value) });
+                  }}
+                />
+              </label>
+
+              {/*
+                Matt, 21 Oct: *"just what needs to be added to the rate card is
+                both fixed and variable line items."* Fixed skips m² × rate.
+              */}
+              <label className="text-xs text-muted-foreground">
+                Weight charge
+                <Select
+                  value={zone.weightChargeKind}
+                  disabled={disabled}
+                  className="mt-1"
+                  aria-label={`How the weight charge is priced for ${name}`}
+                  onChange={(event) => {
+                    setZone(index, { weightChargeKind: event.target.value as WeightChargeKind });
+                  }}
+                >
+                  <option value="per-m2">Per m²</option>
+                  <option value="fixed">Fixed amount</option>
+                </Select>
+              </label>
+
+              {fixed ? (
+                <label className="text-xs text-muted-foreground">
+                  Fixed weight charge
+                  <Input
+                    value={zone.fixedWeightCharge}
+                    disabled={disabled}
+                    inputMode="decimal"
+                    placeholder="112.00"
+                    className="mt-1 font-mono"
+                    aria-label={`Fixed weight charge for ${name}`}
+                    onChange={(event) => {
+                      setZone(index, {
+                        fixedWeightCharge: sanitizeAmountInput(event.target.value),
+                      });
+                    }}
+                  />
+                </label>
+              ) : (
+                <label className="text-xs text-muted-foreground">
+                  Rate per m²
+                  <Input
+                    value={zone.ratePerM2}
+                    disabled={disabled}
+                    inputMode="decimal"
+                    placeholder="0.1600"
+                    className="mt-1 font-mono"
+                    aria-label={`Rate per square metre for ${name}`}
+                    onChange={(event) => {
+                      setZone(index, { ratePerM2: sanitizeAmountInput(event.target.value) });
+                    }}
+                  />
+                </label>
+              )}
+            </div>
+
+            {/* Matt: hook bins are a set price, and it is zone dependent. */}
+            <div className="grid grid-cols-3 gap-2">
+              {HOOK_BIN_BOXES.map((bin) => (
+                <label key={bin.field} className="text-xs text-muted-foreground">
+                  Hook bin {bin.label}
+                  <Input
+                    value={zone[bin.field]}
+                    disabled={disabled}
+                    inputMode="decimal"
+                    placeholder="Not offered"
+                    className="mt-1 font-mono"
+                    aria-label={`Hook bin ${bin.label} price for ${name}`}
+                    onChange={(event) => {
+                      setZone(index, { [bin.field]: sanitizeAmountInput(event.target.value) });
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        );
+      })}
 
       {/*
         Said out loud because it is the one thing a person keying these in will
@@ -1722,7 +1877,8 @@ function ZoneRateFields({
         real money on every large job, and the loss is invisible per invoice.
       */}
       <p className="text-xs text-muted-foreground">
-        Rates take four decimal places — 0.1625 is kept as 0.1625, not rounded to cents.
+        Rates take four decimal places — 0.1625 is kept as 0.1625, not rounded to cents. A fixed
+        weight charge ignores the m². Leave a hook bin blank if this card does not offer it.
       </p>
     </div>
   );
@@ -1736,7 +1892,7 @@ function ZoneRateFields({
  * trip that clears nothing.
  */
 function zoneRateErrors(
-  zones: readonly ZoneRateInput[],
+  zones: readonly ZoneRateRow[],
   labels: ReadonlyMap<string, string>,
 ): string | null {
   /*
@@ -1752,16 +1908,28 @@ function zoneRateErrors(
   }
 
   const nameOf = (zoneId: string) => labels.get(zoneId) ?? 'That zone';
+  const amount = /^\d+(\.\d{1,4})?$/;
 
   for (const zone of zones) {
-    if (zone.serviceCharge.trim() === '' || zone.ratePerM2.trim() === '') {
+    const fixed = zone.weightChargeKind === 'fixed';
+    const weight = fixed ? zone.fixedWeightCharge : zone.ratePerM2;
+
+    if (zone.serviceCharge.trim() === '' || weight.trim() === '') {
       return `Every zone needs both figures — ${nameOf(zone.zoneId)} is incomplete`;
     }
-    if (!/^\d+(\.\d{1,4})?$/.test(zone.serviceCharge.trim())) {
+    if (!amount.test(zone.serviceCharge.trim())) {
       return `${nameOf(zone.zoneId)}'s service charge is not a valid amount`;
     }
-    if (!/^\d+(\.\d{1,4})?$/.test(zone.ratePerM2.trim())) {
-      return `${nameOf(zone.zoneId)}'s rate per m² is not a valid amount`;
+    if (!amount.test(weight.trim())) {
+      return fixed
+        ? `${nameOf(zone.zoneId)}'s fixed weight charge is not a valid amount`
+        : `${nameOf(zone.zoneId)}'s rate per m² is not a valid amount`;
+    }
+    for (const bin of HOOK_BIN_BOXES) {
+      const price = zone[bin.field].trim();
+      if (price !== '' && !amount.test(price)) {
+        return `${nameOf(zone.zoneId)}'s hook bin ${bin.label} price is not a valid amount`;
+      }
     }
   }
   return null;
@@ -1793,7 +1961,7 @@ function NewRateCardDialog({
    * underneath — which is what happens when somebody adds a zone in a second
    * tab.
    */
-  const [zones, setZones] = useState<ZoneRateInput[]>(() => emptyZoneRates(zoneOptions));
+  const [zones, setZones] = useState<ZoneRateRow[]>(() => emptyZoneRates(zoneOptions));
   const [error, setError] = useState<string | null>(null);
 
   const reset = () => {
@@ -1819,11 +1987,7 @@ function NewRateCardDialog({
       const card = await create.mutateAsync({
         label: label.trim(),
         effectiveFrom,
-        zones: zones.map((zone) => ({
-          zoneId: zone.zoneId,
-          serviceCharge: zone.serviceCharge.trim(),
-          ratePerM2: zone.ratePerM2.trim(),
-        })),
+        zones: zones.map(toZoneRateInput),
       });
       reset();
       onClose();
@@ -1950,18 +2114,16 @@ function IssueScheduleDialog({
    * this card was written seeds blank rather than inheriting a neighbour's
    * price. The office is asked to fill it in; it is never guessed at.
    */
-  const seed = (): ZoneRateInput[] =>
-    zoneOptions.map((zone) => {
-      const existing = card.zones.find((rate) => rate.zoneId === zone.value);
-      return {
-        zoneId: zone.value,
-        serviceCharge: existing?.serviceCharge ?? '',
-        ratePerM2: existing?.ratePerM2 ?? '',
-      };
-    });
+  const seed = (): ZoneRateRow[] =>
+    zoneOptions.map((zone) =>
+      rowFrom(
+        zone.value,
+        card.zones.find((rate) => rate.zoneId === zone.value),
+      ),
+    );
 
   const [effectiveFrom, setEffectiveFrom] = useState(todayInSydney);
-  const [zones, setZones] = useState<ZoneRateInput[]>(seed);
+  const [zones, setZones] = useState<ZoneRateRow[]>(seed);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
@@ -1977,11 +2139,7 @@ function IssueScheduleDialog({
         id: card.id,
         schedule: {
           effectiveFrom,
-          zones: zones.map((zone) => ({
-            zoneId: zone.zoneId,
-            serviceCharge: zone.serviceCharge.trim(),
-            ratePerM2: zone.ratePerM2.trim(),
-          })),
+          zones: zones.map(toZoneRateInput),
         },
       });
       onClose();
@@ -3696,4 +3854,39 @@ function InvoiceTemplateDialog({
 function writable(invoicing: Settings['invoicing']): InvoicingSettings {
   const { logoUrl: _logoUrl, ...rest } = invoicing;
   return rest;
+}
+
+/**
+ * Settings → Driver lists: one sub-tab per list, as Pricing has, so the last
+ * list is not a long scroll away (23 Oct). The badge counts the options a
+ * driver is offered — those switched on.
+ */
+function DriverListsPanel() {
+  const [section, setSection] = useSection(DRIVER_LIST_SECTIONS);
+  const counts = useActiveOptionCounts();
+
+  return (
+    <Tabs variant="pill" value={section} onValueChange={setSection}>
+      <TabsList label="Driver lists">
+        <TabsTrigger value="hazards" badge={counts.siteHazards}>
+          Hazards
+        </TabsTrigger>
+        <TabsTrigger value="controls" badge={counts.riskControls}>
+          Controls
+        </TabsTrigger>
+        <TabsTrigger value="cant-collect" badge={counts.cantCollectReasons}>
+          Can&apos;t collect
+        </TabsTrigger>
+        <TabsTrigger value="contamination" badge={counts.contaminationTypes}>
+          Contamination
+        </TabsTrigger>
+      </TabsList>
+
+      {DRIVER_LIST_SECTIONS.map((key) => (
+        <TabsPanel key={key} value={key}>
+          <DriverListsCard list={DRIVER_LIST_OF[key]} />
+        </TabsPanel>
+      ))}
+    </Tabs>
+  );
 }

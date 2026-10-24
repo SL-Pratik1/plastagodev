@@ -136,6 +136,13 @@ const runTipOffSchema = new Schema(
     tippedOffAt: { type: Date, required: true },
     /** Where the docket photo lives. The API serves a URL; it stores no bytes. */
     docketPhotoKey: { type: String, default: null },
+    /**
+     * REFERENCE → `vehicles._id` — the vehicle the driver chose for the run's
+     * day. Null for office entries and when the driver had none.
+     */
+    vehicleId: { type: Schema.Types.ObjectId, default: null, ref: 'Vehicle' },
+    /** The plate at the time, frozen for display. */
+    vehicleRego: { type: String, default: null, trim: true },
   },
   { collection: RUN_TIP_OFFS_COLLECTION, timestamps: true, versionKey: false },
 );

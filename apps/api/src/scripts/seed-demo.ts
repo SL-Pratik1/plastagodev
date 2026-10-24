@@ -119,6 +119,25 @@ function int(min: number, max: number): number {
   return min + Math.floor(random() * (max - min + 1));
 }
 
+const usedPoNumbers = new Set<string>();
+
+/**
+ * A purchase-order number not drawn before.
+ *
+ * ⚠️ The draws are seeded, but how MANY happen depends on today's date, so
+ * some days drew one number twice and `account_po_unique` failed the whole
+ * seed (24 Oct). A repeat is drawn again.
+ */
+function poNumberBetween(min: number, max: number): string {
+  for (;;) {
+    const candidate = `PO-${String(int(min, max))}`;
+    if (!usedPoNumbers.has(candidate)) {
+      usedPoNumbers.add(candidate);
+      return candidate;
+    }
+  }
+}
+
 function pick<T>(values: readonly T[]): T {
   const value = values[Math.floor(random() * values.length)];
   if (value === undefined) throw new Error('pick() called with an empty array');
@@ -1251,6 +1270,8 @@ function buildCredential(
 /* ══ Section 3 — the fleet ══════════════════════════════════════════════════ */
 
 interface AssignedTruck {
+  /** The vehicle's `_id` — what pre-starts, defects and dockets link to. */
+  id: mongoose.Types.ObjectId;
   rego: string;
   label: string;
 }
@@ -1270,10 +1291,12 @@ async function seedFleet(people: People): Promise<Map<string, AssignedTruck>> {
    * wrong kind of identifier.
    */
   const truckByDriver = new Map<string, AssignedTruck>();
+  const vehicleIdByRego = new Map<string, mongoose.Types.ObjectId>();
   for (const seed of VEHICLES) {
     const id = oid();
+    vehicleIdByRego.set(seed.rego, id);
     if (seed.driverName) {
-      truckByDriver.set(seed.driverName, { rego: seed.rego, label: seed.label });
+      truckByDriver.set(seed.driverName, { id, rego: seed.rego, label: seed.label });
     }
     vehicleDocs.push({
       _id: id,
@@ -1392,6 +1415,10 @@ async function seedFleet(people: People): Promise<Map<string, AssignedTruck>> {
         resolutionNote: 'Mount re-tightened at the yard.',
       },
     );
+  }
+  // Each defect links to its vehicle by id; the plate above is only for display.
+  for (const defect of defectDocs) {
+    defect.vehicleId = vehicleIdByRego.get(String(defect.vehicleRego)) ?? null;
   }
   await VehicleModel.insertMany(vehicleDocs);
   await VehicleExpenseModel.insertMany(expenseDocs);
@@ -1961,7 +1988,10 @@ function buildSchedule(
 }
 
 /* ══ Section 6 — persisting runs, and the paper trail each job leaves ═══════ */
-async function persistRuns(runs: readonly RunDraft[]): Promise<void> {
+async function persistRuns(
+  runs: readonly RunDraft[],
+  truckByDriver: Map<string, AssignedTruck>,
+): Promise<void> {
   /*
    * The most recent finished day is left at `tipped-off` rather than `closed`.
    * The two are separate states because the weighbridge docket arrives before
@@ -1999,6 +2029,7 @@ async function persistRuns(runs: readonly RunDraft[]): Promise<void> {
     .filter((run) => run.status === 'closed' && run.stops.length > 0)
     .map((run) => {
       const netKg = run.stops.reduce((sum, stop) => sum + (stop.recoveredWeightKg ?? 0), 0);
+      const truck = run.driver ? truckByDriver.get(run.driver.name) : undefined;
       return {
         runId: run.id,
         facility: pick([
@@ -2011,6 +2042,8 @@ async function persistRuns(runs: readonly RunDraft[]): Promise<void> {
         netKg,
         tippedOffAt: at(run.date, 15, int(0, 59)),
         docketPhotoKey: null,
+        vehicleId: truck?.id ?? null,
+        vehicleRego: truck?.rego ?? null,
       };
     })
     // A run where every stop was futile recovered nothing, and a zero-weight
@@ -2231,9 +2264,12 @@ async function seedJobDetail(
   /* ── Pre-starts: one per run, filed against the run's first stop ───────── */
   const preStartDocs: Record<string, unknown>[] = [];
   const PRE_START_TOTAL = 10;
+  // One per driver, day and vehicle — a driver's afternoon run shares the morning check.
+  const checkedDays = new Set<string>();
   for (const run of runs) {
     const firstStop = run.stops[0];
     if (!run.driver || !firstStop) continue;
+    if (checkedDays.has(`${String(run.driver.id)}|${run.date}`)) continue;
     // Only the recent fortnight, which is as far back as anybody looks for a
     // Chain of Responsibility record.
     if (run.date < day(-14) || run.date > TODAY) continue;
@@ -2246,11 +2282,14 @@ async function seedJobDetail(
      * surface one.
      */
     const failed = chance(0.12);
+    checkedDays.add(`${String(run.driver.id)}|${run.date}`);
     preStartDocs.push({
       jobId: firstStop.id,
+      date: run.date,
       completedAt: at(run.date, 5, int(30, 59)),
       driverId: run.driver.id,
       driverName: run.driver.name,
+      vehicleId: truckByDriver.get(run.driver.name)?.id ?? null,
       vehicleRego: truckByDriver.get(run.driver.name)?.rego ?? '',
       odometerKm: int(140_000, 390_000),
       failedItems: failed
@@ -2570,7 +2609,7 @@ async function seedPurchaseOrders(
     if (!recent && chance(0.08)) continue;
 
     const poId = oid();
-    const poNumber = `PO-${String(int(80_000, 99_999))}`;
+    const poNumber = poNumberBetween(80_000, 99_999);
     job.doc.poNumber = poNumber;
 
     /*
@@ -2683,7 +2722,7 @@ function buildWaitingOrders(
 
     return {
       _id: oid(),
-      poNumber: `PO-${String(int(60_000, 79_999))}`,
+      poNumber: poNumberBetween(60_000, 79_999),
       accountId: account.id,
       accountName: account.name,
       receivedAt: at(toWeekday(day(-entry.agedDays)), int(8, 16), int(0, 59)),
@@ -2848,7 +2887,7 @@ function buildExtractions(accounts: readonly SeededAccount[]): Record<string, un
     if (!account) return;
     const slug = account.name.toLowerCase().replace(/[^a-z0-9]+/g, '');
     const areaValue = area(200, 900);
-    const poNumber = `PO-${String(int(80_000, 99_999))}`;
+    const poNumber = poNumberBetween(80_000, 99_999);
     const siteAddress = `${String(int(2, 140))} ${pick(STREETS)}`;
     const unmatched = review.reason === 'no-account-match';
 
@@ -2917,7 +2956,7 @@ function buildExtractions(accounts: readonly SeededAccount[]): Record<string, un
       pageCount: 1,
       storageKey: null,
       documentText: 'PURCHASE ORDER',
-      poNumber: confirmed ? `PO-${String(int(80_000, 99_999))}` : null,
+      poNumber: confirmed ? poNumberBetween(80_000, 99_999) : null,
       amountExGst: confirmed ? decimal(int(30_000, 90_000)) : null,
       extractedAreaM2: confirmed ? area(200, 800) : null,
       extractedBagAllowance: null,
@@ -4016,7 +4055,7 @@ async function main(): Promise<void> {
   // Jobs go in LAST of the job-shaped writes, because everything above mutates
   // their drafts — the PO number, the invoice state, the charge totals.
   await seedJobDetail(jobs, runs, truckByDriver);
-  await persistRuns(runs);
+  await persistRuns(runs, truckByDriver);
 
   await seedQueues(jobs, people);
   await seedLeads(accounts);

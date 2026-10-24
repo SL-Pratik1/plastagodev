@@ -5,6 +5,7 @@ import {
   NonEmptyStringSchema,
   ObjectIdSchema,
 } from './primitives.js';
+import { TermsSignatureSummarySchema } from './terms.js';
 
 /**
  * The party model (M1.2): **Account ≠ Builder ≠ Site ≠ Contact.**
@@ -444,6 +445,16 @@ export const AccountListItemSchema = z
   })
   .meta({ id: 'AccountListItem' });
 
+/** Where certificates go. Blank is allowed until "Receives certificates" is ticked. */
+export const CertificateEmailSchema = z
+  .string()
+  .trim()
+  .max(160, 'Keep the email under 160 characters')
+  .refine(
+    (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
+    'Enter a valid email address, or leave it blank',
+  );
+
 /**
  * Creating an account directly, with no lead behind it.
  *
@@ -508,6 +519,12 @@ export const AccountDraftSchema = z
      */
     sendInvitation: z.boolean(),
     notes: z.string().trim().max(500),
+    /**
+     * Matt, 21 Oct — whether they receive diversion certificates. Ticking it
+     * needs m² + kg and a certificate email; the service says which is missing.
+     */
+    receivesCertificates: z.boolean().default(false),
+    certificateEmail: CertificateEmailSchema.default(''),
   })
   .meta({ id: 'AccountDraft' });
 
@@ -557,6 +574,22 @@ export const AccountSchema = AccountListItemSchema.extend({
    * goes nowhere is not.
    */
   certificateEmail: z.string().nullable(),
+  /**
+   * Matt, 21 Oct: certificates go *"only to certain customers"*. Ticked, one is
+   * issued and emailed at tip-off; not ticked, nothing is sent and the portal
+   * hides the Certificates tab.
+   */
+  receivesCertificates: z.boolean().default(false),
+  /**
+   * Matt, 21 Oct — the onboarding tick when the account was opened. On: their
+   * administrator completes the details, the director's guarantee and signs the
+   * terms on first sign-in. Off: already covered by a signed contract.
+   */
+  termsRequired: z.boolean().default(false),
+  /** Their latest signing, or null. See `TermsSignatureSummarySchema`. */
+  termsSignature: TermsSignatureSummarySchema.nullable().default(null),
+  /** Asked to sign and has not signed the current version yet. */
+  termsPending: z.boolean().default(false),
   abn: z.string(),
   /**
    * The registered details the CUSTOMER supplies about themselves.
@@ -655,19 +688,67 @@ export const AccountUpdateSchema = z
      * to this specific email address."* Blank falls back to the sustainability
      * contact, then to accounts.
      */
-    certificateEmail: z
-      .string()
-      .trim()
-      .max(160, 'Keep the email under 160 characters')
-      .refine(
-        (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
-        'Enter a valid email address, or leave it blank',
-      ),
+    certificateEmail: CertificateEmailSchema,
+    /** Matt, 21 Oct. Left out keeps the current setting, for older clients. */
+    receivesCertificates: z.boolean().optional(),
     notes: z.string().trim().max(500),
   })
   .meta({ id: 'AccountUpdate' });
 
 export type AccountUpdate = z.infer<typeof AccountUpdateSchema>;
+
+/**
+ * The commercial terms, changed on their own route.
+ *
+ * Matt, 21 Oct: *"there's currently no way to change the rate card that
+ * they're on… commercial terms, the rate card, payment terms, all of that."*
+ * Kept apart from `AccountUpdate` on purpose — these re-price work, so they are
+ * a deliberate act with its own confirmation rather than a typo fix.
+ */
+export const AccountCommercialTermsSchema = z
+  .object({
+    rateCardId: RateCardIdSchema,
+    paymentTermsDays: z
+      .number({ error: 'Enter the payment terms in days' })
+      .int('Whole days only')
+      .min(0, 'Payment terms cannot be negative')
+      .max(90, 'Payment terms are at most 90 days'),
+    poPolicy: PoPolicySchema,
+    captureMode: CaptureModeSchema,
+    /**
+     * Re-price their open, not-invoiced jobs on the new rate card too.
+     *
+     * Off by default: a job keeps the price it was booked at unless the office
+     * opts in here. Nothing already on an invoice ever moves.
+     */
+    repriceOpenJobs: z.boolean().default(false),
+  })
+  .meta({ id: 'AccountCommercialTerms' });
+
+/** What a commercial-terms change would touch, shown before it is saved. */
+export const CommercialTermsImpactSchema = z
+  .object({
+    /** Open jobs with no invoice — the ones "Update their price too" would re-price. */
+    openJobs: z.number().int().nonnegative(),
+    /** Invoices held for a PO, released if the PO requirement is switched off. */
+    awaitingPoInvoices: z.number().int().nonnegative(),
+  })
+  .meta({ id: 'CommercialTermsImpact' });
+
+export const CommercialTermsResultSchema = z
+  .object({
+    account: AccountSchema,
+    repricedJobs: z.number().int().nonnegative(),
+    /** Jobs the new card could not price — they keep their booked price. */
+    notRepriced: z.array(z.object({ jobNumber: z.number().int(), reason: z.string() })),
+    releasedInvoices: z.number().int().nonnegative(),
+  })
+  .meta({ id: 'CommercialTermsResult' });
+
+export type AccountCommercialTerms = z.infer<typeof AccountCommercialTermsSchema>;
+export type AccountCommercialTermsDraft = z.input<typeof AccountCommercialTermsSchema>;
+export type CommercialTermsImpact = z.infer<typeof CommercialTermsImpactSchema>;
+export type CommercialTermsResult = z.infer<typeof CommercialTermsResultSchema>;
 
 /**
  * M7.5 — which invoice template this account's invoices are drawn with.

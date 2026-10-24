@@ -92,11 +92,11 @@ export function usePortalQuote(draft: PortalBookingDraft | null, enabled: boolea
   return useQuery({
     queryKey: queryKeys.portal.quote(draft),
     queryFn: () => portal.quote(draft as PortalBookingDraft),
-    // A builder's booking has no area to price against — the PO carries it, and
-    // the office prices the job. No area, no quote, rather than a quote of $0.
     // The suburb carries the zone, and the zone is what prices the job — so
-    // there is nothing to quote until one is chosen.
-    enabled: enabled && draft !== null && draft.placeId !== '' && (draft.expectedAreaM2 ?? 0) > 0,
+    // there is nothing to quote until one is chosen. Whether an area is needed
+    // is the booking page's call: it hands over no draft while a per-m² pickup
+    // has none, and a fixed-price pickup (21 Oct) is quoted without one.
+    enabled: enabled && draft !== null && draft.placeId !== '',
     staleTime: 30_000,
     // A failed quote must never block a booking — the price is informational
     // here, and the authoritative figure is on the invoice.

@@ -12,12 +12,15 @@ export function jobPhotos(photos: readonly DriverPhoto[]): DriverPhoto[] {
   return photos.filter((photo) => photoPurpose(photo) === 'job');
 }
 
-/** The photos taken as evidence for one exception report, and nothing else. */
+/**
+ * The photos taken as evidence for one exception report, and nothing else —
+ * only those that reached storage. A failed upload is not evidence.
+ */
 export function evidencePhotos(
   photos: readonly DriverPhoto[],
   report: 'futile' | 'contamination',
 ): DriverPhoto[] {
-  return photos.filter((photo) => photoPurpose(photo) === report);
+  return photos.filter((photo) => photo.uploaded && photoPurpose(photo) === report);
 }
 
 /**
@@ -29,6 +32,9 @@ export function evidencePhotos(
  * a module that exports components and nothing else. A helper living beside the
  * grid would have quietly disabled HMR for every screen that imports it.
  *
+ * ⚠️ Only a photo that reached storage fills a slot. One whose upload failed
+ * used to tick it and unlock Complete, with nothing behind the tick.
+ *
  * The conditional slots are excluded on purpose. "Cars still on site" only
  * applies when the site could not be closed, and requiring it always would train
  * drivers to take a meaningless photo to get past the guard — which is worse than
@@ -39,6 +45,7 @@ export function missingRequiredPhotos(
   required: readonly RequiredPhoto[],
 ): RequiredPhoto[] {
   return required.filter(
-    (slot) => slot.required && !photos.some((photo) => photo.slot === slot.key),
+    (slot) =>
+      slot.required && !photos.some((photo) => photo.uploaded && photo.slot === slot.key),
   );
 }

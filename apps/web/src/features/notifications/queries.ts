@@ -28,6 +28,32 @@ export function useNotificationSummary() {
   });
 }
 
+/** Unread driver messages, newest first — what the console's pop-up shows. */
+const DRIVER_MESSAGES: ListQuery = {
+  page: 1,
+  pageSize: 20,
+  filters: { category: 'message', unreadOnly: 'true' },
+};
+
+/**
+ * Driver messages nobody has opened yet (Matt, 21 Oct: *"a message bubble down
+ * the bottom … because otherwise they'll never know it's there"*).
+ *
+ * Every 20 seconds rather than the bell's minute: a driver asking a question
+ * is usually standing on a site waiting for the answer. Customer messages share
+ * the category, so the driver thread is picked out by where it links.
+ */
+export function useUnreadDriverMessages() {
+  const { notifications } = useServices();
+  return useQuery({
+    queryKey: queryKeys.notifications.list(DRIVER_MESSAGES),
+    queryFn: () => notifications.list(DRIVER_MESSAGES),
+    refetchInterval: 20_000,
+    select: (page) =>
+      page.data.filter((item) => item.readAt === null && item.href.includes('thread=driver')),
+  });
+}
+
 function useNotificationMutation<TInput, TResult>(mutationFn: (input: TInput) => Promise<TResult>) {
   const queryClient = useQueryClient();
 

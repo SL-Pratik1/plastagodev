@@ -1,9 +1,6 @@
 import {
   EVIDENCE_PHOTO_CAPTIONS,
   EVIDENCE_PHOTO_SLOTS,
-  EXCEPTION_REASONS,
-  EXCEPTION_REASON_LABELS,
-  type ExceptionReason,
 } from '@plastago/shared';
 import {
   Alert,
@@ -20,10 +17,13 @@ import { CameraIcon, CircleSlashIcon } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { PhotoThumb } from '@/components/driver/photo-grid';
+import { photoUploadFailure } from '@/features/driver/photo-upload-error';
 import { evidencePhotos } from '@/components/driver/photo-rules';
+import { cachedDriverLists } from '@/offline/driver-lists-cache';
 import {
   useAddPhoto,
   useDriverJob,
+  useDriverLists,
   useMarkFutile,
   useRemovePhoto,
 } from '@/features/driver/queries';
@@ -48,14 +48,6 @@ import { currentPosition } from '@/lib/geolocation';
  *    doing.
  */
 
-/** The five the doc names, in the order a driver meets them. */
-const DRIVER_REASONS: readonly ExceptionReason[] = [
-  'site-not-ready',
-  'access-blocked',
-  'nobody-on-site',
-  'site-closed',
-  'crane-unavailable',
-];
 
 export function DriverJobFutilePage() {
   const { jobId } = useParams();
@@ -165,7 +157,10 @@ function FutileForm({
   const addPhoto = useAddPhoto();
   const removePhoto = useRemovePhoto();
 
-  const [reason, setReason] = useState<ExceptionReason | null>(null);
+  // Edited in Settings (Matt, 21 Oct); only the reasons switched on are offered.
+  const lists = useDriverLists().data ?? cachedDriverLists();
+  const reasons = lists.cantCollectReasons.filter((option) => option.active);
+  const [reason, setReason] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [capturing, setCapturing] = useState(false);
@@ -221,10 +216,10 @@ function FutileForm({
           position,
         });
         setError(null);
-      } catch {
-        // Photos are the one driver action that needs signal — see the note in
-        // the photos screen. Saying so beats a bare "try again".
-        toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
+        // Off the phone already — see the same line on the Photos screen.
+        toast.success('Photo uploaded');
+      } catch (error) {
+        toast.error('Could not upload that photo', photoUploadFailure(error));
       } finally {
         setCapturing(false);
       }
@@ -310,7 +305,7 @@ function FutileForm({
       <fieldset className="space-y-2">
         <legend className="text-sm font-medium">What stopped you?</legend>
         <div className="space-y-2">
-          {DRIVER_REASONS.map((option) => (
+          {reasons.map(({ key: option, label }) => (
             <label
               key={option}
               className={cn(
@@ -330,7 +325,7 @@ function FutileForm({
                   setError(null);
                 }}
               />
-              {EXCEPTION_REASON_LABELS[option]}
+              {label}
             </label>
           ))}
         </div>
@@ -421,7 +416,7 @@ function FutileForm({
         Report — could not collect
       </button>
 
-      {EXCEPTION_REASONS.length > 0 && (
+      {reasons.length > 0 && (
         <p className="text-center text-xs text-muted-foreground">
           Not sure? Ring the office on{' '}
           <a href="tel:1300395438" className="underline underline-offset-4">

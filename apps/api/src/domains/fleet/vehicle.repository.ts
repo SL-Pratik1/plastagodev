@@ -6,12 +6,14 @@ import type {
   VehicleExpense,
   VehicleExpenseKind,
   VehicleListItem,
+  VehiclePreStart,
   VehicleType,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { centsToMoney, fromDecimal128, moneyToCents, toDecimal128 } from '../../lib/money.js';
 import { VehicleDefectModel } from '../driver/defect.model.js';
-import { VehicleExpenseModel, VehicleModel } from './vehicle.model.js';
+import { JobPreStartModel } from '../jobs/job.model.js';
+import { VehicleChoiceModel, VehicleExpenseModel, VehicleModel } from './vehicle.model.js';
 
 /**
  * Repository layer — the ONLY file in this domain that touches Mongoose
@@ -73,6 +75,23 @@ interface RawVehicle {
   nextServiceDueOn: string | null;
   purchasedOn: string | null;
   notes: string;
+  registrationRenewals?: Array<{
+    renewedAt: Date;
+    renewedBy: string;
+    periodMonths: number;
+    fromExpiry: string;
+    toExpiry: string;
+  }>;
+}
+
+interface RawPreStart {
+  _id: mongoose.Types.ObjectId;
+  completedAt: Date;
+  driverName: string;
+  odometerKm: number;
+  itemsChecked: number;
+  failedItems: Array<{ key: string; label: string; note?: string }>;
+  items?: Array<{ key: string; label: string; state: VehiclePreStart['items'][number]['state']; note?: string }>;
 }
 
 interface RawExpense {
@@ -142,8 +161,8 @@ export const vehicleRepository = {
     if (query.service) clauses.push(expiryClause('nextServiceDueOn', query.service));
 
     if (query.defects) {
-      const openRegos = await openDefectRegos();
-      clauses.push({ rego: query.defects === 'open' ? { $in: [...openRegos] } : { $nin: [...openRegos] } });
+      const openIds = await openDefectVehicleIds();
+      clauses.push({ _id: query.defects === 'open' ? { $in: openIds } : { $nin: openIds } });
     }
 
     if (clauses.length > 0) filter.$and = clauses;
@@ -174,11 +193,13 @@ export const vehicleRepository = {
      * figures need every expense a vehicle has, so doing this per row is the
      * N+1 that turns a 20-truck fleet list into 41 queries.
      */
-    const [expenses, defectCounts] = await Promise.all([
+    const [expenses, defectCounts, driversToday, checkedToday] = await Promise.all([
       VehicleExpenseModel.find({ vehicleId: { $in: ids } })
         .sort({ incurredOn: 1 })
         .lean<RawExpense[]>(),
-      openDefectCounts(rows.map((row) => row.rego)),
+      openDefectCounts(ids),
+      driversTodayOf(ids),
+      preStartedToday(ids),
     ]);
 
     const byVehicle = groupByVehicle(expenses);
@@ -188,7 +209,9 @@ export const vehicleRepository = {
         toListItem(
           row,
           derive(byVehicle.get(row._id.toHexString()) ?? []),
-          defectCounts.get(row.rego) ?? 0,
+          defectCounts.get(row._id.toHexString()) ?? 0,
+          driversToday.get(row._id.toHexString()) ?? null,
+          checkedToday.has(row._id.toHexString()),
         ),
       ),
       meta: {
@@ -200,30 +223,69 @@ export const vehicleRepository = {
     };
   },
 
-  /** One vehicle with its expense log and its defects. */
+  /**
+   * One page of a vehicle's pre-start checks, newest first (23 Oct) — all of
+   * them, or one Sydney day's. Null when there is no such vehicle.
+   */
+  async preStarts(
+    id: string,
+    query: { page: number; pageSize: number; date?: string | undefined },
+  ): Promise<{ data: VehiclePreStart[]; meta: PageMeta } | null> {
+    if (!mongoose.isValidObjectId(id)) return null;
+    const vehicle = await VehicleModel.findById(id).select({ _id: 1 }).lean<{ _id: mongoose.Types.ObjectId }>();
+    if (!vehicle) return null;
+
+    const filter: Record<string, unknown> = { vehicleId: vehicle._id };
+    if (query.date) filter.date = query.date;
+
+    const [rows, total] = await Promise.all([
+      JobPreStartModel.find(filter)
+        .sort({ completedAt: -1 })
+        .skip((query.page - 1) * query.pageSize)
+        .limit(query.pageSize)
+        .lean<RawPreStart[]>(),
+      JobPreStartModel.countDocuments(filter),
+    ]);
+
+    return {
+      data: rows.map(toPreStart),
+      meta: {
+        page: query.page,
+        pageSize: query.pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / query.pageSize)),
+      },
+    };
+  },
+
+  /** One vehicle with its expense log, defects and pre-start checks. */
   async findById(id: string): Promise<Vehicle | null> {
     if (!mongoose.isValidObjectId(id)) return null;
 
     const row = await VehicleModel.findById(id).lean<RawVehicle>();
     if (!row) return null;
 
-    const [expenses, defects] = await Promise.all([
+    const [expenses, defects, preStartCount, driversToday, checkedToday] = await Promise.all([
       VehicleExpenseModel.find({ vehicleId: row._id }).sort({ incurredOn: 1 }).lean<RawExpense[]>(),
-      /*
-       * Defects are matched by REGO, not by an id.
-       *
-       * A driver reports one from the phone against the plate they can see —
-       * they may be in a hired truck, or one the office has not registered yet
-       * (see `defect.model.ts`). Matching on rego is what makes those reports
-       * findable rather than orphaned.
-       */
-      VehicleDefectModel.find({ vehicleRego: row.rego }).sort({ occurredAt: -1 }).lean(),
+      // By the vehicle's id, not its plate: new plates keep the history.
+      VehicleDefectModel.find({ vehicleId: row._id }).sort({ occurredAt: -1 }).lean(),
+      // Matt, 21 Oct: pre-starts logged against the vehicle — counted here,
+      // listed a page at a time by `preStarts`.
+      JobPreStartModel.countDocuments({ vehicleId: row._id }),
+      driversTodayOf([row._id]),
+      preStartedToday([row._id]),
     ]);
 
     const derived = derive(expenses);
 
     return {
-      ...toListItem(row, derived, defects.filter((defect) => defect.status !== 'resolved').length),
+      ...toListItem(
+        row,
+        derived,
+        defects.filter((defect) => defect.status !== 'resolved').length,
+        driversToday.get(row._id.toHexString()) ?? null,
+        checkedToday.has(row._id.toHexString()),
+      ),
       make: row.make,
       model: row.model,
       year: row.year,
@@ -259,6 +321,16 @@ export const vehicleRepository = {
           resolvedOn: defect.resolvedAt ? defect.resolvedAt.toISOString().slice(0, 10) : null,
         }),
       ),
+      preStartCount,
+      registrationRenewals: [...(row.registrationRenewals ?? [])]
+        .reverse()
+        .map((renewal) => ({
+          renewedAt: renewal.renewedAt.toISOString(),
+          renewedBy: renewal.renewedBy,
+          periodMonths: renewal.periodMonths,
+          fromExpiry: renewal.fromExpiry,
+          toExpiry: renewal.toExpiry,
+        })),
       totalExpensesExGst: centsToMoney(derived.totalCents),
       distanceSinceFirstExpenseKm: derived.distanceKm,
     };
@@ -374,28 +446,59 @@ export const vehicleRepository = {
     return result.matchedCount === 1;
   },
 
-  /** F43 — rolls the registration forward by its own period. */
-  async renewRegistration(id: string, newExpiry: string): Promise<boolean> {
+  /**
+   * F43 — rolls the registration forward and keeps the renewal, with the length
+   * chosen for it, on the vehicle.
+   *
+   * Conditional on the expiry it rolled from, so a double-click cannot roll it
+   * forward twice.
+   */
+  async renewRegistration(
+    id: string,
+    renewal: {
+      renewedAt: Date;
+      renewedById: string;
+      renewedBy: string;
+      periodMonths: number;
+      fromExpiry: string;
+      toExpiry: string;
+    },
+  ): Promise<boolean> {
     if (!mongoose.isValidObjectId(id)) return false;
+    const { renewedById, ...rest } = renewal;
+    const entry = {
+      ...rest,
+      renewedById: mongoose.isValidObjectId(renewedById) ? new mongoose.Types.ObjectId(renewedById) : null,
+    };
 
     const result = await VehicleModel.updateOne(
-      { _id: new mongoose.Types.ObjectId(id) },
-      { $set: { registrationExpiresOn: newExpiry } },
+      { _id: new mongoose.Types.ObjectId(id), registrationExpiresOn: renewal.fromExpiry },
+      {
+        $set: {
+          registrationExpiresOn: renewal.toExpiry,
+          // The next renewal starts from the length chosen this time.
+          registrationPeriodMonths: renewal.periodMonths,
+        },
+        $push: { registrationRenewals: entry },
+      },
     );
 
     return result.matchedCount === 1;
   },
 
-  /** Moves a driver-reported defect along. Matched by rego, like the read. */
+  /** Moves a driver-reported defect along — only one filed against this vehicle. */
   async setDefectState(
     defectId: string,
-    rego: string,
+    vehicleId: string,
     state: 'open' | 'scheduled' | 'resolved',
   ): Promise<boolean> {
-    if (!mongoose.isValidObjectId(defectId)) return false;
+    if (!mongoose.isValidObjectId(defectId) || !mongoose.isValidObjectId(vehicleId)) return false;
 
     const result = await VehicleDefectModel.updateOne(
-      { _id: new mongoose.Types.ObjectId(defectId), vehicleRego: rego },
+      {
+        _id: new mongoose.Types.ObjectId(defectId),
+        vehicleId: new mongoose.Types.ObjectId(vehicleId),
+      },
       {
         $set: {
           status: state,
@@ -553,7 +656,34 @@ const SEVERITY_TO_FLEET: Record<string, VehicleDefect['severity']> = {
   unroadworthy: 'high',
 };
 
-function toListItem(row: RawVehicle, derived: Derived, openDefectCount: number): VehicleListItem {
+function toPreStart(check: RawPreStart): VehiclePreStart {
+  return {
+    id: check._id.toHexString(),
+    completedAt: check.completedAt.toISOString(),
+    driverName: check.driverName,
+    odometerKm: check.odometerKm,
+    itemsChecked: check.itemsChecked,
+    failedItems: check.failedItems.map((item) => ({
+      key: item.key,
+      label: item.label,
+      note: item.note ?? '',
+    })),
+    items: (check.items ?? []).map((item) => ({
+      key: item.key,
+      label: item.label,
+      state: item.state,
+      note: item.note ?? '',
+    })),
+  };
+}
+
+function toListItem(
+  row: RawVehicle,
+  derived: Derived,
+  openDefectCount: number,
+  driverToday: string | null,
+  preStartToday: boolean,
+): VehicleListItem {
   return {
     id: row._id.toHexString(),
     rego: row.rego,
@@ -562,6 +692,8 @@ function toListItem(row: RawVehicle, derived: Derived, openDefectCount: number):
     active: row.active,
     odometerKm: row.odometerKm,
     assignedDriverName: row.assignedDriverName,
+    driverToday,
+    preStartToday,
     costPerKm: derived.costPerKm,
     lastServiceOn: derived.lastServiceOn,
     nextServiceDueOn: row.nextServiceDueOn,
@@ -585,30 +717,56 @@ function groupByVehicle(expenses: RawExpense[]): Map<string, RawExpense[]> {
   return grouped;
 }
 
-/** Open defect counts per rego, in one query for the whole page. */
-async function openDefectCounts(regos: string[]): Promise<Map<string, number>> {
-  if (regos.length === 0) return new Map();
+/**
+ * Who chose each vehicle for today in the driver app (Matt, 21 Oct), in one
+ * query for the whole page.
+ */
+async function driversTodayOf(ids: mongoose.Types.ObjectId[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
 
-  const counts = await VehicleDefectModel.aggregate<{ _id: string; count: number }>([
-    { $match: { vehicleRego: { $in: regos }, status: { $ne: 'resolved' } } },
-    { $group: { _id: '$vehicleRego', count: { $sum: 1 } } },
+  const choices = await VehicleChoiceModel.find({ date: todayIso(), vehicleId: { $in: ids } })
+    .select({ vehicleId: 1, driverName: 1 })
+    .lean<Array<{ vehicleId: mongoose.Types.ObjectId; driverName: string }>>();
+
+  return new Map(choices.map((choice) => [choice.vehicleId.toHexString(), choice.driverName]));
+}
+
+/** The vehicles (ids) with a pre-start check today (Sydney), in one query for the whole page. */
+async function preStartedToday(ids: mongoose.Types.ObjectId[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const checked: unknown[] = await JobPreStartModel.distinct('vehicleId', {
+    vehicleId: { $in: ids },
+    date: todayIso(),
+  });
+  return new Set(
+    checked.flatMap((id) => (id instanceof mongoose.Types.ObjectId ? [id.toHexString()] : [])),
+  );
+}
+
+/** Open defect counts per vehicle id, in one query for the whole page. */
+async function openDefectCounts(ids: mongoose.Types.ObjectId[]): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map();
+
+  const counts = await VehicleDefectModel.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
+    { $match: { vehicleId: { $in: ids }, status: { $ne: 'resolved' } } },
+    { $group: { _id: '$vehicleId', count: { $sum: 1 } } },
   ]);
 
-  return new Map(counts.map((row) => [row._id, row.count]));
+  return new Map(counts.map((row) => [row._id.toHexString(), row.count]));
 }
 
 /**
- * Every rego with at least one unresolved defect — fleet-wide, not just this
+ * Every vehicle with at least one unresolved defect — fleet-wide, not just this
  * page. The "has open defects" filter has to select before pagination, so it
  * cannot reuse `openDefectCounts`, which is scoped to the rows already fetched.
  */
-async function openDefectRegos(): Promise<Set<string>> {
-  const rows = await VehicleDefectModel.aggregate<{ _id: string }>([
-    { $match: { status: { $ne: 'resolved' } } },
-    { $group: { _id: '$vehicleRego' } },
+async function openDefectVehicleIds(): Promise<mongoose.Types.ObjectId[]> {
+  const rows = await VehicleDefectModel.aggregate<{ _id: mongoose.Types.ObjectId | null }>([
+    { $match: { status: { $ne: 'resolved' }, vehicleId: { $ne: null } } },
+    { $group: { _id: '$vehicleId' } },
   ]);
 
-  return new Set(rows.map((row) => row._id));
+  return rows.flatMap((row) => (row._id ? [row._id] : []));
 }
 
 function todayIso(): string {

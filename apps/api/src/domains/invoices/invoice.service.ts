@@ -4,6 +4,7 @@ import type {
   InvoiceDownloads,
   InvoiceKind,
   InvoiceListItem,
+  InvoiceResendResult,
   InvoiceStatus,
   PageMeta,
   RaisedInvoice,
@@ -16,9 +17,16 @@ import { centsToMoney, moneyToCents } from '../../lib/money.js';
 import { withTransaction } from '../../lib/transaction.js';
 import { buildInvoiceEmail } from '../../integrations/notice-messages.js';
 import { accountRepository } from '../accounts/account.repository.js';
+import { notificationRepository } from '../notifications/notification.repository.js';
 import { notificationService } from '../notifications/notification.service.js';
 import { outboundService } from '../notifications/outbound.service.js';
-import { billableCharges, jobRepository, setInvoiceStatus } from '../jobs/job.repository.js';
+import {
+  billableCharges,
+  completionEvidence,
+  jobRepository,
+  setInvoiceStatus,
+} from '../jobs/job.repository.js';
+import { REQUIRED_PHOTOS } from '../jobs/photo-protocol.js';
 import { settingsRepository } from '../settings/settings.repository.js';
 import { invoiceRenderService } from './invoice-render.service.js';
 import { xeroService } from '../xero/xero.service.js';
@@ -73,6 +81,32 @@ const MATCHES_NOTHING = '000000000000000000000000';
 /** GST is 10% in Australia and is not a setting anybody may change. */
 const GST_DIVISOR = 10;
 
+/** The send-log event every invoice email is recorded under. */
+const INVOICE_EMAIL_EVENT = 'invoice-sent';
+
+/**
+ * Who sends an invoice on completion (21 Oct).
+ *
+ * Not a real user, and deliberately visible as such — the same convention as
+ * the certificates' automatic path. Nobody in the office made this decision.
+ */
+const AUTOMATIC_CALLER: Caller = {
+  userId: 'system',
+  name: 'PlastaGo',
+  roles: ['super-admin'],
+  accountId: null,
+};
+
+/** What invoicing a completed job did. See `invoiceCompletedJob`. */
+export interface AutoInvoiceOutcome {
+  /** What was missing, in words, when the job was held back instead. */
+  held: string[];
+  /** Invoice numbers raised or brought up to date. */
+  invoiced: number[];
+  /** Invoice numbers that went out. */
+  sent: number[];
+}
+
 export const invoiceService = {
   async list(
     query: ListInvoicesQuery,
@@ -88,7 +122,163 @@ export const invoiceService = {
     // what somebody pays.
     if (!invoice) throw AppError.notFound('No such invoice');
 
-    return invoice;
+    // The office's question ("did it reach them?"), not the customer's.
+    if (isCustomer(caller)) return invoice;
+
+    const emails = await notificationRepository.sendsForInvoice(invoice.id, INVOICE_EMAIL_EVENT);
+    return {
+      ...invoice,
+      emails: emails.map((email) => ({
+        to: email.toMasked,
+        at: email.sentAt.toISOString(),
+        outcome: email.outcome,
+        detail: email.detail,
+      })),
+    };
+  },
+
+  /**
+   * Matt, 21 Oct: *"the job invoice itself gets sent immediately. And we wait
+   * for the POs and approve those once we receive those POs."*
+   *
+   * Runs when the driver completes a job: bills it, and sends whatever is ready
+   * to go. An invoice that needs a PO the job does not have stays in Awaiting
+   * PO, exactly as before; extra charges still wait for approval.
+   *
+   * ── Why it checks the evidence first ──────────────────────────────────────
+   * Nobody looks at the job before it is billed any more. The photos and what
+   * the driver collected are what defend the charge, so a job missing them is
+   * held back and the office is told, rather than billed blind.
+   *
+   * ⚠️ Never throws. The completion is already written, and a driver at a site
+   * must not see a failure because billing could not finish — the office gets
+   * a bell and Raise invoice finishes it.
+   */
+  async invoiceCompletedJob(jobId: string): Promise<AutoInvoiceOutcome> {
+    const outcome: AutoInvoiceOutcome = { held: [], invoiced: [], sent: [] };
+    let jobNumber: number | null = null;
+
+    try {
+      const job = await jobRepository.findById(jobId, {
+        accountId: null,
+        bookedByUserId: null,
+        driverId: null,
+      });
+      if (!job || job.status !== 'completed') return outcome;
+      jobNumber = job.jobNumber;
+
+      const evidence = await completionEvidence(jobId);
+      // Priced per m² with no m² — its purchase order had none (23 Oct).
+      const missingArea = lacksArea(job);
+      outcome.held = [
+        ...REQUIRED_PHOTOS.filter(
+          (slot) => slot.required && !evidence.uploadedSlots.includes(slot.key),
+        ).map((slot) => `the ${slot.label.toLowerCase()} photo`),
+        ...(evidence.weightsRecorded ? [] : ['what was collected']),
+        ...(missingArea ? ['its m²'] : []),
+      ];
+
+      if (outcome.held.length > 0) {
+        await notificationService.notifyOffice({
+          category: 'invoice',
+          severity: 'action',
+          title: `Job #${String(job.jobNumber)} was not invoiced automatically`,
+          body:
+            missingArea && outcome.held.length === 1
+              ? 'It has no m², and this customer is charged per m². Set the m² on the job and it is invoiced straight away.'
+              : `It was completed without ${listOf(outcome.held)}. ${missingArea ? 'Set the m² on the job, then check' : 'Check'} the job and use Raise invoice.`,
+          href: `/admin/jobs/${jobId}`,
+          subjectKey: `auto-invoice-held:${jobId}`,
+          jobId,
+          jobNumber: job.jobNumber,
+        });
+        log.warn({ jobId, jobNumber: job.jobNumber, missing: outcome.held }, 'auto invoice held');
+        return outcome;
+      }
+
+      const billed = await billJob(job);
+      outcome.invoiced = billed.invoices.map((invoice) => invoice.invoiceNumber);
+
+      const ready = billed.invoices.filter((invoice) => invoice.status === 'draft');
+      if (ready.length === 0) return outcome;
+
+      const { emails } = await deliverInvoices(
+        ready.map((invoice) => invoice.id),
+        AUTOMATIC_CALLER,
+      );
+
+      for (const invoice of ready) {
+        const email = emails.get(invoice.id);
+        if (email === undefined) continue;
+        outcome.sent.push(invoice.invoiceNumber);
+
+        // Nobody received it — the one case the office must hear about.
+        if (email.sentTo.length === 0) {
+          await notificationService.notifyOffice({
+            category: 'invoice',
+            severity: 'action',
+            title: `Invoice ${email.invoiceNumber} was not emailed`,
+            body: `${email.noRecipient ? `${email.accountName} has no email address for invoices` : `The email failed: ${email.failed[0]?.reason ?? 'unknown error'}`}. Open it and press Resend invoice.`,
+            href: `/admin/invoices/${invoice.id}`,
+            subjectKey: `auto-invoice-email-failed:${invoice.id}`,
+            jobId,
+            jobNumber: job.jobNumber,
+          });
+        }
+      }
+
+      log.info({ jobId, jobNumber: job.jobNumber, ...outcome }, 'job invoiced on completion');
+    } catch (error) {
+      log.error({ err: error, jobId }, 'automatic invoicing failed — Raise invoice will finish it');
+      await notificationService.notifyOffice({
+        category: 'invoice',
+        severity: 'action',
+        title: `Job ${jobNumber === null ? '' : `#${String(jobNumber)} `}could not be invoiced automatically`,
+        body: 'Something went wrong while billing it. Open the job and use Raise invoice.',
+        href: `/admin/jobs/${jobId}`,
+        subjectKey: `auto-invoice-failed:${jobId}`,
+        jobId,
+        jobNumber,
+      });
+    }
+
+    return outcome;
+  },
+
+  /**
+   * Emails a sent invoice again (21 Oct).
+   *
+   * Invoices go out on their own now, so this is how the office answers "they
+   * never got it". Every address is tried again, even one that worked before:
+   * the person clicking has decided the first attempt did not land.
+   */
+  async resend(id: string, caller: Caller): Promise<InvoiceResendResult> {
+    assertFinance(caller);
+
+    const invoice = await invoiceRepository.findById(id, scopeFor(caller));
+    if (!invoice) throw AppError.notFound('No such invoice');
+
+    if (UNSENT_STATUSES.includes(invoice.status)) {
+      throw AppError.conflict(
+        invoice.status === 'awaiting-po'
+          ? 'That invoice is waiting for a purchase order — it has not been sent yet'
+          : 'That invoice has not been sent yet — use Send invoice',
+      );
+    }
+
+    const email = await emailInvoice(invoice, { resend: true });
+
+    if (email.noRecipient) {
+      throw AppError.conflict(
+        `${invoice.accountName} has no email address for invoices — add an accounts contact on the customer, then resend`,
+      );
+    }
+
+    log.info(
+      { invoiceId: id, sentTo: email.sentTo.length, failed: email.failed.length, by: caller.name },
+      'invoice resent',
+    );
+    return { sentTo: email.sentTo, failed: email.failed };
   },
 
   /**
@@ -246,21 +436,7 @@ export const invoiceService = {
     assertFinance(caller);
     if (ids.length === 0) throw AppError.validation('Select at least one invoice');
 
-    const now = new Date();
-
-    /*
-     * ⚠️ `awaiting-po` is deliberately NOT in `fromStatuses`. An invoice still
-     * waiting on a purchase order must not go out — that is the entire point of
-     * the queue, and a builder's AP system rejects an invoice with no PO on it
-     * anyway (Matt, 9:56).
-     */
-    const changed = await invoiceRepository.transitionMany({
-      ids,
-      fromStatuses: ['draft', 'unknown'],
-      to: 'sent',
-      scope: scopeFor(caller),
-      set: { sentAt: now },
-    });
+    const { changed } = await deliverInvoices(ids, caller);
 
     if (changed === 0) {
       const existing = await invoiceRepository.existingIds(ids, scopeFor(caller));
@@ -271,30 +447,6 @@ export const invoiceService = {
           : 'None of the selected invoices could be sent — they may already be sent, or still waiting on a purchase order',
       );
     }
-
-    /*
-     * M7.7 — "sent" now means sent.
-     *
-     * ⚠️ AFTER the status transition, and per invoice rather than per batch.
-     * The transition is the durable act (and the thing Xero and the ageing
-     * report read); the emails are best-effort on top of it. One unreachable
-     * accounts address must not roll back a batch of forty invoices, so each
-     * send stands or fails alone and is recorded either way.
-     */
-    await Promise.all(ids.map((id) => emailInvoice(id, now, caller)));
-
-    /*
-     * I1 · M7.8 — and into Xero.
-     *
-     * Same contract as the email above and for the same reason: after the
-     * durable transition, per invoice, and never able to fail the batch. A
-     * rejected invoice records "Xero push failed" on its own row with the
-     * reason, which is where the office looks and what the Retry button acts
-     * on. Rolling back forty sends because Xero disliked one account code
-     * would be the wrong trade in both directions — the invoices really were
-     * sent, and the customer already has the email.
-     */
-    await pushInvoicesToXero(ids, caller);
 
     log.info({ count: changed, by: caller.name }, 'invoices sent');
     return changed;
@@ -337,6 +489,22 @@ export const invoiceService = {
    * without moving the status would leave the row sitting there with a PO
    * printed beside it, which is how a queue stops being trusted.
    */
+  /**
+   * The account no longer needs a PO, so nothing of theirs should wait for one.
+   *
+   * Found by us: switching the policy off changes only what NEW invoices do.
+   * Without this, every invoice already in Awaiting PO stays there for good —
+   * its exit condition is a PO the customer will now never send.
+   */
+  async releaseAwaitingPoForAccount(accountId: string): Promise<number> {
+    const { released, jobIds } = await invoiceRepository.releaseAwaitingPo(accountId);
+    // The job grid's badge follows its invoices, as it does when a PO arrives.
+    for (const jobId of jobIds) await refreshJobRollup(jobId);
+
+    if (released > 0) log.info({ accountId, released }, 'awaiting-PO invoices released');
+    return released;
+  },
+
   async recordPo(id: string, poNumber: string, caller: Caller): Promise<void> {
     assertFinance(caller);
 
@@ -505,7 +673,28 @@ interface BillingOutcome {
  * Running it twice changes nothing the second time, which is what makes it safe
  * to call from both the Raise invoice button and every approval.
  */
+/**
+ * A job priced per m² that has no m² — its purchase order carried none.
+ *
+ * ⚠️ Billing it used to send the invoice without its m² charge at all: the
+ * customer was under-billed and nothing said so. A futile job is exempt; it
+ * bills only the attendance fee.
+ */
+function lacksArea(job: BillableJob): boolean {
+  return (
+    job.status !== 'futile' &&
+    job.areaPriced &&
+    (job.expectedAreaM2 === null || job.expectedAreaM2 <= 0)
+  );
+}
+
 async function billJob(job: BillableJob): Promise<BillingOutcome> {
+  if (lacksArea(job)) {
+    throw AppError.conflict(
+      `Job #${String(job.jobNumber)} has no m², and this customer is charged per m². Set the m² on the job first.`,
+    );
+  }
+
   const account = await accountRepository.findById(job.accountId, { accountId: null });
   if (!account) throw AppError.notFound('The account behind this job no longer exists');
 
@@ -807,6 +996,75 @@ async function refreshJobRollup(jobId: string, knownNumber?: number | null): Pro
   );
 }
 
+/* ── Sending (M7.7) ──────────────────────────────────────────────────────── */
+
+/**
+ * draft → sent, then the email and Xero. Shared by Send and by the automatic
+ * path on completion, so the two cannot drift apart.
+ *
+ * Returns how many moved, and what the email did for each invoice that moved.
+ */
+async function deliverInvoices(
+  ids: readonly string[],
+  caller: Caller,
+): Promise<{ changed: number; emails: Map<string, EmailOutcome> }> {
+  const sentAt = new Date();
+  const emails = new Map<string, EmailOutcome>();
+
+  /*
+   * ⚠️ `awaiting-po` is deliberately NOT in `fromStatuses`. An invoice still
+   * waiting on a purchase order must not go out — that is the entire point of
+   * the queue, and a builder's AP system rejects an invoice with no PO on it
+   * anyway (Matt, 9:56).
+   */
+  const changed = await invoiceRepository.transitionMany({
+    ids,
+    fromStatuses: ['draft', 'unknown'],
+    to: 'sent',
+    scope: scopeFor(caller),
+    set: { sentAt },
+  });
+  if (changed === 0) return { changed, emails };
+
+  /*
+   * M7.7 — "sent" now means sent.
+   *
+   * ⚠️ AFTER the status transition, and per invoice rather than per batch.
+   * The transition is the durable act (and the thing Xero and the ageing
+   * report read); the emails are best-effort on top of it. One unreachable
+   * accounts address must not roll back a batch of forty invoices, so each
+   * send stands or fails alone and is recorded either way.
+   *
+   * ── Why it re-reads the invoice instead of trusting the selection ────────
+   * `transitionMany` reports HOW MANY rows moved, not which — a bulk action
+   * over a grid selection is expected to be partly a no-op. Emailing everything
+   * that was selected would send a covering note for invoices that went out
+   * last week. Matching `sentAt` to this batch identifies the ones that moved.
+   */
+  await Promise.all(
+    ids.map(async (id) => {
+      const invoice = await invoiceRepository.findById(id, scopeFor(caller));
+      if (!invoice || invoice.status !== 'sent' || invoice.sentAt !== sentAt.toISOString()) return;
+      emails.set(id, await emailInvoice(invoice, { resend: false }));
+    }),
+  );
+
+  /*
+   * I1 · M7.8 — and into Xero.
+   *
+   * Same contract as the email above and for the same reason: after the
+   * durable transition, per invoice, and never able to fail the batch. A
+   * rejected invoice records "Xero push failed" on its own row with the
+   * reason, which is where the office looks and what the Retry button acts
+   * on. Rolling back forty sends because Xero disliked one account code
+   * would be the wrong trade in both directions — the invoices really were
+   * sent, and the customer already has the email.
+   */
+  await pushInvoicesToXero(ids, caller);
+
+  return { changed, emails };
+}
+
 /* ── Xero (I1 · M7.8) ────────────────────────────────────────────────────── */
 
 /**
@@ -882,22 +1140,25 @@ async function downloadFor(
 
 /* ── The covering email (M7.7 · M8.4) ───────────────────────────────────── */
 
+/** What emailing one invoice did. The invoice page and the bell both read it. */
+interface EmailOutcome {
+  /** As the PDF prints it, prefix included. */
+  invoiceNumber: string;
+  accountName: string;
+  /** Masked addresses that took it. */
+  sentTo: string[];
+  failed: Array<{ to: string; reason: string }>;
+  /** Nobody on the account has an email address to send it to. */
+  noRecipient: boolean;
+}
+
 /**
- * Emails one invoice to the people who pay it.
+ * Emails one invoice to the people who pay it, and says what happened.
  *
- * ── Why it re-reads the invoice instead of trusting the selection ──────────
- * `transitionMany` reports HOW MANY rows moved, not which — a bulk action over
- * a grid selection is expected to be partly a no-op. Emailing everything that
- * was selected would therefore send a covering note for invoices that were
- * already sent last week. Matching `sentAt` to this batch's timestamp is what
- * identifies the ones that actually moved just now.
+ * `resend` is a person pressing Resend invoice: every address is tried again,
+ * and the customer's portal is not told a second time.
  */
-async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<void> {
-  const invoice = await invoiceRepository.findById(id, scopeFor(caller));
-
-  // Not ours to send: already sent, still awaiting a PO, or out of scope.
-  if (!invoice || invoice.status !== 'sent' || invoice.sentAt !== sentAt.toISOString()) return;
-
+async function emailInvoice(invoice: Invoice, options: { resend: boolean }): Promise<EmailOutcome> {
   const account = await accountRepository.findById(invoice.accountId, { accountId: null });
 
   /*
@@ -916,19 +1177,7 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
   );
   const recipients = payable.length > 0 ? payable : contacts.filter((contact) => contact.email);
 
-  /*
-   * M7.6 — the PDF the customer actually files.
-   *
-   * ⚠️ Fetched ONCE and attached to every recipient's copy. Two people at the
-   * same builder get the identical document, and rendering per contact would
-   * produce two objects in storage for one invoice.
-   *
-   * `null` where it could not be produced. That is not a reason to withhold
-   * the email: the invoice has been sent, the customer needs to know, and a
-   * covering note with no attachment is recoverable in a way silence is not.
-   */
   const renderContext = await invoiceRenderService.context();
-  const pdf = await invoiceRenderService.bytesForSending(invoice, renderContext);
 
   // The number exactly as the attached PDF prints it, from the same context.
   const invoiceNumber = `${renderContext.invoiceNumberPrefix}${String(invoice.invoiceNumber)}`;
@@ -942,6 +1191,41 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
     jobNumber: invoice.jobNumber,
     poNumber: invoice.poNumber,
   };
+
+  const outcome: EmailOutcome = {
+    invoiceNumber,
+    accountName: invoice.accountName,
+    sentTo: [],
+    failed: [],
+    noRecipient: recipients.length === 0,
+  };
+
+  if (recipients.length === 0) {
+    // Logged as skipped, so the invoice page can say why nothing went.
+    await outboundService.send({
+      event: INVOICE_EMAIL_EVENT,
+      subjectKey: `invoice-sent:${invoice.id}:none`,
+      recipient: { email: null, mobile: null },
+      email: (to) => buildInvoiceEmail(to, context),
+      accountId: invoice.accountId,
+      invoiceId: invoice.id,
+      jobId: invoice.jobId,
+    });
+    return outcome;
+  }
+
+  /*
+   * M7.6 — the PDF the customer actually files.
+   *
+   * ⚠️ Fetched ONCE and attached to every recipient's copy. Two people at the
+   * same builder get the identical document, and rendering per contact would
+   * produce two objects in storage for one invoice.
+   *
+   * `null` where it could not be produced. That is not a reason to withhold
+   * the email: the invoice has been sent, the customer needs to know, and a
+   * covering note with no attachment is recoverable in a way silence is not.
+   */
+  const pdf = await invoiceRenderService.bytesForSending(invoice, renderContext);
 
   const attachments =
     pdf === null
@@ -964,8 +1248,8 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
   }
 
   for (const contact of recipients) {
-    await outboundService.send({
-      event: 'invoice-sent',
+    const result = await outboundService.send({
+      event: INVOICE_EMAIL_EVENT,
       // Per contact: two people at the same builder each need their own copy,
       // and each is its own row in the log.
       subjectKey: `invoice-sent:${invoice.id}:${contact.id}`,
@@ -978,8 +1262,19 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
       accountId: invoice.accountId,
       invoiceId: invoice.id,
       jobId: invoice.jobId,
+      force: options.resend,
     });
+
+    // "duplicate" is an earlier, successful send of this same invoice.
+    if (result.outcome === 'sent' || result.outcome === 'duplicate') {
+      outcome.sentTo.push(result.toMasked ?? '—');
+    } else {
+      outcome.failed.push({ to: result.toMasked ?? '—', reason: result.detail ?? 'not sent' });
+    }
   }
+
+  // The customer was told the first time; a resend is not news to them.
+  if (options.resend) return outcome;
 
   /*
    * And in the portal, where somebody looking at their account sees it without
@@ -1004,9 +1299,17 @@ async function emailInvoice(id: string, sentAt: Date, caller: Caller): Promise<v
     jobId: invoice.jobId,
     jobNumber: invoice.jobNumber,
   });
+
+  return outcome;
 }
 
 /* ── Scoping ─────────────────────────────────────────────────────────────── */
+
+/** "a, b and c" — for a sentence the office reads. */
+function listOf(items: readonly string[]): string {
+  if (items.length <= 1) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items.at(-1) ?? ''}`;
+}
 
 function isCustomer(caller: Caller): boolean {
   return caller.roles.some((role) => CUSTOMER_ROLES.has(role));

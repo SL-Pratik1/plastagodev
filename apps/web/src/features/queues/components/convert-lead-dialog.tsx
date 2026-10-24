@@ -72,6 +72,8 @@ const FIELDS: Record<string, { label: string; inputId: string }> = {
   primaryZoneId: { label: 'Primary zone', inputId: 'convert-zone' },
   accountsContactName: { label: 'Accounts contact', inputId: 'convert-contact-name' },
   accountsContactEmail: { label: 'Invoices emailed to', inputId: 'convert-contact-email' },
+  receivesCertificates: { label: 'Receives certificates', inputId: 'convert-certificates' },
+  certificateEmail: { label: 'Certificates emailed to', inputId: 'convert-certificate-email' },
 };
 
 /** One rejected field, ready to list. */
@@ -151,6 +153,9 @@ interface ConvertForm {
   accountsContactEmail: string;
   notes: string;
   sendInvitation: boolean;
+  /** Matt, 21 Oct — certificates go "only to certain customers". */
+  receivesCertificates: boolean;
+  certificateEmail: string;
 }
 
 /**
@@ -229,6 +234,8 @@ export function ConvertLeadDialog({
     accountsContactEmail: lead.email,
     notes: '',
     sendInvitation: true,
+    receivesCertificates: false,
+    certificateEmail: '',
   }));
   const [errors, setErrors] = useState<Record<string, string>>({});
   /**
@@ -309,6 +316,17 @@ export function ConvertLeadDialog({
         'There is nowhere to send the welcome email. Add an address, or untick it below.';
     }
 
+    // The same rule the API applies: a certificate is weighed, and it is emailed.
+    const certificateEmail = form.certificateEmail.trim();
+    if (form.receivesCertificates && form.captureMode !== 'area-and-weight') {
+      next.captureMode = 'Certificates need m² and kg — choose m² + kg, or untick Receives certificates.';
+    }
+    if (form.receivesCertificates && certificateEmail === '') {
+      next.certificateEmail = 'Add the email certificates go to, or untick Receives certificates.';
+    } else if (certificateEmail !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(certificateEmail)) {
+      next.certificateEmail = 'Enter a valid email address.';
+    }
+
     setErrors(next);
 
     if (Object.keys(next).length > 0) {
@@ -348,6 +366,8 @@ export function ConvertLeadDialog({
           accountsContactEmail: contactEmail,
           notes: form.notes.trim(),
           sendInvitation: form.sendInvitation,
+          receivesCertificates: form.receivesCertificates,
+          certificateEmail: form.receivesCertificates ? certificateEmail : '',
         },
       });
 
@@ -674,6 +694,7 @@ export function ConvertLeadDialog({
             <Field
               id="convert-capture"
               label="What gets captured"
+              error={errors.captureMode}
               hint="m² is priced; kg is recovered weight. Two different quantities."
             >
               {(control) => (
@@ -806,6 +827,49 @@ export function ConvertLeadDialog({
           </Field>
         </section>
 
+        {/* Matt, 21 Oct — certificates go "only to certain customers". */}
+        <section className="space-y-3">
+          <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+            <Checkbox
+              id="convert-certificates"
+              checked={form.receivesCertificates}
+              onChange={(event) => {
+                set('receivesCertificates', event.target.checked);
+              }}
+            />
+            <div>
+              <Label htmlFor="convert-certificates">Receives certificates</Label>
+              <p className="text-xs text-muted-foreground">
+                A Certificate of Recycling is issued and emailed after each crane-weighed pickup.
+                Needs m² + kg and a certificate email.
+              </p>
+            </div>
+          </div>
+
+          {form.receivesCertificates && (
+            <Field
+              id="convert-certificate-email"
+              label="Certificates emailed to"
+              required
+              error={errors.certificateEmail}
+              hint="Often a sustainability or ESG mailbox, not accounts."
+            >
+              {(control) => (
+                <Input
+                  {...control}
+                  type="email"
+                  inputMode="email"
+                  value={form.certificateEmail}
+                  placeholder="esg@company.com.au"
+                  onChange={(event) => {
+                    set('certificateEmail', event.target.value);
+                  }}
+                />
+              )}
+            </Field>
+          )}
+        </section>
+
         <div className="flex items-start gap-3 rounded-lg border border-border p-3">
           <Checkbox
             id="convert-invite"
@@ -818,8 +882,9 @@ export function ConvertLeadDialog({
             <Label htmlFor="convert-invite">Send the welcome email now</Label>
             <p className="text-xs text-muted-foreground">
               {form.accountsContactName.trim() || lead.contactName} gets their customer code and a
-              sign-in link, at {form.accountsContactEmail.trim() || lead.email}. Uncheck if you want
-              to set the account up quietly first.
+              sign-in link, at {form.accountsContactEmail.trim() || lead.email}. On first sign-in
+              they complete their details and the director’s guarantee, and sign the terms. Leave
+              it off for a customer already covered by a signed contract.
             </p>
           </div>
         </div>

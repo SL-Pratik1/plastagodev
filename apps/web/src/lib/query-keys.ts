@@ -92,6 +92,8 @@ export const queryKeys = {
     all: ['vehicles'] as const,
     list: (query: ListQuery) => [...queryKeys.vehicles.all, 'list', query] as const,
     detail: (id: string) => [...queryKeys.vehicles.all, 'detail', id] as const,
+    preStarts: (id: string, query: ListQuery) =>
+      [...queryKeys.vehicles.all, 'pre-starts', id, query] as const,
   },
 
   notifications: {
@@ -103,6 +105,7 @@ export const queryKeys = {
   settings: {
     all: ['settings'] as const,
     detail: () => [...queryKeys.settings.all, 'detail'] as const,
+    driverLists: () => [...queryKeys.settings.all, 'driver-lists'] as const,
   },
 
   /**

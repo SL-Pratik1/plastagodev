@@ -1,15 +1,17 @@
-import type {
-  AllocationBoard,
-  CreateRunInput,
-  Driver,
-  DriverDay,
-  MapPin,
-  Run,
-  RunSheet,
-  UnallocatedJob,
+import {
+  RUN_STATUS_LABELS,
+  type AllocationBoard,
+  type CreateRunInput,
+  type Driver,
+  type DriverDay,
+  type MapPin,
+  type Run,
+  type RunSheet,
+  type UnallocatedJob,
 } from '@plastago/shared';
 import { getMapsProvider } from '../../integrations/maps.js';
 import { AppError } from '../../lib/app-error.js';
+import { todayInSydney } from '../../lib/business-day.js';
 import { logger } from '../../lib/logger.js';
 import { jobRepository } from '../jobs/job.repository.js';
 import { settingsRepository } from '../settings/settings.repository.js';
@@ -55,19 +57,80 @@ export const dispatchService = {
    * it in the browser would mean every consumer re-deriving the same grouping.
    */
   async board(date: string): Promise<AllocationBoard> {
-    const [unallocated, runs, drivers] = await Promise.all([
+    const [unallocated, { runs, newlyFinished }, drivers] = await Promise.all([
       runRepository.unallocated(date),
-      runRepository.findByDate(date),
+      runRepository.boardRuns(date),
       driverRepository.list(),
     ]);
+
+    /*
+     * A run whose last stop was finished by a path that does not close runs
+     * itself is closed the first time the board sees it, so it stays gone.
+     */
+    if (newlyFinished.length > 0) {
+      await runRepository.markClosed(newlyFinished);
+      log.info({ runs: newlyFinished.length }, 'runs completed — every stop finished');
+    }
 
     return {
       date,
       unallocated,
       unallocatedBySuburb: groupBySuburb(unallocated),
       runs,
-      drivers: drivers.map((driver) => toDriverDay(driver, date, runs)),
+      // A driver's load is still a DAY's load: the runs planned for `date`.
+      drivers: drivers.map((driver) =>
+        toDriverDay(
+          driver,
+          date,
+          runs.filter((run) => run.date === date),
+        ),
+      ),
     };
+  },
+
+  /**
+   * Moves a run to another planned date (Matt, 21 Oct): *"we might decide that
+   * tomorrow we're going to do a run that was originally planned for Friday."*
+   *
+   * The driver gets the run on its planned date, so a staffed run moves on
+   * their phone too, and takes the next slot in their new day. Refused once a
+   * stop has started — the truck is out on the date it already has.
+   */
+  async setPlannedDate(runId: string, date: string): Promise<Run> {
+    const run = await requireRunSummary(runId);
+    if (run.date === date) return requireRun(runId);
+
+    if (date < todayInSydney()) {
+      throw AppError.validation('A run cannot be planned for a day that has passed', [
+        { path: 'date', message: 'Pick today or a later date' },
+      ]);
+    }
+
+    if (run.status !== 'planning' && run.status !== 'assigned') {
+      throw AppError.conflict(
+        `Run ${String(run.runNumber)} is ${RUN_STATUS_LABELS[run.status].toLowerCase()}, so its date is fixed`,
+      );
+    }
+    if ((await runRepository.startedStopCount(runId)) > 0) {
+      throw AppError.conflict(
+        `The driver has started run ${String(run.runNumber)}, so it stays on ${run.date}`,
+      );
+    }
+
+    const sequenceForDay = run.driverId
+      ? (await runRepository.countDriverRuns(run.driverId, date)) + 1
+      : null;
+
+    const moved = await runRepository.setDate(runId, date, sequenceForDay);
+    if (!moved) {
+      throw AppError.conflict('That run changed while you were looking at it — reload and retry');
+    }
+
+    // The driver's other runs on the old day close the gap: no "run 2 of 1".
+    if (run.driverId) await runRepository.renumberDriverDay(run.driverId, run.date);
+
+    log.info({ runId, runNumber: run.runNumber, from: run.date, to: date }, 'run planned date moved');
+    return requireRun(runId);
   },
 
   async createRun(input: CreateRunInput): Promise<Run> {
@@ -185,7 +248,22 @@ export const dispatchService = {
    * not happen.
    */
   async reorderRun(runId: string, jobIds: readonly string[]): Promise<void> {
-    await assertPlanning(runId);
+    /*
+     * Decided, 21 Oct: allowed until the driver starts the first stop — so a
+     * staffed run can still be put in the allocator's order, and the driver's
+     * sheet follows it. Once a stop has started, the order is the driver's.
+     */
+    const run = await requireRunSummary(runId);
+    if (run.status !== 'planning' && run.status !== 'assigned') {
+      throw AppError.conflict(
+        `Run ${String(run.runNumber)} is ${RUN_STATUS_LABELS[run.status].toLowerCase()}, so its order is fixed`,
+      );
+    }
+    if ((await runRepository.startedStopCount(runId)) > 0) {
+      throw AppError.conflict(
+        `The driver has started run ${String(run.runNumber)}, so its order is fixed`,
+      );
+    }
 
     const current = await runRepository.stopIds(runId);
     assertPermutation(current, jobIds);

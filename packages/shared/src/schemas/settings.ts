@@ -32,6 +32,30 @@ import { BrandIdSchema, RateCardIdSchema, ZoneSchema, ZoneSlugSchema } from './p
 
 /* ── Zone rates, which belong to a rate card (M6) ─────────────────────────── */
 
+/**
+ * How a zone line prices the job's second charge.
+ *
+ * Matt, 21 Oct: *"it's still a two-part charge"* — a service fee, then a weight
+ * charge. `per-m2` is the expected area × the rate, as before. `fixed` is a set
+ * amount that ignores the area, which is how Wisdom are charged ($190 + $112).
+ */
+export const WEIGHT_CHARGE_KINDS = ['per-m2', 'fixed'] as const;
+export const WeightChargeKindSchema = z.enum(WEIGHT_CHARGE_KINDS).meta({ id: 'WeightChargeKind' });
+export type WeightChargeKind = z.infer<typeof WeightChargeKindSchema>;
+
+/**
+ * Which zone-rate field holds each hook bin's price.
+ *
+ * Hook bins are a set price per zone (Matt, 21 Oct), so a hook-bin job is the
+ * service charge plus this price, never m² × rate.
+ */
+export const HOOK_BIN_RATE_FIELDS = {
+  'hook-bin-5': 'hookBin5',
+  'hook-bin-10': 'hookBin10',
+  'hook-bin-15': 'hookBin15',
+} as const;
+export type HookBinRateField = (typeof HOOK_BIN_RATE_FIELDS)[keyof typeof HOOK_BIN_RATE_FIELDS];
+
 export const ZoneRateSchema = z
   .object({
     zoneId: ZoneSchema,
@@ -47,6 +71,13 @@ export const ZoneRateSchema = z
      */
     serviceCharge: MoneySchema,
     ratePerM2: MoneySchema,
+    /** Whether the second charge is m² × `ratePerM2` or the flat `fixedWeightCharge`. */
+    weightChargeKind: WeightChargeKindSchema,
+    fixedWeightCharge: MoneySchema.nullable(),
+    /** A hook bin's set price in this zone. Null means the card does not offer it. */
+    hookBin5: MoneySchema.nullable(),
+    hookBin10: MoneySchema.nullable(),
+    hookBin15: MoneySchema.nullable(),
   })
   .meta({ id: 'ZoneRate' });
 
@@ -100,6 +131,13 @@ export const AppliedRateSchema = z
     scheduleFrom: IsoDateSchema,
     serviceCharge: MoneySchema,
     ratePerM2: MoneySchema,
+    /**
+     * What priced the second charge: m² × rate, the card's fixed weight
+     * charge, or a hook bin's set price. `weightCharge` is that flat amount,
+     * and null for `per-m2`.
+     */
+    weightChargeKind: z.enum(['per-m2', 'fixed', 'hook-bin']),
+    weightCharge: MoneySchema.nullable(),
   })
   .meta({ id: 'AppliedRate' });
 
@@ -209,6 +247,26 @@ export const ZoneRateInputSchema = z
      */
     serviceCharge: NonNegativeMoneySchema,
     ratePerM2: NonNegativeMoneySchema,
+    /*
+     * Defaulted so a caller written before fixed pricing still issues a
+     * per-m² schedule exactly as it did.
+     */
+    weightChargeKind: WeightChargeKindSchema.default('per-m2'),
+    /** Required when `weightChargeKind` is `fixed`; ignored otherwise. */
+    fixedWeightCharge: NonNegativeMoneySchema.nullable().default(null),
+    /** Empty means this card does not offer that bin in this zone. */
+    hookBin5: NonNegativeMoneySchema.nullable().default(null),
+    hookBin10: NonNegativeMoneySchema.nullable().default(null),
+    hookBin15: NonNegativeMoneySchema.nullable().default(null),
+  })
+  .superRefine((rate, ctx) => {
+    if (rate.weightChargeKind === 'fixed' && rate.fixedWeightCharge === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['fixedWeightCharge'],
+        message: 'Enter the fixed weight charge for this zone',
+      });
+    }
   })
   .meta({ id: 'ZoneRateInput' });
 

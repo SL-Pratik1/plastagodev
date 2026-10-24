@@ -1,5 +1,6 @@
-import type { ExceptionReason, JobCommentDraft, JobDraft } from '@plastago/shared';
+import type { JobCommentDraft, JobDraft, OfficeCancelReason } from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { LIVE_REFRESH } from '@/lib/live-refresh';
 import { queryKeys } from '@/lib/query-keys';
 import { useServices } from '@/services/services-context';
 import type { ListQuery } from '@/services/types';
@@ -19,6 +20,7 @@ export function useJob(id: string | undefined) {
     queryKey: queryKeys.jobs.detail(id ?? 'none'),
     queryFn: () => jobs.get(id ?? ''),
     enabled: Boolean(id),
+    ...LIVE_REFRESH,
   });
 }
 
@@ -87,12 +89,42 @@ export function useCancelJob() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ id, reason, note }: { id: string; reason: ExceptionReason; note: string }) =>
+    mutationFn: ({ id, reason, note }: { id: string; reason: OfficeCancelReason; note: string }) =>
       jobs.cancel(id, reason, note),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.dispatch.all });
+    },
+  });
+}
+
+/** Undo an arrival from the office (21 Oct): off the run, no charge. */
+export function useUnarriveJob() {
+  const { jobs } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: string) => jobs.unarrive(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.jobs.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.dispatch.all });
+    },
+  });
+}
+
+/** "Set m²" (23 Oct) — the price moves, and a held invoice may go out. */
+export function useSetJobArea() {
+  const { jobs } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id, expectedAreaM2 }: { id: string; expectedAreaM2: number }) =>
+      jobs.setArea(id, expectedAreaM2),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.jobs.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.invoices.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.notifications.all });
     },
   });
 }

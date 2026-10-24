@@ -2,8 +2,9 @@ import { DEFECT_SEVERITIES, DEFECT_SEVERITY_LABELS, type DefectSeverity } from '
 import { Alert, Field, Input, Spinner, Textarea, buttonVariants, cn, useToast } from '@plastago/ui';
 import { CameraIcon, PhoneIcon, WrenchIcon } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { PhotoThumb } from '@/components/driver/photo-grid';
+import { photoUploadFailure } from '@/features/driver/photo-upload-error';
 import { useReportDefect, useRunSheet, useUploadDefectPhoto } from '@/features/driver/queries';
 import { todayInSydney } from '@/lib/geolocation';
 import { currentPosition } from '@/lib/geolocation';
@@ -111,8 +112,8 @@ export function DriverReportDefectPage() {
             { key, previewUrl, takenAt: new Date().toISOString() },
           ]);
           toast.success('Photo uploaded');
-        } catch {
-          toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
+        } catch (error) {
+          toast.error('Could not upload that photo', photoUploadFailure(error));
         }
       })();
     });
@@ -155,7 +156,7 @@ export function DriverReportDefectPage() {
 
   /*
    * Same stop as the pre-start: a defect is found again by matching the plate,
-   * so one filed with no truck paired lands where nobody looks. Blocking beats
+   * so one filed with no vehicle lands where nobody looks. Blocking beats
    * accepting a report the office will never see.
    */
   if (day !== undefined && day.vehicleRego === null) {
@@ -165,11 +166,18 @@ export function DriverReportDefectPage() {
           <h1 className="font-display text-lg font-semibold tracking-tight">Report a problem</h1>
         </header>
 
-        <Alert variant="destructive" title="No vehicle is assigned to you">
-          A defect is recorded against a truck, so the office has to pair you with yours first.
-          Ring them on the number below — and if it is unsafe to drive, tell them now rather than
-          waiting for this screen.
+        <Alert variant="destructive" title="Choose your vehicle first">
+          A defect is recorded against the vehicle you are driving today. Choose it on the
+          pre-start screen — and if it is unsafe to drive, ring the office now rather than waiting
+          for this screen.
         </Alert>
+
+        <Link
+          to="/driver/pre-start"
+          className={`${buttonVariants({ size: 'lg' })} min-h-14 w-full text-base`}
+        >
+          Choose my vehicle
+        </Link>
       </div>
     );
   }

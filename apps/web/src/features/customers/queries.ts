@@ -1,4 +1,9 @@
-import type { AccountDraft, AccountType, AccountUpdate } from '@plastago/shared';
+import type {
+  AccountCommercialTermsDraft,
+  AccountDraft,
+  AccountType,
+  AccountUpdate,
+} from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query-keys';
 import { useServices } from '@/services/services-context';
@@ -124,6 +129,40 @@ export function useSetInvoiceTemplate(accountId: string | undefined) {
       customers.setInvoiceTemplate(accountId ?? '', invoiceTemplateId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
+    },
+  });
+}
+
+/** What changing the commercial terms would touch. Read when the dialog opens. */
+export function useCommercialTermsImpact(accountId: string | undefined, enabled: boolean) {
+  const { customers } = useServices();
+  return useQuery({
+    queryKey: [...queryKeys.customers.detail(accountId ?? 'none'), 'commercial-terms-impact'],
+    queryFn: () => customers.commercialTermsImpact(accountId ?? ''),
+    enabled: Boolean(accountId) && enabled,
+    // Counted fresh each time the dialog opens — it is a "right now" figure.
+    staleTime: 0,
+  });
+}
+
+/**
+ * Change the rate card and commercial terms.
+ *
+ * Invalidates jobs and invoices as well as the customer: an opted-in re-price
+ * moves job totals, and switching the PO requirement off releases invoices
+ * from Awaiting PO.
+ */
+export function useSetCommercialTerms(accountId: string | undefined) {
+  const { customers } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: AccountCommercialTermsDraft) =>
+      customers.setCommercialTerms(accountId ?? '', input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.jobs.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.invoices.all });
     },
   });
 }

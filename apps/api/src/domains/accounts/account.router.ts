@@ -1,4 +1,5 @@
 import {
+  AccountCommercialTermsSchema,
   AccountInvoiceTemplateBodySchema,
   AccountDraftSchema,
   AccountUpdateSchema,
@@ -117,6 +118,24 @@ accountRouter.patch(
  * anything commercial. What an invoice LOOKS like is commercial — it is the
  * document a builder's accounts department receives.
  */
+/*
+ * The commercial terms (Matt, 21 Oct). The same two roles that may create a
+ * customer — the terms are part of what creating one decides.
+ */
+accountRouter.get(
+  '/:id/commercial-terms/impact',
+  requireRole('super-admin', 'operations'),
+  validate({ params: AccountIdParamsSchema }),
+  asyncHandler(accountController.commercialTermsImpact),
+);
+
+accountRouter.patch(
+  '/:id/commercial-terms',
+  requireRole('super-admin', 'operations'),
+  validate({ params: AccountIdParamsSchema, body: AccountCommercialTermsSchema }),
+  asyncHandler(accountController.setCommercialTerms),
+);
+
 accountRouter.patch(
   '/:id/invoice-template',
   requireRole('super-admin', 'operations', 'office-staff'),

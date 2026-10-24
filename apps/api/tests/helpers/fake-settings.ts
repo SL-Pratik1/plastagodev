@@ -1,9 +1,12 @@
-import { PROTECTED_SERVICE_CODES } from '@plastago/shared';
+import { DRIVER_LIST_DEFAULTS, PROTECTED_SERVICE_CODES } from '@plastago/shared';
 import type {
   AdditionalServiceCreate,
   AdditionalServiceSetting,
   AdditionalServiceUpdate,
   BrandId,
+  DriverListName,
+  DriverListOption,
+  DriverLists,
   InvoiceTemplateWrite,
   RateCardId,
   Settings,
@@ -123,6 +126,12 @@ function seededZoneRates() {
     zoneLabel: zone.label,
     serviceCharge: zone.serviceCharge,
     ratePerM2: zone.ratePerM2,
+    // The read shape the real repository gives a row from before fixed prices.
+    weightChargeKind: 'per-m2' as const,
+    fixedWeightCharge: null,
+    hookBin5: null,
+    hookBin10: null,
+    hookBin15: null,
   }));
 }
 
@@ -250,6 +259,8 @@ export function createFakeSettingsRepository() {
    * with no route that writes it.
    */
   let slaBusinessDays = 5;
+  /** The driver lists (21 Oct), built-in until a test saves one. */
+  const driverLists: DriverLists = structuredClone(DRIVER_LIST_DEFAULTS);
   /*
    * The sequences, likewise off-contract (M1.4). They start where the client's
    * existing history leaves off, so a test asserting a job number is asserting
@@ -374,6 +385,13 @@ export function createFakeSettingsRepository() {
         zoneLabel: zones.find((zone) => zone.id === zoneId)?.label ?? 'Unknown zone',
         serviceCharge: override?.serviceCharge ?? seeded.serviceCharge,
         ratePerM2: override?.ratePerM2 ?? seeded.ratePerM2,
+        // Every seeded card is per m² and offers no hook bins — the real
+        // repository's reading of a row written before fixed pricing.
+        weightChargeKind: 'per-m2',
+        fixedWeightCharge: null,
+        hookBin5: null,
+        hookBin10: null,
+        hookBin15: null,
         scheduleFrom: inForce,
       });
     },
@@ -534,6 +552,15 @@ export function createFakeSettingsRepository() {
     /* M2.4a — read-only, like the real one. There is no `saveGeneral` pair. */
     async slaBusinessDays(): Promise<number> {
       return Promise.resolve(slaBusinessDays);
+    },
+
+    async driverLists(): Promise<DriverLists> {
+      return Promise.resolve(structuredClone(driverLists));
+    },
+
+    async saveDriverList(name: DriverListName, options: readonly DriverListOption[]): Promise<void> {
+      driverLists[name] = options.map((option) => ({ ...option }));
+      return Promise.resolve();
     },
 
     async saveInvoicing(input: Settings['invoicing']): Promise<void> {

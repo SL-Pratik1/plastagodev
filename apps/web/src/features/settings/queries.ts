@@ -1,6 +1,9 @@
+import { DRIVER_LIST_NAMES } from '@plastago/shared';
 import type {
   AdditionalServiceCreate,
   AdditionalServiceUpdate,
+  DriverListName,
+  DriverListWrite,
   InvoiceTemplateWrite,
   InvoicingSettings,
   RateCardCreate,
@@ -239,4 +242,35 @@ export function useUpdateInvoiceTemplate() {
 export function useDeleteInvoiceTemplate() {
   const { settings } = useServices();
   return useSettingsMutation((id: string) => settings.deleteInvoiceTemplate(id));
+}
+
+/* ── What the driver app asks (Matt, 21 Oct) ─────────────────────────────── */
+
+/**
+ * The four driver lists. Also what the office reads a driver's answer back
+ * through — a reason or a contamination type is stored as its key.
+ */
+export function useDriverLists() {
+  const { settings } = useServices();
+  return useQuery({
+    queryKey: queryKeys.settings.driverLists(),
+    queryFn: () => settings.driverLists(),
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+export function useSaveDriverList() {
+  const { settings } = useServices();
+  return useSettingsMutation((input: { list: DriverListName; write: DriverListWrite }) =>
+    settings.saveDriverList(input.list, input.write),
+  );
+}
+
+/** How many options each driver list has switched on — the Settings sub-tab badges. */
+export function useActiveOptionCounts(): Partial<Record<DriverListName, number>> {
+  const { data } = useDriverLists();
+  if (!data) return {};
+  return Object.fromEntries(
+    DRIVER_LIST_NAMES.map((name) => [name, data[name].filter((option) => option.active).length]),
+  );
 }

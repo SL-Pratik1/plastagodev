@@ -34,6 +34,11 @@ export interface OutboxOperation {
   status: OutboxStatus;
   lastError?: string;
   nextAttemptAt?: string;
+  /**
+   * False when the server refused it outright (a 4xx) — sending it again
+   * unchanged will not help, so it waits for the driver instead of retrying.
+   */
+  retryable?: boolean;
 }
 
 export interface PendingUpload {

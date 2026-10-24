@@ -2,6 +2,7 @@ import type {
   AdditionalServiceCreateSchema,
   InvoiceTemplateWriteSchema,
   AdditionalServiceUpdateSchema,
+  DriverListWriteSchema,
   InvoicingSettingsSchema,
   LogoUploadRequestSchema,
   RateCardCreateSchema,
@@ -18,6 +19,7 @@ import { todayInSydney } from '../../lib/business-day.js';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { pricingService } from './pricing.service.js';
 import type {
+  DriverListParamsSchema,
   InvoiceTemplateIdParamsSchema,
   LogoConfirmSchema,
   QuoteQuerySchema,
@@ -125,13 +127,15 @@ export const settingsController = {
     req: ValidatedRequest<{ query: typeof QuoteQuerySchema }>,
     res: Response,
   ): Promise<void> => {
-    const { rateCardId, zoneId, expectedAreaM2, bagCount, onDate } = req.validated.query;
+    const { rateCardId, zoneId, expectedAreaM2, bagCount, freightItem, onDate } =
+      req.validated.query;
 
     const preview = await pricingService.quote({
       rateCardId,
       zoneId,
       expectedAreaM2: expectedAreaM2 ?? null,
       bagCount: bagCount ?? 0,
+      freightItem: freightItem ?? 'plasterboard-bagged',
       /*
        * ⚠️ Today's date in SYDNEY, not `new Date()` sliced to ten characters.
        * A preview asked for at 9am on the 1st would otherwise price on the
@@ -322,6 +326,25 @@ export const settingsController = {
     await settingsService.deleteAdditionalService(req.validated.params.code, callerOf(req));
     res.status(204).end();
   },
+
+  driverLists: async (req: Request, res: Response): Promise<void> => {
+    res.json(await settingsService.driverLists(callerOf(req)));
+  },
+
+  saveDriverList: async (
+    req: ValidatedRequest<{
+      params: typeof DriverListParamsSchema;
+      body: typeof DriverListWriteSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const options = await settingsService.saveDriverList(
+      req.validated.params.list,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.json(options);
+  },
 };
 
 /**
@@ -333,5 +356,10 @@ export const settingsController = {
  */
 function callerOf(req: Request): Caller {
   if (!req.auth) throw AppError.unauthenticated('Sign in to continue');
-  return { roles: req.auth.roles as Caller['roles'], accountId: req.auth.accountId };
+  return {
+    roles: req.auth.roles as Caller['roles'],
+    accountId: req.auth.accountId,
+    userId: req.auth.userId,
+    name: req.auth.name,
+  };
 }

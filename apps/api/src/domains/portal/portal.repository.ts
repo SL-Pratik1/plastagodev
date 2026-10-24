@@ -1,4 +1,5 @@
 import type {
+  FreightItem,
   PortalInvoice,
   JobStatus,
   PageMeta,
@@ -17,6 +18,7 @@ import {
 } from '../jobs/job.model.js';
 import { toJobPhotoViews } from '../jobs/job-photo.view.js';
 import { InvoiceModel } from '../invoices/invoice.model.js';
+import { RunModel } from '../dispatch/run.model.js';
 import { ChangeRequestModel, ReadinessCertificationModel } from './portal.model.js';
 
 /**
@@ -211,13 +213,16 @@ export const portalRepository = {
     ]);
 
     const jobIds = rows.map((row) => row._id);
-    const [photoCounts, certifications] = await Promise.all([
+    const [photoCounts, certifications, plannedDates] = await Promise.all([
       countPhotos(jobIds),
       latestCertifications(jobIds),
+      runDates(rows),
     ]);
 
     return {
-      data: rows.map((row) => toListItem(row, canSeePricing, photoCounts, certifications)),
+      data: rows.map((row) =>
+        toListItem(row, canSeePricing, photoCounts, certifications, plannedDates),
+      ),
       meta: {
         page: query.page,
         pageSize: query.pageSize,
@@ -261,9 +266,10 @@ export const portalRepository = {
     ]);
 
     const photoCounts = new Map([[row._id.toHexString(), photos.length]]);
+    const plannedDates = await runDates([row]);
 
     return {
-      ...toListItem(row, canSeePricing, photoCounts, certifications),
+      ...toListItem(row, canSeePricing, photoCounts, certifications, plannedDates),
       builderName: row.builderName,
       zoneId: row.zoneId.toString(),
       /*
@@ -456,8 +462,9 @@ export const portalRepository = {
     input: {
       readyDate: string;
       targetDate: string;
-      expectedAreaM2: number;
+      expectedAreaM2: number | null;
       bagCount: number;
+      freightItem: FreightItem;
       serviceLevel: 'standard' | 'urgent';
       poNumber: string | null;
       notes: string;
@@ -555,6 +562,7 @@ function toListItem(
   canSeePricing: boolean,
   photoCounts: Map<string, number>,
   certifications: Map<string, Certification>,
+  plannedDates: Map<string, string>,
 ): PortalJobListItem {
   const certification = certifications.get(row._id.toHexString());
 
@@ -568,6 +576,11 @@ function toListItem(
     bookedByName: row.bookedByName,
     readyDate: row.readyDate,
     targetDate: row.targetDate,
+    // A plan for work still to happen — never shown once the job is finished.
+    plannedDate:
+      row.runId && OPEN_STATUSES.includes(row.status)
+        ? (plannedDates.get(row.runId.toHexString()) ?? null)
+        : null,
     serviceLevel: row.serviceLevel,
     expectedAreaM2: row.expectedAreaM2,
     recoveredWeightKg: row.recoveredWeightKg,
@@ -589,6 +602,21 @@ function toListItem(
 }
 
 /* ── Shared reads ────────────────────────────────────────────────────────── */
+
+
+/**
+ * Run id → planned date, for the runs these jobs are on. One query for a page.
+ * Internal runs never reach the customer — only the date does (21 Oct).
+ */
+async function runDates(rows: ReadonlyArray<Pick<RawJob, 'runId'>>): Promise<Map<string, string>> {
+  const ids = rows.flatMap((row) => (row.runId ? [row.runId] : []));
+  if (ids.length === 0) return new Map();
+
+  const runs = await RunModel.find({ _id: { $in: ids } }, { date: 1 }).lean<
+    Array<{ _id: mongoose.Types.ObjectId; date: string }>
+  >();
+  return new Map(runs.map((run) => [run._id.toHexString(), run.date]));
+}
 
 /** Job ids in scope that carry a certification. One query, not one per row. */
 async function certifiedIds(scope: PortalScope): Promise<mongoose.Types.ObjectId[]> {

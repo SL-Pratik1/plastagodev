@@ -1,10 +1,13 @@
-import { DEFAULT_RATE_CARD_ID, PROTECTED_SERVICE_CODES } from '@plastago/shared';
+import { DEFAULT_RATE_CARD_ID, DRIVER_LIST_DEFAULTS, PROTECTED_SERVICE_CODES } from '@plastago/shared';
 import type {
   InvoicingSettings,
   AdditionalServiceCreate,
   AdditionalServiceSetting,
   AdditionalServiceUpdate,
   BrandId,
+  DriverListName,
+  DriverListOption,
+  DriverLists,
   InvoiceTemplate,
   InvoiceTemplateWrite,
   Money,
@@ -12,6 +15,7 @@ import type {
   RateCardSummary,
   RateSchedule,
   Settings,
+  WeightChargeKind,
   Zone,
   ZoneRateInput,
   ZoneSummary,
@@ -35,6 +39,7 @@ import { LeadModel } from '../queues/lead.model.js';
 import { JobChargeModel, JobModel } from '../jobs/job.model.js';
 import {
   AdditionalServiceModel,
+  DriverListModel,
   InvoiceTemplateModel,
   RateCardModel,
   SEQUENCE_STARTS,
@@ -110,6 +115,16 @@ interface RawZoneRate {
   zoneId: Types.ObjectId;
   serviceCharge: Types.Decimal128;
   ratePerM2: Types.Decimal128;
+  /**
+   * Optional for the same reason as the window below: `.lean()` applies no
+   * defaults, and every row written before fixed pricing has none of these.
+   * Absent reads as `per-m2` and "not offered", which is what such a row priced.
+   */
+  weightChargeKind?: WeightChargeKind | undefined;
+  fixedWeightCharge?: Types.Decimal128 | null | undefined;
+  hookBin5?: Types.Decimal128 | null | undefined;
+  hookBin10?: Types.Decimal128 | null | undefined;
+  hookBin15?: Types.Decimal128 | null | undefined;
   /**
    * ⚠️ OPTIONAL, and the type says so deliberately.
    *
@@ -277,6 +292,13 @@ export interface ResolvedRate {
   serviceCharge: string;
   /** Per square metre, at rate precision. */
   ratePerM2: string;
+  /** Whether the weight charge is m² × `ratePerM2` or `fixedWeightCharge`. */
+  weightChargeKind: WeightChargeKind;
+  fixedWeightCharge: string | null;
+  /** Each hook bin's set price here, or null where the card does not offer it. */
+  hookBin5: string | null;
+  hookBin10: string | null;
+  hookBin15: string | null;
   /**
    * Which schedule produced these figures (M6.2).
    *
@@ -411,6 +433,7 @@ export const settingsRepository = {
         zoneLabel: zoneNames.get(rate.zoneId.toString()) ?? 'Unknown zone',
         serviceCharge: fromDecimal128(rate.serviceCharge),
         ratePerM2: fromDecimal128(rate.ratePerM2),
+        ...weightChargeOf(rate),
       });
 
       byDate.set(from, schedule);
@@ -624,8 +647,43 @@ export const settingsRepository = {
       zoneLabel: zone?.label ?? 'Unknown zone',
       serviceCharge: fromDecimal128(resolved.serviceCharge),
       ratePerM2: fromDecimal128(resolved.ratePerM2),
+      ...weightChargeOf(resolved),
       scheduleFrom: isoDay(resolved.effectiveFrom),
     };
+  },
+
+  /**
+   * The zones where this card charges a FIXED weight charge on `onDate`.
+   *
+   * One read for the card and `default` together, applying the same fallback
+   * `resolveRate` does: a zone the card does not price is priced — and so
+   * judged — on `default`.
+   */
+  async fixedPriceZoneIds(rateCardId: RateCardId, onDate: string): Promise<string[]> {
+    const at = startOfSydneyDay(onDate);
+    const rows = await ZoneRateModel.find(
+      {
+        rateCardId: { $in: [rateCardId, DEFAULT_RATE_CARD_ID] },
+        effectiveFrom: { $lte: at },
+        $or: [{ effectiveTo: null }, { effectiveTo: { $gte: at } }],
+      },
+      { rateCardId: 1, zoneId: 1, weightChargeKind: 1, effectiveFrom: 1 },
+    )
+      .sort({ effectiveFrom: -1 })
+      .lean<Array<Pick<RawZoneRate, 'rateCardId' | 'zoneId' | 'weightChargeKind'>>>();
+
+    const own = new Map<string, boolean>();
+    const fallback = new Map<string, boolean>();
+    for (const row of rows) {
+      const into = row.rateCardId === rateCardId ? own : fallback;
+      const zone = row.zoneId.toString();
+      // Newest first, so the first row seen for a zone is the one in force.
+      if (!into.has(zone)) into.set(zone, row.weightChargeKind === 'fixed');
+    }
+
+    return [...new Set([...own.keys(), ...fallback.keys()])].filter(
+      (zone) => own.get(zone) ?? fallback.get(zone) ?? false,
+    );
   },
 
   /** One additional service by code, for pricing a charge the driver raised. */
@@ -811,6 +869,17 @@ export const settingsRepository = {
                */
               serviceCharge: shift(row.serviceCharge, input.adjustServiceCharge),
               ratePerM2: shift(row.ratePerM2, input.adjustRatePerM2),
+              /*
+               * The fixed weight charge and hook-bin prices come across
+               * verbatim. Dropping them would turn a fixed-price card into
+               * a per-m² one in the new zone, and the first booking there
+               * would be invoiced on the wrong basis.
+               */
+              weightChargeKind: row.weightChargeKind ?? 'per-m2',
+              fixedWeightCharge: row.fixedWeightCharge ?? null,
+              hookBin5: row.hookBin5 ?? null,
+              hookBin10: row.hookBin10 ?? null,
+              hookBin15: row.hookBin15 ?? null,
               /*
                * The window, unchanged. This is what makes the new zone's
                * history tile exactly as the source's does.
@@ -1399,6 +1468,33 @@ export const settingsRepository = {
     return row?.certificateSignatureKey ?? '';
   },
 
+  /** Every driver list, each falling back to its built-in options until first saved. */
+  async driverLists(): Promise<DriverLists> {
+    const rows = await DriverListModel.find()
+      .lean<{ _id: DriverListName; options: DriverListOption[] }[]>();
+    const lists: DriverLists = { ...DRIVER_LIST_DEFAULTS };
+    for (const row of rows) {
+      lists[row._id] = row.options.map(({ key, label, active }) => ({ key, label, active }));
+    }
+    return lists;
+  },
+
+  async saveDriverList(
+    name: DriverListName,
+    options: readonly DriverListOption[],
+    updatedBy: { userId: string | null; name: string },
+  ): Promise<void> {
+    const updatedById =
+      updatedBy.userId && Types.ObjectId.isValid(updatedBy.userId)
+        ? new Types.ObjectId(updatedBy.userId)
+        : null;
+    await DriverListModel.updateOne(
+      { _id: name },
+      { $set: { options, updatedById, updatedBy: updatedBy.name } },
+      { upsert: true },
+    );
+  },
+
   /**
    * Remove one rate schedule — the undo for a start date keyed wrong.
    *
@@ -1687,15 +1783,55 @@ async function insertSchedule(
   const from = startOfSydneyDay(effectiveFrom);
 
   await ZoneRateModel.insertMany(
-    zones.map((rate) => ({
-      rateCardId,
-      zoneId: rate.zoneId,
-      serviceCharge: toDecimal128(rate.serviceCharge),
-      ratePerM2: toDecimal128(rate.ratePerM2),
-      effectiveFrom: from,
-      effectiveTo,
-    })),
+    zones.map((rate) => {
+      const fixed = rate.weightChargeKind === 'fixed';
+      return {
+        rateCardId,
+        zoneId: rate.zoneId,
+        serviceCharge: toDecimal128(rate.serviceCharge),
+        // A fixed line never multiplies, so its m² rate is stored as zero
+        // rather than as a figure nothing reads and somebody might trust.
+        ratePerM2: toDecimal128(fixed ? '0' : rate.ratePerM2),
+        weightChargeKind: rate.weightChargeKind,
+        fixedWeightCharge:
+          fixed && rate.fixedWeightCharge !== null ? toDecimal128(rate.fixedWeightCharge) : null,
+        hookBin5: optionalDecimal(rate.hookBin5),
+        hookBin10: optionalDecimal(rate.hookBin10),
+        hookBin15: optionalDecimal(rate.hookBin15),
+        effectiveFrom: from,
+        effectiveTo,
+      };
+    }),
   );
+}
+
+function optionalDecimal(value: string | null): Types.Decimal128 | null {
+  return value === null ? null : toDecimal128(value);
+}
+
+/**
+ * A stored row's weight charge and hook-bin prices, as strings.
+ *
+ * Rows written before fixed pricing carry none of these fields, and read as
+ * per-m² with no hook bins offered — exactly what they priced.
+ */
+function weightChargeOf(row: RawZoneRate): {
+  weightChargeKind: WeightChargeKind;
+  fixedWeightCharge: string | null;
+  hookBin5: string | null;
+  hookBin10: string | null;
+  hookBin15: string | null;
+} {
+  const read = (value: Types.Decimal128 | null | undefined) =>
+    value === null || value === undefined ? null : fromDecimal128(value);
+
+  return {
+    weightChargeKind: row.weightChargeKind ?? 'per-m2',
+    fixedWeightCharge: read(row.fixedWeightCharge),
+    hookBin5: read(row.hookBin5),
+    hookBin10: read(row.hookBin10),
+    hookBin15: read(row.hookBin15),
+  };
 }
 
 /** One stored charge as the contract describes it. */

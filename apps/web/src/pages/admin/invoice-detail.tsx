@@ -15,7 +15,7 @@ import {
   Spinner,
   useToast,
 } from '@plastago/ui';
-import { FileTextIcon, RefreshCwIcon, SendIcon } from 'lucide-react';
+import { FileTextIcon, MailIcon, RefreshCwIcon, SendIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { DetailList } from '@/components/detail-list';
@@ -25,6 +25,7 @@ import {
   useInvoice,
   useRecordPo,
   useRequestInvoicePdf,
+  useResendInvoice,
   useRetryXero,
   useSendInvoices,
 } from '@/features/invoices/queries';
@@ -62,6 +63,7 @@ export function AdminInvoiceDetailPage() {
   const sendInvoices = useSendInvoices();
   const recordPo = useRecordPo();
   const retryXero = useRetryXero();
+  const resendInvoice = useResendInvoice();
   const requestPdf = useRequestInvoicePdf();
   const downloads = useInvoiceDownloads();
 
@@ -99,6 +101,9 @@ export function AdminInvoiceDetailPage() {
     );
   }
 
+  // Newest first, from the send log — see `InvoiceEmailSchema`.
+  const latestEmail = invoice.emails[0];
+
   const send = async () => {
     try {
       await sendInvoices.mutateAsync([invoice.id]);
@@ -106,6 +111,30 @@ export function AdminInvoiceDetailPage() {
         `Invoice ${formatInvoiceNumber(invoice.invoiceNumber, prefix)} sent`,
         'Pushed to Xero and emailed.',
       );
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
+  /*
+   * 21 Oct — invoices go out on their own when the job is completed, so this is
+   * how the office answers "we never got it". A partial resend is reported as
+   * an error naming who missed out, never as a clean success.
+   */
+  const resend = async () => {
+    try {
+      const result = await resendInvoice.mutateAsync(invoice.id);
+      const number = formatInvoiceNumber(invoice.invoiceNumber, prefix);
+
+      if (result.failed.length === 0) {
+        toast.success(`Invoice ${number} emailed again`, `Sent to ${result.sentTo.join(', ')}.`);
+      } else {
+        toast.error(
+          result.sentTo.length === 0 ? `Invoice ${number} was not emailed` : `Invoice ${number} only partly emailed`,
+          result.failed.map((failure) => `${failure.to}: ${failure.reason}`).join(' · '),
+        );
+      }
     } catch (caught) {
       const described = describeError(caught);
       toast.error(described.title, described.detail);
@@ -189,15 +218,55 @@ export function AdminInvoiceDetailPage() {
                 <SendIcon aria-hidden />
                 Send invoice
               </Button>
-            ) : null}
+            ) : (
+              <Button
+                variant="outline"
+                onClick={() => void resend()}
+                disabled={resendInvoice.isPending}
+              >
+                {resendInvoice.isPending && <Spinner className="text-current" />}
+                <MailIcon aria-hidden />
+                Resend invoice
+              </Button>
+            )}
           </>
         }
       />
 
-      {invoice.status === 'awaiting-po' && (
-        <Alert variant="warning" title="Held until a purchase order arrives">
-          These charges were approved but this account requires a PO before invoicing. The base
-          invoice for the job went out on completion and is not affected.
+      {invoice.status === 'awaiting-po' &&
+        (invoice.kind === 'base' ? (
+          <Alert variant="warning" title="Held until a purchase order arrives">
+            This customer needs a purchase order before they are invoiced, and the job had none.
+            Record the PO when it arrives, then send the invoice.
+          </Alert>
+        ) : (
+          <Alert variant="warning" title="Held until a purchase order arrives">
+            These charges were approved but this account requires a PO before invoicing. The base
+            invoice for the job is not affected.
+          </Alert>
+        ))}
+
+      {/* 21 Oct — nobody presses Send any more, so a miss has to be visible here. */}
+      {latestEmail !== undefined && latestEmail.outcome !== 'sent' && (
+        <Alert
+          variant="destructive"
+          title={latestEmail.outcome === 'skipped' ? 'Not emailed — nobody to send it to' : 'Email failed'}
+        >
+          <p>
+            {latestEmail.outcome === 'skipped'
+              ? 'Add an accounts contact with an email address on the customer, then resend.'
+              : (latestEmail.detail ?? 'The email could not be sent.')}
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-2"
+            onClick={() => void resend()}
+            disabled={resendInvoice.isPending}
+          >
+            <MailIcon aria-hidden />
+            Resend invoice
+          </Button>
         </Alert>
       )}
 
@@ -351,6 +420,43 @@ export function AdminInvoiceDetailPage() {
                   { label: 'Template', value: invoice.templateName },
                 ]}
               />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Email</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {invoice.emails.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {invoice.status === 'draft' || invoice.status === 'awaiting-po'
+                    ? 'Not sent yet.'
+                    : 'No email on record.'}
+                </p>
+              ) : (
+                <ul className="space-y-2 text-sm">
+                  {invoice.emails.map((email) => (
+                    <li key={`${email.at}-${email.to}`}>
+                      {email.outcome === 'sent' ? (
+                        <span>
+                          Emailed to <span className="font-medium">{email.to}</span> on{' '}
+                          {formatDateTime(email.at)}
+                        </span>
+                      ) : email.outcome === 'skipped' ? (
+                        <span className="text-destructive">
+                          Not emailed on {formatDateTime(email.at)} — {email.detail ?? 'no email address'}
+                        </span>
+                      ) : (
+                        <span className="text-destructive">
+                          Email to {email.to} failed on {formatDateTime(email.at)}
+                          {email.detail ? ` — ${email.detail}` : ''}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </CardContent>
           </Card>
 

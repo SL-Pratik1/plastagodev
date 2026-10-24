@@ -2,7 +2,7 @@ import type { DriverListItem, DriverPerformance, DriverProfile, PageMeta } from 
 import mongoose from 'mongoose';
 import { todayInSydney } from '../../lib/business-day.js';
 import { UserModel } from '../auth/auth.model.js';
-import { VehicleModel } from '../fleet/vehicle.model.js';
+import { VehicleChoiceModel, VehicleModel } from '../fleet/vehicle.model.js';
 import { JobChargeModel, JobModel, JobPhotoModel } from '../jobs/job.model.js';
 import { DriverRosterModel } from './roster.model.js';
 
@@ -110,33 +110,37 @@ async function decorate(users: RawUser[]): Promise<DriverListItem[]> {
   if (users.length === 0) return [];
 
   const ids = users.map((user) => user._id);
-  const names = users.map((user) => user.name);
   const today = todayInSydney();
 
-  const [rosters, vehicles, jobCounts] = await Promise.all([
+  const [rosters, choices, jobCounts] = await Promise.all([
     DriverRosterModel.find({ userId: { $in: ids } }).lean(),
     /*
-     * The truck is paired by NAME (see `vehicle.model.ts`) — a deliberate choice
-     * there so the pairing survives a driver leaving.
+     * The vehicle each driver chose for today (Matt, 21 Oct) — the office no
+     * longer pairs drivers with trucks.
      */
-    VehicleModel.find(
-      { assignedDriverName: { $in: names } },
-      { rego: 1, label: 1, assignedDriverName: 1 },
-    ).lean(),
+    VehicleChoiceModel.find({ date: today, driverId: { $in: ids } }, { driverId: 1, vehicleId: 1 }).lean(),
     JobModel.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
       { $match: { driverId: { $in: ids }, readyDate: today } },
       { $group: { _id: '$driverId', count: { $sum: 1 } } },
     ]),
   ]);
 
+  const vehicles = await VehicleModel.find(
+    { _id: { $in: choices.map((choice) => choice.vehicleId) } },
+    { rego: 1, label: 1 },
+  ).lean();
+
   const rosterByUser = new Map(rosters.map((row) => [String(row.userId), row]));
-  const vehicleByName = new Map(vehicles.map((row) => [row.assignedDriverName ?? '', row]));
+  const vehicleById = new Map(vehicles.map((row) => [row._id.toHexString(), row]));
+  const vehicleByDriver = new Map(
+    choices.map((choice) => [choice.driverId.toHexString(), vehicleById.get(choice.vehicleId.toHexString())]),
+  );
   const jobsByDriver = new Map(jobCounts.map((row) => [row._id.toHexString(), row.count]));
 
   return users.map((user) => {
     const key = user._id.toHexString();
     const roster = rosterByUser.get(key);
-    const vehicle = vehicleByName.get(user.name);
+    const vehicle = vehicleByDriver.get(key);
 
     return {
       id: key,

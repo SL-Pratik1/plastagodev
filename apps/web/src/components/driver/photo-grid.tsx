@@ -175,7 +175,8 @@ export function PhotoGrid({
       <ul className="space-y-2">
         {required.map((slot) => {
           const taken = photos.filter((photo) => photo.slot === slot.key);
-          const done = taken.length > 0;
+          // Only a photo that reached storage ticks the slot.
+          const done = taken.some((photo) => photo.uploaded);
 
           return (
             <li

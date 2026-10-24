@@ -37,6 +37,19 @@ let postedComments: Array<{
   caller: { userId: string; name: string; accountId: string | null };
 }> = [];
 
+/** What the booking path was asked to enforce (the 4th `create` argument). */
+let createOptions: unknown[] = [];
+/** Jobs `jobService.reprice` was asked to re-price, and on which card. */
+let repriced: Array<{ jobId: string; rateCardId: string }> = [];
+/** Whether the pricing engine says this pickup is charged per m². */
+let quoteAreaPriced = true;
+/** The job as it stood before an edit — what decides whether to re-price. */
+let pricedBefore = {
+  expectedAreaM2: 900 as number | null,
+  bagCount: 2,
+  freightItem: 'plasterboard-bagged' as string,
+};
+
 /** What the repository reports back. Set per test. */
 let jobEditable = true;
 let jobStatus = 'booked';
@@ -49,11 +62,17 @@ const ACCOUNT = {
   id: 'acc0000000000000000000a1',
   name: 'Clarendon Homes',
   code: 'CLA001',
+  rateCardId: 'clarendon-domaine',
   accountType: 'builder' as const,
   captureMode: 'area-and-weight' as 'area-and-weight' | 'area-only',
   poPolicy: 'required-before-invoice' as 'required-before-invoice' | 'not-required',
   status: 'active' as 'active' | 'inactive',
 };
+
+// Matt, 21 Oct — the scope asks whether this admin must sign the terms first.
+vi.mock('../src/domains/terms/terms.service.js', () => ({
+  termsService: { pendingFor: () => Promise.resolve(false) },
+}));
 
 vi.mock('../src/domains/portal/portal.repository.js', () => ({
   portalRepository: {
@@ -129,6 +148,25 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
   accountRepository: { findById: () => Promise.resolve({ ...ACCOUNT }) },
 }));
 
+/* An edit reads the job's priced inputs, and asks the pricing engine whether it is per m². */
+vi.mock('../src/domains/jobs/job.repository.js', () => ({
+  pricingInputsFor: (id: string) =>
+    Promise.resolve({
+      id,
+      jobNumber: 61_400,
+      zoneId: '000000000000000000000001',
+      readyDate: '2026-10-12',
+      totalExGst: '364.00',
+      ...pricedBefore,
+    }),
+}));
+
+vi.mock('../src/domains/settings/pricing.service.js', () => ({
+  pricingService: {
+    quote: () => Promise.resolve({ areaPriced: quoteAreaPriced }),
+  },
+}));
+
 /*
  * `requestChange` and `setUrgency` now tell the office — the whole point of
  * both, and neither did before. Stubbed here so the unit tests do not reach
@@ -150,14 +188,25 @@ vi.mock('../src/domains/settings/settings.repository.js', () => ({
       }),
     /* M2.4a — a one-field read now, not a slice of the settings tree. */
     slaBusinessDays: () => Promise.resolve(5),
+    fixedPriceZoneIds: () => Promise.resolve(['000000000000000000000002']),
   },
 }));
 
 vi.mock('../src/domains/jobs/job.service.js', () => ({
   jobService: {
-    create: (draft: Record<string, unknown>) => {
+    create: (
+      draft: Record<string, unknown>,
+      _caller: unknown,
+      _source: unknown,
+      options: unknown,
+    ) => {
       jobDrafts.push(draft);
+      createOptions.push(options);
       return Promise.resolve({ id: 'job1', jobNumber: 61_400 });
+    },
+    reprice: (jobId: string, rateCardId: string) => {
+      repriced.push({ jobId, rateCardId });
+      return Promise.resolve({ jobNumber: 61_400, previous: '364.00', next: '380.00' });
     },
     preview: (draft: Record<string, unknown>) => {
       jobDrafts.push(draft);
@@ -251,6 +300,10 @@ beforeEach(() => {
   ACCOUNT.poPolicy = 'required-before-invoice';
   ACCOUNT.captureMode = 'area-and-weight';
   ACCOUNT.status = 'active';
+  createOptions = [];
+  repriced = [];
+  quoteAreaPriced = true;
+  pricedBefore = { expectedAreaM2: 900, bagCount: 2, freightItem: 'plasterboard-bagged' };
 });
 
 describe('a customer sees their own account and nothing else', () => {
@@ -383,14 +436,45 @@ describe('booking (M5.1)', () => {
   });
 
   /*
-   * ⚠️ Matt, 29:21 — a supervisor books without knowing the area: *"they're
-   * running the site, they're not going to know it's 823.4 square metres."*
-   * Null means the PO has it. Zero would say the job is empty.
+   * Null reaches the booking path as "no area", never as zero. Whether the m²
+   * was needed is decided there, on the customer's rate card — see below.
    */
-  it('accepts a booking with no area, because the PO carries it', async () => {
+  it('passes a booking with no area through to the booking path', async () => {
     await expect(
       portalService.book(draft({ expectedAreaM2: null }), SUPERVISOR),
     ).resolves.toBeDefined();
+  });
+
+  /* Matt, 21 Oct: exact m² from everyone not on a fixed price. */
+  it('asks the booking path to hold the m² rule', async () => {
+    await portalService.book(draft(), ADMIN);
+
+    expect(createOptions[0]).toEqual({ requireArea: true });
+  });
+
+  /* Matt, 21 Oct: *"They're named whatever the address is."* */
+  it('names the pickup from its lot and street, whatever the browser sent', async () => {
+    await portalService.book(
+      draft({ siteName: 'Something typed', lotNumber: '214', addressLine: '12 Smith Street' }),
+      ADMIN,
+    );
+
+    expect(jobDrafts[0]?.siteName).toBe('Lot 214, 12 Smith Street');
+  });
+
+  it('uses the street alone when there is no lot', async () => {
+    await portalService.book(draft({ lotNumber: '', addressLine: '12 Smith Street' }), ADMIN);
+
+    expect(jobDrafts[0]?.siteName).toBe('12 Smith Street');
+  });
+
+  /* The crane box is gone, so bags decide bagged or hand load. */
+  it('books bags as bagged and no bags as hand load, crane or not', async () => {
+    await portalService.book(draft({ bagCount: 3, craneAvailable: false }), ADMIN);
+    await portalService.book(draft({ bagCount: 0, craneAvailable: true }), ADMIN);
+
+    expect(jobDrafts[0]?.freightItem).toBe('plasterboard-bagged');
+    expect(jobDrafts[1]?.freightItem).toBe('plasterboard-hand-load');
   });
 
   it('refuses a half-completed certification', async () => {
@@ -539,6 +623,118 @@ describe('changing a booking (M5.4)', () => {
         ADMIN,
       ),
     ).rejects.toMatchObject({ status: 409 });
+  });
+
+  /* Found by us: the invoice copies the job's lines, so a new m² must re-price. */
+  it('re-prices the job when the m² changes', async () => {
+    await portalService.editJob(
+      'job1',
+      {
+        readyDate: '2026-10-12',
+        expectedAreaM2: 972.62,
+        bagCount: 2,
+        serviceLevel: 'standard',
+        poNumber: 'PO-88213',
+        notes: '',
+      },
+      ADMIN,
+    );
+
+    expect(edits[0]).toMatchObject({ expectedAreaM2: 972.62 });
+    expect(repriced).toEqual([{ jobId: 'job1', rateCardId: 'clarendon-domaine' }]);
+  });
+
+  it('leaves the price alone when nothing that prices the job changed', async () => {
+    await portalService.editJob(
+      'job1',
+      {
+        readyDate: '2026-10-12',
+        expectedAreaM2: 900,
+        bagCount: 2,
+        serviceLevel: 'urgent',
+        poNumber: 'PO-88213',
+        notes: 'Ring Dave first',
+      },
+      ADMIN,
+    );
+
+    expect(repriced).toHaveLength(0);
+  });
+
+  it('refuses to clear the m² on a pickup charged per m²', async () => {
+    await expect(
+      portalService.editJob(
+        'job1',
+        {
+          readyDate: '2026-10-12',
+          expectedAreaM2: null,
+          bagCount: 2,
+          serviceLevel: 'standard',
+          poNumber: 'PO-88213',
+          notes: '',
+        },
+        ADMIN,
+      ),
+    ).rejects.toMatchObject({ status: 422, issues: [{ path: 'expectedAreaM2' }] });
+
+    expect(edits).toHaveLength(0);
+  });
+
+  it('accepts no m² on a fixed-price pickup', async () => {
+    quoteAreaPriced = false;
+    pricedBefore.expectedAreaM2 = null;
+
+    await portalService.editJob(
+      'job1',
+      {
+        readyDate: '2026-10-12',
+        expectedAreaM2: null,
+        bagCount: 2,
+        serviceLevel: 'standard',
+        poNumber: 'PO-88213',
+        notes: '',
+      },
+      ADMIN,
+    );
+
+    expect(edits[0]).toMatchObject({ expectedAreaM2: null });
+  });
+
+  it('switches a pickup to hand load when its bags go to zero, and re-prices it', async () => {
+    await portalService.editJob(
+      'job1',
+      {
+        readyDate: '2026-10-12',
+        expectedAreaM2: 900,
+        bagCount: 0,
+        serviceLevel: 'standard',
+        poNumber: 'PO-88213',
+        notes: '',
+      },
+      ADMIN,
+    );
+
+    expect(edits[0]).toMatchObject({ freightItem: 'plasterboard-hand-load', bagCount: 0 });
+    expect(repriced).toHaveLength(1);
+  });
+
+  it('never changes a hook bin from the portal', async () => {
+    pricedBefore.freightItem = 'hook-bin-10';
+
+    await portalService.editJob(
+      'job1',
+      {
+        readyDate: '2026-10-12',
+        expectedAreaM2: 900,
+        bagCount: 0,
+        serviceLevel: 'standard',
+        poNumber: 'PO-88213',
+        notes: '',
+      },
+      ADMIN,
+    );
+
+    expect(edits[0]).toMatchObject({ freightItem: 'hook-bin-10' });
   });
 
   it('routes a reschedule to the office as a request', async () => {
@@ -701,5 +897,12 @@ describe('the scope call', () => {
     // Matt, 7:07 — the customer quotes the same number when they pay.
     expect(scope.invoiceNumberPrefix).toBe('PGA-');
     expect(scope.visibility).toBe('account');
+  });
+
+  /* No figures — so a supervisor gets it too, and their form skips the m². */
+  it('tells a supervisor which zones are fixed price for their account', async () => {
+    const scope = await portalService.scope(SUPERVISOR);
+
+    expect(scope.fixedPriceZoneIds).toEqual(['000000000000000000000002']);
   });
 });

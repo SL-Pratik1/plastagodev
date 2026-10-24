@@ -84,6 +84,25 @@ export const PortalScopeSchema = z
      * tells the UI what to say about it.
      */
     visibility: z.enum(['account', 'own-jobs']),
+    /**
+     * The zones where this account's rate card charges a FIXED weight charge
+     * today. The booking form skips the m² question for a suburb in one of
+     * them — Matt, 21 Oct: *"meters square should show for anyone that's not
+     * got fixed price."* No figures, so it is safe for a site supervisor. The
+     * server still decides on the booking's own date.
+     */
+    fixedPriceZoneIds: z.array(ZoneSchema),
+    /**
+     * Matt, 21 Oct: certificates go *"only to certain customers"*. False hides
+     * the Certificates tab and downloads; the server refuses them as well.
+     */
+    receivesCertificates: z.boolean().default(false),
+    /**
+     * Matt, 21 Oct — this customer administrator must finish their details,
+     * the director's guarantee and sign the terms before using the portal.
+     * Never true for a site supervisor.
+     */
+    mustSignTerms: z.boolean().default(false),
   })
   .meta({ id: 'PortalScope' });
 
@@ -150,6 +169,14 @@ export const PortalJobListItemSchema = z
     bookedByName: z.string().nullable(),
     readyDate: IsoDateSchema,
     targetDate: IsoDateSchema,
+    /**
+     * The planned date of the run this job is on, or null when it is on none.
+     *
+     * Matt, 21 Oct: *"the customer can log on and see what date their job's
+     * planned to be picked up. Doesn't necessarily mean it will happen."* A
+     * plan, not a promise — the screens say so.
+     */
+    plannedDate: IsoDateSchema.nullable(),
     serviceLevel: ServiceLevelSchema,
     /** Null on a builder's job until the office reads it off the PO. */
     expectedAreaM2: z.number().nonnegative().nullable(),
@@ -357,7 +384,8 @@ export const PortalBookingDraftSchema = z
 export const PortalJobEditSchema = z
   .object({
     readyDate: IsoDateSchema,
-    expectedAreaM2: z.number().positive().max(100000),
+    /** Null only where the customer is on a fixed price — the server checks. */
+    expectedAreaM2: z.number().positive().max(100000).nullable(),
     bagCount: z.number().int().min(0).max(200),
     serviceLevel: ServiceLevelSchema,
     /** PO number or job reference — one field (Matt, 9:08). */

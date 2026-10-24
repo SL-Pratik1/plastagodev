@@ -69,6 +69,9 @@ const JOB = {
   poNumber: 'PO-88213' as string | null,
   /** What the job's rollup already records — null until it is first invoiced. */
   invoiceNumber: null as number | null,
+  /** Priced per m² (23 Oct) — so it cannot be invoiced without its m². */
+  areaPriced: true,
+  expectedAreaM2: 120 as number | null,
 };
 
 /** Makes reading the job's charges fail — standing in for the database blinking mid-bill. */
@@ -87,6 +90,13 @@ let charges: Array<{
 }> = [];
 
 let invoiceStatusWrites: Array<{ jobId: string; status: string; invoiceNumber?: number }> = [];
+
+/** What the job has to show for itself — every required photo and the weights, by default. */
+const ALL_REQUIRED_SLOTS = ['front-of-site', 'pile-before', 'pile-after', 'site-closed'];
+let evidence = { uploadedSlots: [...ALL_REQUIRED_SLOTS], weightsRecorded: true };
+
+/** Bells raised to the office, in order. */
+const officeBells: Array<{ title: string; body: string; href: string }> = [];
 
 // GETTERS, not values: `vi.mock` factories hoist above every import.
 vi.mock('../src/domains/invoices/invoice.repository.js', async (importOriginal) => {
@@ -123,6 +133,7 @@ vi.mock('../src/domains/jobs/job.repository.js', () => ({
     invoiceStatusWrites.push({ jobId, status, invoiceNumber });
     return Promise.resolve();
   },
+  completionEvidence: () => Promise.resolve(evidence),
 }));
 
 /*
@@ -131,7 +142,17 @@ vi.mock('../src/domains/jobs/job.repository.js', () => ({
  * a MongoDB that is not there.
  */
 vi.mock('../src/domains/notifications/notification.repository.js', () => ({
-  notificationRepository: makeFakeNotificationRepository(),
+  notificationRepository: {
+    ...makeFakeNotificationRepository(),
+    // One member of the office, so a bell has somebody to reach.
+    officeRecipients: () =>
+      Promise.resolve([{ id: 'usr0000000000000000000f1', roles: ['office-staff'] }]),
+    raise: (input: { title: string; body: string; href: string }) => {
+      officeBells.push(input);
+      return Promise.resolve();
+    },
+    sendsForInvoice: () => Promise.resolve([]),
+  },
 }));
 
 /**
@@ -270,7 +291,11 @@ beforeEach(() => {
   JOB.status = 'completed';
   JOB.poNumber = 'PO-88213';
   JOB.invoiceNumber = null;
+  JOB.areaPriced = true;
+  JOB.expectedAreaM2 = 120;
   billingFails = false;
+  evidence = { uploadedSlots: [...ALL_REQUIRED_SLOTS], weightsRecorded: true };
+  officeBells.length = 0;
   clearOutbound();
   setMessagingProvidersForTests(recordingProviders());
 });
@@ -999,5 +1024,186 @@ describe('Xero (I1)', () => {
     await invoiceService.send([a.id, b.id], OFFICE);
 
     expect(xeroPushes).toEqual([a.id, b.id]);
+  });
+});
+
+/*
+ * Matt, 21 Oct: "the job invoice itself gets sent immediately. And we wait for
+ * the POs and approve those once we receive those POs."
+ */
+describe('invoicing on completion (21 Oct)', () => {
+  it('creates and sends the invoice when the driver completes the job', async () => {
+    const result = await invoiceService.invoiceCompletedJob(JOB.id);
+
+    expect(invoices.all).toHaveLength(1);
+    expect(invoices.all[0]).toMatchObject({ kind: 'base', status: 'sent' });
+    expect(result.sent).toEqual([invoices.all[0]?.invoiceNumber]);
+    expect(sentMessages.map((message) => message.to)).toEqual(['accounts@clarendon.com.au']);
+    expect(officeBells).toHaveLength(0);
+  });
+
+  it('leaves it awaiting a PO when the customer needs one and the job has none', async () => {
+    JOB.poNumber = null;
+
+    const result = await invoiceService.invoiceCompletedJob(JOB.id);
+
+    expect(invoices.all[0]?.status).toBe('awaiting-po');
+    expect(result.sent).toEqual([]);
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it('holds back a job missing a required photo, and tells the office what is missing', async () => {
+    evidence = { uploadedSlots: ['front-of-site', 'pile-after', 'site-closed'], weightsRecorded: true };
+
+    const result = await invoiceService.invoiceCompletedJob(JOB.id);
+
+    expect(invoices.all).toHaveLength(0);
+    expect(result.held).toEqual(['the pile before photo']);
+    expect(officeBells[0]).toMatchObject({
+      title: `Job #${String(JOB.jobNumber)} was not invoiced automatically`,
+      href: `/admin/jobs/${JOB.id}`,
+    });
+    expect(officeBells[0]?.body).toContain('the pile before photo');
+  });
+
+  it('holds back a job with nothing recorded as collected', async () => {
+    evidence = { uploadedSlots: [...ALL_REQUIRED_SLOTS], weightsRecorded: false };
+
+    const result = await invoiceService.invoiceCompletedJob(JOB.id);
+
+    expect(invoices.all).toHaveLength(0);
+    expect(result.held).toEqual(['what was collected']);
+  });
+
+  it('tells the office when nobody received the email, and keeps it sent', async () => {
+    providerFailure.message = 'mailbox unavailable';
+
+    await invoiceService.invoiceCompletedJob(JOB.id);
+
+    expect(invoices.all[0]?.status).toBe('sent');
+    expect(officeBells[0]?.title).toBe('Invoice PGA-' + String(invoices.all[0]?.invoiceNumber) + ' was not emailed');
+    expect(officeBells[0]?.body).toContain('mailbox unavailable');
+    expect(officeBells[0]?.href).toBe(`/admin/invoices/${String(invoices.all[0]?.id)}`);
+  });
+
+  it('never throws, and tells the office, when billing fails', async () => {
+    billingFails = true;
+
+    await expect(invoiceService.invoiceCompletedJob(JOB.id)).resolves.toMatchObject({ sent: [] });
+    expect(officeBells[0]?.title).toBe(
+      `Job #${String(JOB.jobNumber)} could not be invoiced automatically`,
+    );
+  });
+
+  it('does nothing for a job that was not completed', async () => {
+    JOB.status = 'futile';
+
+    await invoiceService.invoiceCompletedJob(JOB.id);
+
+    expect(invoices.all).toHaveLength(0);
+    expect(officeBells).toHaveLength(0);
+  });
+
+  it('does not bill or email twice when the completion is replayed', async () => {
+    await invoiceService.invoiceCompletedJob(JOB.id);
+    await invoiceService.invoiceCompletedJob(JOB.id);
+
+    expect(invoices.all).toHaveLength(1);
+    expect(sentMessages).toHaveLength(1);
+  });
+});
+
+describe('resending an invoice (21 Oct)', () => {
+  it('emails a sent invoice again, to every address', async () => {
+    const sent = invoices.seed({ status: 'sent' });
+
+    const result = await invoiceService.resend(sent.id, OFFICE);
+
+    expect(result.sentTo).toHaveLength(1);
+    expect(result.failed).toEqual([]);
+    expect(sentMessages.map((message) => message.to)).toEqual(['accounts@clarendon.com.au']);
+  });
+
+  it('says which address failed', async () => {
+    const sent = invoices.seed({ status: 'sent' });
+    providerFailure.message = 'mailbox unavailable';
+
+    const result = await invoiceService.resend(sent.id, OFFICE);
+
+    expect(result.sentTo).toEqual([]);
+    expect(result.failed[0]?.reason).toBe('mailbox unavailable');
+  });
+
+  it('refuses an invoice that has not been sent yet', async () => {
+    const draft = invoices.seed({ status: 'draft' });
+    const waiting = invoices.seed({ status: 'awaiting-po' });
+
+    await expect(invoiceService.resend(draft.id, OFFICE)).rejects.toMatchObject({ status: 409 });
+    await expect(invoiceService.resend(waiting.id, OFFICE)).rejects.toMatchObject({ status: 409 });
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it('refuses a customer', async () => {
+    const sent = invoices.seed({ status: 'sent' });
+
+    await expect(invoiceService.resend(sent.id, CUSTOMER)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('says so when the customer has nobody to send it to', async () => {
+    const sent = invoices.seed({ status: 'sent' });
+    const contacts = ACCOUNT.contacts;
+    ACCOUNT.contacts = [];
+
+    try {
+      await expect(invoiceService.resend(sent.id, OFFICE)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('has no email address for invoices'),
+      });
+    } finally {
+      ACCOUNT.contacts = contacts;
+    }
+  });
+});
+
+/**
+ * A purchase order with no m², on a customer charged per m² (23 Oct). The job
+ * used to be invoiced without its m² charge at all — under-billed, silently.
+ */
+describe('a job with no m², priced per m² (23 Oct)', () => {
+  it('holds the automatic invoice and tells the office to set the m²', async () => {
+    JOB.expectedAreaM2 = null;
+
+    const result = await invoiceService.invoiceCompletedJob(JOB.id);
+
+    expect(invoices.all).toHaveLength(0);
+    expect(result.held).toEqual(['its m²']);
+    expect(officeBells[0]?.body).toBe(
+      'It has no m², and this customer is charged per m². Set the m² on the job and it is invoiced straight away.',
+    );
+  });
+
+  it('refuses Raise invoice until the m² is set', async () => {
+    JOB.expectedAreaM2 = null;
+
+    await expect(invoiceService.generateForJob(JOB.id, OFFICE)).rejects.toMatchObject({
+      status: 409,
+      message: `Job #${String(JOB.jobNumber)} has no m², and this customer is charged per m². Set the m² on the job first.`,
+    });
+    expect(invoices.all).toHaveLength(0);
+  });
+
+  it('still invoices a fixed-price job with no m² — the m² does not price it', async () => {
+    JOB.expectedAreaM2 = null;
+    JOB.areaPriced = false;
+
+    await expect(invoiceService.generateForJob(JOB.id, OFFICE)).resolves.toHaveLength(1);
+  });
+
+  it('still bills a futile job its fee — it was never going to bill the m²', async () => {
+    JOB.expectedAreaM2 = null;
+    JOB.status = 'futile';
+    charges = [{ ...DRIVER_CHARGE, code: 'futile-pickup', amount: '120.00' }];
+
+    await expect(invoiceService.generateForJob(JOB.id, OFFICE)).resolves.toHaveLength(1);
   });
 });

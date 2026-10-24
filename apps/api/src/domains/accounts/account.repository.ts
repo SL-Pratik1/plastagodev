@@ -10,11 +10,13 @@ import type {
   PageMeta,
   PoPolicy,
   RateCardId,
+  TermsSignatureSummary,
   Zone,
 } from '@plastago/shared';
 import { zoneLabelFor } from '../settings/zone-lookup.js';
 import mongoose from 'mongoose';
 import { withTransaction } from '../../lib/transaction.js';
+import { TermsDocumentModel, TermsSignatureModel } from '../terms/terms.model.js';
 import { AccountModel, ContactModel } from './account.model.js';
 
 /**
@@ -86,6 +88,10 @@ export interface CreateAccountInput {
   primaryZoneId: Zone;
   notes: string;
   contact: { name: string; email: string | null } | null;
+  receivesCertificates: boolean;
+  certificateEmail: string | null;
+  /** The onboarding tick — see `termsRequired` on the model. */
+  termsRequired: boolean;
 }
 
 /**
@@ -104,6 +110,8 @@ export interface UpdateAccountInput {
   suburb: string | null;
   postcode: string | null;
   certificateEmail: string | null;
+  /** Left out keeps what is stored. */
+  receivesCertificates?: boolean | undefined;
   notes: string;
   contact: { name: string; email: string | null } | null;
 }
@@ -125,6 +133,9 @@ interface RawAccount {
   invoiceTemplateId: string | null;
   riskAssessmentRequired: boolean;
   certificateEmail: string | null;
+  /** Absent on accounts written before 21 Oct — read as not ticked. */
+  receivesCertificates?: boolean;
+  termsRequired?: boolean;
   preferredPickupWindow: string | null;
   tradingName: string | null;
   addressLine: string | null;
@@ -226,9 +237,10 @@ export const accountRepository = {
     const account = await AccountModel.findById(id).lean<RawAccount>();
     if (!account) return null;
 
-    const contacts = await ContactModel.find({ accountId: account._id })
-      .sort({ role: 1, name: 1 })
-      .lean<RawContact[]>();
+    const [contacts, terms] = await Promise.all([
+      ContactModel.find({ accountId: account._id }).sort({ role: 1, name: 1 }).lean<RawContact[]>(),
+      termsOf(account),
+    ]);
 
     return {
       ...toListItem(account),
@@ -236,6 +248,8 @@ export const accountRepository = {
       invoiceTemplateId: account.invoiceTemplateId ?? null,
       riskAssessmentRequired: account.riskAssessmentRequired,
       certificateEmail: resolveCertificateEmail(account, contacts),
+      receivesCertificates: account.receivesCertificates ?? false,
+      ...terms,
       abn: account.abn,
       /*
        * The customer's own registered details.
@@ -374,7 +388,9 @@ export const accountRepository = {
               // demand, not a PlastaGo policy. Defaulting it on would make
               // every driver on a new account fill in an unrequested form.
               riskAssessmentRequired: false,
-              certificateEmail: null,
+              certificateEmail: input.certificateEmail,
+              receivesCertificates: input.receivesCertificates,
+              termsRequired: input.termsRequired,
               preferredPickupWindow: null,
               notes: input.notes,
             },
@@ -460,6 +476,9 @@ export const accountRepository = {
               suburb: input.suburb,
               postcode: input.postcode,
               certificateEmail: input.certificateEmail,
+              ...(input.receivesCertificates === undefined
+                ? {}
+                : { receivesCertificates: input.receivesCertificates }),
               notes: input.notes,
             },
           },
@@ -490,6 +509,24 @@ export const accountRepository = {
       },
       { label: 'accounts.update' },
     );
+  },
+
+  /** The commercial terms — a targeted `$set`, like the switches below. */
+  async setCommercialTerms(
+    id: string,
+    terms: {
+      rateCardId: RateCardId;
+      paymentTermsDays: number;
+      poPolicy: PoPolicy;
+      captureMode: CaptureMode;
+    },
+  ): Promise<boolean> {
+    if (!mongoose.isValidObjectId(id)) return false;
+    const result = await AccountModel.updateOne(
+      { _id: new mongoose.Types.ObjectId(id) },
+      { $set: terms },
+    );
+    return result.matchedCount === 1;
   },
 
   /**
@@ -540,6 +577,39 @@ export const accountRepository = {
 };
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Where the account is with the terms (Matt, 21 Oct): whether it is asked, its
+ * latest signing, and whether the current version still waits for one.
+ */
+async function termsOf(account: RawAccount): Promise<{
+  termsRequired: boolean;
+  termsSignature: TermsSignatureSummary | null;
+  termsPending: boolean;
+}> {
+  const termsRequired = account.termsRequired ?? false;
+  const [signature, current] = await Promise.all([
+    TermsSignatureModel.findOne({ accountId: account._id })
+      .sort({ signedAt: -1 })
+      .lean<{ version: number; signedAt: Date; signerName: string; directorName: string; ip: string | null; userAgent: string | null }>(),
+    TermsDocumentModel.findOne().sort({ version: -1 }).select({ version: 1 }).lean<{ version: number }>(),
+  ]);
+
+  return {
+    termsRequired,
+    termsSignature: signature
+      ? {
+          version: signature.version,
+          signedAt: signature.signedAt.toISOString(),
+          signerName: signature.signerName,
+          directorName: signature.directorName,
+          ip: signature.ip ?? null,
+          userAgent: signature.userAgent ?? null,
+        }
+      : null,
+    termsPending: termsRequired && current !== null && signature?.version !== current.version,
+  };
+}
 
 function buildFilter(query: ListAccountsQuery, scope: AccountScope): AccountFilter {
   const filter: AccountFilter = {};

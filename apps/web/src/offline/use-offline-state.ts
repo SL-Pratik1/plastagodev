@@ -1,6 +1,7 @@
 import { liveQuery } from 'dexie';
 import { useEffect, useState } from 'react';
-import { db, META_KEYS } from './db';
+import { db, META_KEYS, type OutboxOperation } from './db';
+import { MAX_ATTEMPTS } from './outbox';
 import { isEffectivelyOffline, subscribeSimulatedOffline } from './transport';
 
 /**
@@ -75,4 +76,48 @@ export function useOutboxSummary(): OutboxSummary {
   }, []);
 
   return summary;
+}
+
+/**
+ * Every action the server has not taken, with why — for the driver's "Not
+ * sent" list (Matt, 21 Oct: the phone said completed, the office said on site).
+ *
+ * The counts above said something was wrong without saying what. `stopped` is
+ * an action that will not be sent again by itself: the server refused it, or
+ * it ran out of attempts.
+ */
+export interface UnsentAction {
+  id: number;
+  method: OutboxOperation['method'];
+  path: string;
+  createdAt: string;
+  lastError: string | null;
+  stopped: boolean;
+}
+
+export function useUnsentActions(): UnsentAction[] {
+  const [rows, setRows] = useState<UnsentAction[]>([]);
+
+  useEffect(() => {
+    const subscription = liveQuery(async () => {
+      const failed = await db.outbox.where('status').equals('failed').sortBy('createdAt');
+      return failed.map((row) => ({
+        id: row.id,
+        method: row.method,
+        path: row.path,
+        createdAt: row.createdAt,
+        lastError: row.lastError ?? null,
+        stopped: row.attempts >= MAX_ATTEMPTS,
+      }));
+    }).subscribe({
+      next: setRows,
+      error: (error: unknown) => {
+        console.error('outbox liveQuery failed', error);
+      },
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  return rows;
 }

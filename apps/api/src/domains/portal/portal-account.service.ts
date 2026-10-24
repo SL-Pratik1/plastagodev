@@ -411,6 +411,17 @@ export const portalAccountService = {
  * terms — a site supervisor books pickups and sees the jobs they raised, and
  * none of this is theirs to see or change (M1.5).
  */
+/**
+ * Matt, 21 Oct: certificates go *"only to certain customers"*. The portal hides
+ * the tab for the rest; this is the refusal behind it.
+ */
+async function assertReceivesCertificates(accountId: string): Promise<void> {
+  const account = await accountRepository.findById(accountId, { accountId: null });
+  if (!account?.receivesCertificates) {
+    throw AppError.forbidden('Certificates are not part of your account — ask PlastaGo if you need them');
+  }
+}
+
 function assertAdministrator(caller: Caller): string {
   if (!caller.accountId) {
     throw AppError.forbidden('Your login is not linked to a customer account');
@@ -486,6 +497,7 @@ export const portalCertificateService = {
     caller: Caller,
   ): Promise<{ data: Certificate[]; meta: PageMeta }> {
     const accountId = assertAdministrator(caller);
+    await assertReceivesCertificates(accountId);
 
     return reportService.certificates(
       { ...query, state: 'issued' },
@@ -515,6 +527,7 @@ export const portalCertificateService = {
    */
   async requestCertificatePdf(id: string, caller: Caller): Promise<{ url: string }> {
     const accountId = assertAdministrator(caller);
+    await assertReceivesCertificates(accountId);
 
     const certificate = await reportRepository.findCertificate(id, accountId);
     // 404, not 403 — a 403 confirms another customer's certificate exists.

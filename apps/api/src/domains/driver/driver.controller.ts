@@ -1,8 +1,10 @@
 import type {
+  ChooseVehicleSchema,
   CompletionSchema,
   ContaminationReportSchema,
   DefectReportSchema,
   FutileReportSchema,
+  UnarriveSchema,
   PreStartSubmissionSchema,
   SiteRiskAssessmentSchema,
   StatusUpdateSchema,
@@ -152,6 +154,14 @@ export const driverController = {
     res.status(204).send();
   },
 
+  unarrive: async (
+    req: ValidatedRequest<{ params: typeof JobIdParamsSchema; body: typeof UnarriveSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    await driverService.unarrive(req.validated.params.jobId, req.validated.body, callerFrom(req));
+    res.status(204).send();
+  },
+
   markContaminated: async (
     req: ValidatedRequest<{
       params: typeof JobIdParamsSchema;
@@ -172,6 +182,21 @@ export const driverController = {
       callerFrom(req),
     );
     res.status(200).json(outcome);
+  },
+
+  lists: async (_req: ValidatedRequest<object>, res: Response): Promise<void> => {
+    res.json(await driverService.lists());
+  },
+
+  vehicleOptions: async (req: ValidatedRequest<object>, res: Response): Promise<void> => {
+    res.json(await driverService.vehicleOptions(callerFrom(req)));
+  },
+
+  chooseVehicle: async (
+    req: ValidatedRequest<{ body: typeof ChooseVehicleSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await driverService.chooseVehicle(req.validated.body, callerFrom(req)));
   },
 
   submitPreStart: async (

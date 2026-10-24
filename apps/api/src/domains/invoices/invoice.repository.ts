@@ -235,6 +235,8 @@ export const invoiceRepository = {
       xeroMessage: row.xeroMessage,
       paymentTermsDays: row.paymentTermsDays,
       notes: row.notes,
+      // Read from the send log by the service, for the office only.
+      emails: [],
     };
   },
 
@@ -467,6 +469,42 @@ export const invoiceRepository = {
     });
 
     return result.modifiedCount;
+  },
+
+  /** How many of an account's invoices are held for a PO. */
+  async countAwaitingPo(accountId: string): Promise<number> {
+    if (!mongoose.isValidObjectId(accountId)) return 0;
+    return InvoiceModel.countDocuments({
+      accountId: new mongoose.Types.ObjectId(accountId),
+      status: 'awaiting-po',
+    });
+  },
+
+  /**
+   * Release every invoice an account has held for a PO, back to `draft`.
+   *
+   * For when the office switches the account's PO requirement off: the
+   * condition those invoices were waiting on no longer exists. `draft`, not
+   * `sent` — releasing unblocks, it does not post. Returns the jobs touched,
+   * so their invoice badge can follow.
+   */
+  async releaseAwaitingPo(accountId: string): Promise<{ released: number; jobIds: string[] }> {
+    if (!mongoose.isValidObjectId(accountId)) return { released: 0, jobIds: [] };
+    const filter = {
+      accountId: new mongoose.Types.ObjectId(accountId),
+      status: 'awaiting-po' as const,
+    };
+
+    const held = await InvoiceModel.find(filter, { jobId: 1 }).lean<
+      Array<{ jobId: mongoose.Types.ObjectId | null }>
+    >();
+    if (held.length === 0) return { released: 0, jobIds: [] };
+
+    const result = await InvoiceModel.updateMany(filter, { $set: { status: 'draft' } });
+    const jobIds = new Set(
+      held.flatMap((invoice) => (invoice.jobId ? [invoice.jobId.toHexString()] : [])),
+    );
+    return { released: result.modifiedCount, jobIds: [...jobIds] };
   },
 
   /**

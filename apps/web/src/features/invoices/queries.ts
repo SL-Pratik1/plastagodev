@@ -85,6 +85,12 @@ export function useRetryXero() {
   return useInvoiceMutation((id: string) => invoices.retryXero(id));
 }
 
+/** Re-reads the invoice afterwards, so its email history shows the new attempt. */
+export function useResendInvoice() {
+  const { invoices } = useServices();
+  return useInvoiceMutation((id: string) => invoices.resend(id));
+}
+
 /**
  * A PDF request changes nothing, so it does not invalidate anything — the
  * rendering happens server-side and the file arrives by another route (§6A.6).

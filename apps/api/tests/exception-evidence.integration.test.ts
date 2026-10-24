@@ -131,8 +131,24 @@ async function seedCharge(input: {
   return charge._id;
 }
 
-async function seedPhoto(jobId: mongoose.Types.ObjectId, slot: string | null, caption: string) {
-  await JobPhotoModel.create({ jobId, slot, caption, takenAt: new Date() });
+/**
+ * A photo as the phone leaves it. Uploaded unless told otherwise: since 23 Oct
+ * only a photo whose bytes arrived counts as evidence, and `uploadedAt` is how
+ * the server knows they did.
+ */
+async function seedPhoto(
+  jobId: mongoose.Types.ObjectId,
+  slot: string | null,
+  caption: string,
+  uploaded = true,
+) {
+  await JobPhotoModel.create({
+    jobId,
+    slot,
+    caption,
+    takenAt: new Date(),
+    uploadedAt: uploaded ? new Date() : null,
+  });
 }
 
 /* ── The rule, spelled twice ──────────────────────────────────────────────── */
@@ -352,6 +368,27 @@ describe('the futile review, against a real database', () => {
       true,
     );
     expect(list.data[0]?.photoCount).toBe(2);
+  });
+
+  it('does not count a photo whose upload never finished (23 Oct)', async ({ skip }) => {
+    if (!reachable) skip();
+
+    const account = await seedAccount('not-required');
+    const jobId = await seedJob({ accountId: account, jobNumber: 61_602, status: 'futile' });
+    await seedPhoto(jobId, 'futile', 'Could not collect — evidence');
+    // Signed for, then the upload to storage failed — not evidence.
+    await seedPhoto(jobId, 'futile', 'Could not collect — evidence', false);
+
+    await FutileReviewModel.create({
+      jobId,
+      reason: 'access-blocked',
+      note: null,
+      markedAt: new Date(),
+      outcome: 'pending',
+    });
+
+    const list = await queueRepository.futileList({ page: 1, pageSize: 20 }, '120.00');
+    expect(list.data.find((row) => row.jobNumber === 61_602)?.photoCount).toBe(1);
   });
 });
 

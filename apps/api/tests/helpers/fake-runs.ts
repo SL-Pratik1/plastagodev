@@ -1,4 +1,11 @@
-import type { Driver, Run, RunStatus, UnallocatedJob } from '@plastago/shared';
+import {
+  FINISHED_STOP_STATUSES,
+  type Driver,
+  type JobStatus,
+  type Run,
+  type RunStatus,
+  type UnallocatedJob,
+} from '@plastago/shared';
 import { ZONE } from './fake-settings.js';
 import type { CreateRunInput } from '../../src/domains/dispatch/run.repository.js';
 
@@ -68,6 +75,7 @@ export function createFakeRunRepository() {
     resequences: [] as Array<{ runId: string; jobIds: readonly string[]; optimised: boolean }>,
     assigns: [] as Array<{ runId: string; driverId: string; sequenceForDay: number }>,
     removed: [] as string[],
+    closed: [] as string[],
   };
 
   /**
@@ -87,6 +95,14 @@ export function createFakeRunRepository() {
    * existed carries and the state a run is most likely to be in.
    */
   const geocoded = new Set<string>();
+
+  /** A stop's job status. `booked` unless a test says the driver got further. */
+  const stopStatus = new Map<string, JobStatus>();
+  const isFinished = (run: StoredRun) =>
+    run.stops.length > 0 &&
+    run.stops.every((jobId) =>
+      (FINISHED_STOP_STATUSES as readonly string[]).includes(stopStatus.get(jobId) ?? 'booked'),
+    );
 
   function factsFor(jobId: string) {
     let facts = jobFacts.get(jobId);
@@ -111,7 +127,7 @@ export function createFakeRunRepository() {
         id: jobId,
         jobNumber: facts.jobNumber,
         sequence: index + 1,
-        status: 'booked' as const,
+        status: stopStatus.get(jobId) ?? 'booked',
         accountName: 'Clarendon Homes',
         builderName: 'GJ Gardner',
         siteName: `Lot ${String(facts.jobNumber)}`,
@@ -164,6 +180,63 @@ export function createFakeRunRepository() {
       return Promise.resolve(
         [...runs.values()].filter((run) => run.date === date).map((run) => toRun(run)),
       );
+    },
+
+    /** Mirrors the real query: open runs of any date, plus every run on `date`. */
+    async boardRuns(date: string): Promise<{ runs: Run[]; newlyFinished: string[] }> {
+      const newlyFinished: string[] = [];
+      const shown: Run[] = [];
+      for (const run of [...runs.values()].sort((a, b) => a.date.localeCompare(b.date))) {
+        if (run.status === 'closed' && run.date !== date) continue;
+        const finished = isFinished(run);
+        if (finished && run.status !== 'closed') newlyFinished.push(run.id);
+        if (finished && run.date !== date) continue;
+        shown.push({ ...toRun(run), ...(finished ? { status: 'closed' as const } : {}) });
+      }
+      return Promise.resolve({ runs: shown, newlyFinished });
+    },
+
+    async markClosed(runIds: readonly string[]): Promise<void> {
+      for (const id of runIds) {
+        const run = runs.get(id);
+        if (run) run.status = 'closed';
+      }
+      calls.closed.push(...runIds);
+      return Promise.resolve();
+    },
+
+    async closeIfFinished(runId: string): Promise<boolean> {
+      const run = runs.get(runId);
+      if (!run || run.status === 'closed' || !isFinished(run)) return Promise.resolve(false);
+      run.status = 'closed';
+      return Promise.resolve(true);
+    },
+
+    async startedStopCount(runId: string): Promise<number> {
+      const stops = runs.get(runId)?.stops ?? [];
+      return Promise.resolve(
+        stops.filter((jobId) => !['booked', 'assigned'].includes(stopStatus.get(jobId) ?? 'booked'))
+          .length,
+      );
+    },
+
+    async setDate(runId: string, date: string, sequenceForDay: number | null): Promise<boolean> {
+      const run = runs.get(runId);
+      if (!run || (run.status !== 'planning' && run.status !== 'assigned')) {
+        return Promise.resolve(false);
+      }
+      Object.assign(run, { date, sequenceForDay });
+      return Promise.resolve(true);
+    },
+
+    async renumberDriverDay(driverId: string, date: string): Promise<void> {
+      const mine = [...runs.values()]
+        .filter((run) => run.driverId === driverId && run.date === date)
+        .sort((a, b) => (a.sequenceForDay ?? 0) - (b.sequenceForDay ?? 0));
+      mine.forEach((run, index) => {
+        run.sequenceForDay = index + 1;
+      });
+      return Promise.resolve();
     },
 
     async findSummary(runId: string) {
@@ -331,6 +404,11 @@ export function createFakeRunRepository() {
 
     isFree(jobId: string): boolean {
       return freeJobs.has(jobId);
+    },
+
+    /** Move one stop's job along, as the driver or the office would. */
+    setStopStatus(jobId: string, status: JobStatus): void {
+      stopStatus.set(jobId, status);
     },
 
     /** Force a status the lifecycle would not normally reach yet. */

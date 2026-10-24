@@ -6,7 +6,10 @@ import {
   ObjectIdSchema,
 } from './primitives.js';
 import { ZoneSchema } from './party.js';
+import { VehicleTypeSchema } from './fleet.js';
 import {
+  EXCEPTION_REASONS,
+  EXCEPTION_REASON_LABELS,
   ExceptionReasonSchema,
   JobStatusSchema,
   LocationSourceSchema,
@@ -291,18 +294,73 @@ export const RunSheetDaySchema = z
     date: IsoDateSchema,
     driverId: ObjectIdSchema,
     driverName: NonEmptyStringSchema,
+    /**
+     * The vehicle this driver is on for the day: the one they chose, or — for
+     * app builds without the vehicle picker — the old office pairing.
+     */
+    vehicleId: ObjectIdSchema.nullable().default(null),
     vehicleRego: z.string().nullable(),
     vehicleLabel: z.string().nullable(),
+    /**
+     * True once the driver has chosen a vehicle for this day
+     * (`POST /driver/vehicle`). False means the picker comes before the
+     * pre-start, even when an old pairing filled `vehicleRego`.
+     */
+    vehicleChosen: z.boolean().default(false),
     runs: z.array(DriverRunSchema),
     stops: z.array(RunStopSchema),
     /**
-     * M4.8a — the pre-start blocks the whole day, not one run: it is a check on
-     * the vehicle, and the vehicle does not change between the morning and the
-     * afternoon trip. So this one stays on the day.
+     * M4.8a — the pre-start blocks the whole day, not one run. It is a check on
+     * the VEHICLE above, so a driver who changes vehicle mid-day sees null here
+     * until they check the new one.
      */
     preStartCompletedAt: IsoDateTimeSchema.nullable(),
   })
   .meta({ id: 'RunSheetDay' });
+
+/* ── Today's vehicle (Matt, 21 Oct) ───────────────────────────────────────── */
+
+/**
+ * Matt: *"Rather than assign vehicles, drivers should select the vehicle they
+ * are driving that day and complete pre-start from there."*
+ *
+ * One driver per vehicle per day. A vehicle somebody else chose comes back with
+ * `takenBy` set, and choosing it is refused.
+ */
+export const DriverVehicleOptionSchema = z
+  .object({
+    id: ObjectIdSchema,
+    rego: NonEmptyStringSchema,
+    label: NonEmptyStringSchema,
+    type: VehicleTypeSchema,
+    /** The other driver who chose it today, or null when it is free. */
+    takenBy: z.string().nullable(),
+    /** True for the vehicle this driver already chose today. */
+    mine: z.boolean(),
+  })
+  .meta({ id: 'DriverVehicleOption' });
+
+export const DriverVehicleOptionsSchema = z
+  .object({
+    date: IsoDateSchema,
+    /** In-service vehicles only, by rego. */
+    vehicles: z.array(DriverVehicleOptionSchema),
+  })
+  .meta({ id: 'DriverVehicleOptions' });
+
+/** Not queued: the driver needs the answer ("Taken by …") before the pre-start. */
+export const ChooseVehicleSchema = z
+  .object({ vehicleId: ObjectIdSchema })
+  .meta({ id: 'ChooseVehicle' });
+
+export const DriverVehicleChoiceSchema = z
+  .object({
+    date: IsoDateSchema,
+    vehicleId: ObjectIdSchema,
+    rego: NonEmptyStringSchema,
+    label: NonEmptyStringSchema,
+  })
+  .meta({ id: 'DriverVehicleChoice' });
 
 /* ── Contamination, what it was and how much (M4.7) ──────────────────────── */
 
@@ -320,12 +378,19 @@ export const CONTAMINATION_TYPES = [
   'wet-board',
   'other',
 ] as const;
+/**
+ * A contamination type's KEY — any the editable list has held (Matt, 21 Oct).
+ * The built-in types above are where the list starts.
+ */
 export const ContaminationTypeSchema = z
-  .enum(CONTAMINATION_TYPES)
+  .string()
+  .trim()
+  .min(1)
+  .max(60)
   .meta({ id: 'ContaminationType' });
 export type ContaminationType = z.infer<typeof ContaminationTypeSchema>;
 
-export const CONTAMINATION_TYPE_LABELS: Record<ContaminationType, string> = {
+export const CONTAMINATION_TYPE_LABELS: Record<(typeof CONTAMINATION_TYPES)[number], string> = {
   timber: 'Timber offcuts',
   insulation: 'Insulation',
   metal: 'Metal — track, screws, offcuts',
@@ -492,6 +557,16 @@ export const DriverActionEnvelopeSchema = z
 export const StatusUpdateSchema = DriverActionEnvelopeSchema.extend({
   transition: DriverTransitionSchema,
 }).meta({ id: 'StatusUpdate' });
+
+/**
+ * "Unarrive" — the driver marked Arrived and then could not do the job.
+ *
+ * Matt, 21 Oct: *"we're not going to charge a futile. We just need to unarrive…
+ * just to stop that timer."* The arrival is cleared, nothing is charged, and the
+ * job leaves the run and goes back to the allocator. Just the envelope: when,
+ * and where the phone was.
+ */
+export const UnarriveSchema = DriverActionEnvelopeSchema.meta({ id: 'Unarrive' });
 
 /* ── Weights (M4.3 · F34, W30, W44) ──────────────────────────────────────── */
 
@@ -1003,10 +1078,15 @@ export type RequiredPhoto = z.infer<typeof RequiredPhotoSchema>;
 export type DriverPhoto = z.infer<typeof DriverPhotoSchema>;
 export type RunStop = z.infer<typeof RunStopSchema>;
 export type RunSheetDay = z.infer<typeof RunSheetDaySchema>;
+export type DriverVehicleOption = z.infer<typeof DriverVehicleOptionSchema>;
+export type DriverVehicleOptions = z.infer<typeof DriverVehicleOptionsSchema>;
+export type ChooseVehicle = z.infer<typeof ChooseVehicleSchema>;
+export type DriverVehicleChoice = z.infer<typeof DriverVehicleChoiceSchema>;
 export type DriverJob = z.infer<typeof DriverJobSchema>;
 export type GeoFix = z.infer<typeof GeoFixSchema>;
 export type DriverActionEnvelope = z.infer<typeof DriverActionEnvelopeSchema>;
 export type StatusUpdate = z.infer<typeof StatusUpdateSchema>;
+export type Unarrive = z.infer<typeof UnarriveSchema>;
 export type WeightCapture = z.infer<typeof WeightCaptureSchema>;
 export type TipOffEntry = z.infer<typeof TipOffEntrySchema>;
 export type TipOffReconciliation = z.infer<typeof TipOffReconciliationSchema>;
@@ -1025,3 +1105,125 @@ export type PresignDocketPhoto = z.infer<typeof PresignDocketPhotoSchema>;
 export type PresignDefectPhoto = z.infer<typeof PresignDefectPhotoSchema>;
 export type PreviewTipOff = z.infer<typeof PreviewTipOffSchema>;
 export type DriverMessage = z.infer<typeof DriverMessageSchema>;
+
+/* ── Lists the office edits (Matt, 21 Oct) ────────────────────────────────── */
+
+/**
+ * The four option lists a driver picks from, editable in Settings.
+ *
+ * Matt: *"I need that to be editable, like the questions in there… The driver
+ * doesn't need to change it. He just needs to answer the question."* And:
+ * *"that can't collect list, and those contamination lists… I also need to be
+ * able to edit them from the admin section."*
+ *
+ * ── Why an option never changes once made ─────────────────────────────────
+ * Options are disabled, never deleted, and their wording is fixed: changing
+ * the wording disables the old option and adds a new one. So every record that
+ * names an option's key keeps the exact wording it was made with — an old
+ * futile report still reads "Site not ready" after the list says something else.
+ */
+export const DRIVER_LIST_NAMES = [
+  'siteHazards',
+  'riskControls',
+  'cantCollectReasons',
+  'contaminationTypes',
+] as const;
+export const DriverListNameSchema = z.enum(DRIVER_LIST_NAMES).meta({ id: 'DriverListName' });
+export type DriverListName = z.infer<typeof DriverListNameSchema>;
+
+export const DRIVER_LIST_LABELS: Record<DriverListName, string> = {
+  siteHazards: 'Site risk — hazards',
+  riskControls: 'Site risk — controls',
+  cantCollectReasons: 'Can’t collect reasons',
+  contaminationTypes: 'Contamination types',
+};
+
+export const DriverListOptionSchema = z
+  .object({
+    key: NonEmptyStringSchema,
+    label: NonEmptyStringSchema,
+    /** False: no longer offered, kept so older records still read correctly. */
+    active: z.boolean(),
+  })
+  .meta({ id: 'DriverListOption' });
+
+export const DriverListsSchema = z
+  .object({
+    siteHazards: z.array(DriverListOptionSchema),
+    riskControls: z.array(DriverListOptionSchema),
+    cantCollectReasons: z.array(DriverListOptionSchema),
+    contaminationTypes: z.array(DriverListOptionSchema),
+  })
+  .meta({ id: 'DriverLists' });
+
+/**
+ * Saving one list. Existing options come back with their key; a new one has
+ * `key: null` and the server names it.
+ */
+export const DriverListWriteSchema = z
+  .object({
+    options: z
+      .array(
+        z.object({
+          key: z.string().trim().min(1).max(60).nullable(),
+          label: z
+            .string()
+            .trim()
+            .min(2, 'Write the option out — at least two characters')
+            .max(80, 'Keep it under 80 characters'),
+          active: z.boolean(),
+        }),
+      )
+      .min(1, 'Keep at least one option')
+      .max(60, 'At most 60 options'),
+  })
+  .meta({ id: 'DriverListWrite' });
+
+/** The reasons the driver app offered before the list was editable, in its order. */
+const DRIVER_CANT_COLLECT_REASONS: readonly (typeof EXCEPTION_REASONS)[number][] = [
+  'site-not-ready',
+  'access-blocked',
+  'nobody-on-site',
+  'site-closed',
+  'crane-unavailable',
+];
+
+/** What each list held before it was editable — the starting point and the fallback. */
+export const DRIVER_LIST_DEFAULTS: z.infer<typeof DriverListsSchema> = {
+  siteHazards: SITE_HAZARDS.map((option) => ({ ...option, active: true })),
+  riskControls: RISK_CONTROLS.map((option) => ({ ...option, active: true })),
+  /*
+   * The five the driver app offered, switched on, then the three only the
+   * office used, switched off: still known, so a record carrying one keeps its
+   * wording, and Matt can switch one on.
+   */
+  cantCollectReasons: [
+    ...DRIVER_CANT_COLLECT_REASONS,
+    ...EXCEPTION_REASONS.filter((key) => !DRIVER_CANT_COLLECT_REASONS.includes(key)),
+  ].map((key) => ({
+    key,
+    label: EXCEPTION_REASON_LABELS[key],
+    active: DRIVER_CANT_COLLECT_REASONS.includes(key),
+  })),
+  contaminationTypes: CONTAMINATION_TYPES.map((key) => ({
+    key,
+    label: CONTAMINATION_TYPE_LABELS[key],
+    active: true,
+  })),
+};
+
+/**
+ * The wording an option had, active or not. Null for a key the list has never
+ * held — the caller shows the key rather than nothing.
+ */
+export function optionLabel(
+  options: readonly z.infer<typeof DriverListOptionSchema>[],
+  key: string | null | undefined,
+): string | null {
+  if (!key) return null;
+  return options.find((option) => option.key === key)?.label ?? null;
+}
+
+export type DriverListOption = z.infer<typeof DriverListOptionSchema>;
+export type DriverLists = z.infer<typeof DriverListsSchema>;
+export type DriverListWrite = z.infer<typeof DriverListWriteSchema>;

@@ -161,7 +161,9 @@ export function buildKey(input: {
     | 'certificates'
     | 'leads'
     | 'purchase-orders'
-    | 'settings';
+    | 'settings'
+    // A customer's signed terms and drawn signatures (21 Oct).
+    | 'accounts';
   ownerId: string;
   kind: string;
   contentType: string;

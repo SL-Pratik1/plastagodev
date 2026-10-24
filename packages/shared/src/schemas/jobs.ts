@@ -104,6 +104,26 @@ export const FREIGHT_ITEMS = [
 export const FreightItemSchema = z.enum(FREIGHT_ITEMS).meta({ id: 'FreightItem' });
 export type FreightItem = z.infer<typeof FreightItemSchema>;
 
+/**
+ * A pickup's name, built from its lot and street.
+ *
+ * Matt, 21 Oct: *"They're named whatever the address is."* — so nobody types
+ * one: "Lot 214, 12 Smith Street", or just the street when there is no lot.
+ * Capped at the 120 characters a site name holds.
+ */
+export function pickupName(lotNumber: string, addressLine: string): string {
+  // "Lot 214" typed into the lot box must not become "Lot Lot 214".
+  const lot = lotNumber.trim().replace(/^lot\s*/i, '');
+  const street = addressLine.trim();
+  const name = lot === '' ? street : street === '' ? `Lot ${lot}` : `Lot ${lot}, ${street}`;
+  return name.slice(0, 120);
+}
+
+/** An m² figure to the hundredth at most — "972.62", never "972.625". */
+export function hasAtMostTwoDecimals(value: number): boolean {
+  return Math.abs(value * 100 - Math.round(value * 100)) < 1e-6;
+}
+
 export const FREIGHT_ITEM_LABELS: Record<FreightItem, string> = {
   'plasterboard-bagged': 'Plasterboard — bagged',
   'plasterboard-hand-load': 'Plasterboard — hand load',
@@ -126,10 +146,22 @@ export const EXCEPTION_REASONS = [
   'customer-request',
   'other',
 ] as const;
-export const ExceptionReasonSchema = z.enum(EXCEPTION_REASONS).meta({ id: 'ExceptionReason' });
+/**
+ * A reason's KEY. The driver's "can't collect" list is editable (Matt, 21 Oct),
+ * so this is any key that list has held — the built-in ones above included. The
+ * wording comes from the list; see `DriverListsSchema` in `driver.ts`.
+ */
+export const ExceptionReasonSchema = z.string().trim().min(1).max(60).meta({ id: 'ExceptionReason' });
 export type ExceptionReason = z.infer<typeof ExceptionReasonSchema>;
 
-export const EXCEPTION_REASON_LABELS: Record<ExceptionReason, string> = {
+/**
+ * The office's own reasons for cancelling a job. Fixed — only the driver's
+ * "can't collect" list became editable.
+ */
+export const OfficeCancelReasonSchema = z.enum(EXCEPTION_REASONS).meta({ id: 'OfficeCancelReason' });
+export type OfficeCancelReason = z.infer<typeof OfficeCancelReasonSchema>;
+
+export const EXCEPTION_REASON_LABELS: Record<(typeof EXCEPTION_REASONS)[number], string> = {
   'site-not-ready': 'Site not ready',
   'access-blocked': 'Truck access blocked',
   'crane-unavailable': 'Crane unavailable',
@@ -144,6 +176,10 @@ export const EXCEPTION_REASON_LABELS: Record<ExceptionReason, string> = {
 export const CHARGE_CODES = [
   'service-fee',
   'area-charge',
+  /** The flat weight charge on a fixed-price zone line — "Weight charge" on the invoice. */
+  'weight-charge',
+  /** A hook bin's set price for the zone. */
+  'hook-bin',
   'recycling-bags',
   /**
    * Bags collected beyond what the purchase order allowed for (Matt, 07:37).
@@ -172,6 +208,8 @@ export type ChargeCode = z.infer<typeof ChargeCodeSchema>;
 export const CHARGE_CODE_LABELS: Record<ChargeCode, string> = {
   'service-fee': 'Service fee',
   'area-charge': 'Weight charge (per m²)',
+  'weight-charge': 'Weight charge (fixed)',
+  'hook-bin': 'Hook bin',
   'recycling-bags': 'Recycling bags',
   'extra-bags': 'Extra bags (not on the original PO)',
   contamination: 'Contamination charge',
@@ -697,6 +735,12 @@ export const JobListItemSchema = z
 
 export const JobSchema = JobListItemSchema.extend({
   freightItem: FreightItemSchema,
+  /**
+   * True when the job's price is m² × rate — so it cannot be invoiced without
+   * its m² (23 Oct). False on a fixed weight charge or a hook bin, where any
+   * m² is kept for the record only.
+   */
+  areaPriced: z.boolean().default(true),
   notes: z.string(),
   exceptionReason: ExceptionReasonSchema.nullable(),
   exceptionNote: z.string().nullable(),
@@ -716,6 +760,31 @@ export const JobSchema = JobListItemSchema.extend({
   /** M4.8 — the safety record, readable by the office. */
   compliance: JobComplianceSchema,
 }).meta({ id: 'Job' });
+
+/** "Set m²" on the office job page — the figure a purchase order left out (23 Oct). */
+export const JobAreaUpdateSchema = z
+  .object({
+    expectedAreaM2: z
+      .number()
+      .positive('Enter the m² — more than 0')
+      .max(100000, 'That looks too large — check the figure')
+      .refine(hasAtMostTwoDecimals, 'Use at most two decimal places, e.g. 972.62'),
+  })
+  .meta({ id: 'JobAreaUpdate' });
+
+export const JobAreaResultSchema = z
+  .object({
+    /** The job's price now, ex GST. */
+    totalExGst: MoneySchema,
+    /** Invoices raised and sent because the job was waiting only for its m². */
+    invoiced: z.array(z.number().int().positive()),
+    /** What still holds a completed job's invoice back, in words. */
+    held: z.array(z.string()),
+  })
+  .meta({ id: 'JobAreaResult' });
+
+export type JobAreaUpdate = z.infer<typeof JobAreaUpdateSchema>;
+export type JobAreaResult = z.infer<typeof JobAreaResultSchema>;
 
 /**
  * M2.1 — what the create-job form collects.
@@ -875,6 +944,12 @@ export const PricePreviewSchema = z
     totalIncGst: MoneySchema,
     /** Set when the estimate is provisional — e.g. rates not yet effective. */
     caveat: z.string().nullable(),
+    /**
+     * Whether the area moves this price — true when the weight charge is m² ×
+     * rate. False on a fixed weight charge or a hook bin, where the booking
+     * forms stop asking for m² (Matt, 21 Oct).
+     */
+    areaPriced: z.boolean(),
   })
   .meta({ id: 'PricePreview' });
 

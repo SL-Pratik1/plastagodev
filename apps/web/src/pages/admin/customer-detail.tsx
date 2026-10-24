@@ -52,6 +52,9 @@ import { useListQuery } from '@/components/data-table/use-list-query';
 import { DetailList } from '@/components/detail-list';
 import { AccountTypeBadge, InvoiceStatusBadge, JobStatusBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
+import { TermsSignatureLine } from '@/features/terms/components/terms-signature-line';
+import { useAuth } from '@/features/auth/auth-context';
+import { CommercialTermsDialog } from '@/features/customers/components/commercial-terms-dialog';
 import { CustomerEditDialog } from '@/features/customers/components/customer-edit-dialog';
 import {
   useCustomer,
@@ -149,6 +152,14 @@ export function AdminCustomerDetailPage() {
 
   const [editing, setEditing] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
+  const [termsOpen, setTermsOpen] = useState(false);
+  /*
+   * The same two roles that may create a customer (Matt, 21 Oct). Any role
+   * held counts, as it does on the server.
+   */
+  const { user } = useAuth();
+  const canChangeTerms =
+    user?.roles.some((role) => role === 'super-admin' || role === 'operations') ?? false;
 
   const jobQuery = useListQuery({
     paramPrefix: 'jobs',
@@ -223,6 +234,25 @@ export function AdminCustomerDetailPage() {
         open={editing}
         onClose={() => {
           setEditing(false);
+        }}
+        onChangeCommercialTerms={
+          canChangeTerms
+            ? () => {
+                setEditing(false);
+                setTab('preferences');
+                setTermsOpen(true);
+              }
+            : undefined
+        }
+      />
+
+      <CommercialTermsDialog
+        // Remounted per open, so the form starts from what is stored.
+        key={termsOpen ? 'terms-open' : 'terms-closed'}
+        account={account}
+        open={termsOpen}
+        onClose={() => {
+          setTermsOpen(false);
         }}
       />
 
@@ -352,10 +382,21 @@ export function AdminCustomerDetailPage() {
                        */
                       label: 'Certificates emailed to',
                       value: account.certificateEmail ?? (
-                        <span className="text-muted-foreground">
-                          Not set — falls back to the accounts contact
-                        </span>
+                        <span className="text-muted-foreground">Not set</span>
                       ),
+                    },
+                    {
+                      // Matt, 21 Oct — certificates go "only to certain customers".
+                      label: 'Receives certificates',
+                      value: account.receivesCertificates
+                        ? 'Yes — issued and emailed at tip-off'
+                        : 'No — none are sent, and the portal hides them',
+                    },
+                    {
+                      // Matt, 21 Oct — who signed, when, from where, and the copy.
+                      label: 'Terms and conditions',
+                      value: <TermsSignatureLine account={account} />,
+                      wide: true,
                     },
                     {
                       /*
@@ -556,6 +597,51 @@ export function AdminCustomerDetailPage() {
           */}
           <AccountTypeCard account={account} />
 
+          {/*
+            The commercial terms, now changeable (Matt, 21 Oct). They used to
+            sit read-only in "Service preferences" below, which is where the
+            Edit details banner sent people to change them.
+          */}
+          <Card className="mt-4">
+            <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+              <CardTitle>Commercial terms</CardTitle>
+              {canChangeTerms && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setTermsOpen(true);
+                  }}
+                >
+                  <PencilIcon aria-hidden />
+                  Change
+                </Button>
+              )}
+            </CardHeader>
+            <CardContent>
+              <DetailList
+                columns={2}
+                items={[
+                  {
+                    label: 'Rate card',
+                    value: rateCardLabels.get(account.rateCardId) ?? account.rateCardId,
+                  },
+                  { label: 'Payment terms', value: `${String(account.paymentTermsDays)} days` },
+                  { label: 'PO policy', value: PO_POLICY_LABELS[account.poPolicy] },
+                  {
+                    label: 'Capture configuration',
+                    value: CAPTURE_MODE_LABELS[account.captureMode],
+                  },
+                ]}
+              />
+              {!canChangeTerms && (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  A Super Admin or Operations can change these.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
           <Card className="mt-4">
             <CardHeader>
               <CardTitle>Service preferences</CardTitle>
@@ -568,12 +654,6 @@ export function AdminCustomerDetailPage() {
                     label: 'Preferred pickup window',
                     value: account.preferredPickupWindow ?? 'No preference recorded',
                   },
-                  {
-                    label: 'Capture configuration',
-                    value: CAPTURE_MODE_LABELS[account.captureMode],
-                  },
-                  { label: 'PO policy', value: PO_POLICY_LABELS[account.poPolicy] },
-                  { label: 'Payment terms', value: `${String(account.paymentTermsDays)} days` },
                 ]}
               />
             </CardContent>

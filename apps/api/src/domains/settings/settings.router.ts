@@ -1,6 +1,7 @@
 import {
   AdditionalServiceCreateSchema,
   AdditionalServiceUpdateSchema,
+  DriverListWriteSchema,
   InvoiceTemplateWriteSchema,
   InvoicingSettingsSchema,
   LogoUploadRequestSchema,
@@ -17,6 +18,7 @@ import { requireAuth, requireRole } from '../../middleware/require-auth.js';
 import { validate } from '../../middleware/validate.js';
 import { settingsController } from './settings.controller.js';
 import {
+  DriverListParamsSchema,
   InvoiceTemplateIdParamsSchema,
   LogoConfirmSchema,
   QuoteQuerySchema,
@@ -304,4 +306,15 @@ settingsRouter.delete(
   ADMIN,
   validate({ params: ServiceCodeParamsSchema }),
   asyncHandler(settingsController.deleteAdditionalService),
+);
+
+/* ── What the driver app asks (Matt, 21 Oct) ─────────────────────────────── */
+
+settingsRouter.get('/driver-lists', asyncHandler(settingsController.driverLists));
+
+settingsRouter.put(
+  '/driver-lists/:list',
+  ZONE_ADMIN,
+  validate({ params: DriverListParamsSchema, body: DriverListWriteSchema }),
+  asyncHandler(settingsController.saveDriverList),
 );

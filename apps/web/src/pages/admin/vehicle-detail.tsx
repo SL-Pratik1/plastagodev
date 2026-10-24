@@ -2,6 +2,7 @@ import {
   VEHICLE_EXPENSE_KIND_LABELS,
   VEHICLE_TYPE_LABELS,
   type VehicleDefect,
+  type VehiclePreStart,
 } from '@plastago/shared';
 import {
   Alert,
@@ -33,7 +34,6 @@ import {
   PlusIcon,
   RotateCcwIcon,
   TriangleAlertIcon,
-  UserIcon,
   WrenchIcon,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -42,22 +42,25 @@ import { DetailList } from '@/components/detail-list';
 import { ExpiryBadge } from '@/components/domain-badges';
 import { PageHeader } from '@/components/page-header';
 import { StatCard } from '@/components/stat-card';
+import { PreStartCheckDialog } from '@/features/fleet/components/pre-start-check-dialog';
+import { PreStartChecksPanel } from '@/features/fleet/components/pre-start-checks-panel';
 import { RenewRegistrationDialog } from '@/features/fleet/components/renew-registration-dialog';
 import { ScheduleServiceDialog } from '@/features/fleet/components/schedule-service-dialog';
 import { VehicleExpenseDialog } from '@/features/fleet/components/vehicle-expense-dialog';
 import { VehicleFormDialog } from '@/features/fleet/components/vehicle-form-dialog';
-import { useDriverOptions } from '@/features/lookups/queries';
-import {
-  useAssignVehicleDriver,
-  useSetDefectState,
-  useSetVehicleActive,
-  useVehicle,
-} from '@/features/fleet/queries';
+import { useSetDefectState, useSetVehicleActive, useVehicle } from '@/features/fleet/queries';
 import { describeError } from '@/lib/error-message';
 import { useAuth } from '@/features/auth/auth-context';
 import { formatDate, formatMoney } from '@/lib/format';
 
-const TABS = ['overview', 'maintenance', 'expenses', 'defects', 'registration'] as const;
+const TABS = [
+  'overview',
+  'maintenance',
+  'expenses',
+  'defects',
+  'prestarts',
+  'registration',
+] as const;
 type TabKey = (typeof TABS)[number];
 
 /**
@@ -72,10 +75,9 @@ export function AdminVehicleDetailPage() {
   const { data: vehicle, error, isPending, refetch } = useVehicle(vehicleId);
   const setDefectState = useSetDefectState();
   const setActive = useSetVehicleActive();
-  const assignDriver = useAssignVehicleDriver();
-  const drivers = useDriverOptions();
 
   const [renewOpen, setRenewOpen] = useState(false);
+  const [openCheck, setOpenCheck] = useState<VehiclePreStart | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [expenseOpen, setExpenseOpen] = useState(false);
   const [expenseKind, setExpenseKind] = useState<'service' | 'other'>('other');
@@ -163,19 +165,6 @@ export function AdminVehicleDetailPage() {
     }
   };
 
-  const changeDriver = async (driverName: string | null) => {
-    try {
-      await assignDriver.mutateAsync({ id: vehicle.id, driverName });
-      toast.success(
-        driverName === null ? `${vehicle.rego} unassigned` : `${vehicle.rego} → ${driverName}`,
-        'The drivers list shows the same pairing from the other side.',
-      );
-    } catch (caught) {
-      const described = describeError(caught);
-      toast.error(described.title, described.detail);
-    }
-  };
-
   const openExpense = (kind: 'service' | 'other') => {
     setExpenseKind(kind);
     setExpenseOpen(true);
@@ -205,6 +194,9 @@ export function AdminVehicleDetailPage() {
               {vehicle.active ? 'In service' : 'Out of service'}
             </Badge>
             <ExpiryBadge state={vehicle.registrationState} />
+            {vehicle.driverToday !== null && (
+              <Badge variant="secondary">Today: {vehicle.driverToday}</Badge>
+            )}
           </span>
         }
         actions={
@@ -240,12 +232,15 @@ export function AdminVehicleDetailPage() {
               Edit
             </Button>
             {/*
-              ── Why assignment and off-the-road live on a menu ────────────────
+              ── Why the service date and off-the-road live on a menu ──────────
               Both are one-click decisions taken on their own, and neither has
               anything to do with the make and model. Putting them in the edit
               form would mean opening a ten-field dialog to park a broken truck;
               putting them on the toolbar would give a read-mostly page five
               competing buttons. A menu is the honest middle.
+
+              There is no "Assign driver" here any more (Matt, 21 Oct): drivers
+              choose their vehicle each day in the driver app.
             */}
             <Menu
               align="end"
@@ -261,28 +256,6 @@ export function AdminVehicleDetailPage() {
               >
                 {vehicle.nextServiceDueOn === null ? 'Book next service' : 'Change service date'}
               </MenuItem>
-              <MenuSeparator />
-              <MenuItem
-                icon={UserIcon}
-                onSelect={() => {
-                  void changeDriver(null);
-                }}
-                disabled={vehicle.assignedDriverName === null}
-              >
-                Unassign driver
-              </MenuItem>
-              {(drivers.data ?? [])
-                .filter((option) => option.label !== vehicle.assignedDriverName)
-                .map((option) => (
-                  <MenuItem
-                    key={option.value}
-                    onSelect={() => {
-                      void changeDriver(option.label);
-                    }}
-                  >
-                    Assign to {option.label}
-                  </MenuItem>
-                ))}
               <MenuSeparator />
               {vehicle.active ? (
                 <MenuItem
@@ -329,6 +302,9 @@ export function AdminVehicleDetailPage() {
           )}
           <TabsTrigger value="defects" badge={openDefects.length || undefined}>
             Defects
+          </TabsTrigger>
+          <TabsTrigger value="prestarts" badge={vehicle.preStartCount || undefined}>
+            Pre-start checks
           </TabsTrigger>
           <TabsTrigger value="registration">Registration</TabsTrigger>
         </TabsList>
@@ -377,8 +353,8 @@ export function AdminVehicleDetailPage() {
                     { label: 'Year', value: vehicle.year ?? '—' },
                     { label: 'Type', value: VEHICLE_TYPE_LABELS[vehicle.type] },
                     {
-                      label: 'Assigned driver',
-                      value: vehicle.assignedDriverName ?? 'Unassigned',
+                      label: 'Driver today',
+                      value: vehicle.driverToday ?? 'Not chosen today',
                     },
                     { label: 'Purchased', value: formatDate(vehicle.purchasedOn) },
                     {
@@ -631,6 +607,16 @@ export function AdminVehicleDetailPage() {
           </Card>
         </TabsPanel>
 
+        {/* ── Pre-start checks (Matt, 21 Oct) ─────────────────────────── */}
+        <TabsPanel value="prestarts">
+          <PreStartChecksPanel
+            vehicleId={vehicle.id}
+            rego={vehicle.rego}
+            active={tab === 'prestarts'}
+            onOpen={setOpenCheck}
+          />
+        </TabsPanel>
+
         {/* ── Registration ─────────────────────────────────────────────── */}
         <TabsPanel value="registration">
           <Card>
@@ -659,7 +645,7 @@ export function AdminVehicleDetailPage() {
 
               <Alert variant="info" title="How the reminder works">
                 A notification goes out two weeks before expiry. Logging the renewal rolls the
-                expiry forward by the registered period — 12, 6 or 3 months — from the current
+                expiry forward by the length you choose — 12, 6 or 3 months — from the current
                 expiry date, so a late renewal does not quietly shorten the next one.
               </Alert>
 
@@ -671,6 +657,28 @@ export function AdminVehicleDetailPage() {
                 <RotateCcwIcon aria-hidden />
                 Log renewal
               </Button>
+
+              {vehicle.registrationRenewals.length > 0 && (
+                <div>
+                  <h3 className="mb-1 text-sm font-medium">Renewals</h3>
+                  <ul className="divide-y divide-border">
+                    {vehicle.registrationRenewals.map((renewal) => (
+                      <li
+                        key={renewal.renewedAt}
+                        className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5 text-sm"
+                      >
+                        <span className="font-medium tabular-nums">
+                          {formatDate(renewal.fromExpiry)} → {formatDate(renewal.toExpiry)}
+                        </span>
+                        <Badge variant="outline">{renewal.periodMonths} months</Badge>
+                        <span className="text-xs text-muted-foreground">
+                          Logged {formatDate(renewal.renewedAt)} by {renewal.renewedBy}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsPanel>
@@ -713,6 +721,14 @@ export function AdminVehicleDetailPage() {
           setRenewOpen(false);
         }}
         vehicle={vehicle}
+      />
+
+      <PreStartCheckDialog
+        check={openCheck}
+        rego={vehicle.rego}
+        onClose={() => {
+          setOpenCheck(null);
+        }}
       />
 
       <ConfirmDialog

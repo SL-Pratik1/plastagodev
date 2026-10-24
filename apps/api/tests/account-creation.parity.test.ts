@@ -152,11 +152,11 @@ const TERMS = {
 } as const;
 
 function directDraft(overrides: Partial<AccountDraft> = {}): AccountDraft {
-  return { ...TERMS, notes: '', sendInvitation: false, ...overrides };
+  return { ...TERMS, notes: '', sendInvitation: false, receivesCertificates: false, certificateEmail: '', ...overrides };
 }
 
 function conversion(overrides: Partial<LeadConversion> = {}): LeadConversion {
-  return { ...TERMS, notes: '', sendInvitation: false, ...overrides };
+  return { ...TERMS, notes: '', sendInvitation: false, receivesCertificates: false, certificateEmail: '', ...overrides };
 }
 
 beforeEach(() => {

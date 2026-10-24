@@ -1,4 +1,4 @@
-import { INVOICE_LAYOUTS } from '@plastago/shared';
+import { DRIVER_LIST_NAMES, INVOICE_LAYOUTS, WEIGHT_CHARGE_KINDS } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
 export const SETTINGS_COLLECTION = 'settings';
@@ -306,6 +306,17 @@ const zoneRateSchema = new Schema(
      * rounding it to cents before multiplying by 823.41 m² loses real money.
      */
     ratePerM2: { type: Schema.Types.Decimal128, required: true },
+    /**
+     * Whether the second charge is m² × `ratePerM2` or the flat
+     * `fixedWeightCharge` (Matt, 21 Oct — Wisdom's $190 + $112). A row written
+     * before this existed reads as `per-m2`, which is what it always priced.
+     */
+    weightChargeKind: { type: String, enum: WEIGHT_CHARGE_KINDS, default: 'per-m2' },
+    fixedWeightCharge: { type: Schema.Types.Decimal128, default: null },
+    /** Each hook bin's set price in this zone. Null: this card does not offer it. */
+    hookBin5: { type: Schema.Types.Decimal128, default: null },
+    hookBin10: { type: Schema.Types.Decimal128, default: null },
+    hookBin15: { type: Schema.Types.Decimal128, default: null },
 
     /**
      * The window this row prices, inclusive at both ends.
@@ -442,3 +453,38 @@ const invoiceTemplateSchema = new Schema(
 );
 
 export const InvoiceTemplateModel = model('InvoiceTemplate', invoiceTemplateSchema);
+
+export const DRIVER_LISTS_COLLECTION = 'driverlists';
+
+/**
+ * One editable list the driver app asks from (Matt, 21 Oct): site hazards,
+ * risk controls, can't-collect reasons, contamination types. `_id` is the
+ * list's name, so there is one document per list.
+ *
+ * ⚠️ An option is never removed and its wording never changes — a job or a
+ * report stores the KEY, and reads the wording back from here. Retiring an
+ * option switches it off; new wording is a new option. No document means the
+ * list still holds its built-in defaults (`DRIVER_LIST_DEFAULTS`).
+ */
+const driverListOptionSchema = new Schema(
+  {
+    key: { type: String, required: true, trim: true },
+    label: { type: String, required: true, trim: true },
+    active: { type: Boolean, required: true },
+  },
+  { _id: false },
+);
+
+const driverListSchema = new Schema(
+  {
+    _id: { type: String, required: true, enum: DRIVER_LIST_NAMES },
+    options: { type: [driverListOptionSchema], required: true },
+    /** REFERENCE → `users._id` — who saved it last. */
+    updatedById: { type: Schema.Types.ObjectId, default: null, ref: 'User' },
+    /** Their name at the time, frozen for display. */
+    updatedBy: { type: String, default: null },
+  },
+  { collection: DRIVER_LISTS_COLLECTION, timestamps: true, versionKey: false, _id: false },
+);
+
+export const DriverListModel = model('DriverList', driverListSchema);

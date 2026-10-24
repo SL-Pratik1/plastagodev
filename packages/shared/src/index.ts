@@ -28,4 +28,5 @@ export * from './schemas/fleet.js';
 export * from './schemas/notifications.js';
 export * from './schemas/reports.js';
 export * from './schemas/settings.js';
+export * from './schemas/terms.js';
 export * from './openapi/index.js';

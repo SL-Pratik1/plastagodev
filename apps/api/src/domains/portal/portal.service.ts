@@ -1,27 +1,34 @@
-import type {
-  AwaitingCallUp,
-  CallUpRequest,
-  PageMeta,
-  PortalBookingDraft,
-  PortalChangeRequest,
-  PortalDashboard,
-  PortalJob,
-  PortalJobEdit,
-  PortalJobListItem,
-  PortalJobMessage,
-  PortalJobMessageDraft,
-  PortalScope as PortalScopeContract,
-  PricePreview,
-  ReadinessCertification,
-  Role,
+import {
+  HOOK_BIN_RATE_FIELDS,
+  pickupName,
+  type AwaitingCallUp,
+  type CallUpRequest,
+  type FreightItem,
+  type PageMeta,
+  type PortalBookingDraft,
+  type PortalChangeRequest,
+  type PortalDashboard,
+  type PortalJob,
+  type PortalJobEdit,
+  type PortalJobListItem,
+  type PortalJobMessage,
+  type PortalJobMessageDraft,
+  type PortalScope as PortalScopeContract,
+  type PricePreview,
+  type ReadinessCertification,
+  type Role,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
+import { todayInSydney } from '../../lib/business-day.js';
 import { logger } from '../../lib/logger.js';
 import { assertPlausibleReadyDate } from '../../lib/ready-date.js';
 import { notificationService } from '../notifications/notification.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
+import { pricingInputsFor } from '../jobs/job.repository.js';
 import { jobService, type Caller as JobCaller } from '../jobs/job.service.js';
 import { callUpService, type CallUpOutcome } from '../queues/call-up.service.js';
+import { pricingService } from '../settings/pricing.service.js';
+import { termsService } from '../terms/terms.service.js';
 import { settingsRepository } from '../settings/settings.repository.js';
 import {
   portalRepository,
@@ -89,6 +96,13 @@ export const portalService = {
        * "showing jobs you raised" rather than a silently short list.
        */
       visibility: isSupervisorOnly(caller) ? 'own-jobs' : 'account',
+      fixedPriceZoneIds: await settingsRepository.fixedPriceZoneIds(
+        account.rateCardId,
+        todayInSydney(),
+      ),
+      receivesCertificates: account.receivesCertificates,
+      // The same question the portal gate asks — see `termsService.pendingFor`.
+      mustSignTerms: await termsService.pendingFor(caller),
     };
   },
 
@@ -235,7 +249,8 @@ export const portalService = {
     const created = await jobService.create(
       {
         accountId: account.id,
-        siteName: draft.siteName,
+        // Built, never typed (Matt, 21 Oct) — whatever the browser sent.
+        siteName: pickupName(draft.lotNumber, draft.addressLine),
         lotNumber: draft.lotNumber,
         addressLine: draft.addressLine,
         placeId: draft.placeId,
@@ -253,7 +268,7 @@ export const portalService = {
         purchaseOrderId: draft.purchaseOrderId,
         readyDate: draft.readyDate,
         serviceLevel: draft.serviceLevel,
-        freightItem: draft.craneAvailable ? 'plasterboard-bagged' : 'plasterboard-hand-load',
+        freightItem: portalFreightItem(draft.bagCount),
         /*
          * ⚠️ Null means "the purchase order has it" — the builder's supervisor
          * genuinely does not know (Matt, 29:21). The office booking path takes a
@@ -264,6 +279,9 @@ export const portalService = {
         notes: draft.notes,
       },
       toJobCaller(caller),
+      undefined,
+      // The m² is required unless this customer is on a fixed price here.
+      { requireArea: true },
     );
 
     // The certification is filed against the job it certifies, immediately.
@@ -391,7 +409,7 @@ export const portalService = {
         purchaseOrderId: draft.purchaseOrderId,
         readyDate: draft.readyDate,
         serviceLevel: draft.serviceLevel,
-        freightItem: draft.craneAvailable ? 'plasterboard-bagged' : 'plasterboard-hand-load',
+        freightItem: portalFreightItem(draft.bagCount),
         expectedAreaM2: draft.expectedAreaM2 ?? 0,
         bagCount: draft.bagCount,
         notes: draft.notes,
@@ -424,6 +442,37 @@ export const portalService = {
     // the SLA clock from it.
     assertPlausibleReadyDate(input.readyDate);
 
+    const priced = await pricingInputsFor(id);
+    if (!priced) throw AppError.notFound('No such job');
+
+    // The same rule as booking: bags asked for means bagged. A hook bin is
+    // the office's to change, never the portal's.
+    const freightItem = HOOK_BIN_ITEMS.has(priced.freightItem)
+      ? priced.freightItem
+      : portalFreightItem(input.bagCount);
+
+    /*
+     * The edit is held to the booking form's rule — Matt, 21 Oct: exact m²
+     * from everyone not on a fixed price. Asked of the pricing service on the
+     * EDITED date, which is the date the job will be priced on.
+     */
+    const quote = await pricingService.quote({
+      rateCardId: account.rateCardId,
+      zoneId: priced.zoneId,
+      expectedAreaM2: input.expectedAreaM2,
+      bagCount: input.bagCount,
+      freightItem,
+      onDate: input.readyDate,
+    });
+    if (quote.areaPriced && input.expectedAreaM2 === null) {
+      throw AppError.validation('Enter the exact square metres', [
+        {
+          path: 'expectedAreaM2',
+          message: 'Enter the exact square metres, e.g. 972.62 — this pickup is charged per m²',
+        },
+      ]);
+    }
+
     const slaBusinessDays = await settingsRepository.slaBusinessDays();
 
     const changed = await portalRepository.editJob(id, scope, {
@@ -432,6 +481,7 @@ export const portalService = {
       targetDate: addBusinessDays(input.readyDate, slaBusinessDays),
       expectedAreaM2: input.expectedAreaM2,
       bagCount: input.bagCount,
+      freightItem,
       serviceLevel: input.serviceLevel,
       poNumber: input.poNumber.trim() || null,
       notes: input.notes,
@@ -440,6 +490,22 @@ export const portalService = {
     if (!changed) {
       // The allocator put it on a run between the read and the write.
       throw AppError.conflict('That pickup was allocated while you were editing it — reload');
+    }
+
+    /*
+     * Found by us: the m² and the bags ARE the price. Saving them without
+     * re-pricing left the booked figure on the job, and the invoice is a
+     * straight copy of the job's charge lines — so it went out on the old area.
+     */
+    if (
+      input.expectedAreaM2 !== priced.expectedAreaM2 ||
+      input.bagCount !== priced.bagCount ||
+      freightItem !== priced.freightItem
+    ) {
+      await jobService.reprice(id, account.rateCardId, {
+        actor: caller.name,
+        reason: 'Edited in the portal',
+      });
     }
 
     return this.jobListItem(id, caller);
@@ -759,6 +825,20 @@ function toJobCaller(caller: Caller): JobCaller {
     roles: caller.roles,
     accountId: caller.accountId,
   };
+}
+
+const HOOK_BIN_ITEMS = new Set<FreightItem>(
+  Object.keys(HOOK_BIN_RATE_FIELDS) as FreightItem[],
+);
+
+/**
+ * Bagged or hand load, for a portal booking.
+ *
+ * The "Crane on site" box used to decide this, and it is gone — Matt, 21 Oct:
+ * *"There will never be a crane on site."* Bags asked for means bagged.
+ */
+function portalFreightItem(bagCount: number): FreightItem {
+  return bagCount > 0 ? 'plasterboard-bagged' : 'plasterboard-hand-load';
 }
 
 /**

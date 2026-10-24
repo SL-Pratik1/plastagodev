@@ -1,4 +1,9 @@
-import type { JobChargeDraftSchema, JobCommentDraftSchema, JobDraftSchema } from '@plastago/shared';
+import type {
+  JobAreaUpdateSchema,
+  JobChargeDraftSchema,
+  JobCommentDraftSchema,
+  JobDraftSchema,
+} from '@plastago/shared';
 import type { Request, Response } from 'express';
 import { AppError } from '../../lib/app-error.js';
 import type { ValidatedRequest } from '../../middleware/validate.js';
@@ -62,7 +67,10 @@ export const jobController = {
     req: ValidatedRequest<{ body: typeof JobDraftSchema }>,
     res: Response,
   ): Promise<void> => {
-    const job = await jobService.create(req.validated.body, callerOf(req));
+    // The office's booking form — held to the exact-m² rule (Matt, 21 Oct).
+    const job = await jobService.create(req.validated.body, callerOf(req), undefined, {
+      requireArea: true,
+    });
     // 201 with the created row: the grid and the redirect both need its id.
     res.status(201).json(job);
   },
@@ -78,6 +86,31 @@ export const jobController = {
     await jobService.cancel(req.validated.params.id, reason, note, callerOf(req));
     // 204: the caller already knows what it asked for, and the grid refetches.
     res.status(204).send();
+  },
+
+  /** Undo an arrival — no charge, off the run, back to "to place" (21 Oct). */
+  unarrive: async (
+    req: ValidatedRequest<{ params: typeof JobIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    await jobService.unarrive(req.validated.params.id, callerOf(req));
+    res.status(204).send();
+  },
+
+  setArea: async (
+    req: ValidatedRequest<{
+      params: typeof JobIdParamsSchema;
+      body: typeof JobAreaUpdateSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(
+      await jobService.setArea(
+        req.validated.params.id,
+        req.validated.body.expectedAreaM2,
+        callerOf(req),
+      ),
+    );
   },
 
   reschedule: async (

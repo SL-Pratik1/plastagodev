@@ -447,19 +447,33 @@ export const reportService = {
    * tonnage. A draft cut at completion would carry a permanently empty audit
    * block.
    *
+   * ── Only for certificate customers, and issued straight away ───────────
+   * Matt, 21 Oct: *"That should be sent automatically, but only to certain
+   * customers."* A customer with "Receives certificates" ticked gets theirs
+   * issued and emailed here; everybody else gets nothing — not even a draft
+   * for the office to wonder about.
+   *
    * ⚠️ Never throws. This runs on the back of a driver's tip-off, and a
    * certificate that could not be prepared must not fail a reconciliation that
    * is already written. The office can still prepare one by hand.
    */
-  async autoPrepareForRun(runId: string): Promise<{ prepared: number }> {
+  async autoPrepareForRun(runId: string): Promise<{ prepared: number; issued: number }> {
     let prepared = 0;
+    let issued = 0;
 
     try {
       const jobs = await reportRepository.certifiableJobsOnRun(runId);
+      const receives = new Map<string, boolean>();
 
       for (const job of jobs) {
         try {
-          await this.prepareCertificate(
+          if (!receives.has(job.accountId)) {
+            const account = await accountRepository.findById(job.accountId, { accountId: null });
+            receives.set(job.accountId, account?.receivesCertificates ?? false);
+          }
+          if (receives.get(job.accountId) !== true) continue;
+
+          const draft = await this.prepareCertificate(
             {
               scope: 'job',
               accountId: job.accountId,
@@ -470,6 +484,10 @@ export const reportService = {
             SYSTEM_CALLER,
           );
           prepared += 1;
+
+          // Issued as PlastaGo, which emails it to the account's certificate address.
+          await this.issueCertificate(draft.id, SYSTEM_CALLER);
+          issued += 1;
         } catch (error) {
           /*
            * Per job, not per run. One account that has been deleted, or one job
@@ -480,12 +498,12 @@ export const reportService = {
         }
       }
 
-      if (prepared > 0) log.info({ runId, prepared }, 'certificates prepared from tip-off');
+      if (prepared > 0) log.info({ runId, prepared, issued }, 'certificates issued from tip-off');
     } catch (error) {
       log.error({ err: error, runId }, 'auto certificate preparation failed');
     }
 
-    return { prepared };
+    return { prepared, issued };
   },
 };
 

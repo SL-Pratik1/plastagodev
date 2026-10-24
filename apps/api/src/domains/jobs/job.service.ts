@@ -2,6 +2,7 @@ import {
   FUTILE_DECIDED_EVENT_LABELS,
   type ExceptionReason,
   type Job,
+  type JobAreaResult,
   type JobCharge,
   type JobChargeDraft,
   type JobComment,
@@ -9,8 +10,10 @@ import {
   type JobDraft,
   type JobListItem,
   type LocationSource,
+  type Money,
   type PageMeta,
   type PricePreview,
+  type RateCardId,
   type Role,
 } from '@plastago/shared';
 import { env } from '../../config/env.js';
@@ -25,6 +28,8 @@ import { formatDay, jobNotices } from '../notifications/job-notices.service.js';
 import { driverNotices } from '../notifications/driver-notices.service.js';
 import { notificationService } from '../notifications/notification.service.js';
 import { accountRepository } from '../accounts/account.repository.js';
+// A run completes once its last stop is finished (21 Oct) — cancelled or released.
+import { runRepository } from '../dispatch/run.repository.js';
 import { placeService } from '../places/place.service.js';
 import {
   purchaseOrderRepository,
@@ -32,10 +37,15 @@ import {
 } from '../queues/purchase-order.repository.js';
 import { pricingService } from '../settings/pricing.service.js';
 import { settingsRepository } from '../settings/settings.repository.js';
+import { invoiceService } from '../invoices/invoice.service.js';
 import {
+  areaStateOf,
+  setExpectedArea,
   writeQuotedCharges,
   jobRepository,
   jobsForPurchaseOrders,
+  pricingInputsFor,
+  replaceQuote,
   type JobScope,
   type ListJobsQuery,
 } from './job.repository.js';
@@ -268,6 +278,7 @@ export const jobService = {
       zoneId: place.zoneId,
       expectedAreaM2: quantities.expectedAreaM2,
       bagCount: quantities.bagCount,
+      freightItem: draft.freightItem,
       // M6.2 — the SAME date `create` below prices on, so the estimate the
       // office reads out cannot differ from the job that gets saved.
       onDate: draft.readyDate,
@@ -378,6 +389,127 @@ export const jobService = {
    * nothing, so the job page went on telling people to "decide it in Futile
    * review" after it had been decided. See `FUTILE_DECIDED_EVENT_LABELS`.
    */
+  /**
+   * Re-price a job nobody has invoiced yet, on its own inputs and the given
+   * rate card.
+   *
+   * Two callers: a customer correcting the m² on a pickup — the invoice is that
+   * figure × the rate, so the booked price would be wrong — and the office
+   * moving a customer to another rate card and opting their open jobs in.
+   *
+   * Null when the job has reached an invoice in the meantime: a figure the
+   * customer has been sent never moves.
+   */
+  async reprice(
+    jobId: string,
+    rateCardId: RateCardId,
+    change: { actor: string; reason: string },
+  ): Promise<{ jobNumber: number; previous: Money; next: Money } | null> {
+    const job = await pricingInputsFor(jobId);
+    if (!job) throw AppError.notFound('No such job');
+
+    const { preview, appliedRate } = await pricingService.quoteWithAppliedRate({
+      rateCardId,
+      zoneId: job.zoneId,
+      expectedAreaM2: job.expectedAreaM2,
+      bagCount: job.bagCount,
+      freightItem: job.freightItem,
+      // Its own ready date, as when it was booked (M6.2).
+      onDate: job.readyDate,
+    });
+
+    const replaced = await replaceQuote(jobId, {
+      totals: preview,
+      appliedRate,
+      lines: preview.lines,
+    });
+    if (!replaced) return null;
+
+    if (moneyToCents(preview.subtotalExGst) !== moneyToCents(job.totalExGst)) {
+      await jobRepository.appendEvent({
+        jobId,
+        label: 'Price updated',
+        actor: change.actor,
+        status: null,
+        detail: `${change.reason} — $${job.totalExGst} → $${preview.subtotalExGst} ex GST`,
+      });
+    }
+
+    return { jobNumber: job.jobNumber, previous: job.totalExGst, next: preview.subtotalExGst };
+  },
+
+  /**
+   * "Set m²" on the office job page (23 Oct).
+   *
+   * A purchase order can arrive with no m², and a job booked against it then
+   * has no area to price — the m² charge simply went missing from the invoice.
+   * The office sets it here, the job is re-priced on the card that priced it,
+   * and a completed job held for it is invoiced there and then.
+   *
+   * Refused once the job is on an invoice: a figure the customer has been sent
+   * never moves.
+   */
+  async setArea(id: string, expectedAreaM2: number, caller: Caller): Promise<JobAreaResult> {
+    if (!seesPricing(caller)) {
+      throw AppError.forbidden("Only the office can set a job's m² — it changes the price");
+    }
+
+    const job = await jobRepository.findSummary(id, scopeFor(caller));
+    const state = await areaStateOf(id);
+    if (!job || !state) throw AppError.notFound('No such job');
+
+    if (state.status === 'cancelled') {
+      throw AppError.conflict('That job is cancelled, so its m² no longer matters');
+    }
+    if (state.invoiceStatus !== 'not-invoiced') {
+      throw AppError.conflict(
+        `Job #${String(job.jobNumber)} is already on an invoice, so its m² can't change now`,
+      );
+    }
+
+    if (!(await setExpectedArea(id, expectedAreaM2))) {
+      throw AppError.conflict(
+        `Job #${String(job.jobNumber)} was invoiced or cancelled a moment ago — reload it`,
+      );
+    }
+
+    await jobRepository.appendEvent({
+      jobId: id,
+      label: 'm² set',
+      actor: caller.name,
+      status: null,
+      detail:
+        state.expectedAreaM2 === null
+          ? `${String(expectedAreaM2)} m²`
+          : `${String(state.expectedAreaM2)} → ${String(expectedAreaM2)} m²`,
+    });
+
+    // The card that priced it — moving it to another card is a separate decision.
+    const rateCardId =
+      state.rateCardId ??
+      (await accountRepository.findById(job.accountId, { accountId: null }))?.rateCardId ??
+      null;
+    const repriced =
+      rateCardId === null
+        ? null
+        : await jobService.reprice(id, rateCardId, {
+            actor: caller.name,
+            reason: `m² set to ${String(expectedAreaM2)}`,
+          });
+
+    // A completed job held for its m² goes out now — see `invoiceCompletedJob`.
+    const invoice =
+      state.status === 'completed'
+        ? await invoiceService.invoiceCompletedJob(id)
+        : { invoiced: [], held: [] };
+
+    return {
+      totalExGst: repriced?.next ?? job.totalExGst,
+      invoiced: invoice.invoiced,
+      held: invoice.held,
+    };
+  },
+
   async recordFutileClosed(jobId: string, note: string | null, caller: Caller): Promise<void> {
     await jobRepository.appendEvent({
       jobId,
@@ -405,7 +537,18 @@ export const jobService = {
    * recorded as "Created in the admin console". Never taken from a request body:
    * it is not on `JobDraft`, so nobody can claim a door they did not use.
    */
-  async create(draft: JobDraft, caller: Caller, source?: JobBookingSource): Promise<JobListItem> {
+  async create(
+    draft: JobDraft,
+    caller: Caller,
+    source?: JobBookingSource,
+    options?: {
+      /**
+       * Set by the two booking FORMS — the office's and the portal's. A
+       * call-up or a futile rebook carries whatever area its source had.
+       */
+      requireArea?: boolean;
+    },
+  ): Promise<JobListItem> {
     const bookedVia: JobBookingSource = source ?? (isCustomer(caller) ? 'portal' : 'office');
 
     // Before anything is priced off it — the quote below is taken ON this date.
@@ -427,6 +570,7 @@ export const jobService = {
       zoneId: place.zoneId,
       expectedAreaM2: quantities.expectedAreaM2,
       bagCount: quantities.bagCount,
+      freightItem: draft.freightItem,
       /*
        * ⚠️ M6.2 — priced on the READY DATE, not on today.
        *
@@ -437,6 +581,26 @@ export const jobService = {
        */
       onDate: draft.readyDate,
     });
+
+    /*
+     * Matt, 21 Oct: m² is asked of every customer not on fixed price, and it
+     * must be exact — *"if we expect 972.62"* — because the invoice is that
+     * figure × the rate. A purchase order supplies its own area, so only a
+     * booking typed without one is held to this.
+     */
+    if (
+      options?.requireArea === true &&
+      purchaseOrder === null &&
+      quote.areaPriced &&
+      quantities.expectedAreaM2 === null
+    ) {
+      throw AppError.validation('Enter the exact square metres', [
+        {
+          path: 'expectedAreaM2',
+          message: 'Enter the exact square metres, e.g. 972.62 — this pickup is charged per m²',
+        },
+      ]);
+    }
 
     /*
      * I3 — the pin, resolved BEFORE the number is taken.
@@ -701,6 +865,9 @@ export const jobService = {
       });
     }
 
+    // A cancelled stop is a finished one: it may have been the run's last.
+    if (allocation) await runRepository.closeIfFinished(allocation.runId);
+
     log.info({ jobId: id, jobNumber: job.jobNumber, reason }, 'job cancelled');
   },
 
@@ -731,21 +898,21 @@ export const jobService = {
     });
 
     /*
-     * A run that no longer fits. The job's new ready date is after the day of
-     * the run it is on, so it cannot be collected on that run — and leaving it
-     * there keeps it on a driver's sheet for a day the site is not ready. That
-     * is exactly the wasted trip the move was meant to prevent.
-     *
-     * So it comes off, back into the jobs still to plan, the driver is texted,
-     * and the people who plan runs are told. A job moved EARLIER, or still ready
-     * in time for its run, stays where it is.
+     * A rescheduled job always comes off its run (Matt, 21 Oct): *"if a job is
+     * on a run and it gets rescheduled, it needs to obviously automatically be
+     * removed from the run… And the allocator needs an alert."* Any date change
+     * — earlier or later — because the allocator aims for 8 to 10 jobs a run
+     * and has to know to fill the gap. The job goes back to the jobs still to
+     * plan, the driver is texted, and the planners get a bell alert.
      */
     const allocation = await jobRepository.allocationOf(id);
 
-    if (allocation && allocation.runDate < readyDate) {
+    if (allocation && previous.readyDate !== readyDate) {
       const released = await jobRepository.releaseFromRun(id, allocation.runId);
 
       if (released) {
+        const stopsLeft = await jobRepository.countStopsOnRun(allocation.runId);
+
         await jobRepository.appendEvent({
           jobId: id,
           label: 'Taken off run',
@@ -769,19 +936,24 @@ export const jobService = {
           audience: 'planning',
           category: 'exception',
           severity: 'action',
-          title: `Job #${String(job.jobNumber)} taken off ${allocation.runName} — plan it again`,
+          title: `Job #${String(job.jobNumber)} rescheduled — taken off ${allocation.runName}`,
           body:
-            `${job.siteName} is now ready from ${formatDay(readyDate)}, so it came off the ` +
+            `${job.siteName} was rescheduled to ${formatDay(readyDate)}, so it came off the ` +
             `${formatDay(allocation.runDate)} run` +
             (allocation.driverId ? ' and the driver was texted.' : '.') +
-            ' It is back with the jobs to plan.',
+            ` ${allocation.runName} now has ${String(stopsLeft)} ` +
+            `${stopsLeft === 1 ? 'stop' : 'stops'}. The job is back with the jobs to plan.`,
           href: '/admin/dispatch',
-          subjectKey: `job-off-run:${id}:${allocation.runId}`,
+          // Keyed on the new date too: a second move of the same job is news.
+          subjectKey: `job-off-run:${id}:${allocation.runId}:${readyDate}`,
           jobId: id,
           jobNumber: job.jobNumber,
           // Whoever moved it knows; the rest of the planners need telling.
           exceptUserId: caller.userId,
         });
+
+        // The released job may have been the last one still open on the run.
+        await runRepository.closeIfFinished(allocation.runId);
 
         log.info(
           { jobId: id, jobNumber: job.jobNumber, runId: allocation.runId, readyDate },
@@ -794,6 +966,96 @@ export const jobService = {
     await jobNotices.moved(id);
 
     log.info({ jobId: id, jobNumber: job.jobNumber, readyDate, targetDate }, 'job rescheduled');
+  },
+
+  /**
+   * "Unarrive", from the office job page — see `clearArrival`.
+   *
+   * Office roles only: the router already refuses customers, and this says so
+   * again for any other caller.
+   */
+  async unarrive(id: string, caller: Caller): Promise<void> {
+    if (!caller.roles.some((role) => OFFICE_ROLES.has(role))) {
+      throw AppError.forbidden('Only the office or the driver can unarrive a job');
+    }
+    await this.clearArrival(id, { userId: caller.userId, name: caller.name }, 'office');
+  },
+
+  /**
+   * Undo an arrival — Matt, 21 Oct: *"sometimes the driver will arrive to a job
+   * and say that he's arrived and then decide afterwards that he can't do the
+   * job… we're not going to charge a futile. We just need to unarrive… just to
+   * stop that timer."*
+   *
+   * The arrival time and the on-site clock are cleared, nothing is charged, the
+   * job comes off its run back to "to place", the timeline says who did it,
+   * and the allocator gets a bell alert so the run can be refilled.
+   *
+   * ⚠️ Only an ARRIVED job. The release is filtered on that status, so two
+   * taps, or the office and the driver at once, unarrive it exactly once.
+   */
+  async clearArrival(
+    id: string,
+    actor: { userId: string; name: string },
+    from: 'office' | 'driver',
+  ): Promise<void> {
+    const job = await jobRepository.findSummary(id, {
+      accountId: null,
+      bookedByUserId: null,
+      driverId: null,
+    });
+    if (!job) throw AppError.notFound('No such job');
+
+    const allocation = await jobRepository.allocationOf(id);
+
+    if (job.status !== 'arrived' || !allocation) {
+      throw AppError.conflict(
+        `Job #${String(job.jobNumber)} is not marked arrived, so there is no arrival to undo`,
+      );
+    }
+
+    const released = await jobRepository.releaseFromRun(id, allocation.runId, ['arrived']);
+    if (!released) {
+      throw AppError.conflict('That job changed while you were looking at it — reload and retry');
+    }
+
+    // Written straight after the release: a phone replaying this action finds
+    // the job off its run and reads this event as "already done".
+    await jobRepository.appendEvent({
+      jobId: id,
+      label: 'Unarrived',
+      actor: actor.name,
+      status: 'booked',
+      detail:
+        `Arrival cleared ${from === 'driver' ? 'from the driver app' : 'by the office'} — no charge. ` +
+        `Taken off ${allocation.runName}; back with the jobs to place.`,
+    });
+
+    const stopsLeft = await jobRepository.countStopsOnRun(allocation.runId);
+
+    await notificationService.notifyOffice({
+      audience: 'planning',
+      category: 'exception',
+      severity: 'action',
+      title: `Job #${String(job.jobNumber)} unarrived — taken off ${allocation.runName}`,
+      body:
+        `${actor.name} cleared the arrival at ${job.siteName}. No charge. ` +
+        `${allocation.runName} now has ${String(stopsLeft)} ${stopsLeft === 1 ? 'stop' : 'stops'}; ` +
+        'the job is back with the jobs to place.',
+      href: '/admin/dispatch',
+      subjectKey: `job-unarrived:${id}:${allocation.runId}:${String(Date.now())}`,
+      jobId: id,
+      jobNumber: job.jobNumber,
+      exceptUserId: actor.userId,
+    });
+
+    // Every other stop on the run may already be finished.
+    await runRepository.closeIfFinished(allocation.runId);
+
+    log.info(
+      { jobId: id, jobNumber: job.jobNumber, runId: allocation.runId, from, by: actor.name },
+      'job unarrived and taken off its run',
+    );
   },
 
   /**

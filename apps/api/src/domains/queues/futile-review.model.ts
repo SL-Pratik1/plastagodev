@@ -1,4 +1,4 @@
-import { EXCEPTION_REASONS, FUTILE_OUTCOMES } from '@plastago/shared';
+import { FUTILE_OUTCOMES } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
 export const FUTILE_REVIEWS_COLLECTION = 'futilereviews';
@@ -25,7 +25,8 @@ const futileReviewSchema = new Schema(
     jobId: { type: Schema.Types.ObjectId, required: true, ref: 'Job' },
 
     /** Why the driver could not collect. Structured, never free text (M2.4). */
-    reason: { type: String, required: true, enum: EXCEPTION_REASONS },
+    // A key from the editable can't-collect list (Matt, 21 Oct) — no enum.
+    reason: { type: String, required: true },
     /** What the driver typed at the fence, if anything. */
     note: { type: String, default: null, trim: true },
 

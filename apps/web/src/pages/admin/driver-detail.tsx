@@ -124,10 +124,10 @@ export function AdminDriverDetailPage() {
                   { label: 'Mobile', value: formatMobile(driver.mobile) },
                   { label: 'Email', value: driver.email ?? '—' },
                   {
-                    label: 'Vehicle',
+                    label: 'Vehicle today',
                     value:
                       driver.vehicleRego === null
-                        ? 'Unassigned'
+                        ? 'Not chosen today'
                         : `${driver.vehicleRego} · ${driver.vehicleLabel ?? ''}`,
                   },
                   {

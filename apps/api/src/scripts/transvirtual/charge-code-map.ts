@@ -31,6 +31,8 @@ export const CHARGE_CODE_MAP: Record<string, ChargeCode> = {
 const BEHAVIOUR_DEFAULTS: Record<ChargeCode, { requiresApproval: boolean; driverRaisable: boolean }> = {
   'service-fee': { requiresApproval: false, driverRaisable: false },
   'area-charge': { requiresApproval: false, driverRaisable: false },
+  'weight-charge': { requiresApproval: false, driverRaisable: false },
+  'hook-bin': { requiresApproval: false, driverRaisable: false },
   'recycling-bags': { requiresApproval: false, driverRaisable: false },
   'extra-bags': { requiresApproval: true, driverRaisable: true },
   contamination: { requiresApproval: true, driverRaisable: true },

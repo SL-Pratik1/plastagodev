@@ -114,6 +114,12 @@ export function PortalJobsPage() {
       cell: (row) => (
         <span className="block">
           <span className="block font-medium">{formatDate(row.readyDate)}</span>
+          {/* The run's planned date, once the pickup is on one (21 Oct). */}
+          {row.plannedDate !== null && (
+            <span className="block text-xs text-primary">
+              Planned pickup {formatDate(row.plannedDate)}
+            </span>
+          )}
           <span className="block text-xs text-muted-foreground">
             <span className="font-mono">#{row.jobNumber}</span>
             {row.poNumber !== null && ` · ${row.poNumber}`}

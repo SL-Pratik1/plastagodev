@@ -11,7 +11,7 @@ import {
 } from '@plastago/ui';
 import { ChevronDownIcon, LogOutIcon, PhoneIcon } from 'lucide-react';
 import { useState } from 'react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
+import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
 import { NotificationsMenu } from '@/components/notifications-menu';
 import { InstallButton } from '@/components/pwa/install-button';
@@ -55,7 +55,17 @@ export function PortalLayout() {
 
   // Site supervisors are a builder concept, so the item is hidden for a
   // contractor rather than shown and explained (Matt, 20:09).
-  const items = visiblePortalNav(can, scope.data?.accountType);
+  /*
+   * Matt, 21 Oct — a customer administrator who has to sign the terms does so
+   * before anything else. The menu waits, and every other screen sends them
+   * to the steps; the API refuses the rest as well.
+   */
+  const mustSignTerms = scope.data?.mustSignTerms === true;
+  const onSigningStep = ['/portal/onboarding', '/portal/welcome'].includes(location.pathname);
+
+  const items = mustSignTerms
+    ? []
+    : visiblePortalNav(can, scope.data?.accountType, scope.data?.receivesCertificates);
 
   /*
    * ── The terms gate: REMOVED ─────────────────────────────────────────────
@@ -240,7 +250,7 @@ export function PortalLayout() {
           // tabs and looks like a rendering bug.
           className="mx-auto w-full max-w-6xl flex-1 px-4 pt-5 pb-24 sm:px-6 md:pb-8"
         >
-          <Outlet />
+          {mustSignTerms && !onSigningStep ? <Navigate to="/portal/onboarding" replace /> : <Outlet />}
         </main>
       </div>
 

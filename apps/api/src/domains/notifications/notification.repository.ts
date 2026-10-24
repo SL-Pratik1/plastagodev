@@ -546,6 +546,33 @@ export const notificationRepository = {
     ).exec();
   },
 
+  /**
+   * Every attempt to email one invoice, newest first — sends, failures, and
+   * "nobody to send it to". The invoice page shows these now that nobody
+   * presses Send by hand (21 Oct).
+   */
+  async sendsForInvoice(
+    invoiceId: string,
+    event: string,
+  ): Promise<Array<{ toMasked: string; sentAt: Date; outcome: 'sent' | 'failed' | 'skipped'; detail: string | null }>> {
+    if (!mongoose.isValidObjectId(invoiceId)) return [];
+
+    const rows = await OutboundMessageModel.find({
+      invoiceId: new mongoose.Types.ObjectId(invoiceId),
+      event,
+    })
+      .sort({ sentAt: -1 })
+      .limit(20)
+      .lean();
+
+    return rows.map((row) => ({
+      toMasked: row.toMasked,
+      sentAt: row.sentAt,
+      outcome: row.outcome,
+      detail: row.detail ?? null,
+    }));
+  },
+
   /** What went to one customer — the question support actually asks. */
   async sendsForAccount(
     accountId: string,

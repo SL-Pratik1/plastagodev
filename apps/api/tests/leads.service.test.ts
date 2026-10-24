@@ -260,6 +260,8 @@ function conversion(overrides: Partial<LeadConversion> = {}): LeadConversion {
     accountsContactEmail: '',
     notes: '',
     sendInvitation: true,
+    receivesCertificates: false,
+    certificateEmail: '',
     ...overrides,
   };
 }

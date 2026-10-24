@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import {
   IsoDateSchema,
+  IsoDateTimeSchema,
   MoneySchema,
   NonEmptyStringSchema,
   ObjectIdSchema,
@@ -213,6 +214,50 @@ export const VehicleDefectSchema = z
 
 /** F43 — 12 / 6 / 3 months, configurable; the date rolls forward on renewal. */
 export const REGO_PERIODS = [12, 6, 3] as const;
+export const RegoPeriodSchema = z.literal(REGO_PERIODS).meta({ id: 'RegoPeriod' });
+export type RegoPeriod = z.infer<typeof RegoPeriodSchema>;
+
+/**
+ * One logged renewal, newest first on the vehicle.
+ *
+ * Matt, 21 Oct: *"When you log a registration you should record whether it's a
+ * 12 month because it can vary."* So the length is kept with each renewal, not
+ * only as the vehicle's current setting.
+ */
+export const VehicleRegistrationRenewalSchema = z
+  .object({
+    renewedAt: IsoDateTimeSchema,
+    renewedBy: NonEmptyStringSchema,
+    periodMonths: z.number().int().positive(),
+    fromExpiry: IsoDateSchema,
+    toExpiry: IsoDateSchema,
+  })
+  .meta({ id: 'VehicleRegistrationRenewal' });
+
+/**
+ * One pre-start check, as the vehicle's "Pre-start checks" tab shows it.
+ *
+ * `items` holds every answer. Checks saved before that existed kept only the
+ * failed items, so for those `items` is empty and `failedItems` is all there is.
+ */
+export const VehiclePreStartSchema = z
+  .object({
+    id: ObjectIdSchema,
+    completedAt: IsoDateTimeSchema,
+    driverName: NonEmptyStringSchema,
+    odometerKm: z.number().int().nonnegative(),
+    itemsChecked: z.number().int().nonnegative(),
+    failedItems: z.array(z.object({ key: z.string(), label: z.string(), note: z.string() })),
+    items: z.array(
+      z.object({
+        key: z.string(),
+        label: z.string(),
+        state: z.enum(['pass', 'fail', 'not-applicable']),
+        note: z.string(),
+      }),
+    ),
+  })
+  .meta({ id: 'VehiclePreStart' });
 
 export const VehicleListItemSchema = z
   .object({
@@ -222,7 +267,16 @@ export const VehicleListItemSchema = z
     type: VehicleTypeSchema,
     active: z.boolean(),
     odometerKm: z.number().int().nonnegative(),
+    /**
+     * The old office pairing. No longer set from the console — drivers choose
+     * their vehicle each day (`driverToday`) — and kept only so app builds
+     * without the vehicle picker still find their truck.
+     */
     assignedDriverName: z.string().nullable(),
+    /** Who chose this vehicle for today in the driver app. Null when nobody has. */
+    driverToday: z.string().nullable().default(null),
+    /** Whether a pre-start check was done on it today (Sydney) — the Vehicles list's column. */
+    preStartToday: z.boolean().default(false),
     /** Auto-calculated, which is the whole point of the expense log (F43). */
     costPerKm: MoneySchema.nullable(),
     lastServiceOn: IsoDateSchema.nullable(),
@@ -243,6 +297,14 @@ export const VehicleSchema = VehicleListItemSchema.extend({
   notes: z.string(),
   expenses: z.array(VehicleExpenseSchema),
   defects: z.array(VehicleDefectSchema),
+  /**
+   * How many pre-start checks it has. The checks themselves are a paged list of
+   * their own (`GET /vehicles/:id/pre-starts`, 23 Oct) — one a day per truck
+   * grows without end, and the vehicle page should not carry them all.
+   */
+  preStartCount: z.number().int().nonnegative().default(0),
+  /** Newest first. Empty for a vehicle never renewed through the console. */
+  registrationRenewals: z.array(VehicleRegistrationRenewalSchema).default([]),
   /** Totals over the expense log, so the list and detail cannot disagree. */
   totalExpensesExGst: MoneySchema,
   distanceSinceFirstExpenseKm: z.number().int().nonnegative().nullable(),
@@ -250,6 +312,8 @@ export const VehicleSchema = VehicleListItemSchema.extend({
 
 export type VehicleExpense = z.infer<typeof VehicleExpenseSchema>;
 export type VehicleDefect = z.infer<typeof VehicleDefectSchema>;
+export type VehiclePreStart = z.infer<typeof VehiclePreStartSchema>;
+export type VehicleRegistrationRenewal = z.infer<typeof VehicleRegistrationRenewalSchema>;
 export type VehicleListItem = z.infer<typeof VehicleListItemSchema>;
 export type Vehicle = z.infer<typeof VehicleSchema>;
 

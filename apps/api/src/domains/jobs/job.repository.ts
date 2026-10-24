@@ -207,6 +207,7 @@ interface RawJob {
   serviceLevel: ServiceLevel;
   driverId: mongoose.Types.ObjectId | null;
   driverName: string | null;
+  runId?: mongoose.Types.ObjectId | null;
   expectedAreaM2: number | null;
   recoveredWeightKg: number | null;
   recoveredWeightBasis: WeightBasis | null;
@@ -227,6 +228,7 @@ interface RawJob {
   completedAt: Date | null;
   riskAssessmentRequired: boolean;
   createdAt: Date;
+  appliedRate?: { weightChargeKind?: 'per-m2' | 'fixed' | 'hook-bin' } | null;
 }
 
 /**
@@ -376,7 +378,7 @@ export const jobRepository = {
         JobPhotoModel.find({ jobId: row._id }).sort({ takenAt: 1 }).lean(),
         JobDocumentModel.find({ jobId: row._id }).sort({ uploadedAt: 1 }).lean(),
         JobCommentModel.find({ jobId: row._id }).sort({ at: 1 }).lean(),
-        JobPreStartModel.findOne({ jobId: row._id }).lean(),
+        preStartForJob(row),
         JobRiskAssessmentModel.findOne({ jobId: row._id }).lean(),
       ]);
 
@@ -395,6 +397,8 @@ export const jobRepository = {
         await zoneLabels(),
       ),
       freightItem: row.freightItem,
+      // A job priced before rate snapshots existed was priced per m².
+      areaPriced: (row.appliedRate?.weightChargeKind ?? 'per-m2') === 'per-m2',
       notes: row.notes,
       exceptionReason: row.exceptionReason,
       exceptionNote: row.exceptionNote,
@@ -542,6 +546,12 @@ export const jobRepository = {
    * Read when a job's date moves or it is cancelled: whether the driver has to
    * be told, and whether the job can stay where it is, both depend on this.
    */
+  /** How many stops are on a run — for "the run now has N stops". */
+  async countStopsOnRun(runId: string): Promise<number> {
+    if (!mongoose.isValidObjectId(runId)) return 0;
+    return JobModel.countDocuments({ runId: new mongoose.Types.ObjectId(runId) });
+  },
+
   async allocationOf(id: string): Promise<{
     runId: string;
     runNumber: number;
@@ -594,7 +604,12 @@ export const jobRepository = {
    * The stops left behind are renumbered, so the sheet never reads 1, 2, 4.
    * Returns false when the job was no longer on that run.
    */
-  async releaseFromRun(id: string, runId: string): Promise<boolean> {
+  async releaseFromRun(
+    id: string,
+    runId: string,
+    /** Narrower than "any open status" for an unarrive, which only an arrived job can take. */
+    fromStatuses: readonly JobStatus[] = ['booked', 'assigned', 'in-transit', 'arrived'],
+  ): Promise<boolean> {
     if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(runId)) return false;
 
     const run = new mongoose.Types.ObjectId(runId);
@@ -603,7 +618,7 @@ export const jobRepository = {
       {
         _id: new mongoose.Types.ObjectId(id),
         runId: run,
-        status: { $in: ['booked', 'assigned', 'in-transit', 'arrived'] },
+        status: { $in: [...fromStatuses] },
       },
       {
         $set: {
@@ -612,6 +627,13 @@ export const jobRepository = {
           runSequence: null,
           driverId: null,
           driverName: null,
+          /*
+           * Found by us (21 Oct): a job released from its run is back to
+           * "to place", so the on-site clock stops with it. Left set, a job
+           * that had been marked arrived kept counting its time on site.
+           */
+          arrivedAt: null,
+          onSiteMinutes: null,
         },
       },
     );
@@ -761,17 +783,7 @@ export const jobRepository = {
        * string is a rate that can be compared with `>` and get the wrong
        * answer, and these are the figures a credit note is derived from.
        */
-      appliedRate: input.appliedRate
-        ? {
-            rateCardId: input.appliedRate.rateCardId,
-            rateCardLabel: input.appliedRate.rateCardLabel,
-            zoneId: new mongoose.Types.ObjectId(input.appliedRate.zoneId),
-            zoneLabel: input.appliedRate.zoneLabel,
-            scheduleFrom: input.appliedRate.scheduleFrom,
-            serviceCharge: toDecimal128(input.appliedRate.serviceCharge),
-            ratePerM2: toDecimal128(input.appliedRate.ratePerM2),
-          }
-        : null,
+      appliedRate: input.appliedRate ? storedRate(input.appliedRate) : null,
       invoiceStatus: 'not-invoiced',
       notes: input.notes,
       riskAssessmentRequired: input.riskAssessmentRequired,
@@ -1228,6 +1240,37 @@ async function invoicedCharges(ids: readonly mongoose.Types.ObjectId[]): Promise
   );
 }
 
+/**
+ * The driver's pre-start for the job's day, for the Compliance tab.
+ *
+ * Matt, 21 Oct: a pre-start is logged against the vehicle, one per driver, day
+ * and vehicle — no longer keyed to the day's first job. So it is found by the
+ * job's driver and day; when they checked two vehicles that day, the last one
+ * checked before they arrived — or, for a job not yet started, the latest.
+ */
+async function preStartForJob(row: RawJob) {
+  if (!row.driverId) return null;
+
+  const at = row.arrivedAt ?? row.completedAt;
+  let day: string | null = at
+    ? at.toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' })
+    : null;
+
+  if (!day && row.runId) {
+    const run = await RunModel.findById(row.runId).select({ date: 1 }).lean<{ date: string }>();
+    day = run?.date ?? null;
+  }
+  if (!day) return null;
+
+  const checks = await JobPreStartModel.find({ driverId: row.driverId, date: day })
+    .sort({ completedAt: 1 })
+    .lean();
+  if (checks.length === 0) return null;
+
+  if (!at) return checks.at(-1) ?? null;
+  return checks.filter((check) => check.completedAt <= at).at(-1) ?? checks[0] ?? null;
+}
+
 function toListItem(
   row: RawJob,
   hasPendingCharges: boolean,
@@ -1507,6 +1550,210 @@ export async function jobsForPurchaseOrders(
   return new Map(rows.map((row) => [row.purchaseOrderId.toHexString(), row.jobNumber]));
 }
 
+/** What re-pricing a job reads: the inputs that decide its price, and the price. */
+export interface JobPricingInputs {
+  id: string;
+  jobNumber: number;
+  zoneId: string;
+  expectedAreaM2: number | null;
+  bagCount: number;
+  freightItem: FreightItem;
+  readyDate: string;
+  totalExGst: string;
+}
+
+const PRICING_PROJECTION = {
+  jobNumber: 1,
+  zoneId: 1,
+  expectedAreaM2: 1,
+  bagCount: 1,
+  freightItem: 1,
+  readyDate: 1,
+  totalExGst: 1,
+} as const;
+
+function toPricingInputs(row: {
+  _id: mongoose.Types.ObjectId;
+  jobNumber: number;
+  zoneId: mongoose.Types.ObjectId;
+  expectedAreaM2: number | null;
+  bagCount: number;
+  freightItem: FreightItem;
+  readyDate: string;
+  totalExGst: mongoose.Types.Decimal128;
+}): JobPricingInputs {
+  return {
+    id: row._id.toHexString(),
+    jobNumber: row.jobNumber,
+    zoneId: row.zoneId.toHexString(),
+    expectedAreaM2: row.expectedAreaM2,
+    bagCount: row.bagCount,
+    freightItem: row.freightItem,
+    readyDate: row.readyDate,
+    totalExGst: fromDecimal128(row.totalExGst),
+  };
+}
+
+export async function pricingInputsFor(jobId: string): Promise<JobPricingInputs | null> {
+  if (!mongoose.isValidObjectId(jobId)) return null;
+  const row = await JobModel.findById(jobId, PRICING_PROJECTION).lean<
+    Parameters<typeof toPricingInputs>[0]
+  >();
+  return row ? toPricingInputs(row) : null;
+}
+
+/**
+ * An account's jobs that are still open and on no invoice — the ones whose
+ * price may still move when the office changes the customer's rate card.
+ */
+const repriceableFilter = (accountId: string, openStatuses: readonly JobStatus[]) => ({
+  accountId: new mongoose.Types.ObjectId(accountId),
+  status: { $in: [...openStatuses] },
+  invoiceStatus: 'not-invoiced' as const,
+});
+
+export async function countRepriceableJobs(
+  accountId: string,
+  openStatuses: readonly JobStatus[],
+): Promise<number> {
+  if (!mongoose.isValidObjectId(accountId)) return 0;
+  return JobModel.countDocuments(repriceableFilter(accountId, openStatuses));
+}
+
+export async function repriceableJobs(
+  accountId: string,
+  openStatuses: readonly JobStatus[],
+): Promise<JobPricingInputs[]> {
+  if (!mongoose.isValidObjectId(accountId)) return [];
+  const rows = await JobModel.find(repriceableFilter(accountId, openStatuses), PRICING_PROJECTION)
+    .sort({ jobNumber: 1 })
+    .lean<Array<Parameters<typeof toPricingInputs>[0]>>();
+  return rows.map(toPricingInputs);
+}
+
+/** The applied-rate snapshot as it is stored — money as `Decimal128`. */
+function storedRate(rate: AppliedRate) {
+  return {
+    rateCardId: rate.rateCardId,
+    rateCardLabel: rate.rateCardLabel,
+    zoneId: new mongoose.Types.ObjectId(rate.zoneId),
+    zoneLabel: rate.zoneLabel,
+    scheduleFrom: rate.scheduleFrom,
+    serviceCharge: toDecimal128(rate.serviceCharge),
+    ratePerM2: toDecimal128(rate.ratePerM2),
+    weightChargeKind: rate.weightChargeKind,
+    weightCharge: rate.weightCharge === null ? null : toDecimal128(rate.weightCharge),
+  };
+}
+
+/**
+ * The charge codes a quote writes — and so the ones a re-quote replaces.
+ *
+ * Office extras, driver charges and Extra Load Time are never in this list, so
+ * re-pricing a job cannot touch anything somebody raised by hand.
+ */
+const QUOTED_CHARGE_CODES: readonly ChargeCode[] = [
+  'service-fee',
+  'area-charge',
+  'weight-charge',
+  'hook-bin',
+  'recycling-bags',
+];
+
+/**
+ * Re-price a job that has not been invoiced: new totals, a new rate snapshot
+ * and new quoted charge lines, replacing the old ones.
+ *
+ * ⚠️ Refuses (returns false) once anything on the job is on an invoice. A
+ * figure a customer has been sent never moves — that is what `appliedRate`
+ * exists to guarantee, and this is the only write that changes it.
+ */
+export async function replaceQuote(
+  jobId: string,
+  quote: {
+    totals: { subtotalExGst: string; gst: string; totalIncGst: string };
+    appliedRate: AppliedRate;
+    lines: ReadonlyArray<{
+      code: ChargeCode;
+      description: string;
+      quantity: number;
+      unitRate: string;
+      amount: string;
+    }>;
+  },
+): Promise<boolean> {
+  if (!mongoose.isValidObjectId(jobId)) return false;
+  const _id = new mongoose.Types.ObjectId(jobId);
+
+  const updated = await JobModel.updateOne(
+    { _id, invoiceStatus: 'not-invoiced' },
+    {
+      $set: {
+        totalExGst: toDecimal128(quote.totals.subtotalExGst),
+        gst: toDecimal128(quote.totals.gst),
+        totalIncGst: toDecimal128(quote.totals.totalIncGst),
+        appliedRate: storedRate(quote.appliedRate),
+      },
+    },
+  );
+  if (updated.matchedCount === 0) return false;
+
+  await JobChargeModel.deleteMany({
+    jobId: _id,
+    source: 'system',
+    code: { $in: QUOTED_CHARGE_CODES },
+  });
+  await writeQuotedCharges(jobId, quote.lines);
+  return true;
+}
+
+/** What setting a job's m² needs to know first. Null for no such job. */
+export async function areaStateOf(jobId: string): Promise<{
+  status: JobStatus;
+  invoiceStatus: Job['invoiceStatus'];
+  expectedAreaM2: number | null;
+  rateCardId: string | null;
+} | null> {
+  if (!mongoose.isValidObjectId(jobId)) return null;
+  const row = await JobModel.findById(jobId, {
+    status: 1,
+    invoiceStatus: 1,
+    expectedAreaM2: 1,
+    'appliedRate.rateCardId': 1,
+  }).lean<{
+    status: JobStatus;
+    invoiceStatus: Job['invoiceStatus'];
+    expectedAreaM2: number | null;
+    appliedRate?: { rateCardId?: string } | null;
+  }>();
+  if (!row) return null;
+  return {
+    status: row.status,
+    invoiceStatus: row.invoiceStatus,
+    expectedAreaM2: row.expectedAreaM2,
+    rateCardId: row.appliedRate?.rateCardId ?? null,
+  };
+}
+
+/**
+ * Set a job's m² — the office filling in what its purchase order left out.
+ *
+ * Conditional on the job being on no invoice, the same guard as `replaceQuote`:
+ * a figure the customer has been sent never moves. False when that lost a race.
+ */
+export async function setExpectedArea(jobId: string, expectedAreaM2: number): Promise<boolean> {
+  if (!mongoose.isValidObjectId(jobId)) return false;
+  const updated = await JobModel.updateOne(
+    {
+      _id: new mongoose.Types.ObjectId(jobId),
+      invoiceStatus: 'not-invoiced',
+      status: { $ne: 'cancelled' },
+    },
+    { $set: { expectedAreaM2 } },
+  );
+  return updated.matchedCount === 1;
+}
+
 export async function writeQuotedCharges(
   jobId: string,
   lines: ReadonlyArray<{
@@ -1578,6 +1825,29 @@ export async function billableCharges(jobId: string): Promise<
     source: row.source,
     raisedBy: row.raisedBy ?? null,
   }));
+}
+
+/**
+ * What a job has to show for itself before it is billed automatically (21 Oct):
+ * the photo slots whose bytes really arrived, and whether the driver saved
+ * what they collected.
+ *
+ * `uploadedAt`, never the storage key — a key is assigned before a byte exists.
+ */
+export async function completionEvidence(
+  jobId: string,
+): Promise<{ uploadedSlots: string[]; weightsRecorded: boolean }> {
+  const _id = new mongoose.Types.ObjectId(jobId);
+
+  const [slots, job] = await Promise.all([
+    JobPhotoModel.distinct('slot', { jobId: _id, uploadedAt: { $ne: null }, slot: { $ne: null } }),
+    JobModel.findById(_id).select({ weightsRecordedAt: 1 }).lean<{ weightsRecordedAt?: Date | null }>(),
+  ]);
+
+  return {
+    uploadedSlots: (slots as Array<string | null>).filter((slot): slot is string => slot !== null),
+    weightsRecorded: Boolean(job?.weightsRecordedAt),
+  };
 }
 
 /**

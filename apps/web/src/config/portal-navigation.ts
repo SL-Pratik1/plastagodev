@@ -33,6 +33,11 @@ export interface PortalNavItem {
    * out that it does not apply to them.
    */
   accountTypes?: readonly AccountType[];
+  /**
+   * Only for customers with "Receives certificates" ticked (Matt, 21 Oct:
+   * certificates go *"only to certain customers"*).
+   */
+  requiresCertificates?: boolean;
   scope?: string;
 }
 
@@ -119,6 +124,7 @@ export const PORTAL_NAV: readonly PortalNavItem[] = [
     shortLabel: 'Certs',
     icon: AwardIcon,
     capability: 'portal:certificates',
+    requiresCertificates: true,
     scope: 'M5.12 · F52, W84 — Certificates of Recycling for Green Star',
   },
   {
@@ -153,9 +159,12 @@ export const PORTAL_NAV: readonly PortalNavItem[] = [
 export function visiblePortalNav(
   can: (capability: Capability) => boolean,
   accountType?: AccountType,
+  receivesCertificates?: boolean,
 ): PortalNavItem[] {
   return PORTAL_NAV.filter((item) => {
     if (!can(item.capability)) return false;
+    // Hidden until the scope says yes — the same safe direction as account types.
+    if (item.requiresCertificates && receivesCertificates !== true) return false;
     if (!item.accountTypes) return true;
     return accountType !== undefined && item.accountTypes.includes(accountType);
   });

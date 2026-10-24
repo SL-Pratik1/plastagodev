@@ -163,6 +163,8 @@ outboundMessageSchema.index(
 /** "What did we send this customer?" — the question support actually asks. */
 outboundMessageSchema.index({ accountId: 1, sentAt: -1 }, { name: 'account_sent' });
 outboundMessageSchema.index({ jobId: 1, sentAt: -1 }, { name: 'job_sent' });
+/** "Was this invoice emailed?" — the invoice page asks on every open (21 Oct). */
+outboundMessageSchema.index({ invoiceId: 1, sentAt: -1 }, { name: 'invoice_sent' });
 
 /** The failure sweep. Partial, because most sends succeed. */
 outboundMessageSchema.index(

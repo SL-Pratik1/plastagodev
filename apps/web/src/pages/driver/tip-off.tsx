@@ -18,6 +18,7 @@ import { CameraIcon, CheckCircle2Icon, ScaleIcon } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { PhotoThumb } from '@/components/driver/photo-grid';
+import { photoUploadFailure } from '@/features/driver/photo-upload-error';
 import {
   useRecordTipOff,
   useRunSheet,
@@ -193,11 +194,8 @@ export function DriverTipOffPage() {
           setErrors(({ docket: _drop, ...rest }) => rest);
           // Uploaded, not "saved on this phone": the bytes are already in storage.
           toast.success('Docket photo uploaded');
-        } catch {
-          toast.error(
-            'Could not save the docket photo',
-            'The weighbridge usually has signal — try again before you leave.',
-          );
+        } catch (error) {
+          toast.error('Could not save the docket photo', photoUploadFailure(error));
         }
       })();
     });

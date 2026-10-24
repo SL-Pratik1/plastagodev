@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import type { PortalJob } from '@plastago/shared';
+import { hasAtMostTwoDecimals, type PortalJob } from '@plastago/shared';
 import {
   Alert,
   Button,
@@ -46,10 +46,16 @@ import { useNow } from '@/lib/use-now';
  */
 const FormSchema = z.object({
   readyDate: z.string().min(1, 'Tell us the date the board will be ready'),
+  /*
+   * The booking form's rule (Matt, 21 Oct): exact, and asked of everyone not
+   * on a fixed price. `null` is what a fixed-price pickup sends.
+   */
   expectedAreaM2: z.coerce
     .number()
-    .positive('Enter the expected square metres')
-    .max(100000, 'That is larger than any job on record — check the figure'),
+    .positive('Enter the exact square metres')
+    .max(100000, 'That is larger than any job on record — check the figure')
+    .refine(hasAtMostTwoDecimals, 'At most two decimal places, e.g. 972.62')
+    .nullable(),
   bagCount: z.coerce
     .number()
     .int('Whole bags only')
@@ -102,6 +108,7 @@ function EditForm({ job }: { job: PortalJob }) {
 
   const today = todayInSydney(now);
   const poRequired = scope.data?.poRequired ?? false;
+  const fixedPrice = (scope.data?.fixedPriceZoneIds ?? []).includes(job.zoneId);
 
   const {
     register,
@@ -144,9 +151,16 @@ function EditForm({ job }: { job: PortalJob }) {
     );
   }
 
+  // Required unless the price is fixed; asked of everyone either way (23 Oct).
+  const areaRequired = !fixedPrice;
+
   const submit = handleSubmit(async (values) => {
     if (poRequired && values.poNumber.trim().length === 0) {
       setError('poNumber', { message: 'Your account requires a purchase order number' });
+      return;
+    }
+    if (areaRequired && !values.expectedAreaM2) {
+      setError('expectedAreaM2', { message: 'Enter the exact square metres, e.g. 972.62' });
       return;
     }
 
@@ -155,7 +169,8 @@ function EditForm({ job }: { job: PortalJob }) {
         id: job.id,
         input: {
           readyDate: values.readyDate,
-          expectedAreaM2: Number(values.expectedAreaM2),
+          expectedAreaM2:
+            Number(values.expectedAreaM2) > 0 ? Number(values.expectedAreaM2) : null,
           bagCount: Number(values.bagCount),
           serviceLevel: values.serviceLevel,
 
@@ -223,18 +238,26 @@ function EditForm({ job }: { job: PortalJob }) {
 
               <Field
                 id="edit-area"
-                label="Expected plasterboard (m²)"
-                required
+                label="Plasterboard (m²)"
+                required={areaRequired}
                 error={errors.expectedAreaM2?.message}
+                hint={
+                  areaRequired
+                    ? 'The exact figure, e.g. 972.62 — it is what you are invoiced on.'
+                    : 'Optional — your price here is fixed, so this is for the record only.'
+                }
               >
                 {(control) => (
                   <Input
                     {...control}
                     type="number"
-                    inputMode="numeric"
-                    min={1}
-                    step={10}
-                    {...register('expectedAreaM2')}
+                    inputMode="decimal"
+                    min={0.01}
+                    step={0.01}
+                    // A blank box is "not given", not 0 — it is optional on a fixed price.
+                    {...register('expectedAreaM2', {
+                      setValueAs: (value: unknown) => (value === '' ? null : value),
+                    })}
                   />
                 )}
               </Field>

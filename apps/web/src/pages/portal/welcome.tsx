@@ -18,7 +18,11 @@ import { CheckCircle2Icon } from 'lucide-react';
 import { useForm } from 'react-hook-form';
 import { useNavigate } from 'react-router';
 import { PageHeader } from '@/components/page-header';
-import { useCompleteOnboarding, useOnboardingInvite } from '@/features/portal/queries';
+import {
+  useCompleteOnboarding,
+  useOnboardingInvite,
+  usePortalScope,
+} from '@/features/portal/queries';
 import { describeError } from '@/lib/error-message';
 import { formatDateTime, normaliseAbnInput } from '@/lib/format';
 
@@ -37,14 +41,16 @@ import { formatDateTime, normaliseAbnInput } from '@/lib/format';
  * and a tick that gated the whole portal until it was made. Removed on the
  * client's instruction; see the note in `packages/shared/src/schemas/party.ts`.
  *
- * ⚠️ Consequence: nothing blocks anybody now, so this screen has to work as a
- * page somebody visits ON PURPOSE and possibly more than once. It opens on what
+ * ⚠️ Consequence: this screen has to work as a page somebody visits ON PURPOSE
+ * and possibly more than once. (Since 21 Oct it is also step 1 of signing the
+ * terms for an account opened with the onboarding tick — see `onboarding.tsx`.) It opens on what
  * is already on file rather than blank, and it can be submitted again — a
  * customer who has moved office is the one person who knows their new address.
  */
 export function PortalWelcomePage() {
   const invite = useOnboardingInvite();
   const complete = useCompleteOnboarding();
+  const scope = usePortalScope();
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -91,7 +97,8 @@ export function PortalWelcomePage() {
         'Your details are saved',
         'We will use these on your invoices and certificates.',
       );
-      await navigate('/portal');
+      // Step 1 of signing the terms, when they are asked to — back to the steps.
+      await navigate(scope.data?.mustSignTerms ? '/portal/onboarding' : '/portal');
     } catch (caught) {
       const described = describeError(caught);
       setError('root', { message: described.detail ?? described.title });

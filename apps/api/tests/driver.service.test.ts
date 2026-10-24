@@ -1,3 +1,4 @@
+import { DRIVER_LIST_DEFAULTS } from '@plastago/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearOutbound,
@@ -5,6 +6,7 @@ import {
   recordingProviders,
   sentMessages,
 } from './helpers/fake-outbound.js';
+import { todayInSydney } from '../src/lib/business-day.js';
 import { createFakeDriverRepository } from './helpers/fake-driver.js';
 import { createFakeSettingsRepository } from './helpers/fake-settings.js';
 
@@ -138,6 +140,43 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
  * carry — the phone is told about a stop, not about who to text. So the notice
  * module reads the job, and that read is faked here.
  */
+/** Runs the service asked to check for completion, and arrivals it cleared. */
+const closedRuns: string[] = [];
+const clearedArrivals: Array<{ jobId: string; actor: string; from: string }> = [];
+
+vi.mock('../src/domains/dispatch/run.repository.js', () => ({
+  runRepository: {
+    closeIfFinished: (runId: string) => {
+      closedRuns.push(runId);
+      return Promise.resolve(false);
+    },
+  },
+}));
+
+/* Unarrive's shared work lives in the jobs domain — see `jobService.clearArrival`. */
+vi.mock('../src/domains/jobs/job.service.js', () => ({
+  jobService: {
+    clearArrival: (jobId: string, actor: { name: string }, from: string) => {
+      clearedArrivals.push({ jobId, actor: actor.name, from });
+      return Promise.resolve();
+    },
+  },
+}));
+
+/*
+ * Matt, 21 Oct — completing a job invoices it. Faked: what billing does is
+ * `invoices.service.test.ts`; here it only matters that completion asks.
+ */
+const invoicedOnCompletion: string[] = [];
+vi.mock('../src/domains/invoices/invoice.service.js', () => ({
+  invoiceService: {
+    invoiceCompletedJob: (jobId: string) => {
+      invoicedOnCompletion.push(jobId);
+      return Promise.resolve({ held: [], invoiced: [], sent: [] });
+    },
+  },
+}));
+
 vi.mock('../src/domains/jobs/job.repository.js', () => ({
   jobRepository: {
     findById: () =>
@@ -177,6 +216,7 @@ beforeEach(() => {
   removed.length = 0;
   futileReviews.length = 0;
   urgentAlerts.length = 0;
+  invoicedOnCompletion.length = 0;
 });
 
 describe('seeing only your own work', () => {
@@ -380,6 +420,16 @@ describe('completing a job', () => {
     await expect(driverService.complete(stop.id, action, CALLER)).resolves.toBeUndefined();
 
     expect(driver.events.filter((event) => event.status === 'completed')).toHaveLength(1);
+    // Billed once — the replay never reaches invoicing.
+    expect(invoicedOnCompletion).toEqual([stop.id]);
+  });
+
+  it('invoices the job as soon as it is completed (21 Oct)', async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    await driverService.complete(stop.id, { ...envelope(), note: '' }, CALLER);
+
+    expect(invoicedOnCompletion).toEqual([stop.id]);
   });
 
   /*
@@ -1873,5 +1923,341 @@ describe('the two urgent alerts (M8.7)', () => {
 
     expect(driver.defects).toHaveLength(1);
     expect(urgentAlerts).toHaveLength(0);
+  });
+});
+
+/*
+ * "Unarrive" from the phone — Matt, 21 Oct: *"we're not going to charge a
+ * futile. We just need to unarrive… just to stop that timer."* The shared work
+ * is `jobService.clearArrival`; this is the driver's door to it.
+ */
+describe('unarriving from the phone', () => {
+  beforeEach(() => {
+    clearedArrivals.length = 0;
+  });
+
+  it('clears the arrival on the driver’s own job', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, status: 'arrived' });
+
+    await driverService.unarrive(stop.id, envelope(), CALLER);
+
+    expect(clearedArrivals).toEqual([{ jobId: stop.id, actor: 'Troy Holm', from: 'driver' }]);
+  });
+
+  it('treats a replay after it landed as success', async () => {
+    const stop = driver.addStop({ jobNumber: 61302, status: 'arrived' });
+    driver.unarrived(stop.id, CALLER.name);
+
+    await expect(driverService.unarrive(stop.id, envelope(), CALLER)).resolves.toBeUndefined();
+    expect(clearedArrivals).toHaveLength(0);
+  });
+
+  it('cannot reach another driver’s job', async () => {
+    const stop = driver.addStop({ jobNumber: 61303, status: 'arrived', driverId: 'someone-else' });
+
+    await expect(driverService.unarrive(stop.id, envelope(), CALLER)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(clearedArrivals).toHaveLength(0);
+  });
+});
+
+describe('a run completes with its last stop', () => {
+  beforeEach(() => {
+    closedRuns.length = 0;
+  });
+
+  it('checks the run when a stop is completed', async () => {
+    const stop = driver.addStop({ jobNumber: 61304 });
+
+    await driverService.updateStatus(
+      stop.id,
+      { ...envelope('2026-09-10T08:00:00.000Z'), transition: 'arrived' },
+      CALLER,
+    );
+    await driverService.complete(
+      stop.id,
+      { ...envelope('2026-09-10T08:45:00.000Z'), note: '' },
+      CALLER,
+    );
+
+    expect(driver.stop(stop.id)?.status).toBe('completed');
+    expect(closedRuns).toHaveLength(1);
+  });
+});
+
+/*
+ * Matt, 21 Oct: "Rather than assign vehicles, drivers should select the vehicle
+ * they are driving that day and complete pre-start from there." One driver per
+ * vehicle per day; the pre-start, defects and tip-off use the chosen vehicle.
+ */
+describe("today's vehicle (Matt, 21 Oct)", () => {
+  const ME = { ...CALLER, vehicleRego: null };
+  const DAY = '2026-09-10';
+
+  it('records the chosen vehicle, and the run sheet prefers it to the old pairing', async () => {
+    const truck = driver.addVehicle({ rego: 'XY99ZZ', label: 'Truck 9' });
+    driver.assignVehicle({ rego: 'CD34EF', label: 'Truck 2 — Hino crane' });
+
+    const choice = await driverService.chooseVehicle({ vehicleId: truck }, ME);
+    expect(choice).toMatchObject({ date: todayInSydney(), vehicleId: truck, rego: 'XY99ZZ' });
+
+    const sheet = await driverService.runSheet(todayInSydney(), ME);
+    expect(sheet).toMatchObject({ vehicleId: truck, vehicleRego: 'XY99ZZ', vehicleChosen: true });
+  });
+
+  it('still finds the old pairing for an app without the picker, flagged as not chosen', async () => {
+    driver.assignVehicle({ rego: 'CD34EF', label: 'Truck 2 — Hino crane' });
+
+    const sheet = await driverService.runSheet(DAY, ME);
+
+    expect(sheet).toMatchObject({ vehicleRego: 'CD34EF', vehicleChosen: false });
+  });
+
+  it('refuses a vehicle another driver chose today, and names them', async () => {
+    const truck = driver.addVehicle({ rego: 'XY99ZZ' });
+    driver.choose(todayInSydney(), truck, OTHER_DRIVER, 'Dean Kelly');
+
+    await expect(driverService.chooseVehicle({ vehicleId: truck }, ME)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('taken by Dean Kelly'),
+    });
+  });
+
+  it('refuses a vehicle that is out of service', async () => {
+    const truck = driver.addVehicle({ rego: 'XY99ZZ', active: false });
+
+    await expect(driverService.chooseVehicle({ vehicleId: truck }, ME)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(driver.choices).toHaveLength(0);
+  });
+
+  it('404s a vehicle that does not exist', async () => {
+    await expect(
+      driverService.chooseVehicle({ vehicleId: 'f'.repeat(24) }, ME),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('moves the driver when they choose again, freeing the first vehicle', async () => {
+    const first = driver.addVehicle({ rego: 'AA11AA' });
+    const second = driver.addVehicle({ rego: 'BB22BB' });
+
+    await driverService.chooseVehicle({ vehicleId: first }, ME);
+    await driverService.chooseVehicle({ vehicleId: second }, ME);
+
+    expect(driver.choices).toEqual([
+      { date: todayInSydney(), vehicleId: second, driverId: DRIVER, driverName: 'Troy Holm' },
+    ]);
+  });
+
+  it('shows the picker who has each in-service vehicle', async () => {
+    const mine = driver.addVehicle({ rego: 'AA11AA' });
+    const theirs = driver.addVehicle({ rego: 'BB22BB' });
+    driver.addVehicle({ rego: 'CC33CC' });
+    driver.addVehicle({ rego: 'DD44DD', active: false });
+    driver.choose(todayInSydney(), mine, DRIVER, 'Troy Holm');
+    driver.choose(todayInSydney(), theirs, OTHER_DRIVER, 'Dean Kelly');
+
+    const options = await driverService.vehicleOptions(ME);
+
+    expect(options.vehicles.map((v) => [v.rego, v.takenBy, v.mine])).toEqual([
+      ['AA11AA', null, true],
+      ['BB22BB', 'Dean Kelly', false],
+      ['CC33CC', null, false],
+    ]);
+  });
+
+  it('files the pre-start against the chosen vehicle, and a new vehicle needs its own', async () => {
+    driver.addStop({ jobNumber: 61301 });
+    const first = driver.addVehicle({ rego: 'AA11AA' });
+    const second = driver.addVehicle({ rego: 'BB22BB' });
+    driver.choose(DAY, first, DRIVER, 'Troy Holm');
+    const check = {
+      ...envelope(),
+      date: DAY,
+      vehicleRego: '',
+      odometerKm: 184_320,
+      items: [{ key: 'tyres', state: 'pass' as const, note: '' }],
+      declaration: true as const,
+    };
+
+    await driverService.submitPreStart(check, ME);
+    // Linked by the vehicle's id; the plate is kept only to show.
+    expect(driver.preStarts[0]).toMatchObject({ vehicleId: first, vehicleRego: 'AA11AA', date: DAY, items: 1 });
+    expect((await driverService.runSheet(DAY, ME)).preStartCompletedAt).not.toBeNull();
+
+    // Mid-day change of truck: the morning check does not cover the new one.
+    const mine = driver.choices.find((row) => row.driverId === DRIVER);
+    if (mine) mine.vehicleId = second;
+    expect((await driverService.runSheet(DAY, ME)).preStartCompletedAt).toBeNull();
+
+    await driverService.submitPreStart(check, ME);
+    expect(driver.preStarts.map((row) => row.vehicleId)).toEqual([first, second]);
+  });
+
+  it('does not use the old pairing when another driver chose that truck for the day', async () => {
+    driver.addStop({ jobNumber: 61301 });
+    const truck = driver.addVehicle({ rego: 'CD34EF' });
+    driver.assignVehicle({ id: truck, rego: 'CD34EF', label: 'Truck 2 — Hino crane' });
+    driver.choose(DAY, truck, OTHER_DRIVER, 'Dean Kelly');
+
+    await expect(
+      driverService.submitPreStart(
+        {
+          ...envelope(),
+          date: DAY,
+          vehicleRego: 'CD34EF',
+          odometerKm: 1,
+          items: [],
+          declaration: true,
+        },
+        ME,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect((await driverService.runSheet(DAY, ME)).vehicleRego).toBeNull();
+  });
+
+  it('records the vehicle on the tip-off', async () => {
+    driver.addStop({ jobNumber: 61301, expectedAreaM2: 1000 });
+    const truck = driver.addVehicle({ rego: 'XY99ZZ' });
+    driver.choose(DAY, truck, DRIVER, 'Troy Holm');
+
+    await driverService.recordTipOff(
+      {
+        ...envelope(),
+        runId: 'run1',
+        date: DAY,
+        totalKg: 2000,
+        docketReference: 'WB-8823',
+        docketPhotoId: null,
+      },
+      ME,
+    );
+
+    expect(driver.tipOffs[0]).toMatchObject({ vehicleId: truck, vehicleRego: 'XY99ZZ' });
+  });
+
+  it('never refuses a tip-off for want of a vehicle', async () => {
+    driver.addStop({ jobNumber: 61301, expectedAreaM2: 1000 });
+    driver.assignVehicle(null);
+
+    await driverService.recordTipOff(
+      {
+        ...envelope(),
+        runId: 'run1',
+        date: DAY,
+        totalKg: 2000,
+        docketReference: 'WB-8823',
+        docketPhotoId: null,
+      },
+      ME,
+    );
+
+    expect(driver.tipOffs[0]).toMatchObject({ vehicleId: null, vehicleRego: null });
+  });
+
+  it('files a defect against the vehicle chosen on the day it was found', async () => {
+    const truck = driver.addVehicle({ rego: 'XY99ZZ' });
+    driver.choose(DAY, truck, DRIVER, 'Troy Holm');
+
+    await driverService.reportDefect(
+      {
+        ...envelope(`${DAY}T00:30:00.000Z`),
+        vehicleRego: 'Unknown',
+        severity: 'monitor',
+        summary: 'Mirror loose',
+        detail: '',
+        photoIds: [],
+      },
+      ME,
+    );
+
+    expect(driver.defects[0]).toMatchObject({ vehicleId: truck, rego: 'XY99ZZ' });
+  });
+});
+
+/**
+ * The lists the driver picks from are edited in Settings (Matt, 21 Oct). A
+ * driver's answer is checked against them — but an option switched off after
+ * the phone queued it must still land, or a report fails when signal returns.
+ */
+describe('the editable driver lists (Matt, 21 Oct)', () => {
+  const futile = (reason: string) => ({ ...envelope(), reason, note: '', photoIds: ['p1'] });
+
+  it("refuses a can't-collect reason the list has never held", async () => {
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    await expect(
+      driverService.markFutile(stop.id, futile('gate-locked'), CALLER),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(driver.stop(stop.id)?.status).not.toBe('futile');
+  });
+
+  it('still accepts a reason switched off after the phone queued it', async () => {
+    await settings.repository.saveDriverList(
+      'cantCollectReasons',
+      DRIVER_LIST_DEFAULTS.cantCollectReasons.map((option) =>
+        option.key === 'site-closed' ? { ...option, active: false } : option,
+      ),
+    );
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    await driverService.markFutile(stop.id, futile('site-closed'), CALLER);
+
+    expect(driver.stop(stop.id)?.status).toBe('futile');
+  });
+
+  it('accepts a reason the office added, and words the timeline with it', async () => {
+    await settings.repository.saveDriverList('cantCollectReasons', [
+      ...DRIVER_LIST_DEFAULTS.cantCollectReasons,
+      { key: 'gate-locked', label: 'Gate locked', active: true },
+    ]);
+    const stop = driver.addStop({ jobNumber: 61301 });
+
+    await driverService.markFutile(stop.id, futile('gate-locked'), CALLER);
+
+    expect(driver.events.find((event) => event.label === 'Marked futile')?.detail).toBe(
+      'Gate locked',
+    );
+  });
+
+  it('refuses a contamination type the list has never held', async () => {
+    const stop = driver.addStop({ jobNumber: 61301, status: 'arrived' });
+
+    await expect(
+      driverService.markContaminated(
+        stop.id,
+        { ...envelope(), type: 'asbestos', extent: 'heavy', note: '', photoIds: ['p1'] },
+        CALLER,
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('files a risk assessment in the wording the list holds today', async () => {
+    await settings.repository.saveDriverList('siteHazards', [
+      ...DRIVER_LIST_DEFAULTS.siteHazards,
+      { key: 'dogs', label: 'Dogs on site', active: true },
+    ]);
+    const save = vi.spyOn(driver.repository, 'saveRiskAssessment');
+    const stop = driver.addStop({ jobNumber: 61301, riskAssessmentRequired: true });
+
+    await driverService.submitRiskAssessment(
+      {
+        ...envelope(),
+        jobId: stop.id,
+        hazardKeys: ['dogs'],
+        controlKeys: ['ppe'],
+        note: '',
+        safeToProceed: true,
+        swmsVersion: '2026.1',
+        builderPortalCode: null,
+      },
+      CALLER,
+    );
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ hazards: ['Dogs on site'], controls: ['PPE worn'] }),
+    );
   });
 });

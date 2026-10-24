@@ -67,3 +67,10 @@ scripts/tmp-*.mjs
 e2e/
 playwright.config.ts
 scripts/e2e.mjs
+
+# Claude Code's own settings for this checkout — a local tool preference, not
+# something the four deploy repos need a copy of.
+.claude/
+
+# The PDemo demo helper. Its own header says TEMPORARY, delete after the demo.
+pw.mjs

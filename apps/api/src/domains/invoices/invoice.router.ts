@@ -100,6 +100,16 @@ invoiceRouter.post(
   asyncHandler(invoiceController.recordPo),
 );
 
+/**
+ * Emails a sent invoice again (21 Oct). Invoices go out on their own when the
+ * job is completed, so this is the office's answer to "we never got it".
+ */
+invoiceRouter.post(
+  '/:id/resend',
+  validate({ params: InvoiceIdParamsSchema }),
+  asyncHandler(invoiceController.resend),
+);
+
 /* ── I1 · Xero ───────────────────────────────────────────────────────────── */
 
 invoiceRouter.post(

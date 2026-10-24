@@ -5,6 +5,7 @@ import { authRouter } from './domains/auth/auth.router.js';
 import { dashboardRouter } from './domains/dashboard/dashboard.router.js';
 import { dispatchRouter } from './domains/dispatch/dispatch.router.js';
 import { driverRouter } from './domains/driver/driver.router.js';
+import { termsRouter } from './domains/terms/terms.router.js';
 import { extractorRouter } from './domains/extractor/extractor.router.js';
 import { xeroRouter } from './domains/xero/xero.router.js';
 import { vehicleRouter } from './domains/fleet/vehicle.router.js';
@@ -70,6 +71,9 @@ export function mountRoutes(app: Express): void {
   // M7 — invoicing. Reads are scoped so a customer sees their own; the acts
   // that decide what gets billed are gated in the service.
   v1.use('/invoices', invoiceRouter);
+
+  // Matt, 21 Oct — the terms library and what each customer signed.
+  v1.use('/terms', termsRouter);
 
   // M2.6 · M2.7 · M7.3 — the office's worklists. Everything waiting on a human
   // decision, oldest first, because the old row is the one that costs money.

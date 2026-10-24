@@ -66,6 +66,27 @@ export class ServiceError extends Error {
   }
 }
 
+/**
+ * A photo the API signed for, that storage then did not take (Matt, 21 Oct).
+ *
+ * Its own type because it is not the driver's signal: the phone reached the API
+ * a moment earlier. `status` is storage's HTTP answer, or null when the browser
+ * was refused before one came back (a CORS rule, a dropped connection).
+ */
+export class StorageUploadError extends ServiceError {
+  readonly status: number | null;
+
+  constructor(status: number | null) {
+    super(
+      'UNEXPECTED',
+      `Photo storage did not accept the upload${status === null ? '' : ` (error ${String(status)})`}`,
+      { retryable: true },
+    );
+    this.name = 'StorageUploadError';
+    this.status = status;
+  }
+}
+
 const RETRYABLE = new Set<ServiceErrorCode>(['OFFLINE', 'TIMEOUT', 'UNEXPECTED', 'RATE_LIMITED']);
 
 export function isServiceError(error: unknown): error is ServiceError {

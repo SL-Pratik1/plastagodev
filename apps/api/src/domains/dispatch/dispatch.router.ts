@@ -1,4 +1,4 @@
-import { CreateRunInputSchema } from '@plastago/shared';
+import { CreateRunInputSchema, RunPlannedDateBodySchema } from '@plastago/shared';
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
 import { requireAuth, requireRole } from '../../middleware/require-auth.js';
@@ -77,6 +77,16 @@ dispatchRouter.patch(
   '/runs/:id',
   validate({ params: RunIdParamsSchema, body: RenameRunBodySchema }),
   asyncHandler(dispatchController.renameRun),
+);
+
+/*
+ * The run's planned date (Matt, 21 Oct) — runs are not tied to one day, and the
+ * allocator moves them as the week changes.
+ */
+dispatchRouter.patch(
+  '/runs/:id/date',
+  validate({ params: RunIdParamsSchema, body: RunPlannedDateBodySchema }),
+  asyncHandler(dispatchController.setPlannedDate),
 );
 
 dispatchRouter.delete(

@@ -144,6 +144,34 @@ export const XERO_SYNC_LABELS: Record<XeroSyncState, string> = {
   unknown: 'Unknown',
 };
 
+/**
+ * One attempt to email an invoice (21 Oct).
+ *
+ * Invoices now go out on their own when the driver completes the job, so the
+ * office no longer sees a Send succeed — this is how they know it reached
+ * somebody. The address is masked, as it is in the send log.
+ */
+export const InvoiceEmailSchema = z
+  .object({
+    to: z.string(),
+    at: IsoDateTimeSchema,
+    /** `skipped` means there was nobody to send it to. */
+    outcome: z.enum(['sent', 'failed', 'skipped']),
+    detail: z.string().nullable(),
+  })
+  .meta({ id: 'InvoiceEmail' });
+
+/** What "Resend invoice" did, per address. */
+export const InvoiceResendResultSchema = z
+  .object({
+    sentTo: z.array(z.string()),
+    failed: z.array(z.object({ to: z.string(), reason: z.string() })),
+  })
+  .meta({ id: 'InvoiceResendResult' });
+
+export type InvoiceEmail = z.infer<typeof InvoiceEmailSchema>;
+export type InvoiceResendResult = z.infer<typeof InvoiceResendResultSchema>;
+
 export const InvoiceSchema = InvoiceListItemSchema.extend({
   lines: z.array(InvoiceLineSchema),
   /**
@@ -168,6 +196,8 @@ export const InvoiceSchema = InvoiceListItemSchema.extend({
   /** Bank details and terms printed on the PDF, from the brand (M7.5). */
   paymentTermsDays: z.number().int().nonnegative(),
   notes: z.string(),
+  /** Every attempt to email it, newest first. See `InvoiceEmailSchema`. */
+  emails: z.array(InvoiceEmailSchema).default([]),
 }).meta({ id: 'Invoice' });
 
 export type InvoiceLine = z.infer<typeof InvoiceLineSchema>;

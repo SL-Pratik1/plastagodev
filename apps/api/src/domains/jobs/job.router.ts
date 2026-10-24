@@ -1,4 +1,9 @@
-import { JobChargeDraftSchema, JobCommentDraftSchema, JobDraftSchema } from '@plastago/shared';
+import {
+  JobAreaUpdateSchema,
+  JobChargeDraftSchema,
+  JobCommentDraftSchema,
+  JobDraftSchema,
+} from '@plastago/shared';
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
 import { requireAuth, requireRole } from '../../middleware/require-auth.js';
@@ -89,6 +94,27 @@ jobRouter.post(
   '/:id/cancel',
   validate({ params: JobIdParamsSchema, body: CancelJobBodySchema }),
   asyncHandler(jobController.cancel),
+);
+
+/*
+ * "Unarrive" (Matt, 21 Oct) — the driver marked arrived and could not do the
+ * job. No body: there is nothing to choose, and nothing is charged.
+ */
+jobRouter.post(
+  '/:id/unarrive',
+  validate({ params: JobIdParamsSchema }),
+  asyncHandler(jobController.unarrive),
+);
+
+/*
+ * "Set m²" (23 Oct) — the area a purchase order left out. It changes the
+ * price, so it is for the roles that see prices; the allocator is not one.
+ */
+jobRouter.post(
+  '/:id/area',
+  requireRole('super-admin', 'operations', 'office-staff'),
+  validate({ params: JobIdParamsSchema, body: JobAreaUpdateSchema }),
+  asyncHandler(jobController.setArea),
 );
 
 jobRouter.post(

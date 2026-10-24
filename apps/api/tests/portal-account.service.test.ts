@@ -187,7 +187,7 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
 }));
 
 import { supervisorProvisioning } from '../src/domains/portal/supervisor-provisioning.service.js';
-const { portalAccountService } = await import('../src/domains/portal/portal-account.service.js');
+const { portalAccountService, portalCertificateService } = await import('../src/domains/portal/portal-account.service.js');
 
 const ADMIN = {
   userId: 'usr0000000000000000000c1',
@@ -666,5 +666,20 @@ describe('the customer completing their own details', () => {
     // A date, not a state: "have they filled this in?" and "is it still
     // current?" are the same question a year later.
     expect(invite).toHaveProperty('completedAt');
+  });
+});
+
+/*
+ * Matt, 21 Oct: certificates go "only to certain customers". The portal hides
+ * the tab for the rest; this is the refusal behind it.
+ */
+describe('certificates for a customer who does not receive them', () => {
+  it('refuses the list and the download', async () => {
+    await expect(
+      portalCertificateService.certificates({ page: 1, pageSize: 20 }, ADMIN),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(portalCertificateService.requestCertificatePdf('c'.repeat(24), ADMIN)).rejects.toMatchObject({
+      status: 403,
+    });
   });
 });

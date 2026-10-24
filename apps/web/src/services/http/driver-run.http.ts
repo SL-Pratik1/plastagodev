@@ -3,15 +3,20 @@ import {
   API_PREFIX,
   ContaminationReportSchema,
   DriverJobSchema,
+  DriverVehicleChoiceSchema,
+  DriverListsSchema,
+  DriverVehicleOptionsSchema,
   FutileReportSchema,
   RunSheetDaySchema,
   TipOffReconciliationSchema,
+  type ChooseVehicle,
   type Completion,
   type ContaminationReport,
   type DefectReport,
   type DriverJob,
   type DriverPhoto,
   type FutileReport,
+  type Unarrive,
   type RunStop,
   type PreStartSubmission,
   type SiteRiskAssessment,
@@ -20,8 +25,9 @@ import {
   type WeightCapture,
 } from '@plastago/shared';
 import * as z from 'zod';
+import { cacheDriverLists } from '@/offline/driver-lists-cache';
 import { enqueue, queuedOperations } from '@/offline/outbox';
-import { ServiceError } from '../service-error.js';
+import { ServiceError, StorageUploadError } from '../service-error.js';
 import type { DriverRunService } from '../driver-run.types.js';
 import { viaService } from './to-service-error.js';
 
@@ -58,10 +64,17 @@ import { viaService } from './to-service-error.js';
 interface QueuedForJob {
   futile: FutileReport | null;
   contamination: ContaminationReport | null;
+  /** Photos whose bytes reached storage, with the confirmation still queued. */
+  sentPhotoIds: Set<string>;
+  /** Photos waiting to be removed. */
+  removedPhotoIds: Set<string>;
 }
 
 /** `/api/v1/driver/jobs/<id>/<action>` — the job actions the queue can hold. */
 const JOB_ACTION_PATH = /\/driver\/jobs\/([0-9a-f]{24})\/([a-z-]+)/i;
+
+/** `/api/v1/driver/jobs/<id>/photos/<photoId>[/uploaded]` — a photo's confirmation or removal. */
+const PHOTO_PATH = /\/driver\/jobs\/[0-9a-f]{24}\/photos\/([0-9a-f]{24})(\/uploaded)?$/i;
 
 /** The statuses a futile report can still move a job out of. */
 const FUTILE_FROM: ReadonlySet<string> = new Set(['assigned', 'in-transit', 'arrived']);
@@ -75,7 +88,12 @@ async function queuedByJob(): Promise<Map<string, QueuedForJob>> {
     const action = match?.[2];
     if (!jobId || !action) continue;
 
-    const entry = byJob.get(jobId) ?? { futile: null, contamination: null };
+    const entry = byJob.get(jobId) ?? {
+      futile: null,
+      contamination: null,
+      sentPhotoIds: new Set<string>(),
+      removedPhotoIds: new Set<string>(),
+    };
 
     if (action === 'futile') {
       const parsed = FutileReportSchema.safeParse(operation.body);
@@ -84,6 +102,11 @@ async function queuedByJob(): Promise<Map<string, QueuedForJob>> {
     if (action === 'contamination') {
       const parsed = ContaminationReportSchema.safeParse(operation.body);
       if (parsed.success) entry.contamination = parsed.data;
+    }
+    const photo = PHOTO_PATH.exec(operation.path);
+    if (photo?.[1] && photo[2] && operation.method === 'POST') entry.sentPhotoIds.add(photo[1]);
+    if (photo?.[1] && !photo[2] && operation.method === 'DELETE') {
+      entry.removedPhotoIds.add(photo[1]);
     }
 
     byJob.set(jobId, entry);
@@ -120,6 +143,16 @@ function withQueued(job: DriverJob, queued: QueuedForJob | undefined): DriverJob
   return {
     ...stop,
     ...(futileNow ? { completedAt: queued.futile?.occurredAt ?? job.completedAt } : {}),
+    /*
+     * A photo whose bytes are in storage counts as sent while its confirmation
+     * waits in the queue — the phone saw the upload succeed. One waiting to be
+     * removed is already gone as far as the driver is concerned.
+     */
+    photos: job.photos
+      .filter((photo) => !queued.removedPhotoIds.has(photo.id))
+      .map((photo) =>
+        queued.sentPhotoIds.has(photo.id) ? { ...photo, uploaded: true } : photo,
+      ),
     contamination:
       job.contamination ??
       (report && job.status !== 'cancelled' && job.status !== 'futile'
@@ -138,6 +171,29 @@ const PresignPhotoResponseSchema = z.object({
     expiresAt: z.string(),
   }),
 });
+
+/**
+ * PUT the bytes straight to storage, or throw the error that says why not.
+ *
+ * ⚠️ Every failure here used to be thrown as OFFLINE, and the screen turned
+ * that into "Photos need signal" — so a phone with full signal, whose upload
+ * storage had refused, sent Matt looking for a location setting (21 Oct).
+ */
+async function putToStorage(
+  upload: z.infer<typeof PresignPhotoResponseSchema>['upload'],
+  blob: Blob,
+): Promise<void> {
+  let stored: Response;
+  try {
+    stored = await fetch(upload.uploadUrl, { method: 'PUT', headers: upload.headers, body: blob });
+  } catch (cause) {
+    if (!navigator.onLine) {
+      throw new ServiceError('OFFLINE', 'The photo could not be uploaded — no signal', { cause });
+    }
+    throw new StorageUploadError(null);
+  }
+  if (!stored.ok) throw new StorageUploadError(stored.status);
+}
 
 export function createHttpDriverRunService(api: ApiClient): DriverRunService {
   const base = `${API_PREFIX}/driver`;
@@ -200,6 +256,31 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
         }),
       ),
 
+    /*
+     * Today's vehicle (Matt, 21 Oct). Direct rather than queued: the driver
+     * needs the answer — "taken by X" — before the pre-start, and a choice
+     * replayed hours later could land on a truck somebody else has by then.
+     */
+    lists: async () => {
+      const lists = await viaService(() =>
+        api.request(`${base}/lists`, { schema: DriverListsSchema }),
+      );
+      cacheDriverLists(lists);
+      return lists;
+    },
+
+    vehicleOptions: () =>
+      viaService(() => api.request(`${base}/vehicles`, { schema: DriverVehicleOptionsSchema })),
+
+    chooseVehicle: (input: ChooseVehicle) =>
+      viaService(() =>
+        api.request(`${base}/vehicle`, {
+          method: 'POST',
+          body: input,
+          schema: DriverVehicleChoiceSchema,
+        }),
+      ),
+
     /* ── M4.2 · status ────────────────────────────────────────────────────── */
 
     updateStatus: (jobId: string, input: StatusUpdate) =>
@@ -248,14 +329,20 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
       ).then(async (result) => {
         // Direct to storage: this request does NOT go through the api client,
         // because it is not going to the API.
-        const stored = await fetch(result.upload.uploadUrl, {
-          method: 'PUT',
-          headers: result.upload.headers,
-          body: input.blob,
-        }).catch(() => null);
-
-        if (!stored?.ok) {
-          throw new ServiceError('OFFLINE', 'The photo could not be uploaded — try again');
+        try {
+          await putToStorage(result.upload, input.blob);
+        } catch (error) {
+          /*
+           * The API wrote the photo's record before the upload. Left behind,
+           * it would sit on the job as a shot that never arrived — so it goes,
+           * queued like any other removal. Best effort: the failure the
+           * driver needs to hear about is the upload's.
+           */
+          await enqueue({
+            method: 'DELETE',
+            path: `${base}/jobs/${jobId}/photos/${result.photoId}`,
+          }).catch(() => undefined);
+          throw error;
         }
 
         /*
@@ -276,6 +363,9 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
         await enqueue({
           method: 'POST',
           path: `${base}/jobs/${jobId}/photos/${result.photoId}/uploaded`,
+        }).catch((error: unknown) => {
+          // The bytes are safe in storage; the job just reads "still sending".
+          console.warn('Could not queue the upload confirmation', error);
         });
 
         return result;
@@ -308,6 +398,8 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
     /* ── M4.6, M4.7 · the exception branches that carry charges ───────────── */
 
     markFutile: (jobId: string, input: FutileReport) => queue(`/jobs/${jobId}/futile`, input),
+
+    unarrive: (jobId: string, input: Unarrive) => queue(`/jobs/${jobId}/unarrive`, input),
 
     markContaminated: (jobId: string, input: ContaminationReport) =>
       queue(`/jobs/${jobId}/contamination`, input),
@@ -343,13 +435,7 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
         schema: PresignPhotoResponseSchema,
       });
 
-      const stored = await fetch(result.upload.uploadUrl, {
-        method: 'PUT',
-        headers: result.upload.headers,
-        body: blob,
-      }).catch(() => null);
-
-      if (!stored?.ok) throw new Error('The docket photo could not be uploaded — try again');
+      await putToStorage(result.upload, blob);
 
       return result.photoId;
     },
@@ -381,15 +467,7 @@ export function createHttpDriverRunService(api: ApiClient): DriverRunService {
       );
 
       // Straight to storage — not through the API. See `addPhoto`.
-      const stored = await fetch(result.upload.uploadUrl, {
-        method: 'PUT',
-        headers: result.upload.headers,
-        body: blob,
-      }).catch(() => null);
-
-      if (!stored?.ok) {
-        throw new ServiceError('OFFLINE', 'The photo could not be uploaded — try again');
-      }
+      await putToStorage(result.upload, blob);
 
       return result.photoId;
     },

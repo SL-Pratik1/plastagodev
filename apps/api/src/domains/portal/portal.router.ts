@@ -8,6 +8,7 @@ import {
   PortalJobMessageDraftSchema,
   PortalSupervisorInviteSchema,
   ReadinessCertificationSchema,
+  TermsSigningSchema,
 } from '@plastago/shared';
 import { Router } from 'express';
 import { asyncHandler } from '../../lib/async-handler.js';
@@ -19,6 +20,8 @@ import {
   portalCertificateController,
 } from './portal-account.controller.js';
 import { portalController } from './portal.controller.js';
+import { termsController } from '../terms/terms.controller.js';
+import { requireSignedTerms } from '../terms/terms.gate.js';
 import {
   PortalAwaitingQuerySchema,
   PortalInvoiceIdsSchema,
@@ -49,6 +52,24 @@ export const portalRouter = Router();
 
 portalRouter.use(requireAuth);
 portalRouter.use(requireRole('customer-administrator', 'customer-site-supervisor'));
+
+/*
+ * Matt, 21 Oct — a customer administrator who has to sign the terms does so
+ * before using anything else. The signing steps below stay open.
+ */
+portalRouter.use(requireSignedTerms);
+
+/* ── The terms: status, the document to read, and signing ────────────────── */
+
+portalRouter.get('/terms', asyncHandler(termsController.status));
+portalRouter.get('/terms/document', asyncHandler(termsController.currentDocument));
+/** Their own signed copy, for their Account page (23 Oct). */
+portalRouter.get('/terms/signed', asyncHandler(termsController.mySignedCopy));
+portalRouter.post(
+  '/terms/sign',
+  validate({ body: TermsSigningSchema }),
+  asyncHandler(termsController.sign),
+);
 
 /** Resolved on every page load. Cheap, cached hard. */
 portalRouter.get('/scope', asyncHandler(portalController.scope));

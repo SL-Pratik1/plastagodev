@@ -344,6 +344,25 @@ function PickupDetail({
                 columns={1}
                 items={[
                   { label: 'Ready date', value: formatDate(job.readyDate) },
+                  /*
+                   * Matt, 21 Oct: the customer sees the date their pickup is
+                   * planned for — "doesn't necessarily mean it will happen".
+                   */
+                  ...(job.plannedDate !== null
+                    ? [
+                        {
+                          label: 'Planned pickup',
+                          value: (
+                            <span>
+                              {formatDate(job.plannedDate)}
+                              <span className="block text-xs text-muted-foreground">
+                                Our plan for now — it can still move.
+                              </span>
+                            </span>
+                          ),
+                        },
+                      ]
+                    : []),
                   {
                     label: 'Collect by',
                     value: (
@@ -396,7 +415,7 @@ function PickupDetail({
           </Card>
 
           {/* M5.12 · F52 — the certificate, where a completed job earns one. */}
-          {job.certificateReference !== null && (
+          {job.certificateReference !== null && scope.data?.receivesCertificates === true && (
             <Card className="border-success/35">
               <CardContent className="space-y-2 py-5">
                 <p className="flex items-center gap-2 text-sm font-medium">

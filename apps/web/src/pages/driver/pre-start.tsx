@@ -14,6 +14,7 @@ import {
 import { CheckIcon, MinusIcon, XIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
+import { VehiclePicker } from '@/features/driver/components/vehicle-picker';
 import { useRunSheet, useSubmitPreStart } from '@/features/driver/queries';
 import { todayInSydney } from '@/lib/geolocation';
 import { currentPosition } from '@/lib/geolocation';
@@ -49,21 +50,21 @@ export function DriverPreStartPage() {
   const [odometer, setOdometer] = useState('');
   const [declared, setDeclared] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [changingVehicle, setChangingVehicle] = useState(false);
 
   const failures = PRE_START_ITEMS.filter((item) => states[item.key] === 'fail');
   const answered = PRE_START_ITEMS.filter((item) => states[item.key] !== undefined).length;
 
   /*
-   * ── No truck paired, no pre-start ────────────────────────────────────────
+   * ── Today's vehicle first (Matt, 21 Oct) ─────────────────────────────────
    * A pre-start is a record of which VEHICLE was checked, and the office finds
-   * defects again by matching that plate. With no pairing there is no plate, so
-   * the record would satisfy nothing and its defects would never surface on any
-   * vehicle screen. The server refuses it too — this is here so the driver
-   * learns it before filling in fourteen checks, not after.
+   * it again — and its defects — by that plate. So the driver chooses the
+   * vehicle they are driving today before the checks, and the server files the
+   * check against that choice.
    *
-   * `day !== undefined` because an unloaded run sheet is not an unpaired one.
+   * `day !== undefined` because an unloaded run sheet is not an unchosen one.
    */
-  const noVehicle = day !== undefined && day.vehicleRego === null;
+  const chooseVehicle = day !== undefined && (!day.vehicleChosen || changingVehicle);
 
   const setState = (key: string, state: PreStartItemState) => {
     setStates((current) => ({ ...current, [key]: state }));
@@ -126,12 +127,12 @@ export function DriverPreStartPage() {
   };
 
   /*
-   * A full stop, not a disabled button at the foot of the form. There is
-   * nothing useful to fill in without a truck to fill it in against, and a
-   * driver who works through fourteen checks before being told is a driver who
-   * has to do them all again.
+   * The picker comes before the checks, not under them. There is nothing
+   * useful to fill in without a vehicle to fill it in against, and a driver who
+   * works through the checks before being told is a driver who has to do them
+   * all again.
    */
-  if (noVehicle) {
+  if (chooseVehicle) {
     return (
       <div className="space-y-4">
         <Link
@@ -143,13 +144,24 @@ export function DriverPreStartPage() {
 
         <header>
           <h1 className="font-display text-lg font-semibold tracking-tight">Pre-start check</h1>
+          <p className="text-sm text-muted-foreground">
+            First, the vehicle you are driving today.
+          </p>
         </header>
 
-        <Alert variant="destructive" title="No vehicle is assigned to you">
-          A pre-start is a record of which truck was checked, so the office has to pair you with
-          yours before you can do one. Ring them and they can set it in a moment — then come back
-          to this screen.
-        </Alert>
+        <VehiclePicker
+          currentId={day.vehicleChosen ? day.vehicleId : null}
+          onChosen={() => {
+            setChangingVehicle(false);
+          }}
+          {...(changingVehicle
+            ? {
+                onCancel: () => {
+                  setChangingVehicle(false);
+                },
+              }
+            : {})}
+        />
       </div>
     );
   }
@@ -162,11 +174,22 @@ export function DriverPreStartPage() {
 
       <header>
         <h1 className="font-display text-lg font-semibold tracking-tight">Pre-start check</h1>
-        <p className="text-sm text-muted-foreground">
-          {day?.vehicleRego ?? 'Your vehicle'}
-          {day?.vehicleLabel !== null &&
-            day?.vehicleLabel !== undefined &&
-            ` · ${day.vehicleLabel}`}
+        <p className="flex flex-wrap items-center gap-x-2 text-sm text-muted-foreground">
+          <span>
+            {day?.vehicleRego ?? 'Your vehicle'}
+            {day?.vehicleLabel !== null &&
+              day?.vehicleLabel !== undefined &&
+              ` · ${day.vehicleLabel}`}
+          </span>
+          <button
+            type="button"
+            className="focus-ring rounded text-sm font-medium text-brand-600 underline-offset-2 hover:underline dark:text-brand-400"
+            onClick={() => {
+              setChangingVehicle(true);
+            }}
+          >
+            Change vehicle
+          </button>
         </p>
       </header>
 

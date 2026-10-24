@@ -12,6 +12,7 @@ import {
   AccountTypeSchema,
   BrandIdSchema,
   CaptureModeSchema,
+  CertificateEmailSchema,
   PoPolicySchema,
   RateCardIdSchema,
   ZoneSchema,
@@ -21,6 +22,7 @@ import {
   ChargeCodeSchema,
   ExceptionReasonSchema,
   JobPhotoSchema,
+  OfficeCancelReasonSchema,
 } from './jobs.js';
 
 /**
@@ -105,7 +107,7 @@ export const FutileDecisionSchema = z
     /** Required when rescheduling, ignored when cancelling. */
     newReadyDate: IsoDateSchema.nullable(),
     /** Required when cancelling — M2.4 forbids a bare cancel. */
-    cancelReason: ExceptionReasonSchema.nullable(),
+    cancelReason: OfficeCancelReasonSchema.nullable(),
     note: z.string().trim().max(500),
   })
   .meta({ id: 'FutileDecision' });
@@ -1122,7 +1124,9 @@ export const LeadConversionSchema = z
       .trim()
       .max(160, 'Keep the email under 160 characters')
       .refine(
-        (value) => value === '' || /^[^s@]+@[^s@]+.[^s@]+$/.test(value),
+        // Found by us: this read /^[^s@]+@[^s@]+.[^s@]+$/ — the backslashes were
+        // lost, so any address containing the letter "s" was refused.
+        (value) => value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
         'Enter a valid email address, or leave it blank',
       )
       .default(''),
@@ -1136,6 +1140,9 @@ export const LeadConversionSchema = z
     notes: z.string().trim().max(500).default(''),
     /** A.4 finishes by sending the welcome email; skipping it is a choice. */
     sendInvitation: z.boolean(),
+    /** Matt, 21 Oct — the same tick as on direct create. See `AccountDraftSchema`. */
+    receivesCertificates: z.boolean().default(false),
+    certificateEmail: CertificateEmailSchema.default(''),
   })
   .meta({ id: 'LeadConversion' });
 

@@ -1423,7 +1423,8 @@ async function countEvidencePhotos(
   if (jobIds.length === 0) return new Map();
 
   const counts = await JobPhotoModel.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
-    { $match: { jobId: { $in: jobIds } } },
+    // Only photos whose bytes arrived: a failed upload is not evidence.
+    { $match: { jobId: { $in: jobIds }, uploadedAt: { $ne: null } } },
     { $project: { jobId: 1, purpose: PHOTO_PURPOSE_EXPR } },
     { $match: { purpose } },
     { $group: { _id: '$jobId', count: { $sum: 1 } } },

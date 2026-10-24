@@ -1,14 +1,16 @@
 import {
-  EXCEPTION_REASON_LABELS,
+  optionLabel,
   PRE_START_ITEMS,
-  RISK_CONTROLS,
-  SITE_HAZARDS,
+  type ChooseVehicle,
   type Completion,
   type ContaminationReport,
   type ContaminationOutcome,
   type DefectReport,
   type DriverJob,
+  type DriverLists,
   type DriverPhoto,
+  type DriverVehicleChoice,
+  type DriverVehicleOptions,
   type FutileReport,
   type GeoFix,
   type JobStatus,
@@ -19,9 +21,11 @@ import {
   type StatusUpdate,
   type TipOffEntry,
   type TipOffReconciliation,
+  type Unarrive,
   type WeightCapture,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
+import { todayInSydney } from '../../lib/business-day.js';
 import { logger } from '../../lib/logger.js';
 import { centsToMoney, moneyToCents } from '../../lib/money.js';
 import {
@@ -31,7 +35,11 @@ import {
   getStorage,
   type PresignedUpload,
 } from '../../integrations/storage.js';
+import { runRepository } from '../dispatch/run.repository.js';
+import { invoiceService } from '../invoices/invoice.service.js';
+import { jobService } from '../jobs/job.service.js';
 import { pricingService } from '../settings/pricing.service.js';
+import { settingsRepository } from '../settings/settings.repository.js';
 import {
   addDriverMessage,
   driverRepository,
@@ -46,6 +54,7 @@ import { queueRepository } from '../queues/queue.repository.js';
 import { reportService } from '../reports/report.service.js';
 import { describeContamination } from './contamination-note.js';
 import { reconcileTipOff } from './tipoff.js';
+import { REQUIRED_PHOTOS } from '../jobs/photo-protocol.js';
 
 const log = logger.child({ module: 'driver' });
 
@@ -87,23 +96,28 @@ export const driverService = {
    * nothing has to infer the grouping.
    */
   async runSheet(date: string, caller: DriverCaller): Promise<RunSheetDay> {
-    const [{ runs, stops }, preStart, vehicle] = await Promise.all([
+    const [{ runs, stops }, vehicle] = await Promise.all([
       driverRepository.runSheet(caller.userId, date),
-      driverRepository.findPreStartForDay(caller.userId, date),
-      resolveVehicle(caller),
+      resolveVehicle(caller, date),
     ]);
+    // The check is of THIS vehicle: a driver who changes truck checks the new one.
+    const preStart = vehicle
+      ? await driverRepository.findPreStartForDay(caller.userId, date, vehicle.id)
+      : null;
 
     return {
       date,
       driverId: caller.userId,
       driverName: caller.name,
       /*
-       * Null when no truck is paired with this driver, and the pre-start screen
-       * reads that as "you cannot start" rather than papering over it — see
-       * `submitPreStart`.
+       * Null when the driver has no vehicle for the day, and the pre-start
+       * screen reads that as "choose one first" rather than papering over it —
+       * see `submitPreStart`.
        */
+      vehicleId: vehicle?.id ?? null,
       vehicleRego: vehicle?.rego ?? null,
       vehicleLabel: vehicle?.label ?? null,
+      vehicleChosen: vehicle?.chosen ?? false,
       runs: runs.map((run) => ({
         runId: run.runId,
         runName: run.runName,
@@ -115,12 +129,77 @@ export const driverService = {
       })),
       stops: stops.map(toRunStop),
       /*
-       * M4.8a — the pre-start is a check on the VEHICLE, and the vehicle does
-       * not change between the morning and the afternoon run. So it belongs to
-       * the day rather than to either run.
+       * M4.8a — the pre-start is a check on the VEHICLE, so it belongs to the
+       * day's vehicle rather than to either run.
        */
       preStartCompletedAt: preStart ? preStart.completedAt.toISOString() : null,
     };
+  },
+
+  /**
+   * The lists the driver answers from, as Settings holds them (Matt, 21 Oct).
+   *
+   * Switched-off options come back too, marked: the app offers only the active
+   * ones, and needs the rest to show what an earlier report said.
+   */
+  async lists(): Promise<DriverLists> {
+    return settingsRepository.driverLists();
+  },
+
+  /**
+   * Today's in-service vehicles for the picker (Matt, 21 Oct).
+   *
+   * One driver per vehicle per day, so a vehicle another driver chose comes back
+   * with `takenBy` — the picker shows "Taken by X" rather than letting the tap
+   * fail.
+   */
+  async vehicleOptions(caller: DriverCaller): Promise<DriverVehicleOptions> {
+    const date = todayInSydney();
+    const rows = await driverRepository.vehicleOptions(date);
+
+    return {
+      date,
+      vehicles: rows.map((row) => ({
+        id: row.id,
+        rego: row.rego,
+        label: row.label,
+        type: row.type,
+        takenBy: row.chosenById !== null && row.chosenById !== caller.userId ? row.chosenByName : null,
+        mine: row.chosenById === caller.userId,
+      })),
+    };
+  },
+
+  /**
+   * The driver chooses the vehicle they are driving today.
+   *
+   * Choosing again moves them to the new vehicle; the pre-start, defects and
+   * tip-off from then on are filed against it. Not queued on the phone: the
+   * driver needs the answer before the pre-start.
+   */
+  async chooseVehicle(input: ChooseVehicle, caller: DriverCaller): Promise<DriverVehicleChoice> {
+    const date = todayInSydney();
+
+    const vehicle = await driverRepository.findVehicle(input.vehicleId);
+    if (!vehicle) throw AppError.notFound('No such vehicle');
+
+    if (!vehicle.active) {
+      throw AppError.conflict(`${vehicle.rego} is out of service — choose another vehicle`);
+    }
+
+    const result = await driverRepository.chooseVehicle({
+      date,
+      vehicleId: vehicle.id,
+      driverId: caller.userId,
+      driverName: caller.name,
+    });
+
+    if (!result.ok) {
+      throw AppError.conflict(`${vehicle.rego} is taken by ${result.takenBy} today — choose another vehicle`);
+    }
+
+    log.info({ driverId: caller.userId, date, rego: vehicle.rego }, 'vehicle chosen for the day');
+    return { date, vehicleId: vehicle.id, rego: vehicle.rego, label: vehicle.label };
   },
 
   async job(jobId: string, caller: DriverCaller): Promise<DriverJob> {
@@ -365,6 +444,16 @@ export const driverService = {
      */
     await jobNotices.completed(jobId);
 
+    // The run completes with its last stop and leaves the board (21 Oct).
+    if (stop.runId) await runRepository.closeIfFinished(stop.runId.toHexString());
+
+    /*
+     * Matt, 21 Oct — the invoice is created and sent now, not when somebody in
+     * the office gets to it. Cannot throw: a billing problem reaches the office
+     * as a bell, never the driver as a failed completion.
+     */
+    await invoiceService.invoiceCompletedJob(jobId);
+
     log.info({ jobId, jobNumber: stop.jobNumber, onSiteMinutes }, 'job completed on the phone');
   },
 
@@ -554,6 +643,7 @@ export const driverService = {
   async markFutile(jobId: string, input: FutileReport, caller: DriverCaller): Promise<void> {
     const stop = await requireStop(jobId, caller);
     const occurredAt = new Date(input.occurredAt);
+    const reasonLabel = await requireListOption('cantCollectReasons', input.reason, 'reason');
 
     /*
      * ⚠️ Refused BEFORE anything is written. This used to check only
@@ -637,7 +727,7 @@ export const driverService = {
         label: 'Marked futile',
         actor: caller.name,
         status: 'futile',
-        detail: input.note.trim() || input.reason,
+        detail: input.note.trim() || reasonLabel,
         latitude: input.position?.latitude ?? null,
         longitude: input.position?.longitude ?? null,
       });
@@ -652,7 +742,6 @@ export const driverService = {
      * weeks later, as an argument. Both are keyed on the job, so a phone
      * replaying this report tells nobody twice, and neither can throw.
      */
-    const reasonLabel = EXCEPTION_REASON_LABELS[input.reason];
     const note = input.note.trim();
 
     await notificationService.notifyOffice({
@@ -671,7 +760,32 @@ export const driverService = {
 
     await jobNotices.futile(jobId, reasonLabel);
 
+    // A futile stop is a finished one (21 Oct) — it may have been the run's last.
+    if (stop.runId) await runRepository.closeIfFinished(stop.runId.toHexString());
+
     log.info({ jobId, jobNumber: stop.jobNumber, reason: input.reason }, 'job marked futile');
+  },
+
+  /**
+   * "Unarrive" from the driver's job screen (Matt, 21 Oct) — see
+   * `jobService.clearArrival`, which the office's button uses too.
+   *
+   * A replay is a success: the first attempt took the job off this driver's
+   * run, so a queued copy arriving later can no longer find it on their sheet.
+   */
+  async unarrive(jobId: string, _input: Unarrive, caller: DriverCaller): Promise<void> {
+    const stop = await driverRepository.findJobForDriver(jobId, caller.userId);
+
+    if (!stop) {
+      if (await driverRepository.wasUnarrivedBy(jobId, caller.name)) return;
+      throw AppError.notFound('That job is not on your run sheet');
+    }
+
+    if (stop.status === 'cancelled') {
+      throw AppError.conflict('The office cancelled this job — do not collect it');
+    }
+
+    await jobService.clearArrival(jobId, { userId: caller.userId, name: caller.name }, 'driver');
   },
 
   /**
@@ -697,6 +811,7 @@ export const driverService = {
         'This job was marked as could not collect, so there is no load to report on',
       );
     }
+    const typeLabel = await requireListOption('contaminationTypes', input.type, 'type');
 
     /*
      * ⚠️ ONE report per job.
@@ -747,7 +862,7 @@ export const driverService = {
       label: 'Contamination reported',
       actor: caller.name,
       status: null,
-      detail: `${input.type} · ${input.extent}`,
+      detail: `${typeLabel} · ${input.extent}`,
       latitude: input.position?.latitude ?? null,
       longitude: input.position?.longitude ?? null,
     });
@@ -775,13 +890,14 @@ export const driverService = {
    *
    * ⚠️ The rego is resolved HERE, not taken from `input`. `input.vehicleRego` is
    * whatever the phone had on its cached run sheet, which is blank for any
-   * driver with no truck paired — and a blank plate files both this record and
-   * its defects against no vehicle at all, where the office never sees them.
+   * driver with no vehicle — and a blank plate files both this record and its
+   * defects against no vehicle at all, where the office never sees them. It is
+   * the vehicle the driver chose for `input.date` (Matt, 21 Oct).
    */
   async submitPreStart(input: PreStartSubmission, caller: DriverCaller): Promise<void> {
     const [{ stops }, vehicle] = await Promise.all([
       driverRepository.runSheet(caller.userId, input.date),
-      requireVehicle(caller),
+      requireVehicle(caller, input.date),
     ]);
     const first = stops[0];
 
@@ -801,12 +917,21 @@ export const driverService = {
 
     const preStartId = await driverRepository.savePreStart({
       jobId: first._id.toHexString(),
+      date: input.date,
       driverId: caller.userId,
       driverName: caller.name,
       completedAt: new Date(input.occurredAt),
+      vehicleId: vehicle.id,
       vehicleRego: vehicle.rego,
       odometerKm: input.odometerKm,
       failedItems: failed,
+      // Every answer, so the vehicle page can open the full check.
+      items: input.items.map((item) => ({
+        key: item.key,
+        label: labels.get(item.key) ?? item.key,
+        state: item.state,
+        note: item.note,
+      })),
       // The denominator. A wall of green ticks is noise, but "3 of 14" is not.
       itemsChecked: input.items.length,
     });
@@ -819,6 +944,7 @@ export const driverService = {
      */
     for (const item of failed) {
       await driverRepository.reportDefect({
+        vehicleId: vehicle.id,
         vehicleRego: vehicle.rego,
         reportedByUserId: caller.userId,
         reportedByName: caller.name,
@@ -853,11 +979,12 @@ export const driverService = {
 
     // Resolved to labels on write, so the office never needs the key table to
     // read the record back — and so a later change to the key list cannot
-    // silently rewrite what a past assessment said.
-    const hazardLabels = new Map<string, string>(SITE_HAZARDS.map((item) => [item.key, item.label]));
-    const controlLabels = new Map<string, string>(
-      RISK_CONTROLS.map((item) => [item.key, item.label]),
-    );
+    // silently rewrite what a past assessment said. The lists are editable in
+    // Settings (Matt, 21 Oct); a key they never held is kept as written, as
+    // before, so an app with its own copy of the list is never refused.
+    const lists = await settingsRepository.driverLists();
+    const hazardLabels = new Map(lists.siteHazards.map((item) => [item.key, item.label]));
+    const controlLabels = new Map(lists.riskControls.map((item) => [item.key, item.label]));
 
     await driverRepository.saveRiskAssessment({
       jobId: input.jobId,
@@ -997,6 +1124,10 @@ export const driverService = {
       );
     }
 
+    // The vehicle the driver chose for the run's day. Never a reason to refuse
+    // the docket — a tip-off with no vehicle is still the weighbridge figure.
+    const vehicle = await resolveVehicle(caller, run.date);
+
     await driverRepository.recordTipOff({
       runId: input.runId,
       driverId: caller.userId,
@@ -1006,6 +1137,8 @@ export const driverService = {
       // The wire calls it an id; it is the storage key the run-scoped upload returned.
       docketPhotoKey: input.docketPhotoId,
       tippedOffAt: new Date(input.occurredAt),
+      vehicleId: vehicle?.id ?? null,
+      vehicleRego: vehicle?.rego ?? null,
     });
 
     await driverRepository.applyImputedWeights(
@@ -1046,7 +1179,8 @@ export const driverService = {
   /**
    * M4.9 — a defect reported directly, rather than off a pre-start item.
    *
-   * ⚠️ Same rule as the pre-start: the rego comes from the pairing, not from
+   * ⚠️ Same rule as the pre-start: the rego comes from the driver's vehicle for
+   * the day, not from
    * `input`. The report screen sends the literal string `Unknown` when it has no
    * run sheet to read one off, which files the defect against a truck that does
    * not exist and cannot be found again.
@@ -1069,10 +1203,10 @@ export const driverService = {
     input: { contentType: string; contentLength: number },
     caller: DriverCaller,
   ): Promise<{ photoId: string; upload: PresignedUpload }> {
-    // Called for the pairing check, not the plate: a driver with no truck
-    // should be refused here exactly as they are on the report itself, rather
-    // than uploading bytes that can never be attached to anything.
-    await requireVehicle(caller);
+    // Called for the vehicle check, not the plate: a driver with no vehicle
+    // today should be refused here exactly as they are on the report itself,
+    // rather than uploading bytes that can never be attached to anything.
+    await requireVehicle(caller, todayInSydney());
 
     assertUploadable(input);
 
@@ -1093,9 +1227,12 @@ export const driverService = {
   },
 
   async reportDefect(input: DefectReport, caller: DriverCaller): Promise<void> {
-    const vehicle = await requireVehicle(caller);
+    // The vehicle of the day the driver found it — a queued report replayed
+    // tomorrow still lands on the truck they were in.
+    const vehicle = await requireVehicle(caller, todayInSydney(new Date(input.occurredAt)));
 
     const defectId = await driverRepository.reportDefect({
+      vehicleId: vehicle.id,
       vehicleRego: vehicle.rego,
       reportedByUserId: caller.userId,
       reportedByName: caller.name,
@@ -1166,38 +1303,61 @@ function assertUploadable(input: { contentType: string; contentLength: number })
   }
 }
 
+interface DayVehicle {
+  /** The vehicle's `_id` — what every record about the vehicle links to. */
+  id: string;
+  rego: string;
+  label: string;
+  /** False when it came from the old office pairing rather than the driver's choice. */
+  chosen: boolean;
+}
+
 /**
- * The truck this driver is paired with, or null.
+ * The vehicle this driver is on for that day, or null.
+ *
+ * The driver's own choice first (Matt, 21 Oct). Then the old office pairing,
+ * so an app build without the vehicle picker keeps working — unless another
+ * driver has chosen that truck for the day, because one truck never has two
+ * drivers.
  *
  * `caller.vehicleRego` wins when the auth layer already resolved it, so this
  * stays a single lookup per request rather than one per call site.
  */
-async function resolveVehicle(
-  caller: DriverCaller,
-): Promise<{ rego: string; label: string } | null> {
+async function resolveVehicle(caller: DriverCaller, date: string): Promise<DayVehicle | null> {
   if (caller.vehicleRego !== null) {
-    return { rego: caller.vehicleRego, label: caller.vehicleRego };
+    // Still the fleet record, so what is saved links to the vehicle, not the plate.
+    const known = await driverRepository.findVehicleByRego(caller.vehicleRego);
+    return known ? { ...known, chosen: false } : null;
   }
 
-  return driverRepository.findAssignedVehicle(caller.name);
+  const chosen = await driverRepository.findVehicleChoice(caller.userId, date);
+  if (chosen) return { ...chosen, chosen: true };
+
+  const paired = await driverRepository.findAssignedVehicle(caller.name);
+  if (!paired) return null;
+
+  const holder = await driverRepository.vehicleChosenBy(paired.id, date);
+  if (holder && holder.driverId !== caller.userId) return null;
+
+  return { ...paired, chosen: false };
 }
 
 /**
- * The truck this driver is paired with, or a 409 they can act on.
+ * The vehicle this driver is on for that day, or a 409 they can act on.
  *
  * ⚠️ Used by every record that is ABOUT a vehicle rather than about a job.
  * Chain of Responsibility makes a pre-start a record of which truck was checked;
  * one filed against an unknown truck satisfies nothing, and — because the office
- * finds defects by matching the plate — it also disappears from the only screen
- * anybody would look at. Refusing is the honest outcome, and the message names
+ * finds defects through the vehicle they link to — it also disappears from the
+ * only screen anybody would look at. Refusing is the honest outcome, and the message names
  * the fix rather than the fault.
  */
-async function requireVehicle(caller: DriverCaller): Promise<{ rego: string; label: string }> {
-  const vehicle = await resolveVehicle(caller);
+async function requireVehicle(caller: DriverCaller, date: string): Promise<DayVehicle> {
+  const vehicle = await resolveVehicle(caller, date);
 
   if (!vehicle) {
     throw AppError.conflict(
-      'No vehicle is assigned to you — ring the office so they can pair you with your truck',
+      'Choose the vehicle you are driving today first — it is the first step of the pre-start',
     );
   }
 
@@ -1214,6 +1374,26 @@ async function requireStop(jobId: string, caller: DriverCaller): Promise<DriverS
   const stop = await driverRepository.findJobForDriver(jobId, caller.userId);
   if (!stop) throw AppError.notFound('That job is not on your run sheet');
   return stop;
+}
+
+/**
+ * The wording of the option a driver picked, or a 422.
+ *
+ * A switched-off option is still accepted: a report queued on the phone before
+ * the office switched it off must not fail when signal returns.
+ */
+async function requireListOption(
+  list: 'cantCollectReasons' | 'contaminationTypes',
+  key: string,
+  path: string,
+): Promise<string> {
+  const label = optionLabel((await settingsRepository.driverLists())[list], key);
+  if (label === null) {
+    throw AppError.validation('That option is not on the list — refresh the app and pick again', [
+      { path, message: 'Pick an option from the list' },
+    ]);
+  }
+  return label;
 }
 
 /**
@@ -1737,47 +1917,3 @@ const EVENT_LABEL = {
   arrived: 'Driver on site',
   completed: 'Job completed',
 } as const;
-
-/**
- * M4.5 — their photo protocol, as data.
- *
- * Matt described it as a prompt rather than a fixed form: *"a prompt of what's
- * in the photos that are required, and a space to put in any others"*. Sent to
- * the phone so the app renders the checklist without hard-coding it, and so
- * changing the protocol later is a server change rather than an app release.
- *
- * "Cars on site" is the conditional one — it only applies where the driver could
- * not close the site, which is exactly the case that gets disputed.
- */
-const REQUIRED_PHOTOS = [
-  {
-    key: 'front-of-site',
-    label: 'Front of site',
-    hint: 'Wide shot from the street, showing the lot number if you can',
-    required: true,
-  },
-  {
-    key: 'pile-before',
-    label: 'Pile before',
-    hint: 'The whole stack before you start loading',
-    required: true,
-  },
-  {
-    key: 'pile-after',
-    label: 'Pile after',
-    hint: 'The same spot once the load is on the truck',
-    required: true,
-  },
-  {
-    key: 'site-closed',
-    label: 'Site closed',
-    hint: 'Gates shut and the site left as you found it',
-    required: true,
-  },
-  {
-    key: 'cars-on-site',
-    label: 'Cars on site',
-    hint: 'Only if you could not close the site — shows why',
-    required: false,
-  },
-] as const;

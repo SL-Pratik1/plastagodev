@@ -1,4 +1,5 @@
 import type {
+  AccountCommercialTermsSchema,
   AccountInvoiceTemplateBodySchema,
   AccountDraftSchema,
   AccountUpdateSchema,
@@ -54,6 +55,28 @@ export const accountController = {
   },
 
   /** M7.5 — assign an invoice template, or null to follow the brand. */
+  commercialTermsImpact: async (
+    req: ValidatedRequest<{ params: typeof AccountIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await accountService.commercialTermsImpact(req.validated.params.id, callerOf(req)));
+  },
+
+  setCommercialTerms: async (
+    req: ValidatedRequest<{
+      params: typeof AccountIdParamsSchema;
+      body: typeof AccountCommercialTermsSchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    const result = await accountService.setCommercialTerms(
+      req.validated.params.id,
+      req.validated.body,
+      callerOf(req),
+    );
+    res.json(result);
+  },
+
   setInvoiceTemplate: async (
     req: ValidatedRequest<{
       params: typeof AccountIdParamsSchema;

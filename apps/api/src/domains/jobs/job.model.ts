@@ -4,7 +4,6 @@ import {
   CHARGE_CODES,
   CHARGE_SOURCES,
   COMMENT_VISIBILITIES,
-  EXCEPTION_REASONS,
   FREIGHT_ITEMS,
   JOB_STATUSES,
   LOAD_TYPES,
@@ -353,6 +352,17 @@ const jobSchema = new Schema(
           scheduleFrom: { type: String, required: true },
           serviceCharge: { type: Schema.Types.Decimal128, required: true },
           ratePerM2: { type: Schema.Types.Decimal128, required: true },
+          /**
+           * What priced the second charge — m² × rate, the card's fixed weight
+           * charge, or a hook bin's set price — and that flat amount. A job
+           * priced before fixed pricing existed reads as `per-m2`.
+           */
+          weightChargeKind: {
+            type: String,
+            enum: ['per-m2', 'fixed', 'hook-bin'],
+            default: 'per-m2',
+          },
+          weightCharge: { type: Schema.Types.Decimal128, default: null },
         },
         { _id: false },
       ),
@@ -372,7 +382,8 @@ const jobSchema = new Schema(
     /* ── Outcome ─────────────────────────────────────────────────────── */
     notes: { type: String, required: false, default: '', trim: true },
     /** M2.4 — cancel and futile carry a STRUCTURED reason, never free text. */
-    exceptionReason: { type: String, enum: EXCEPTION_REASONS, default: null },
+    // A key from the editable can't-collect list (Matt, 21 Oct) — no enum.
+    exceptionReason: { type: String, default: null },
     exceptionNote: { type: String, default: null, trim: true },
     /** M4.2 — Arrived → Complete is the logged on-site duration. */
     arrivedAt: { type: Date, default: null },
@@ -690,12 +701,28 @@ export const JobCommentModel = model('JobComment', jobCommentSchema);
  */
 const jobPreStartSchema = new Schema(
   {
-    /** REFERENCE → `jobs._id`. */
+    /**
+     * REFERENCE → `jobs._id` — the driver's first stop that day.
+     *
+     * No longer the key. Matt, 21 Oct: the pre-start is logged against the
+     * VEHICLE, so it is one per driver, day and vehicle (index below), and a
+     * driver who changes truck mid-day checks the new one too.
+     */
     jobId: { type: Schema.Types.ObjectId, required: true, ref: 'Job' },
+    /** The Sydney day the check was for. Null only on rows the migration could not date. */
+    date: { type: String, default: null },
     completedAt: { type: Date, required: true },
     /** REFERENCE → `users._id`, plus the name frozen for the audit record. */
     driverId: { type: Schema.Types.ObjectId, default: null, ref: 'User' },
     driverName: { type: String, required: true, trim: true },
+    /**
+     * REFERENCE → `vehicles._id` — the vehicle the driver chose for the day.
+     *
+     * The link, not the plate: a truck that gets new plates keeps its history.
+     * Null only on checks saved before drivers chose a vehicle.
+     */
+    vehicleId: { type: Schema.Types.ObjectId, default: null, ref: 'Vehicle' },
+    /** The plate at the time, frozen for display. Never used to find the check. */
     vehicleRego: { type: String, required: false, default: '', trim: true },
     odometerKm: { type: Number, required: true, min: 0 },
     /**
@@ -717,12 +744,43 @@ const jobPreStartSchema = new Schema(
       },
     ],
     itemsChecked: { type: Number, required: true, min: 0 },
+    /**
+     * Every answer, so the vehicle's "Pre-start checks" tab can open the full
+     * check. Empty on checks saved before this existed.
+     */
+    items: [
+      {
+        _id: false,
+        key: { type: String, required: true },
+        label: { type: String, required: true },
+        state: { type: String, required: true, enum: ['pass', 'fail', 'not-applicable'] },
+        note: { type: String, required: false, default: '' },
+      },
+    ],
   },
   { collection: JOB_PRE_STARTS_COLLECTION, timestamps: true, versionKey: false },
 );
 
-/** One per job. A second would make "was the obligation met" ambiguous. */
-jobPreStartSchema.index({ jobId: 1 }, { unique: true, name: 'job_unique' });
+/**
+ * One per driver, day and vehicle. A second would make "was the obligation met"
+ * ambiguous.
+ *
+ * ⚠️ This replaced a unique index on `jobId` (`job_unique`), which allowed one
+ * check per day however many trucks the driver used. Mongoose never drops an
+ * index, so existing databases need `npm run migrate:prestart-vehicle`.
+ * Partial, so rows the migration could not date or link never block the build.
+ */
+jobPreStartSchema.index(
+  { driverId: 1, date: 1, vehicleId: 1 },
+  {
+    unique: true,
+    name: 'driver_day_vehicle_id_unique',
+    partialFilterExpression: { date: { $type: 'string' }, vehicleId: { $type: 'objectId' } },
+  },
+);
+
+/** The vehicle's "Pre-start checks" tab, newest first. */
+jobPreStartSchema.index({ vehicleId: 1, completedAt: -1 }, { name: 'vehicle_id_completed' });
 
 export const JobPreStartModel = model('JobPreStart', jobPreStartSchema);
 

@@ -1,13 +1,12 @@
 import {
   CONTAMINATION_EXTENTS,
   CONTAMINATION_EXTENT_LABELS,
-  CONTAMINATION_TYPES,
-  CONTAMINATION_TYPE_LABELS,
   EVIDENCE_PHOTO_CAPTIONS,
   EVIDENCE_PHOTO_SLOTS,
   type ContaminationExtent,
-  type ContaminationType,
+  optionLabel,
   type DriverContamination,
+  type DriverListOption,
 } from '@plastago/shared';
 import {
   Alert,
@@ -24,10 +23,13 @@ import { CameraIcon, TriangleAlertIcon } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { PhotoThumb } from '@/components/driver/photo-grid';
+import { photoUploadFailure } from '@/features/driver/photo-upload-error';
 import { evidencePhotos } from '@/components/driver/photo-rules';
+import { cachedDriverLists } from '@/offline/driver-lists-cache';
 import {
   useAddPhoto,
   useDriverJob,
+  useDriverLists,
   useMarkContaminated,
   useRemovePhoto,
 } from '@/features/driver/queries';
@@ -54,6 +56,7 @@ import { currentPosition } from '@/lib/geolocation';
 export function DriverJobContaminationPage() {
   const { jobId } = useParams();
   const { data: job, error, isPending, refetch } = useDriverJob(jobId);
+  const types = (useDriverLists().data ?? cachedDriverLists()).contaminationTypes;
 
   if (error) {
     return (
@@ -89,7 +92,7 @@ export function DriverJobContaminationPage() {
         tone="success"
         title="Contamination already reported"
       >
-        <p>{describeReport(job.contamination)}</p>
+        <p>{describeReport(job.contamination, types)}</p>
         <p>If something in it is wrong, message the office from the job.</p>
       </ReportClosed>
     );
@@ -114,14 +117,15 @@ export function DriverJobContaminationPage() {
 }
 
 /** "Timber offcuts · Heavy · reported 14:32" — what the job's report said. */
-function describeReport(report: DriverContamination): string {
+function describeReport(report: DriverContamination, types: readonly DriverListOption[]): string {
   const at = new Date(report.reportedAt).toLocaleTimeString('en-AU', {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
   });
   const what = [
-    report.type === null ? null : CONTAMINATION_TYPE_LABELS[report.type],
+    // A switched-off type keeps its wording (21 Oct); a key never listed shows as itself.
+    report.type === null ? null : (optionLabel(types, report.type) ?? report.type),
     report.extent === null ? null : CONTAMINATION_EXTENT_LABELS[report.extent].split(' —')[0],
   ].filter((part): part is string => part !== null && part !== undefined);
 
@@ -177,7 +181,11 @@ function ContaminationForm({
   const addPhoto = useAddPhoto();
   const removePhoto = useRemovePhoto();
 
-  const [type, setType] = useState<ContaminationType | null>(null);
+  // Edited in Settings (Matt, 21 Oct); only the types switched on are offered.
+  const typeOptions = (useDriverLists().data ?? cachedDriverLists()).contaminationTypes.filter(
+    (option) => option.active,
+  );
+  const [type, setType] = useState<string | null>(null);
   const [extent, setExtent] = useState<ContaminationExtent | null>(null);
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -231,10 +239,10 @@ function ContaminationForm({
           position,
         });
         setError(null);
-      } catch {
-        // Photos are the one driver action that needs signal — see the note in
-        // the photos screen. Saying so beats a bare "try again".
-        toast.error('Could not upload that photo', 'Photos need signal. Try again in range.');
+        // Off the phone already — see the same line on the Photos screen.
+        toast.success('Photo uploaded');
+      } catch (error) {
+        toast.error('Could not upload that photo', photoUploadFailure(error));
       } finally {
         setCapturing(false);
       }
@@ -343,7 +351,7 @@ function ContaminationForm({
       <fieldset className="space-y-2">
         <legend className="text-sm font-medium">What was in it?</legend>
         <div className="space-y-2">
-          {CONTAMINATION_TYPES.map((option) => (
+          {typeOptions.map(({ key: option, label }) => (
             <label
               key={option}
               className={cn(
@@ -363,7 +371,7 @@ function ContaminationForm({
                   setError(null);
                 }}
               />
-              {CONTAMINATION_TYPE_LABELS[option]}
+              {label}
             </label>
           ))}
         </div>

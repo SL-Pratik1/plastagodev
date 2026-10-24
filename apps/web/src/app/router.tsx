@@ -37,6 +37,7 @@ import {
   PortalJobsPage,
   PortalReportsPage,
   PortalWelcomePage,
+  PortalOnboardingPage,
   PortalSupervisorsPage,
   QueueApprovalsPage,
   QueueAwaitingPoPage,
@@ -394,6 +395,9 @@ export const router = createBrowserRouter([
                     of the only door available to them.
                   */
                   { path: 'welcome', element: load(<PortalWelcomePage />) },
+                  // Matt, 21 Oct — details, the director's guarantee and the terms. Same
+                  // reasoning as `welcome`: it is the way out of the gate.
+                  { path: 'onboarding', element: load(<PortalOnboardingPage />) },
                   { path: 'jobs', element: load(<PortalJobsPage />) },
                   /*
                    * M2.12b — deliberately NOT behind `portal:book`. A site

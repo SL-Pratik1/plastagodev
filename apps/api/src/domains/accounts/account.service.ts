@@ -1,12 +1,15 @@
 import {
   OPEN_JOB_STATUSES,
   type Account,
+  type AccountCommercialTerms,
   type AccountDraft,
   type AccountListItem,
   type AccountType,
   type AccountUpdate,
   type BrandId,
   type CaptureMode,
+  type CommercialTermsImpact,
+  type CommercialTermsResult,
   type InvitationResult,
   type PageMeta,
   type PoPolicy,
@@ -28,8 +31,17 @@ import { outboundService } from '../notifications/outbound.service.js';
  * one definition — the same one the portal screen shows.
  */
 import { supervisorRepository } from '../portal/supervisor.repository.js';
-// Written only by the risk-assessment rule, which has to reach open jobs.
-import { jobRepository } from '../jobs/job.repository.js';
+// Written by the two account rules that have to reach open jobs: the
+// risk-assessment switch and a re-priced rate card.
+import {
+  countRepriceableJobs,
+  jobRepository,
+  repriceableJobs,
+} from '../jobs/job.repository.js';
+import { jobService } from '../jobs/job.service.js';
+// A PO requirement switched off releases what was waiting on it.
+import { invoiceRepository } from '../invoices/invoice.repository.js';
+import { invoiceService } from '../invoices/invoice.service.js';
 // Read-only: "does this rate card exist?" is the settings domain's question.
 import { settingsRepository } from '../settings/settings.repository.js';
 // The customer's own portal login, made alongside the welcome email.
@@ -80,6 +92,9 @@ export interface AccountProvision {
   notes: string;
   /** Whether the caller will follow up with `sendWelcome`. Validated here. */
   sendInvitation: boolean;
+  /** Matt, 21 Oct. Needs m² + kg and `certificateEmail` — see `certificateIssues`. */
+  receivesCertificates: boolean;
+  certificateEmail: string;
   /*
    * `termsAgreedOffSystem` used to be here, and was the ONE field the two doors
    * answered differently — the last thing standing between them. It went with
@@ -251,6 +266,14 @@ export const accountService = {
       ]);
     }
 
+    const certificateEmail = input.certificateEmail.trim().toLowerCase();
+    assertCertificateRule({
+      receivesCertificates: input.receivesCertificates,
+      captureMode: input.captureMode,
+      certificateEmail,
+      captureModePath: 'captureMode',
+    });
+
     return accountRepository.create({
       code,
       name: input.legalName.trim(),
@@ -264,6 +287,14 @@ export const accountService = {
       primaryZoneId: input.primaryZoneId,
       notes: input.notes.trim(),
       contact: contactName === '' ? null : { name: contactName, email: contactEmail || null },
+      receivesCertificates: input.receivesCertificates,
+      certificateEmail: certificateEmail || null,
+      /*
+       * Matt, 21 Oct — the onboarding tick IS the terms question. Ticked: their
+       * administrator signs the terms on first sign-in. Unticked: covered by a
+       * signed contract. Both doors pass the same tick, so they cannot differ.
+       */
+      termsRequired: input.sendInvitation,
     });
   },
 
@@ -349,6 +380,8 @@ export const accountService = {
       accountsContactEmail: draft.accountsContactEmail,
       notes: draft.notes,
       sendInvitation: draft.sendInvitation,
+      receivesCertificates: draft.receivesCertificates,
+      certificateEmail: draft.certificateEmail,
     });
 
     // Last, and unable to throw — see `sendWelcome`.
@@ -409,6 +442,17 @@ export const accountService = {
       ]);
     }
 
+    // Left out by an older client: keep what is stored, and still check it.
+    const before = await this.get(id, caller);
+    const certificateEmail = input.certificateEmail.trim().toLowerCase();
+    assertCertificateRule({
+      receivesCertificates: input.receivesCertificates ?? before.receivesCertificates,
+      captureMode: before.captureMode,
+      certificateEmail,
+      // The capture mode is not on this form, so the tick is what gets the message.
+      captureModePath: 'receivesCertificates',
+    });
+
     const updated = await accountRepository.update(id, {
       name: input.legalName.trim(),
       tradingName: input.tradingName.trim() || null,
@@ -416,7 +460,8 @@ export const accountService = {
       addressLine: input.addressLine.trim() || null,
       suburb: input.suburb.trim() || null,
       postcode: input.postcode.trim() || null,
-      certificateEmail: input.certificateEmail.trim().toLowerCase() || null,
+      certificateEmail: certificateEmail || null,
+      receivesCertificates: input.receivesCertificates,
       notes: input.notes.trim(),
       /*
        * A blank name leaves the existing contact ALONE rather than deleting it.
@@ -436,6 +481,135 @@ export const accountService = {
     // The server's answer, not the caller's optimistic guess — the detail page
     // renders what was actually stored, including the fields it normalised.
     return this.get(id, caller);
+  },
+
+  /**
+   * What changing this account's commercial terms would touch — shown in the
+   * dialog BEFORE the office saves, so "update their price too" is a choice
+   * made knowing how many jobs it moves.
+   */
+  async commercialTermsImpact(id: string, caller: Caller): Promise<CommercialTermsImpact> {
+    if (isCustomer(caller)) {
+      throw AppError.forbidden('Only the office can change an account’s commercial terms');
+    }
+    // Not found answers 404 here rather than a pair of zeros.
+    await this.get(id, caller);
+
+    const [openJobs, awaitingPoInvoices] = await Promise.all([
+      countRepriceableJobs(id, OPEN_JOB_STATUSES),
+      invoiceRepository.countAwaitingPo(id),
+    ]);
+    return { openJobs, awaitingPoInvoices };
+  },
+
+  /**
+   * Change the rate card, payment terms, PO policy and capture mode.
+   *
+   * Matt, 21 Oct: *"there's currently no way to change the rate card that
+   * they're on… commercial terms, the rate card, payment terms, all of that."*
+   *
+   * ── What else moves ───────────────────────────────────────────────────────
+   *  • Open jobs keep the price they were booked at, unless the office opts
+   *    them in with `repriceOpenJobs` — and then only when the CARD changed.
+   *    Nothing on an invoice ever moves. A job the new card cannot price keeps
+   *    its old price and is named in the answer.
+   *  • Switching the PO requirement off releases their Awaiting-PO invoices,
+   *    which would otherwise wait forever for a PO nobody will send.
+   */
+  async setCommercialTerms(
+    id: string,
+    input: AccountCommercialTerms,
+    caller: Caller,
+  ): Promise<CommercialTermsResult> {
+    if (isCustomer(caller)) {
+      throw AppError.forbidden('Only the office can change an account’s commercial terms');
+    }
+
+    const before = await this.get(id, caller);
+
+    // Certificates are weighed, so a customer who receives them keeps their kg.
+    if (before.receivesCertificates && input.captureMode !== 'area-and-weight') {
+      throw AppError.validation('This customer receives certificates, which need kg', [
+        {
+          path: 'captureMode',
+          message: 'Keep m² + kg, or untick Receives certificates on Edit details first',
+        },
+      ]);
+    }
+
+    const card = await settingsRepository.findRateCard(input.rateCardId);
+    if (!card) {
+      throw AppError.validation('That rate card does not exist', [
+        { path: 'rateCardId', message: 'Pick one from the list — it may have been deleted' },
+      ]);
+    }
+
+    const updated = await accountRepository.setCommercialTerms(id, {
+      rateCardId: input.rateCardId,
+      paymentTermsDays: input.paymentTermsDays,
+      poPolicy: input.poPolicy,
+      captureMode: input.captureMode,
+    });
+    if (!updated) throw AppError.notFound('That account could not be found');
+
+    const actor = caller.name ?? 'The office';
+
+    const releasedInvoices =
+      before.poPolicy === 'required-before-invoice' &&
+      input.poPolicy !== 'required-before-invoice'
+        ? await invoiceService.releaseAwaitingPoForAccount(id)
+        : 0;
+
+    let repricedJobs = 0;
+    const notRepriced: CommercialTermsResult['notRepriced'] = [];
+
+    if (input.repriceOpenJobs && input.rateCardId !== before.rateCardId) {
+      // One at a time: a handful of jobs, and each one stands or fails alone.
+      for (const job of await repriceableJobs(id, OPEN_JOB_STATUSES)) {
+        try {
+          const result = await jobService.reprice(job.id, input.rateCardId, {
+            actor,
+            reason: `Rate card changed to ${card.label}`,
+          });
+          if (result) repricedJobs += 1;
+        } catch (error) {
+          notRepriced.push({
+            jobNumber: job.jobNumber,
+            reason: error instanceof AppError ? error.message : 'It could not be priced',
+          });
+        }
+      }
+    }
+
+    log.info(
+      {
+        accountId: id,
+        from: {
+          rateCardId: before.rateCardId,
+          paymentTermsDays: before.paymentTermsDays,
+          poPolicy: before.poPolicy,
+          captureMode: before.captureMode,
+        },
+        to: {
+          rateCardId: input.rateCardId,
+          paymentTermsDays: input.paymentTermsDays,
+          poPolicy: input.poPolicy,
+          captureMode: input.captureMode,
+        },
+        repricedJobs,
+        notRepriced: notRepriced.length,
+        releasedInvoices,
+        by: actor,
+      },
+      'commercial terms changed',
+    );
+
+    return {
+      account: await this.get(id, caller),
+      repricedJobs,
+      notRepriced,
+      releasedInvoices,
+    };
   },
 
   /**
@@ -675,6 +849,42 @@ function scopeFor(caller: Caller): AccountScope {
  * servicing, and putting a new customer's primary zone there would seed a
  * relationship into a market that is being wound down.
  */
+/**
+ * Matt, 21 Oct: certificates go *"only to certain customers"*, and a
+ * certificate states weighed tonnes and is emailed. So ticking "Receives
+ * certificates" needs m² + kg and an address to send it to — refused here with
+ * the field to fix, rather than issuing a certificate that can never go out.
+ */
+function assertCertificateRule(input: {
+  receivesCertificates: boolean;
+  captureMode: CaptureMode;
+  certificateEmail: string;
+  captureModePath: 'captureMode' | 'receivesCertificates';
+}): void {
+  if (!input.receivesCertificates) return;
+
+  const issues = [
+    ...(input.captureMode === 'area-and-weight'
+      ? []
+      : [
+          {
+            path: input.captureModePath,
+            message:
+              input.captureModePath === 'captureMode'
+                ? 'Certificates need m² and kg — choose m² + kg, or untick Receives certificates'
+                : 'Certificates need m² and kg — change the capture mode in Commercial terms first',
+          },
+        ]),
+    ...(input.certificateEmail === ''
+      ? [{ path: 'certificateEmail', message: 'Add the email certificates go to, or untick Receives certificates' }]
+      : []),
+  ];
+
+  if (issues.length > 0) {
+    throw AppError.validation('Receives certificates needs m² + kg and a certificate email', issues);
+  }
+}
+
 async function assertZoneExists(zoneId: string): Promise<void> {
   const zone = await settingsRepository.findZone(zoneId);
 

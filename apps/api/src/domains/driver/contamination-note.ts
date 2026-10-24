@@ -1,6 +1,6 @@
 import {
+  CONTAMINATION_TYPES,
   ContaminationExtentSchema,
-  ContaminationTypeSchema,
   type ContaminationExtent,
   type ContaminationType,
 } from '@plastago/shared';
@@ -39,10 +39,13 @@ export function parseContaminationNote(note: string | null): {
 
   const [head = '', ...rest] = note.split(' — ');
   const [rawType, rawExtent] = head.split(' · ');
-  const type = ContaminationTypeSchema.safeParse(rawType?.trim());
+  // Only the built-in types: these notes predate the editable list (21 Oct).
+  const type = rawType?.trim() ?? '';
   const extent = ContaminationExtentSchema.safeParse(rawExtent?.trim());
 
-  if (!type.success || !extent.success) return { type: null, extent: null, note };
+  if (!(CONTAMINATION_TYPES as readonly string[]).includes(type) || !extent.success) {
+    return { type: null, extent: null, note };
+  }
 
-  return { type: type.data, extent: extent.data, note: rest.join(' — ').trim() || null };
+  return { type, extent: extent.data, note: rest.join(' — ').trim() || null };
 }

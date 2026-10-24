@@ -1,4 +1,11 @@
-import { IsoDateSchema, RateCardIdSchema, ServiceCodeSchema, ZoneSchema } from '@plastago/shared';
+import {
+  DriverListNameSchema,
+  FreightItemSchema,
+  IsoDateSchema,
+  RateCardIdSchema,
+  ServiceCodeSchema,
+  ZoneSchema,
+} from '@plastago/shared';
 import * as z from 'zod';
 
 /**
@@ -48,6 +55,8 @@ export const QuoteQuerySchema = z
      */
     expectedAreaM2: z.coerce.number().positive().max(100_000).nullable().optional(),
     bagCount: z.coerce.number().int().min(0).max(500).optional(),
+    /** Plasterboard when absent — the quote this endpoint always gave. */
+    freightItem: FreightItemSchema.optional(),
     /**
      * The date to price AS AT (M6.2) — the job's ready date.
      *
@@ -90,3 +99,8 @@ export const ScheduleParamsSchema = z
 export const LogoConfirmSchema = z
   .object({ key: z.string().trim().min(1).max(512) })
   .meta({ id: 'LogoConfirm' });
+
+/** `:list` on the driver-list routes. */
+export const DriverListParamsSchema = z
+  .object({ list: DriverListNameSchema })
+  .meta({ id: 'DriverListParams' });

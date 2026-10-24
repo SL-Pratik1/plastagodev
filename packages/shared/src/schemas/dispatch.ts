@@ -89,8 +89,27 @@ export const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   assigned: 'Assigned',
   'in-progress': 'In progress',
   'tipped-off': 'Tipped off',
-  closed: 'Closed',
+  // `closed` is what a run becomes once every stop is finished (21 Oct).
+  closed: 'Completed',
 };
+
+/**
+ * A stop that needs nothing more from the run — Decided, 21 Oct: "finished"
+ * means completed, futile or cancelled (`admin-complete` is the office's
+ * completed). A run whose stops are ALL finished is completed and leaves the
+ * board.
+ */
+export const FINISHED_STOP_STATUSES = ['completed', 'admin-complete', 'futile', 'cancelled'] as const;
+
+/**
+ * A run's planned date — the day it is meant to go out (Matt, 21 Oct): *"it
+ * doesn't necessarily mean it will happen, but it's planned."* The driver gets
+ * the run on this date, and the customer sees it on their pickup.
+ */
+export const RunPlannedDateBodySchema = z
+  .object({ date: IsoDateSchema })
+  .meta({ id: 'RunPlannedDateBody' });
+export type RunPlannedDateBody = z.infer<typeof RunPlannedDateBodySchema>;
 
 /**
  * A job as it sits on a run — the card the allocator drags.
@@ -174,6 +193,8 @@ export const RunTipOffSchema = z
     netKg: z.number().nonnegative(),
     tippedOffAt: IsoDateTimeSchema,
     docketPhotoUrl: z.string().nullable(),
+    /** The vehicle the driver chose for that day. Null for older dockets and office entries. */
+    vehicleRego: z.string().nullable().default(null),
   })
   .meta({ id: 'RunTipOff' });
 
@@ -336,7 +357,15 @@ export const AllocationBoardSchema = z
         atRiskCount: z.number().int().nonnegative(),
       }),
     ),
-    /** Runs for the date, including ones nobody is on yet. */
+    /**
+     * Every run not yet completed, WHATEVER its planned date, plus the runs
+     * planned for `date` that have completed (the run sheet still prints them).
+     *
+     * Matt, 21 Oct: *"all the runs that exist, that are not yet completed,
+     * should be visible… I don't want to filter through a date column."* The
+     * board shows the ones that are not `closed`; `date` only filters the jobs
+     * waiting to be placed. Ordered by planned date.
+     */
     runs: z.array(RunSchema),
     drivers: z.array(DriverDaySchema),
   })

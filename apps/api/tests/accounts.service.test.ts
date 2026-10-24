@@ -173,6 +173,8 @@ function draft(overrides: Partial<AccountDraft> = {}): AccountDraft {
     accountsContactEmail: 'jo@acme.com.au',
     sendInvitation: false,
     notes: '',
+    receivesCertificates: false,
+    certificateEmail: '',
     ...overrides,
   };
 }
@@ -574,5 +576,90 @@ describe('the risk assessment rule', () => {
     ).rejects.toMatchObject({ status: 404 });
 
     expect(openJobSync.calls).toHaveLength(0);
+  });
+});
+
+/*
+ * Matt, 21 Oct: certificates go "only to certain customers". A certificate
+ * states weighed tonnes and is emailed, so the tick needs both.
+ */
+describe('receives certificates (21 Oct)', () => {
+  it('saves the tick and where certificates go', async () => {
+    await accountService.create(
+      draft({
+        captureMode: 'area-and-weight',
+        receivesCertificates: true,
+        certificateEmail: 'ESG@Acme.com.au',
+      }),
+    );
+
+    expect(repo.lastCreate).toMatchObject({
+      receivesCertificates: true,
+      certificateEmail: 'esg@acme.com.au',
+    });
+  });
+
+  it('refuses the tick on an m²-only account, naming the capture mode', async () => {
+    const error = await accountService
+      .create(draft({ captureMode: 'area-only', receivesCertificates: true, certificateEmail: 'esg@acme.com.au' }))
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ status: 422, code: 'VALIDATION_FAILED' });
+    expect((error as { issues?: { path: string }[] }).issues?.map((issue) => issue.path)).toEqual(['captureMode']);
+    expect(repo.lastCreate).toBeNull();
+  });
+
+  it('refuses the tick with nowhere to send certificates', async () => {
+    const error = await accountService
+      .create(draft({ captureMode: 'area-and-weight', receivesCertificates: true, certificateEmail: '' }))
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+    expect((error as { issues?: { path: string }[] }).issues?.map((issue) => issue.path)).toEqual(['certificateEmail']);
+  });
+
+  it('refuses ticking it on an existing m²-only account, pointing at the tick', async () => {
+    const id = repo.seedAccount({ code: 'OLD001' });
+
+    const error = await accountService
+      .update(
+        id,
+        {
+          legalName: 'OLD001 Pty Ltd',
+          tradingName: '',
+          abn: '12345678901',
+          addressLine: '',
+          suburb: '',
+          postcode: '',
+          accountsContactName: '',
+          accountsContactEmail: '',
+          certificateEmail: 'esg@old.com.au',
+          receivesCertificates: true,
+          notes: '',
+        },
+        OFFICE as never,
+      )
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+    expect((error as { issues?: { path: string }[] }).issues?.map((issue) => issue.path)).toEqual(['receivesCertificates']);
+  });
+});
+
+/*
+ * Matt, 21 Oct — the onboarding tick is the terms question: ticked, their
+ * administrator signs the terms on first sign-in; unticked, a signed contract
+ * already covers them.
+ */
+describe('the onboarding tick and the terms (21 Oct)', () => {
+  it('asks an account opened with the tick to sign the terms', async () => {
+    await accountService.create(draft({ sendInvitation: true }));
+    expect(repo.lastCreate?.termsRequired).toBe(true);
+  });
+
+  it('does not ask an account opened without it', async () => {
+    await accountService.create(draft({ sendInvitation: false }));
+    expect(repo.lastCreate?.termsRequired).toBe(false);
   });
 });

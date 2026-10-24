@@ -2,7 +2,7 @@ import { ApiRequestError } from '@plastago/api-client';
 import { db, META_KEYS, type OutboxOperation } from './db';
 import { isEffectivelyOffline, sendOperation, subscribeSimulatedOffline } from './transport';
 
-const MAX_ATTEMPTS = 8;
+export const MAX_ATTEMPTS = 8;
 
 export interface EnqueueInput {
   method: OutboxOperation['method'];
@@ -124,7 +124,13 @@ export async function flushOutbox(): Promise<{ sent: number; failed: number }> {
        * the run they recorded during it.
        */
       if (operation.nextAttemptAt !== undefined && Date.parse(operation.nextAttemptAt) > now) {
-        continue;
+        /*
+         * Wait, rather than skip ahead: sending a later action before this one
+         * is the out-of-order landing the note above forbids. Only a
+         * retryable failure is ever waiting here — a refused one is out of
+         * attempts and skipped above.
+         */
+        break;
       }
 
       await db.outbox.update(operation.id, { status: 'syncing' });
@@ -141,12 +147,29 @@ export async function flushOutbox(): Promise<{ sent: number; failed: number }> {
         sent += 1;
       } catch (error) {
         failed += 1;
-        const retryable = error instanceof ApiRequestError ? error.isRetryable : true;
         const message = error instanceof Error ? error.message : 'Unknown error';
+
+        /*
+         * Signed out. Nothing is wrong with the action, so it keeps its
+         * attempts and waits for the driver to sign back in — burning them
+         * here used to lose a whole run's queue to an expired session.
+         */
+        if (error instanceof ApiRequestError && error.status === 401) {
+          await db.outbox.update(operation.id, { status: 'pending', lastError: message });
+          break;
+        }
+
+        const retryable = error instanceof ApiRequestError ? error.isRetryable : true;
 
         await db.outbox.update(operation.id, {
           status: 'failed',
-          attempts: operation.attempts + 1,
+          /*
+           * A refusal (a 4xx) will be refused again: it stops here and waits
+           * for the driver, with the server's reason, instead of being
+           * retried out of sight for ten minutes and then dropped (21 Oct).
+           */
+          attempts: retryable ? operation.attempts + 1 : MAX_ATTEMPTS,
+          retryable,
           lastError: message,
           nextAttemptAt: new Date(Date.now() + backoffMs(operation.attempts + 1)).toISOString(),
         });
@@ -187,6 +210,25 @@ export async function flushOutbox(): Promise<{ sent: number; failed: number }> {
   return { sent, failed };
 }
 
+/**
+ * Send one stopped action again, from the driver's "Not sent" list. Its place
+ * in the queue is kept — it goes first if it was first.
+ */
+export async function retryOperation(id: number): Promise<void> {
+  await db.outbox.update(id, {
+    status: 'pending',
+    attempts: 0,
+    nextAttemptAt: undefined,
+    retryable: undefined,
+  });
+  await flushOutbox();
+}
+
+/** Drop one action the driver has decided not to send. */
+export async function discardOperation(id: number): Promise<void> {
+  await db.outbox.delete(id);
+}
+
 function backoffMs(attempt: number): number {
   // 2s, 4s, 8s … capped at 5 minutes.
   return Math.min(2_000 * 2 ** (attempt - 1), 300_000);
@@ -207,6 +249,20 @@ async function bumpFailureCount(): Promise<void> {
  */
 export function startOutboxSync(intervalMs = 15_000): () => void {
   const onOnline = () => void flushOutbox();
+
+  /*
+   * ⚠️ An action marked "sending" when the app was closed or the phone slept
+   * was never picked up again: the drain reads only waiting and failed rows,
+   * so a completion caught mid-send sat on the phone for good while the
+   * office saw the job on site (21 Oct). Nothing is in flight at start-up, so
+   * each one goes back in the queue — the idempotency key makes a resend of
+   * one that did land harmless.
+   */
+  const unstick = db.outbox
+    .where('status')
+    .equals('syncing')
+    .modify({ status: 'pending' })
+    .catch(() => undefined);
   window.addEventListener('online', onOnline);
 
   // Coming back from the demo's offline switch has to drain the queue too,
@@ -216,7 +272,7 @@ export function startOutboxSync(intervalMs = 15_000): () => void {
   });
 
   const timer = window.setInterval(() => void flushOutbox(), intervalMs);
-  void flushOutbox();
+  void unstick.then(() => flushOutbox());
 
   return () => {
     window.removeEventListener('online', onOnline);

@@ -23,6 +23,7 @@ import {
 import { useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
+import { DriverMessagePopup } from '@/components/driver-message-popup';
 import { NotificationsMenu } from '@/components/notifications-menu';
 import { InstallButton } from '@/components/pwa/install-button';
 import { SessionExpiry } from '@/features/auth/session-expiry';
@@ -380,6 +381,9 @@ export function AdminShell() {
 
       {/* Support. Mounted on the shell: everywhere behind sign-in, nowhere before it. */}
       <SortdWidget />
+
+      {/* A new driver message, where nobody can miss it (Matt, 21 Oct). */}
+      {can('notifications:read') && <DriverMessagePopup />}
 
       <ConfirmDialog
         open={signOutOpen}

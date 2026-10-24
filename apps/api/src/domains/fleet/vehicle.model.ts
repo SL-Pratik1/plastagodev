@@ -3,6 +3,7 @@ import { Schema, model } from 'mongoose';
 
 export const VEHICLES_COLLECTION = 'vehicles';
 export const VEHICLE_EXPENSES_COLLECTION = 'vehicleexpenses';
+export const VEHICLE_CHOICES_COLLECTION = 'vehiclechoices';
 
 /**
  * A vehicle (M9.7 · F43).
@@ -52,6 +53,10 @@ const vehicleSchema = new Schema(
      * Not a reference: the pairing is an operational convenience shown on two
      * screens, and it has to survive the driver leaving without orphaning the
      * truck. One-to-one — assigning a driver here clears them elsewhere.
+     *
+     * ⚠️ Superseded by the daily choice (`vehiclechoices`) — the console no
+     * longer sets it. Still read as a fallback, so a driver app build without
+     * the vehicle picker keeps finding its truck.
      */
     assignedDriverName: { type: String, default: null, trim: true },
 
@@ -59,6 +64,28 @@ const vehicleSchema = new Schema(
     registrationExpiresOn: { type: String, required: true },
     /** 12 / 6 / 3 months. The renewal rolls the date forward by this. */
     registrationPeriodMonths: { type: Number, required: true, min: 1, max: 12, default: 12 },
+    /**
+     * Every renewal logged from the console, with the length chosen for it.
+     *
+     * Matt, 21 Oct: the length "can vary" from one renewal to the next, so it is
+     * kept with each renewal rather than only as the current setting above.
+     */
+    registrationRenewals: {
+      type: [
+        {
+          _id: false,
+          renewedAt: { type: Date, required: true },
+          /** REFERENCE → `users._id` — who logged it. */
+          renewedById: { type: Schema.Types.ObjectId, default: null, ref: 'User' },
+          /** Their name at the time, frozen for display. */
+          renewedBy: { type: String, required: true, trim: true },
+          periodMonths: { type: Number, required: true, min: 1, max: 12 },
+          fromExpiry: { type: String, required: true },
+          toExpiry: { type: String, required: true },
+        },
+      ],
+      default: [],
+    },
 
     /**
      * W113 — when the next service is booked. The allocator's job.
@@ -142,3 +169,31 @@ vehicleExpenseSchema.index({ vehicleId: 1, incurredOn: -1 }, { name: 'vehicle_in
 vehicleExpenseSchema.index({ vehicleId: 1, kind: 1, incurredOn: -1 }, { name: 'vehicle_kind' });
 
 export const VehicleExpenseModel = model('VehicleExpense', vehicleExpenseSchema);
+
+/**
+ * The vehicle a driver chose for one day (Matt, 21 Oct).
+ *
+ * *"Rather than assign vehicles, drivers should select the vehicle they are
+ * driving that day and complete pre-start from there."* The pre-start, defects
+ * and tip-off of that day are filed against this vehicle.
+ */
+const vehicleChoiceSchema = new Schema(
+  {
+    /** A Sydney calendar day. */
+    date: { type: String, required: true },
+    /** REFERENCE → `vehicles._id`. */
+    vehicleId: { type: Schema.Types.ObjectId, required: true, ref: 'Vehicle' },
+    /** REFERENCE → `users._id`, plus the name the vehicle page shows. */
+    driverId: { type: Schema.Types.ObjectId, required: true, ref: 'User' },
+    driverName: { type: String, required: true, trim: true },
+  },
+  { collection: VEHICLE_CHOICES_COLLECTION, timestamps: true, versionKey: false },
+);
+
+/** One driver per vehicle per day — the second driver is told who has it. */
+vehicleChoiceSchema.index({ date: 1, vehicleId: 1 }, { unique: true, name: 'day_vehicle_unique' });
+
+/** One vehicle per driver per day. Choosing again moves them to the new one. */
+vehicleChoiceSchema.index({ date: 1, driverId: 1 }, { unique: true, name: 'day_driver_unique' });
+
+export const VehicleChoiceModel = model('VehicleChoice', vehicleChoiceSchema);

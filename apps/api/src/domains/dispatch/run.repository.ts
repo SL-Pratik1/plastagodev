@@ -1,11 +1,12 @@
-import type {
-  JobStatus,
-  LocationSource,
-  Run,
-  RunStatus,
-  RunStopSummary,
-  RunTipOff,
-  UnallocatedJob,
+import {
+  FINISHED_STOP_STATUSES,
+  type JobStatus,
+  type LocationSource,
+  type Run,
+  type RunStatus,
+  type RunStopSummary,
+  type RunTipOff,
+  type UnallocatedJob,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
 import { UNKNOWN_ZONE_LABEL, zoneLabels } from '../settings/zone-lookup.js';
@@ -77,6 +78,7 @@ interface RawTipOff {
   netKg: number;
   tippedOffAt: Date;
   docketPhotoKey?: string | null;
+  vehicleRego?: string | null;
 }
 
 export interface CreateRunInput {
@@ -124,6 +126,111 @@ export const runRepository = {
     return rows.map((row) =>
       toRun(row, stops.get(row._id.toHexString()) ?? EMPTY_GROUP, tipOffs.get(row._id.toHexString()) ?? null),
     );
+  },
+
+  /**
+   * The runs the board shows: every run not yet completed, whatever its planned
+   * date, plus the runs planned for `date` (the run sheet still prints a
+   * completed one). Ordered by planned date.
+   *
+   * Matt, 21 Oct: *"all the runs that exist, that are not yet completed, should
+   * be visible."*
+   *
+   * ⚠️ Completion is read off the STOPS, not trusted from the stored status. A
+   * run whose stops are all finished is reported `closed` here even if no
+   * finishing path closed it yet, and its id comes back in `newlyFinished` so
+   * the caller can persist that. One query for the runs, one for their stops.
+   */
+  async boardRuns(date: string): Promise<{ runs: Run[]; newlyFinished: string[] }> {
+    const rows = await RunModel.find({ $or: [{ status: { $ne: 'closed' } }, { date }] })
+      .sort({ date: 1, sequenceForDay: 1, runNumber: 1 })
+      .lean<RawRun[]>();
+
+    if (rows.length === 0) return { runs: [], newlyFinished: [] };
+
+    const ids = rows.map((row) => row._id);
+    const [stops, tipOffs] = await Promise.all([stopsOf(ids), tipOffsOf(ids)]);
+
+    const newlyFinished: string[] = [];
+    const runs: Run[] = [];
+
+    for (const row of rows) {
+      const key = row._id.toHexString();
+      const group = stops.get(key) ?? EMPTY_GROUP;
+      const finished = allFinished(group.stops);
+
+      if (finished && row.status !== 'closed') newlyFinished.push(key);
+      // A completed run planned for another day has left the board.
+      if (finished && row.date !== date) continue;
+
+      runs.push(
+        toRun(
+          finished ? { ...row, status: 'closed' } : row,
+          group,
+          tipOffs.get(key) ?? null,
+        ),
+      );
+    }
+
+    return { runs, newlyFinished };
+  },
+
+  /** Marks runs completed. Only runs whose stops are all finished reach here. */
+  async markClosed(runIds: readonly string[]): Promise<void> {
+    const ids = runIds
+      .filter((id) => mongoose.isValidObjectId(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+    if (ids.length === 0) return;
+
+    await RunModel.updateMany({ _id: { $in: ids }, status: { $ne: 'closed' } }, {
+      $set: { status: 'closed' },
+    });
+  },
+
+  /**
+   * Completes a run once every stop on it is finished (21 Oct).
+   *
+   * Called after anything that finishes a stop or takes one off. A run with no
+   * stops is NOT completed — it is a run still being built. Returns whether it
+   * closed, so a caller can log it.
+   */
+  async closeIfFinished(runId: string): Promise<boolean> {
+    if (!mongoose.isValidObjectId(runId)) return false;
+    const _id = new mongoose.Types.ObjectId(runId);
+
+    const [stopCount, openCount] = await Promise.all([
+      JobModel.countDocuments({ runId: _id }),
+      JobModel.countDocuments({ runId: _id, status: { $nin: [...FINISHED_STOP_STATUSES] } }),
+    ]);
+    if (stopCount === 0 || openCount > 0) return false;
+
+    const result = await RunModel.updateOne(
+      { _id, status: { $ne: 'closed' } },
+      { $set: { status: 'closed' } },
+    );
+    return result.modifiedCount === 1;
+  },
+
+  /**
+   * How many of a run's stops a driver has started — on the way, on site or
+   * done. Reordering and moving the date are allowed only while this is zero.
+   */
+  async startedStopCount(runId: string): Promise<number> {
+    if (!mongoose.isValidObjectId(runId)) return 0;
+    return JobModel.countDocuments({
+      runId: new mongoose.Types.ObjectId(runId),
+      status: { $nin: ['booked', 'assigned'] },
+    });
+  },
+
+  /** Moves a run to another planned date, with the driver's sequence for that day. */
+  async setDate(runId: string, date: string, sequenceForDay: number | null): Promise<boolean> {
+    if (!mongoose.isValidObjectId(runId)) return false;
+    const result = await RunModel.updateOne(
+      { _id: new mongoose.Types.ObjectId(runId), status: { $in: ['planning', 'assigned'] } },
+      { $set: { date, sequenceForDay } },
+    );
+    return result.matchedCount === 1;
   },
 
   /** The status and staffing of one run, without loading its stops. */
@@ -379,6 +486,24 @@ export const runRepository = {
     return true;
   },
 
+  /** Renumbers a driver's runs on one day 1, 2, 3… in their current order. */
+  async renumberDriverDay(driverId: string, date: string): Promise<void> {
+    if (!mongoose.isValidObjectId(driverId)) return;
+    const rows = await RunModel.find(
+      { driverId: new mongoose.Types.ObjectId(driverId), date },
+      { _id: 1 },
+    )
+      .sort({ sequenceForDay: 1, runNumber: 1 })
+      .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+    if (rows.length === 0) return;
+
+    await RunModel.bulkWrite(
+      rows.map((row, index) => ({
+        updateOne: { filter: { _id: row._id }, update: { $set: { sequenceForDay: index + 1 } } },
+      })),
+    );
+  },
+
   /** How many runs this driver already has that day, for `sequenceForDay`. */
   async countDriverRuns(driverId: string, date: string): Promise<number> {
     if (!mongoose.isValidObjectId(driverId)) return 0;
@@ -393,6 +518,9 @@ export const runRepository = {
    * finished — which is what ready means. Anything ready EARLIER is included
    * too, because an unallocated job from last week has not gone away; it is the
    * most urgent thing on the board.
+   *
+   * Ordered by ready date, oldest first — Matt, 21 Oct: *"rather than sorting
+   * by suburb… sort by ready date with the oldest at the top."*
    */
   async unallocated(date: string): Promise<UnallocatedJob[]> {
     const rows = await JobModel.find({
@@ -400,7 +528,7 @@ export const runRepository = {
       status: { $in: OPEN_JOB_STATUSES },
       readyDate: { $lte: date },
     })
-      .sort({ targetDate: 1, jobNumber: 1 })
+      .sort({ readyDate: 1, jobNumber: 1 })
       .lean<RawStop[]>();
 
     const zones = await zoneLabels();
@@ -517,6 +645,7 @@ async function toTipOff(row: RawTipOff): Promise<RunTipOff> {
     docketPhotoUrl: row.docketPhotoKey
       ? await getStorage().presignDownload(row.docketPhotoKey)
       : null,
+    vehicleRego: row.vehicleRego ?? null,
   };
 }
 
@@ -590,6 +719,12 @@ async function releaseStops(filter: Record<string, unknown>): Promise<number> {
   });
 
   return result.modifiedCount;
+}
+
+/** A run with stops, every one of them finished — see `FINISHED_STOP_STATUSES`. */
+function allFinished(stops: readonly RunStopSummary[]): boolean {
+  const finished: readonly string[] = FINISHED_STOP_STATUSES;
+  return stops.length > 0 && stops.every((stop) => finished.includes(stop.status));
 }
 
 /** M3.5 — an open job past its target date. The board highlights these. */

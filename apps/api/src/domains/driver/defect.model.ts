@@ -19,13 +19,15 @@ export const VEHICLE_DEFECTS_COLLECTION = 'vehicledefects';
 const defectSchema = new Schema(
   {
     /**
-     * The rego, as the driver typed it on the phone.
+     * REFERENCE → `vehicles._id` — the vehicle the driver chose for the day.
      *
-     * ⚠️ Not a reference to a fleet record, deliberately. A driver can report a
-     * defect on a hired truck, or on one the office has not registered yet, and
-     * a foreign key would make the report impossible to file at the exact moment
-     * it matters most. The fleet screen matches on rego.
+     * The link, not the plate: a truck that gets new plates keeps its defects.
+     * A driver can only report against a vehicle on the fleet (they choose it
+     * before the pre-start), so every new defect has one. Null only on reports
+     * filed before drivers chose a vehicle.
      */
+    vehicleId: { type: Schema.Types.ObjectId, default: null, ref: 'Vehicle' },
+    /** The plate at the time, frozen for display. Never used to find the defect. */
     vehicleRego: { type: String, required: true, trim: true, uppercase: true },
 
     /** REFERENCE → `users._id`. Who found it. */
@@ -101,7 +103,7 @@ const defectSchema = new Schema(
 defectSchema.index({ status: 1, severity: 1, occurredAt: -1 }, { name: 'open_by_severity' });
 
 /** One vehicle's history, for the fleet screen. */
-defectSchema.index({ vehicleRego: 1, occurredAt: -1 }, { name: 'vehicle_history' });
+defectSchema.index({ vehicleId: 1, occurredAt: -1 }, { name: 'vehicle_id_history' });
 
 /**
  * ⚠️ An unroadworthy report is the one that has to reach somebody TODAY.

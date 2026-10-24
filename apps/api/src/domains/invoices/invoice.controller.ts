@@ -117,4 +117,12 @@ export const invoiceController = {
   ): Promise<void> => {
     res.json(await invoiceService.retryXero(req.validated.params.id, callerFrom(req)));
   },
+
+  /** 200 with who it went to and who it failed for — a partial resend is still an answer. */
+  resend: async (
+    req: ValidatedRequest<{ params: typeof InvoiceIdParamsSchema }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await invoiceService.resend(req.validated.params.id, callerFrom(req)));
+  },
 };

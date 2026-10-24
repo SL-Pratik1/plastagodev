@@ -3,6 +3,10 @@ import type {
   AdditionalServiceCreate,
   AdditionalServiceSetting,
   AdditionalServiceUpdate,
+  DriverListName,
+  DriverListOption,
+  DriverLists,
+  DriverListWrite,
   RateCardCreate,
   RateCardSummary,
   RateCardUpdate,
@@ -47,6 +51,9 @@ const log = logger.child({ module: 'settings' });
 export interface Caller {
   roles: readonly Role[];
   accountId: string | null;
+  /** Who is saving, where a write records it. */
+  userId?: string;
+  name?: string;
 }
 
 /**
@@ -996,7 +1003,125 @@ export const settingsService = {
     await settingsRepository.deleteAdditionalService(code);
     log.info({ code }, 'additional service deleted');
   },
+
+  /* ── The lists the driver app asks from (Matt, 21 Oct) ──────────────────── */
+
+  async driverLists(caller: Caller): Promise<DriverLists> {
+    assertStaff(caller);
+    return settingsRepository.driverLists();
+  },
+
+  /**
+   * Save one list.
+   *
+   * ⚠️ Every option already on the list must come back, with the same wording.
+   * Jobs and reports store an option's key and read its wording from here, so
+   * removing one would leave old records blank and rewording one would change
+   * what a driver answered last month. Retiring is switching off; new wording
+   * is a new option.
+   */
+  async saveDriverList(
+    name: DriverListName,
+    input: DriverListWrite,
+    caller: Caller,
+  ): Promise<DriverListOption[]> {
+    assertStaff(caller);
+    if (!caller.roles.includes('super-admin')) {
+      throw AppError.forbidden('Only an administrator can change what drivers are asked');
+    }
+
+    const current = (await settingsRepository.driverLists())[name];
+    const options = resolveDriverList(current, input.options);
+
+    await settingsRepository.saveDriverList(name, options, {
+      userId: caller.userId ?? null,
+      name: caller.name ?? 'An administrator',
+    });
+    log.info({ list: name, options: options.length }, 'driver list saved');
+    return options;
+  },
 };
+
+/**
+ * Check a list as written against the list as stored, and name any new option.
+ *
+ * Exported for the tests: the rules are the whole of this feature, and they are
+ * easier to read as cases than through a database.
+ */
+export function resolveDriverList(
+  current: readonly DriverListOption[],
+  written: DriverListWrite['options'],
+): DriverListOption[] {
+  const issues: { path: string; message: string }[] = [];
+  const byKey = new Map(current.map((option) => [option.key, option]));
+  const taken = new Set(current.map((option) => option.key));
+  const seen = new Set<string>();
+
+  const options = written.map((option, index): DriverListOption => {
+    if (option.key === null) {
+      const key = uniqueKey(option.label, taken);
+      taken.add(key);
+      return { key, label: option.label, active: option.active };
+    }
+
+    const stored = byKey.get(option.key);
+    if (!stored) {
+      issues.push({
+        path: `options.${String(index)}.key`,
+        message: 'This option is not on the list — reload and try again',
+      });
+    } else if (stored.label !== option.label) {
+      issues.push({
+        path: `options.${String(index)}.label`,
+        message: `"${stored.label}" can't be reworded — switch it off and add the new wording`,
+      });
+    }
+    if (seen.has(option.key)) {
+      issues.push({ path: `options.${String(index)}.key`, message: 'This option is listed twice' });
+    }
+    seen.add(option.key);
+    return { key: option.key, label: option.label, active: option.active };
+  });
+
+  for (const stored of current) {
+    if (!seen.has(stored.key)) {
+      issues.push({
+        path: 'options',
+        message: `"${stored.label}" can't be removed — switch it off instead`,
+      });
+    }
+  }
+
+  const activeLabels = new Set<string>();
+  options.forEach((option, index) => {
+    if (!option.active) return;
+    const label = option.label.toLowerCase();
+    if (activeLabels.has(label)) {
+      issues.push({
+        path: `options.${String(index)}.label`,
+        message: `"${option.label}" is already on the list`,
+      });
+    }
+    activeLabels.add(label);
+  });
+
+  if (activeLabels.size === 0) {
+    issues.push({ path: 'options', message: 'Keep at least one option switched on' });
+  }
+
+  if (issues.length > 0) {
+    throw AppError.validation(issues[0]?.message ?? 'The list could not be saved', issues);
+  }
+  return options;
+}
+
+/** A key for a new option: its wording as a slug, numbered if that is taken. */
+function uniqueKey(label: string, taken: ReadonlySet<string>): string {
+  const base = slugify(label) || 'option';
+  let key = base;
+  for (let n = 2; taken.has(key); n += 1) key = `${base}-${String(n)}`;
+  return key;
+}
 
 /* ── Guards ──────────────────────────────────────────────────────────────── */
 
@@ -1279,6 +1404,7 @@ function sampleInvoice(templateName: string): Invoice {
     xeroMessage: null,
     paymentTermsDays: 7,
     notes: 'This is a sample invoice, produced to preview a template. It is not a real invoice.',
+    emails: [],
   };
 }
 

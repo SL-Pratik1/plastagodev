@@ -1,10 +1,13 @@
-import type {
-  AppliedRate,
-  Money,
-  PricePreview,
-  PricePreviewLine,
-  RateCardId,
-  Zone,
+import {
+  FREIGHT_ITEM_LABELS,
+  HOOK_BIN_RATE_FIELDS,
+  type AppliedRate,
+  type FreightItem,
+  type Money,
+  type PricePreview,
+  type PricePreviewLine,
+  type RateCardId,
+  type Zone,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { todayInSydney } from '../../lib/business-day.js';
@@ -37,6 +40,11 @@ export interface QuoteInput {
    */
   expectedAreaM2: number | null;
   bagCount: number;
+  /**
+   * What is being collected. A hook bin is priced at its set price for the
+   * zone instead of the weight charge (Matt, 21 Oct).
+   */
+  freightItem: FreightItem;
   /**
    * ⚠️ The date this job is priced AS AT — `YYYY-MM-DD`, M6.2.
    *
@@ -167,20 +175,82 @@ export const pricingService = {
       amount: centsToMoney(serviceCents),
     });
 
-    /* ── Area, where there is one ──────────────────────────────────────── */
-    let areaCents = 0;
-    if (input.expectedAreaM2 !== null && input.expectedAreaM2 > 0) {
+    /*
+     * ── The second charge ─────────────────────────────────────────────────
+     * Matt, 21 Oct: *"it's still a two-part charge"*. Which second charge
+     * depends on what is collected and on the zone line:
+     *
+     *  • a hook bin → its set price for the zone, whatever the area;
+     *  • a fixed line → the flat "Weight charge" (Wisdom's $112), whatever
+     *    the area;
+     *  • otherwise → m² × rate, where there is an area.
+     */
+    let weightCents = 0;
+    let weightChargeKind: AppliedRate['weightChargeKind'] = 'per-m2';
+    let weightCharge: Money | null = null;
+
+    const hookBinField =
+      input.freightItem in HOOK_BIN_RATE_FIELDS
+        ? HOOK_BIN_RATE_FIELDS[input.freightItem as keyof typeof HOOK_BIN_RATE_FIELDS]
+        : null;
+
+    if (hookBinField !== null) {
+      const price = rate[hookBinField];
+      /*
+       * Empty or $0.00 means the card does not offer this bin here — Matt:
+       * *"if they're on the rate card as $0.00, then that's not an option for
+       * that customer."* Refused rather than priced at the service fee alone,
+       * which would collect a bin and invoice nothing for it.
+       */
+      if (price === null || moneyToCents(price) === 0) {
+        const item = FREIGHT_ITEM_LABELS[input.freightItem];
+        throw AppError.validation(`${item} has no price on ${rate.label} in ${rate.zoneLabel}`, [
+          {
+            path: 'freightItem',
+            message: `${item} is not on this customer's rate card for ${rate.zoneLabel}. Choose another item, or ask a Super Admin to add its price.`,
+          },
+        ]);
+      }
+
+      weightCents = moneyToCents(price);
+      weightChargeKind = 'hook-bin';
+      weightCharge = price;
+      lines.push({
+        code: 'hook-bin',
+        description: FREIGHT_ITEM_LABELS[input.freightItem],
+        quantity: 1,
+        unitRate: price,
+        amount: centsToMoney(weightCents),
+      });
+    } else if (rate.weightChargeKind === 'fixed') {
+      // The schema requires the amount on a fixed line; zero is a real
+      // arrangement and prints as $0.00 rather than vanishing.
+      const fixed = rate.fixedWeightCharge ?? '0';
+      weightCents = moneyToCents(fixed);
+      weightChargeKind = 'fixed';
+      weightCharge = fixed;
+      lines.push({
+        code: 'weight-charge',
+        // What Matt and the Wisdom purchase order both call it.
+        description: 'Weight charge',
+        quantity: 1,
+        unitRate: fixed,
+        amount: centsToMoney(weightCents),
+      });
+    } else if (input.expectedAreaM2 !== null && input.expectedAreaM2 > 0) {
       // `applyRate`, not multiplication: $0.16 has to survive at its own
       // precision or a month of jobs drifts.
-      areaCents = applyRate(rate.ratePerM2, input.expectedAreaM2);
+      weightCents = applyRate(rate.ratePerM2, input.expectedAreaM2);
       lines.push({
         code: 'area-charge',
         description: 'Plasterboard recycling (per m²)',
         quantity: input.expectedAreaM2,
         unitRate: rate.ratePerM2,
-        amount: centsToMoney(areaCents),
+        amount: centsToMoney(weightCents),
       });
     }
+
+    const areaPriced = weightChargeKind === 'per-m2';
 
     /* ── Recycling bags ────────────────────────────────────────────────── */
     let bagCents = 0;
@@ -198,7 +268,7 @@ export const pricingService = {
       }
     }
 
-    const subtotalCents = serviceCents + areaCents + bagCents;
+    const subtotalCents = serviceCents + weightCents + bagCents;
     // Rounded once, at the end. Rounding each line then summing produces a
     // total that disagrees with its own breakdown by a cent or two.
     const gstCents = Math.round(subtotalCents / GST_DIVISOR);
@@ -213,9 +283,10 @@ export const pricingService = {
         gst: centsToMoney(gstCents),
         totalIncGst: centsToMoney(subtotalCents + gstCents),
         caveat:
-          input.expectedAreaM2 === null
+          areaPriced && input.expectedAreaM2 === null
             ? 'The area comes from the purchase order, so this shows the call-out fee only. The final invoice will include it.'
             : 'Estimate on your agreed rates. Additional services raised on site — contamination, extra load time — are quoted and approved separately.',
+        areaPriced,
       },
       /*
        * ⚠️ The card that was USED, not the one that was asked for. Where a
@@ -232,6 +303,8 @@ export const pricingService = {
         scheduleFrom: rate.scheduleFrom,
         serviceCharge: rate.serviceCharge,
         ratePerM2: rate.ratePerM2,
+        weightChargeKind,
+        weightCharge,
       },
     };
   },

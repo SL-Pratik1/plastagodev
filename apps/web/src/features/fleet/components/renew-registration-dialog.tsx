@@ -1,6 +1,16 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import type { Vehicle } from '@plastago/shared';
-import { Alert, Button, Checkbox, Dialog, Field, Input, Spinner, useToast } from '@plastago/ui';
+import { REGO_PERIODS, type RegoPeriod, type Vehicle } from '@plastago/shared';
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Dialog,
+  Field,
+  Input,
+  Select,
+  Spinner,
+  useToast,
+} from '@plastago/ui';
 import { useEffect } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import * as z from 'zod';
@@ -28,6 +38,8 @@ import { formatDate } from '@/lib/format';
  */
 const FormSchema = z
   .object({
+    /** Matt, 21 Oct: the length "can vary" — chosen on every renewal. */
+    periodMonths: z.enum(['12', '6', '3']),
     logCost: z.boolean(),
     amountExGst: z.string(),
   })
@@ -51,11 +63,24 @@ export interface RenewRegistrationDialogProps {
   vehicle: Vehicle;
 }
 
-/** The new expiry, computed the same way the service does. */
+/**
+ * The new expiry, computed the same way the service does — including the
+ * month-end clamp: six months from 31 August is 28 February, not 3 March.
+ */
 function rollForward(expiresOn: string, months: number): string {
-  const next = new Date(`${expiresOn}T00:00:00Z`);
-  next.setUTCMonth(next.getUTCMonth() + months);
-  return next.toISOString().slice(0, 10);
+  const [year = 0, month = 1, day = 1] = expiresOn.split('-').map(Number);
+  const target = new Date(Date.UTC(year, month - 1 + months, 1));
+  const lastDay = new Date(
+    Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target.toISOString().slice(0, 10);
+}
+
+/** The vehicle's current length when it is one of the three on offer, else 12. */
+function defaultPeriod(vehicle: Vehicle): FormValues['periodMonths'] {
+  const current = String(vehicle.registrationPeriodMonths);
+  return current === '6' || current === '3' ? current : '12';
 }
 
 export function RenewRegistrationDialog({ open, onClose, vehicle }: RenewRegistrationDialogProps) {
@@ -70,28 +95,31 @@ export function RenewRegistrationDialog({ open, onClose, vehicle }: RenewRegistr
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(FormSchema),
-    defaultValues: { logCost: true, amountExGst: '' },
+    defaultValues: { periodMonths: defaultPeriod(vehicle), logCost: true, amountExGst: '' },
     mode: 'onTouched',
   });
 
   useEffect(() => {
     if (!open) return;
-    reset({ logCost: true, amountExGst: '' });
-  }, [open, reset]);
+    reset({ periodMonths: defaultPeriod(vehicle), logCost: true, amountExGst: '' });
+  }, [open, reset, vehicle]);
 
   const logCost = useWatch({ control, name: 'logCost' });
-  const newExpiry = rollForward(vehicle.registrationExpiresOn, vehicle.registrationPeriodMonths);
+  const months = Number(useWatch({ control, name: 'periodMonths' })) as RegoPeriod;
+  const newExpiry = rollForward(vehicle.registrationExpiresOn, months);
 
   const onSubmit = async (values: FormValues) => {
+    const chosen = Number(values.periodMonths) as RegoPeriod;
     try {
       await renew.mutateAsync({
         id: vehicle.id,
+        periodMonths: chosen,
         expense: values.logCost
           ? {
               incurredOn: todayInSydney(),
               odometerKm: vehicle.odometerKm,
               kind: 'registration',
-              description: `Registration renewal to ${formatDate(newExpiry)}`,
+              description: `Registration renewal (${String(chosen)} months) to ${formatDate(newExpiry)}`,
               amountExGst: Number(values.amountExGst).toFixed(2),
               supplier: null,
             }
@@ -99,7 +127,7 @@ export function RenewRegistrationDialog({ open, onClose, vehicle }: RenewRegistr
       });
       toast.success(
         `${vehicle.rego} registered to ${formatDate(newExpiry)}`,
-        values.logCost ? 'The cost is on the expense log.' : undefined,
+        `${String(chosen)}-month renewal saved.${values.logCost ? ' The cost is on the expense log.' : ''}`,
       );
       onClose();
     } catch (caught) {
@@ -143,6 +171,24 @@ export function RenewRegistrationDialog({ open, onClose, vehicle }: RenewRegistr
         className="space-y-4 py-2"
         noValidate
       >
+        <Field
+          id="renewal-period"
+          label="Registration length"
+          required
+          error={errors.periodMonths?.message}
+          hint="What you paid for this time. The next renewal starts from this length."
+        >
+          {(aria) => (
+            <Select {...aria} {...register('periodMonths')}>
+              {REGO_PERIODS.map((period) => (
+                <option key={period} value={String(period)}>
+                  {period} months
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-muted/40 p-4">
           <span className="text-sm">
             <span className="block text-xs text-muted-foreground">Expires now</span>
@@ -160,14 +206,13 @@ export function RenewRegistrationDialog({ open, onClose, vehicle }: RenewRegistr
             </span>
           </span>
           <span className="ml-auto text-xs text-muted-foreground">
-            {vehicle.registrationPeriodMonths}-month registration
+            {months}-month registration
           </span>
         </div>
 
         <Alert variant="neutral" title="Counted from the old expiry, not from today">
-          A late renewal does not quietly shorten the next period — you paid for{' '}
-          {vehicle.registrationPeriodMonths} months, so you get {vehicle.registrationPeriodMonths}{' '}
-          months.
+          A late renewal does not quietly shorten the next period — you paid for {months} months,
+          so you get {months} months.
         </Alert>
 
         <label className="flex items-center gap-2 text-sm">

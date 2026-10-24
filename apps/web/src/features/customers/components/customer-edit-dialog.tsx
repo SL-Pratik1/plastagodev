@@ -1,5 +1,15 @@
 import { AccountUpdateSchema, type Account, type AccountUpdate } from '@plastago/shared';
-import { Alert, Button, Dialog, Field, Input, Spinner, Textarea, useToast } from '@plastago/ui';
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Dialog,
+  Field,
+  Input,
+  Spinner,
+  Textarea,
+  useToast,
+} from '@plastago/ui';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import { useUpdateCustomer } from '@/features/customers/queries';
@@ -34,10 +44,13 @@ export function CustomerEditDialog({
   account,
   open,
   onClose,
+  onChangeCommercialTerms,
 }: {
   account: Account;
   open: boolean;
   onClose: () => void;
+  /** Opens the commercial-terms edit. Absent for a role that may not change them. */
+  onChangeCommercialTerms?: (() => void) | undefined;
 }) {
   const toast = useToast();
   const update = useUpdateCustomer(account.id);
@@ -76,6 +89,7 @@ export function CustomerEditDialog({
       accountsContactName: accounts?.name ?? '',
       accountsContactEmail: accounts?.email ?? '',
       certificateEmail: account.certificateEmail ?? '',
+      receivesCertificates: account.receivesCertificates,
       notes: account.notes,
     },
   });
@@ -123,9 +137,23 @@ export function CustomerEditDialog({
       }
     >
       <div className="space-y-5">
+        {/*
+          Matt, 21 Oct: this banner sent people to a Preferences tab where
+          nothing could be changed. It now opens the real edit, or says who can.
+        */}
         <Alert variant="neutral" title="Commercial terms are not on this form">
-          The rate card, payment terms, PO policy and capture mode stay as they were agreed. Change
-          those from the Preferences tab or by raising it with the account owner.
+          The rate card, payment terms, PO policy and capture mode have their own edit.{' '}
+          {onChangeCommercialTerms ? (
+            <button
+              type="button"
+              onClick={onChangeCommercialTerms}
+              className="focus-ring rounded font-medium text-primary underline underline-offset-4"
+            >
+              Change commercial terms
+            </button>
+          ) : (
+            'A Super Admin or Operations can change them under Preferences → Commercial terms.'
+          )}
         </Alert>
 
         <section className="space-y-4">
@@ -237,11 +265,35 @@ export function CustomerEditDialog({
             </Field>
           </div>
 
+          {/* Matt, 21 Oct — certificates go "only to certain customers". */}
+          <div>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border p-3">
+              <Checkbox
+                id="ce-certificates"
+                className="mt-0.5"
+                aria-invalid={errors.receivesCertificates !== undefined}
+                {...register('receivesCertificates')}
+              />
+              <span>
+                <span className="block text-sm font-medium">Receives certificates</span>
+                <span className="block text-xs text-muted-foreground">
+                  A Certificate of Recycling is issued and emailed after each crane-weighed pickup,
+                  and their portal shows Certificates. Needs m² + kg and a certificate email.
+                </span>
+              </span>
+            </label>
+            {errors.receivesCertificates?.message !== undefined && (
+              <p role="alert" className="mt-1 text-xs font-medium text-destructive">
+                {errors.receivesCertificates.message}
+              </p>
+            )}
+          </div>
+
           <Field
             id="ce-certificate-email"
             label="Recycling certificates emailed to"
             error={errors.certificateEmail?.message}
-            hint="Often a compliance or sustainability mailbox. Blank falls back to the accounts contact."
+            hint="Often a compliance or sustainability mailbox. Needed when they receive certificates."
           >
             {(aria) => (
               <Input

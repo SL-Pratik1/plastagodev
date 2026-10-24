@@ -2,8 +2,11 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import {
   FREIGHT_ITEM_LABELS,
   FREIGHT_ITEMS,
+  hasAtMostTwoDecimals,
+  pickupName,
   type JobDraft,
   type Place,
+  type PricePreview,
 } from '@plastago/shared';
 import {
   Alert,
@@ -63,12 +66,11 @@ import { isServiceError } from '@/services/service-error';
  */
 const FormSchema = z.object({
   accountId: z.string().min(1, 'Choose the account being invoiced'),
-  /* ── The address, typed on the job (Matt, 0:29) ───────────────────── */
-  siteName: z
-    .string()
-    .trim()
-    .min(1, 'Name the place — drivers navigate by it')
-    .max(120, 'Keep the site name under 120 characters'),
+  /*
+   * ── The address, typed on the job (Matt, 0:29) ─────────────────────
+   * No site name: it is built from the lot and street (`pickupName`) —
+   * Matt, 21 Oct: *"They're named whatever the address is."*
+   */
   lotNumber: z.string().trim().max(30, 'A lot number is at most 30 characters'),
   addressLine: z
     .string()
@@ -97,10 +99,15 @@ const FormSchema = z.object({
   readyDate: z.string().min(1, 'Enter the date the customer says it will be ready'),
   serviceLevel: z.enum(['standard', 'urgent']),
   freightItem: z.enum(FREIGHT_ITEMS),
+  /*
+   * Exact, to the hundredth — Matt, 21 Oct: *"if we expect 972.62"*. Whether
+   * it is required depends on the customer's rate card; see `areaRequired`.
+   */
   expectedAreaM2: z.coerce
     .number()
     .min(0, 'Square metres cannot be negative')
-    .max(100000, 'That looks too large — check the figure'),
+    .max(100000, 'That looks too large — check the figure')
+    .refine(hasAtMostTwoDecimals, 'At most two decimal places, e.g. 972.62'),
   bagCount: z.coerce
     .number()
     .int('Whole bags only')
@@ -129,7 +136,6 @@ export function AdminJobCreatePage() {
     resolver: zodResolver(FormSchema),
     defaultValues: {
       accountId: '',
-      siteName: '',
       lotNumber: '',
       addressLine: '',
       placeId: '',
@@ -241,6 +247,44 @@ export function AdminJobCreatePage() {
 
   const preview = useJobPricePreview(priceDraft);
 
+  /*
+   * Whether this pickup is charged per m², as the rate engine priced it for
+   * this account, suburb, freight item and date. A fixed weight charge or a
+   * hook bin does not need the area, so it is optional there; a purchase order
+   * supplies its own.
+   *
+   * Remembered per (account, suburb, freight item, date, order) so typing the
+   * bags — which re-asks for a price — does not flip the box's hint and
+   * required mark while the new estimate loads. Updated during render, not in
+   * an effect, so a stale answer is never painted.
+   */
+  const basisKey = [accountId, placeId, freightItem, readyDate, purchaseOrderId].join('|');
+  const [lastBasis, setLastBasis] = useState<{ key: string; areaPriced: boolean } | null>(null);
+  if (
+    preview.data &&
+    (lastBasis?.key !== basisKey || lastBasis.areaPriced !== preview.data.areaPriced)
+  ) {
+    setLastBasis({ key: basisKey, areaPriced: preview.data.areaPriced });
+  }
+  const areaPriced =
+    preview.data?.areaPriced ?? (lastBasis?.key === basisKey ? lastBasis.areaPriced : undefined);
+
+  const areaRequired = !lockedToOrder && areaPriced === true;
+  /*
+   * Fixed price (a fixed weight charge or a hook bin): the m² is still asked,
+   * as optional — kept on the job for the record, never used for the price
+   * (23 Oct). Only an estimate that has said so counts as fixed.
+   */
+  const fixedPrice = areaPriced === false;
+
+  const customerName = (
+    accounts.data?.find((option) => option.value === accountId)?.label ?? 'This customer'
+  ).replace(/\s*\([A-Z]{3}\d{3}\)$/, '');
+
+  const lotNumber = useWatch({ control, name: 'lotNumber' });
+  const addressLine = useWatch({ control, name: 'addressLine' });
+  const builtName = pickupName(lotNumber ?? '', addressLine ?? '');
+
   /** How far the estimate runs past the chosen order's value, in dollars — or null. */
   const overOrderBy = useMemo(() => {
     if (!preview.data || !chosenOrder?.amountExGst) return null;
@@ -268,26 +312,35 @@ export function AdminJobCreatePage() {
 
     const current = getValues();
     const fill = (
-      name: 'siteName' | 'lotNumber' | 'addressLine' | 'siteContactName' | 'siteContactMobile',
+      name: 'lotNumber' | 'addressLine' | 'siteContactName' | 'siteContactMobile',
       value: string | null,
     ) => {
       if (value && !current[name]) setValue(name, value, { shouldValidate: true });
     };
 
+    // The pickup's name follows from these two — see `pickupName`.
     fill('lotNumber', chosenOrder.lotNumber);
     fill('addressLine', chosenOrder.addressLine);
-    // The same rule a call-up uses: drivers find a new-estate house by its lot.
-    fill(
-      'siteName',
-      chosenOrder.lotNumber ? `Lot ${chosenOrder.lotNumber}` : chosenOrder.addressLine,
-    );
     fill('siteContactName', chosenOrder.siteSupervisorName);
     fill('siteContactMobile', chosenOrder.siteSupervisorMobile);
   }, [chosenOrder, getValues, setValue]);
 
   const onSubmit = async (values: FormValues) => {
+    // Exact m² from every customer not on a fixed price (Matt, 21 Oct). The
+    // server holds the same rule; this just says it at the field first.
+    if (areaRequired && !(Number(values.expectedAreaM2) > 0)) {
+      setError('expectedAreaM2', {
+        type: 'required',
+        message: 'Enter the exact square metres, e.g. 972.62 — this pickup is charged per m²',
+      });
+      return;
+    }
+
     const draft: JobDraft = {
       ...values,
+      siteName: pickupName(values.lotNumber, values.addressLine),
+      // Matt, 21 Oct: *"There will never be a crane on site."*
+      craneAvailable: false,
       // '' is what an unselected <select> gives; the contract wants null.
       purchaseOrderId: values.purchaseOrderId || null,
       /*
@@ -383,24 +436,9 @@ export function AdminJobCreatePage() {
                 {/*
                   The address, typed on the job — no site to pick from.
                   Matt, 0:29: *"the job should just have the site on it as part
-                  of the details for the job."*
+                  of the details for the job."* Its name is built from the lot
+                  and street below (21 Oct), so there is no name box.
                 */}
-                <Field
-                  id="job-site-name"
-                  label="Site name"
-                  required
-                  error={errors.siteName?.message}
-                  hint="What the office and the driver will call it."
-                >
-                  {(aria) => (
-                    <Input
-                      {...aria}
-                      placeholder="Lot 214 Allambie Circuit"
-                      {...register('siteName')}
-                    />
-                  )}
-                </Field>
-
                 <Field id="job-lot" label="Lot number" error={errors.lotNumber?.message}>
                   {(aria) => <Input {...aria} placeholder="214" {...register('lotNumber')} />}
                 </Field>
@@ -419,6 +457,17 @@ export function AdminJobCreatePage() {
                     />
                   )}
                 </Field>
+
+                <p className="text-sm text-muted-foreground sm:col-span-2" aria-live="polite">
+                  {builtName === '' ? (
+                    'The pickup is named from its lot and street address.'
+                  ) : (
+                    <>
+                      This pickup will be called{' '}
+                      <span className="font-medium text-foreground">{builtName}</span>
+                    </>
+                  )}
+                </p>
 
                 {/*
                   Picked, not typed: the suburb carries the zone that prices the
@@ -508,7 +557,7 @@ export function AdminJobCreatePage() {
                         >
                           {order.poNumber}
                           {order.expectedAreaM2 === null
-                            ? ' · fixed price'
+                            ? ' · no m²'
                             : ` · ${String(order.expectedAreaM2)} m²`}
                           {order.suburb === null ? '' : ` · ${order.suburb}`}
                           {order.usedByJobNumber === null
@@ -522,9 +571,12 @@ export function AdminJobCreatePage() {
 
                 {chosenOrder !== null && (
                   <Alert variant="info" title={`Booking against ${chosenOrder.poNumber}`}>
-                    {chosenOrder.expectedAreaM2 === null
-                      ? 'This order states a fixed price and no square metres, so the job prices on the call-out fee. That is correct — do not guess an area.'
-                      : `The job will be priced on ${String(chosenOrder.expectedAreaM2)} m² and ${String(chosenOrder.bagAllowance ?? 0)} bag(s) from the order.`}
+                    {/*
+                      What the ORDER supplies, and what that means for the
+                      price. It used to say a no-m² order "prices on the
+                      call-out fee", which a fixed weight charge made untrue.
+                    */}
+                    {orderNote(chosenOrder.expectedAreaM2, chosenOrder.bagAllowance, areaPriced)}
                   </Alert>
                 )}
                 <Field
@@ -590,16 +642,24 @@ export function AdminJobCreatePage() {
                   )}
                 </Field>
 
+                {/*
+                  Shown for every customer (23 Oct): required when the price
+                  is m² × rate, optional on a fixed price, where it is kept
+                  for the record and changes nothing.
+                */}
                 <Field
                   id="job-area"
                   label="Expected m²"
+                  required={areaRequired}
                   error={errors.expectedAreaM2?.message}
                   hint={
                     lockedToOrder
                       ? chosenOrder?.expectedAreaM2 === null
-                        ? 'The order states a fixed price and no area.'
+                        ? 'This order has no m² — set it on the job once you know it.'
                         : 'From the purchase order.'
-                      : 'Board installed — this is what gets priced.'
+                      : fixedPrice
+                        ? 'Optional — a fixed price, so this is kept for the record and not used for the price.'
+                        : 'The exact figure, e.g. 972.62 — it is what gets invoiced.'
                   }
                 >
                   {(aria) => (
@@ -607,9 +667,9 @@ export function AdminJobCreatePage() {
                       {...aria}
                       {...register('expectedAreaM2')}
                       type="number"
-                      inputMode="numeric"
+                      inputMode="decimal"
                       min={0}
-                      step={1}
+                      step={0.01}
                       /*
                         Locked, not hidden. The server takes the area from the
                         order regardless, and an editable box whose value is
@@ -769,15 +829,7 @@ export function AdminJobCreatePage() {
                   </span>
                 </label>
 
-                <label className="flex items-start gap-2.5 text-sm">
-                  <Checkbox className="mt-0.5" {...register('craneAvailable')} />
-                  <span>
-                    <span className="block font-medium">Crane on site</span>
-                    <span className="block text-xs text-muted-foreground">
-                      Changes how the load comes out.
-                    </span>
-                  </span>
-                </label>
+                {/* No "Crane on site": Matt, 21 Oct — *"There will never be a crane on site."* */}
               </CardContent>
             </Card>
           </div>
@@ -813,10 +865,24 @@ export function AdminJobCreatePage() {
                   </div>
                 ) : preview.error ? (
                   <Alert variant="destructive" title="Could not price this job">
-                    {describeError(preview.error).detail}
+                    {/*
+                      The server's own reason where it gave one on a field —
+                      "Hook bin 15 m³ is not on this customer's rate card…" —
+                      rather than the generic "some details need correcting".
+                    */}
+                    {(isServiceError(preview.error)
+                      ? Object.values(preview.error.fieldErrors)[0]
+                      : undefined) ?? describeError(preview.error).detail}
                   </Alert>
                 ) : preview.data ? (
                   <>
+                    {/* How this was priced, in words — why the m² box is there or not. */}
+                    <PricingNote
+                      preview={preview.data}
+                      customerName={customerName}
+                      orderWithoutArea={chosenOrder !== null && chosenOrder.expectedAreaM2 === null}
+                    />
+
                     <p className="text-xs text-muted-foreground">
                       {preview.data.zoneLabel} zone
                     </p>
@@ -906,4 +972,97 @@ export function AdminJobCreatePage() {
       </form>
     </div>
   );
+}
+
+/**
+ * How the rate engine priced this pickup, said in words at the top of the
+ * Estimate — so the office can see why the m² box is there or not.
+ *
+ * Read off the preview's own lines (`hook-bin`, `weight-charge`) and its
+ * `areaPriced` flag, never recomputed here: the server is the one that knows
+ * which rate card and zone line priced the job.
+ */
+function PricingNote({
+  preview,
+  customerName,
+  orderWithoutArea,
+}: {
+  preview: PricePreview;
+  customerName: string;
+  /** A purchase order is chosen and states no m². */
+  orderWithoutArea: boolean;
+}) {
+  const card = preview.rateCardLabel;
+  const zone = preview.zoneLabel;
+  // "The rate card for Wisdom" — and the card's name only when it says something new.
+  const whose = (
+    <>
+      The rate card for {customerName}
+      {card === customerName ? '' : <> (<em>{card}</em>)</>}
+    </>
+  );
+  const bin = preview.lines.find((line) => line.code === 'hook-bin');
+  const fixed = preview.lines.find((line) => line.code === 'weight-charge');
+  const perM2 = preview.lines.find((line) => line.code === 'area-charge');
+
+  if (bin) {
+    return (
+      <Alert variant="info" title="Hook bin price">
+        <strong>{bin.description}</strong> has a set price of{' '}
+        <strong>{formatMoney(bin.unitRate)}</strong> in <strong>{zone}</strong> on the{' '}
+        <em>{card}</em> rate card. The m² does not change it.
+      </Alert>
+    );
+  }
+
+  if (fixed) {
+    return (
+      <Alert variant="info" title="Fixed price">
+        {whose} has a fixed weight charge of{' '}
+        <strong>{formatMoney(fixed.unitRate)}</strong> in <strong>{zone}</strong>. The m² does not
+        change the price, so it is optional — kept for the record only.
+      </Alert>
+    );
+  }
+
+  if (preview.areaPriced && orderWithoutArea) {
+    return (
+      <Alert variant="warning" title="Waiting for the m²">
+        This purchase order has no m², so the m² charge is missing from this estimate. Once you
+        know it, use <strong>Set m²</strong> on the job — its invoice waits for it.
+      </Alert>
+    );
+  }
+
+  return (
+    <Alert variant="info" title="Priced per m²">
+      {whose} charges{' '}
+      {perM2 ? <strong>${perM2.unitRate} per m²</strong> : 'per m²'} in <strong>{zone}</strong>.
+      Enter the exact m² — the invoice is worked out from it.
+    </Alert>
+  );
+}
+
+/** What a chosen purchase order supplies, and what that means for the price. */
+function orderNote(
+  areaM2: number | null,
+  bags: number | null,
+  areaPriced: boolean | undefined,
+): string {
+  const bagText = !bags ? 'no bags' : `${String(bags)} bag${bags === 1 ? '' : 's'}`;
+
+  if (areaM2 === null) {
+    if (areaPriced === false) {
+      return `This order has no m² — that's fine, this pickup is a fixed price on the customer's rate card. Bags from the order: ${bagText}.`;
+    }
+    if (areaPriced === true) {
+      return 'This order has no m², and this customer is charged per m² — set the m² on the job once you know it. The invoice waits for it.';
+    }
+    return 'This order has no m². The Estimate shows how the job is priced.';
+  }
+
+  if (areaPriced === false) {
+    return `The m² (${String(areaM2)}) and ${bagText} come from the order. This pickup is a fixed price, so the m² is kept on the job but does not change the price.`;
+  }
+  return `The job will be priced on ${String(areaM2)} m² and ${bagText} from the order.`;
 }

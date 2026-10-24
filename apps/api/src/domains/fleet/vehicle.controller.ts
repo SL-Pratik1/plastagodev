@@ -12,6 +12,7 @@ import type {
   SetVehicleActiveSchema,
   VehicleDefectParamsSchema,
   VehicleIdParamsSchema,
+  VehiclePreStartsQuerySchema,
 } from './vehicle.schemas.js';
 
 /** Controller layer — HTTP in, HTTP out. No business rules, no Mongoose. */
@@ -32,6 +33,18 @@ export const vehicleController = {
     res: Response,
   ): Promise<void> => {
     res.json(await vehicleService.list(req.validated.query, callerFrom(req)));
+  },
+
+  preStarts: async (
+    req: ValidatedRequest<{
+      params: typeof VehicleIdParamsSchema;
+      query: typeof VehiclePreStartsQuerySchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(
+      await vehicleService.preStarts(req.validated.params.id, req.validated.query, callerFrom(req)),
+    );
   },
 
   get: async (
@@ -139,6 +152,7 @@ export const vehicleController = {
         req.validated.params.id,
         req.validated.body.expense,
         callerFrom(req),
+        req.validated.body.periodMonths,
       ),
     );
   },

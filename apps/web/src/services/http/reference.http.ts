@@ -2,6 +2,10 @@ import type { ApiClient } from '@plastago/api-client';
 import {
   API_PREFIX,
   DashboardSummarySchema,
+  DriverListOptionSchema,
+  DriverListsSchema,
+  type DriverListName,
+  type DriverListWrite,
   DriverListItemSchema,
   DriverProfileSchema,
   InvitationResultSchema,
@@ -561,6 +565,18 @@ export function createHttpSettingsService(api: ApiClient): SettingsService {
         api.request(`${base}/invoice-templates/${encodeURIComponent(id)}/preview`, {
           method: 'POST',
           schema: TemplatePreviewSchema,
+        }),
+      ),
+
+    driverLists: () =>
+      viaService(() => api.request(`${base}/driver-lists`, { schema: DriverListsSchema })),
+
+    saveDriverList: (list: DriverListName, input: DriverListWrite) =>
+      viaService(() =>
+        api.request(`${base}/driver-lists/${list}`, {
+          method: 'PUT',
+          body: input,
+          schema: z.array(DriverListOptionSchema),
         }),
       ),
   };

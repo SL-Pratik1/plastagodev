@@ -6,7 +6,7 @@ import {
   sentMessages,
   staffContacts,
 } from './helpers/fake-outbound.js';
-import type { JobDraft, Role } from '@plastago/shared';
+import { JobAreaUpdateSchema, type JobDraft, type Role } from '@plastago/shared';
 import { createFakeJobRepository } from './helpers/fake-jobs.js';
 import { ZONE, createFakeSettingsRepository } from './helpers/fake-settings.js';
 
@@ -36,9 +36,23 @@ let accountFound = true;
 
 // GETTERS, not values: `vi.mock` factories hoist above every import, so the
 // fakes do not exist yet when these run.
+/** "Set m²" (23 Oct) — the job's stored state, and the m² written to it. */
+let areaState = {
+  status: 'booked' as string,
+  invoiceStatus: 'not-invoiced' as string,
+  expectedAreaM2: null as number | null,
+  rateCardId: 'clarendon-domaine' as string | null,
+};
+const areaWrites: Array<{ jobId: string; expectedAreaM2: number }> = [];
+
 vi.mock('../src/domains/jobs/job.repository.js', () => ({
   get jobRepository() {
     return repo.repository;
+  },
+  areaStateOf: () => Promise.resolve({ ...areaState }),
+  setExpectedArea: (jobId: string, expectedAreaM2: number) => {
+    areaWrites.push({ jobId, expectedAreaM2 });
+    return Promise.resolve(areaState.invoiceStatus === 'not-invoiced');
   },
   writeQuotedCharges: (
     jobId: string,
@@ -46,6 +60,18 @@ vi.mock('../src/domains/jobs/job.repository.js', () => ({
   ) => {
     quotedCharges.push({ jobId, lines });
     return Promise.resolve();
+  },
+}));
+
+/** Runs the service asked to check for completion. */
+const closedRuns: string[] = [];
+
+vi.mock('../src/domains/dispatch/run.repository.js', () => ({
+  runRepository: {
+    closeIfFinished: (runId: string) => {
+      closedRuns.push(runId);
+      return Promise.resolve(false);
+    },
   },
 }));
 
@@ -122,6 +148,17 @@ vi.mock('../src/integrations/maps.js', async (importOriginal) => {
   return { ...actual, getMapsProvider: () => ({ name: 'test', ...maps }) };
 });
 
+/** A completed job held for its m² is invoiced once it is set — see `setArea`. */
+const autoInvoiced: string[] = [];
+vi.mock('../src/domains/invoices/invoice.service.js', () => ({
+  invoiceService: {
+    invoiceCompletedJob: (jobId: string) => {
+      autoInvoiced.push(jobId);
+      return Promise.resolve({ held: [], invoiced: [104_200], sent: [104_200] });
+    },
+  },
+}));
+
 const { jobService } = await import('../src/domains/jobs/job.service.js');
 const { notificationService } = await import('../src/domains/notifications/notification.service.js');
 const { setMessagingProvidersForTests } = await import('../src/integrations/messaging.js');
@@ -182,6 +219,7 @@ beforeEach(() => {
   clearOutbound();
   setMessagingProvidersForTests(recordingProviders());
   quotedCharges.length = 0;
+  closedRuns.length = 0;
   repo = createFakeJobRepository();
   settings = createFakeSettingsRepository();
   accountScope = null;
@@ -613,7 +651,7 @@ describe('rescheduling', () => {
    * ⚠️ The date moved and the job stayed on its run — on a driver's sheet for
    * a day the site is not ready. It comes off now, and the driver is texted.
    */
-  describe('a job on a run whose day is before the new ready date', () => {
+  describe('a job on a run', () => {
     const DRIVER_ID = 'drv0000000000000000000d1';
     const RUN = { id: 'run0000000000000000000r1', date: '2026-09-25', name: 'Run 7 — North' };
 
@@ -663,25 +701,111 @@ describe('rescheduling', () => {
           audience: 'planning',
           href: '/admin/dispatch',
           exceptUserId: OFFICE.userId,
-          subjectKey: `job-off-run:${id}:${RUN.id}`,
+          subjectKey: `job-off-run:${id}:${RUN.id}:2026-09-30`,
         }),
       );
     });
 
-    it('leaves it on a run it can still make', async () => {
+    /*
+     * Matt, 21 Oct: *"if a job is on a run and it gets rescheduled, it needs
+     * to obviously automatically be removed from the run."* Any date change —
+     * earlier too — because the allocator has a gap to fill either way.
+     */
+    it('takes it off even when the new date is earlier than the run', async () => {
       const id = repo.seed({
         status: 'assigned',
         driverId: DRIVER_ID,
         run: { ...RUN, date: '2026-09-30' },
       });
 
-      // Ready earlier than the run's day: the truck can still collect it then.
+      await jobService.reschedule(id, '2026-09-25', OFFICE);
+
+      expect(repo.calls.releases).toEqual([{ id, runId: RUN.id }]);
+      expect(repo.runOf(id)).toBeNull();
+    });
+
+    it('leaves it alone when the date did not actually change', async () => {
+      const id = repo.seed({
+        status: 'assigned',
+        driverId: DRIVER_ID,
+        readyDate: '2026-09-25',
+        run: RUN,
+      });
+
       await jobService.reschedule(id, '2026-09-25', OFFICE);
 
       expect(repo.calls.releases).toHaveLength(0);
-      expect(repo.runOf(id)).not.toBeNull();
       expect(sentMessages.filter((message) => message.channel === 'sms')).toHaveLength(0);
     });
+
+    it('tells the allocator how many stops the run has left', async () => {
+      const notifyOffice = vi.spyOn(notificationService, 'notifyOffice').mockResolvedValue([]);
+      repo.seed({ status: 'assigned', driverId: DRIVER_ID, run: RUN });
+      const id = repo.seed({ status: 'assigned', driverId: DRIVER_ID, run: RUN });
+
+      await jobService.reschedule(id, '2026-09-30', OFFICE);
+
+      expect(notifyOffice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('rescheduled — taken off Run 7 — North') as string,
+          body: expect.stringContaining('now has 1 stop.') as string,
+        }),
+      );
+    });
+
+    it('checks whether the run is now complete', async () => {
+      const id = repo.seed({ status: 'assigned', driverId: DRIVER_ID, run: RUN });
+
+      await jobService.reschedule(id, '2026-09-30', OFFICE);
+
+      expect(closedRuns).toEqual([RUN.id]);
+    });
+  });
+});
+
+/*
+ * "Unarrive" — Matt, 21 Oct: *"we're not going to charge a futile. We just
+ * need to unarrive… just to stop that timer."*
+ */
+describe('unarriving a job', () => {
+  const DRIVER_ID = 'drv0000000000000000000d1';
+  const RUN = { id: 'run0000000000000000000r1', date: '2026-09-25', name: 'Run 7 — North' };
+
+  it('takes an arrived job off its run, back to the jobs to place', async () => {
+    const id = repo.seed({ status: 'arrived', driverId: DRIVER_ID, run: RUN });
+
+    await jobService.unarrive(id, OFFICE);
+
+    expect(repo.calls.releases).toEqual([{ id, runId: RUN.id }]);
+    expect(repo.statusOf(id)).toBe('booked');
+    expect(repo.calls.events.map((event) => event.label)).toEqual(['Unarrived']);
+    expect(repo.calls.events[0]?.detail).toContain('no charge');
+  });
+
+  it('alerts the allocator, and checks whether the run is now complete', async () => {
+    const notifyOffice = vi.spyOn(notificationService, 'notifyOffice').mockResolvedValue([]);
+    const id = repo.seed({ status: 'arrived', driverId: DRIVER_ID, run: RUN });
+
+    await jobService.unarrive(id, OFFICE);
+
+    expect(notifyOffice).toHaveBeenCalledWith(
+      expect.objectContaining({ audience: 'planning', href: '/admin/dispatch' }),
+    );
+    expect(closedRuns).toEqual([RUN.id]);
+  });
+
+  it('refuses a job that is not marked arrived', async () => {
+    const id = repo.seed({ status: 'in-transit', driverId: DRIVER_ID, run: RUN });
+
+    await expect(jobService.unarrive(id, OFFICE)).rejects.toMatchObject({ status: 409 });
+    expect(repo.calls.releases).toHaveLength(0);
+  });
+
+  it('refuses a customer', async () => {
+    const id = repo.seed({ status: 'arrived', driverId: DRIVER_ID, run: RUN });
+
+    await expect(jobService.unarrive(id, CUSTOMER_ADMIN)).rejects.toMatchObject({ status: 403 });
+    expect(repo.calls.releases).toHaveLength(0);
   });
 });
 
@@ -1144,5 +1268,125 @@ describe('resolving the pin on a booking', () => {
     await jobService.preview(draft(), OFFICE);
 
     expect(maps.geocode).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * Matt, 21 Oct: exact m² from everyone not on a fixed price. Held by the two
+ * booking FORMS only — a call-up or a futile rebook keeps whatever area its
+ * source had, so neither can be stranded by this rule.
+ */
+describe('the exact-m² rule on the booking forms', () => {
+  it('refuses a form booking with no area on a per-m² rate card', async () => {
+    await expect(
+      jobService.create(draft({ expectedAreaM2: 0 }), OFFICE, undefined, { requireArea: true }),
+    ).rejects.toMatchObject({ status: 422, issues: [{ path: 'expectedAreaM2' }] });
+
+    // Refused before anything was written or numbered.
+    expect(quotedCharges).toHaveLength(0);
+  });
+
+  it('accepts a form booking with an exact area', async () => {
+    await expect(
+      jobService.create(draft({ expectedAreaM2: 972.62 }), OFFICE, undefined, {
+        requireArea: true,
+      }),
+    ).resolves.toMatchObject({ jobNumber: expect.any(Number) });
+  });
+
+  it('leaves the other booking paths as they were', async () => {
+    await expect(
+      jobService.create(draft({ expectedAreaM2: 0 }), OFFICE, 'call-up'),
+    ).resolves.toBeDefined();
+  });
+
+  it('does not ask for an area on a hook bin, which has its own set price', async () => {
+    // The fake card offers no bins, so the bin is refused for THAT reason —
+    // on the freight item, never on the m².
+    await expect(
+      jobService.create(draft({ expectedAreaM2: 0, freightItem: 'hook-bin-5' }), OFFICE, undefined, {
+        requireArea: true,
+      }),
+    ).rejects.toMatchObject({ status: 422, issues: [{ path: 'freightItem' }] });
+  });
+});
+
+/**
+ * "Set m²" on the office job page (23 Oct) — the figure a purchase order left
+ * out. The job is re-priced on the card that priced it, and a completed job
+ * held for it goes out to be invoiced.
+ */
+describe('setting the m² a purchase order left out (23 Oct)', () => {
+  const ALLOCATOR = { ...OFFICE, roles: ['allocator'] as Role[] };
+
+  beforeEach(() => {
+    areaState = {
+      status: 'booked',
+      invoiceStatus: 'not-invoiced',
+      expectedAreaM2: null,
+      rateCardId: 'clarendon-domaine',
+    };
+    areaWrites.length = 0;
+    autoInvoiced.length = 0;
+    vi.spyOn(jobService, 'reprice').mockResolvedValue({
+      jobNumber: 61_300,
+      previous: '220.00',
+      next: '375.62',
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sets it, re-prices the job on its own card, and says so on the timeline', async () => {
+    const id = repo.seed();
+
+    const result = await jobService.setArea(id, 972.62, OFFICE);
+
+    expect(areaWrites).toEqual([{ jobId: id, expectedAreaM2: 972.62 }]);
+    expect(jobService.reprice).toHaveBeenCalledWith(id, 'clarendon-domaine', expect.anything());
+    expect(repo.calls.events.at(-1)).toMatchObject({ label: 'm² set', detail: '972.62 m²' });
+    expect(result).toEqual({ totalExGst: '375.62', invoiced: [], held: [] });
+    // Still open — nothing to invoice yet.
+    expect(autoInvoiced).toEqual([]);
+  });
+
+  it('invoices a completed job that was waiting only for its m²', async () => {
+    const id = repo.seed({ status: 'completed' });
+    areaState.status = 'completed';
+
+    const result = await jobService.setArea(id, 412.5, OFFICE);
+
+    expect(autoInvoiced).toEqual([id]);
+    expect(result.invoiced).toEqual([104_200]);
+  });
+
+  it('refuses once the job is on an invoice — a figure the customer was sent never moves', async () => {
+    const id = repo.seed({ status: 'completed' });
+    areaState.invoiceStatus = 'invoiced';
+
+    await expect(jobService.setArea(id, 412.5, OFFICE)).rejects.toMatchObject({ status: 409 });
+    expect(areaWrites).toEqual([]);
+  });
+
+  it('refuses a cancelled job', async () => {
+    const id = repo.seed({ status: 'cancelled' });
+    areaState.status = 'cancelled';
+
+    await expect(jobService.setArea(id, 412.5, OFFICE)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('refuses the allocator, who does not see prices', async () => {
+    const id = repo.seed();
+
+    await expect(jobService.setArea(id, 412.5, ALLOCATOR)).rejects.toMatchObject({ status: 403 });
+    expect(areaWrites).toEqual([]);
+  });
+
+  it('takes an exact figure only — two decimal places, more than 0', () => {
+    expect(JobAreaUpdateSchema.safeParse({ expectedAreaM2: 972.62 }).success).toBe(true);
+    expect(JobAreaUpdateSchema.safeParse({ expectedAreaM2: 972.625 }).success).toBe(false);
+    expect(JobAreaUpdateSchema.safeParse({ expectedAreaM2: 0 }).success).toBe(false);
   });
 });

@@ -6,7 +6,7 @@ import {
   FUTILE_DECIDED_EVENT_LABELS,
   WEIGHT_BASIS_HINTS,
   WEIGHT_BASIS_LABELS,
-  type ExceptionReason,
+  type OfficeCancelReason,
 } from '@plastago/shared';
 import {
   Alert,
@@ -17,6 +17,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  ConfirmDialog,
   DatePicker,
   Dialog,
   EmptyState,
@@ -35,6 +36,7 @@ import {
   BanIcon,
   CalendarIcon,
   FileIcon,
+  RotateCcwIcon,
   ImageIcon,
   MapPinIcon,
   ReceiptIcon,
@@ -54,9 +56,16 @@ import { PageHeader } from '@/components/page-header';
 import { EvidenceGrid } from '@/components/queues/evidence-grid';
 import { useAuth } from '@/features/auth/auth-context';
 import { JobCommentThreads } from '@/features/jobs/components/comment-thread';
+import { SetAreaDialog } from '@/features/jobs/components/set-area-dialog';
 import { useRaiseInvoiceForJob } from '@/features/invoices/queries';
-import { useCancelJob, useJob, useRescheduleJob } from '@/features/jobs/queries';
-import { useSettings } from '@/features/settings/queries';
+import {
+  useCancelJob,
+  useJob,
+  useRescheduleJob,
+  useUnarriveJob,
+} from '@/features/jobs/queries';
+import { reasonLabel } from '@/features/settings/driver-list-labels';
+import { useDriverLists, useSettings } from '@/features/settings/queries';
 import { todayInSydney } from '@/lib/business-day';
 import { describeError } from '@/lib/error-message';
 import {
@@ -120,6 +129,8 @@ export function AdminJobDetailPage() {
   const { data: job, error, isPending, refetch } = useJob(jobId);
   const cancelJob = useCancelJob();
   const rescheduleJob = useRescheduleJob();
+  const unarriveJob = useUnarriveJob();
+  const [unarriveOpen, setUnarriveOpen] = useState(false);
   const raiseInvoice = useRaiseInvoiceForJob();
 
   /*
@@ -135,12 +146,15 @@ export function AdminJobDetailPage() {
    */
   const seesPricing = can('pricing:view');
   const invoicePrefix = useSettings().data?.invoicing.invoiceNumberPrefix ?? '';
+  // A driver's reason is a key into the editable list (21 Oct); this is its wording.
+  const driverLists = useDriverLists().data;
 
   const [cancelOpen, setCancelOpen] = useState(false);
-  const [cancelReason, setCancelReason] = useState<ExceptionReason>('customer-request');
+  const [cancelReason, setCancelReason] = useState<OfficeCancelReason>('customer-request');
   const [cancelNote, setCancelNote] = useState('');
   const [rescheduleOpen, setRescheduleOpen] = useState(false);
   const [newReadyDate, setNewReadyDate] = useState('');
+  const [areaOpen, setAreaOpen] = useState(false);
 
   const visibleTabs: readonly TabKey[] = seesPricing
     ? TABS
@@ -198,6 +212,16 @@ export function AdminJobDetailPage() {
   // Only things someone has to ACT on. See the note on the tab trigger.
   const complianceGaps = countComplianceGaps(job);
 
+  /*
+   * "Set m²" (23 Oct): a job with no m² — its purchase order had none — can
+   * have it set until it reaches an invoice. Priced per m², it cannot be
+   * invoiced without it, so the page says so up front.
+   */
+  const hasArea = job.expectedAreaM2 !== null && job.expectedAreaM2 > 0;
+  const canSetArea =
+    seesPricing && !hasArea && job.invoiceStatus === 'not-invoiced' && job.status !== 'cancelled';
+  const waitingForArea = canSetArea && job.areaPriced && job.status !== 'futile';
+
   const isTerminal = (TERMINAL as readonly string[]).includes(job.status);
   // The review wrote its decision on this job's timeline — see the futile alert.
   const futileDecided = job.events.some((event) =>
@@ -247,12 +271,26 @@ export function AdminJobDetailPage() {
     }
   };
 
+  const doUnarrive = async () => {
+    try {
+      await unarriveJob.mutateAsync(job.id);
+      toast.success(
+        'Arrival cleared',
+        `No charge. Job #${String(job.jobNumber)} is back with the jobs to place, and the allocator has been alerted.`,
+      );
+      setUnarriveOpen(false);
+    } catch (caught) {
+      const described = describeError(caught);
+      toast.error(described.title, described.detail);
+    }
+  };
+
   const doReschedule = async () => {
     try {
       await rescheduleJob.mutateAsync({ id: job.id, readyDate: newReadyDate });
       toast.success(
         'Ready date updated',
-        `Target date recalculated from ${formatDate(newReadyDate)}.`,
+        `Target date recalculated from ${formatDate(newReadyDate)}. If it was on a run, it has come off it and the allocator has been alerted.`,
       );
       setRescheduleOpen(false);
     } catch (caught) {
@@ -307,6 +345,21 @@ export function AdminJobDetailPage() {
         }
         actions={
           <>
+            {/*
+              "Unarrive" (Matt, 21 Oct) — the driver marked arrived and then
+              could not do the job. Only an arrived job has an arrival to undo.
+            */}
+            {job.status === 'arrived' && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setUnarriveOpen(true);
+                }}
+              >
+                <RotateCcwIcon aria-hidden />
+                Unarrive
+              </Button>
+            )}
             {!isTerminal && (
               <>
                 <Button
@@ -367,10 +420,27 @@ export function AdminJobDetailPage() {
         }
       />
 
+      {waitingForArea && (
+        <Alert variant="warning" title="No m² on this job">
+          {job.accountName} is charged per m², so this job can't be invoiced until its m² is set
+          {job.status === 'completed' ? ' — its invoice is waiting for it' : ''}.{' '}
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-1"
+            onClick={() => {
+              setAreaOpen(true);
+            }}
+          >
+            Set m²
+          </Button>
+        </Alert>
+      )}
+
       {job.status === 'futile' && (
         <Alert variant="destructive" title="Futile pickup">
           The driver attended and could not collect
-          {job.exceptionReason ? ` — ${EXCEPTION_REASON_LABELS[job.exceptionReason]}` : ''}. A $120
+          {job.exceptionReason ? ` — ${reasonLabel(driverLists, job.exceptionReason)}` : ''}. A $120
           futile fee applies whether the job is rescheduled or cancelled, and the driver’s photos
           and the GPS on the timeline are what make that stand up.
           {/*
@@ -410,7 +480,7 @@ export function AdminJobDetailPage() {
       {job.status === 'cancelled' && job.exceptionReason !== null && (
         <Alert
           variant="neutral"
-          title={`Cancelled — ${EXCEPTION_REASON_LABELS[job.exceptionReason]}`}
+          title={`Cancelled — ${reasonLabel(driverLists, job.exceptionReason)}`}
         >
           {job.exceptionNote ?? 'No note was left when this job was cancelled.'}
         </Alert>
@@ -536,7 +606,25 @@ export function AdminJobDetailPage() {
                   <DetailList
                     columns={1}
                     items={[
-                      { label: 'Expected area', value: formatArea(job.expectedAreaM2) },
+                      {
+                        label: 'Expected area',
+                        value: canSetArea ? (
+                          <span className="flex flex-wrap items-center gap-2">
+                            <span className="text-muted-foreground">Not set</span>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setAreaOpen(true);
+                              }}
+                            >
+                              Set m²
+                            </Button>
+                          </span>
+                        ) : (
+                          formatArea(job.expectedAreaM2)
+                        ),
+                      },
                       { label: 'Recycling bags', value: job.bagCount },
                       /*
                        * Matt, 07:37 — what came off site against what the order
@@ -939,6 +1027,19 @@ export function AdminJobDetailPage() {
         </TabsPanel>
       </Tabs>
 
+      {/* ── Unarrive ─────────────────────────────────────────────────────── */}
+      <ConfirmDialog
+        open={unarriveOpen}
+        onCancel={() => {
+          setUnarriveOpen(false);
+        }}
+        onConfirm={() => void doUnarrive()}
+        title={`Unarrive job #${String(job.jobNumber)}?`}
+        description="The arrival is cleared and the on-site clock stops. Nothing is charged. The job comes off its run and goes back to the allocator to place again."
+        confirmLabel="Unarrive"
+        pending={unarriveJob.isPending}
+      />
+
       {/* ── Reschedule ───────────────────────────────────────────────────── */}
       <Dialog
         open={rescheduleOpen}
@@ -946,7 +1047,7 @@ export function AdminJobDetailPage() {
           setRescheduleOpen(false);
         }}
         title={`Reschedule job #${String(job.jobNumber)}`}
-        description="The target date recalculates as the new ready date plus 5 business days."
+        description="The target date recalculates as the new ready date plus 5 business days. If the job is on a run, it comes off it and the allocator is alerted."
         footer={
           <>
             <Button
@@ -990,6 +1091,15 @@ export function AdminJobDetailPage() {
       </Dialog>
 
       {/* ── Cancel ───────────────────────────────────────────────────────── */}
+      <SetAreaDialog
+        job={job}
+        invoicePrefix={invoicePrefix}
+        open={areaOpen}
+        onClose={() => {
+          setAreaOpen(false);
+        }}
+      />
+
       <Dialog
         open={cancelOpen}
         onClose={() => {
@@ -1026,7 +1136,7 @@ export function AdminJobDetailPage() {
                 {...aria}
                 value={cancelReason}
                 onChange={(event) => {
-                  setCancelReason(event.target.value as ExceptionReason);
+                  setCancelReason(event.target.value as OfficeCancelReason);
                 }}
               >
                 {EXCEPTION_REASONS.map((reason) => (

@@ -106,6 +106,22 @@ const accountSchema = new Schema(
      */
     certificateEmail: { type: String, default: null, lowercase: true, trim: true },
 
+    /**
+     * Matt, 21 Oct: *"an option needs to be added to customers whether they
+     * receive certificates or not."* Ticked, a certificate is issued and emailed
+     * at tip-off; not ticked, nothing is sent and the portal hides certificates.
+     * Needs m² + kg and a certificate email — see the account service.
+     */
+    receivesCertificates: { type: Boolean, required: true, default: false },
+
+    /**
+     * Matt, 21 Oct — the onboarding tick when the account was opened. On: their
+     * administrator completes the details and director's guarantee and signs the
+     * terms before using the portal. Off: already covered by a signed contract.
+     * Absent on accounts opened before then, which were never asked.
+     */
+    termsRequired: { type: Boolean, required: true, default: false },
+
     preferredPickupWindow: { type: String, default: null, trim: true },
 
     /**

@@ -12,6 +12,9 @@ export const IDEMPOTENCY_HEADER = 'idempotency-key';
 /** A UUID v4, which is what the sync protocol specifies the client generates. */
 const KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Longer than any request runs. A claim older than this lost its request. */
+export const ABANDONED_CLAIM_MS = 2 * 60_000;
+
 function fingerprint(body: unknown): string {
   // Stable enough for the purpose: the client replays the SAME serialised body
   // from its outbox, so key order does not drift between attempts.
@@ -112,6 +115,7 @@ async function replay(
     status: 'in-flight' | 'complete';
     responseStatus: number | null;
     responseBody: unknown;
+    createdAt: Date;
   }>();
 
   if (!existing) {
@@ -132,6 +136,27 @@ async function replay(
   }
 
   if (existing.status === 'in-flight') {
+    /*
+     * ⚠️ A claim older than any request runs is one whose request died — the
+     * API restarted under it, as every deploy does. It used to refuse every
+     * retry for the key's seven days, so a completion caught mid-restart never
+     * landed and the office saw the job on site (21 Oct). The retry takes the
+     * claim over and runs; the routes behind this are idempotent by design.
+     * Conditional on the old claim, so two retries cannot both take it.
+     */
+    if (existing.createdAt.getTime() < Date.now() - ABANDONED_CLAIM_MS) {
+      const taken = await IdempotencyKeyModel.updateOne(
+        { userId, key, status: 'in-flight', createdAt: existing.createdAt },
+        { $set: { createdAt: new Date() } },
+      );
+      if (taken.modifiedCount === 1) {
+        log.warn({ key, userId }, 'took over an abandoned idempotency claim');
+        capture(key, userId, res);
+        next();
+        return;
+      }
+    }
+
     // The first attempt is still running. Answering now would either duplicate
     // the work or report a result that has not happened yet.
     log.info({ key, userId }, 'replay arrived while the original is still running');

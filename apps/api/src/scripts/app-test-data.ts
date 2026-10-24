@@ -46,6 +46,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // Safe to load first: mongoose reads none of our environment.
 import mongoose from 'mongoose';
+// Type-only, so it is erased and loads nothing ahead of the environment below.
+import type { ZoneRateInput } from '@plastago/shared';
 
 const args = new Set(process.argv.slice(2));
 const LIVE = args.has('--live');
@@ -221,14 +223,32 @@ async function addMissingPrices(caller: { roles: readonly ['super-admin']; accou
   const zones = await settingsRepository.activeZones();
   const missing: string[] = [];
 
-  const rates = [];
+  const rates: ZoneRateInput[] = [];
   for (const zone of zones) {
     const current = await settingsRepository.resolveRate('default', zone.id, PRICE_FROM);
     if (current) {
-      rates.push({ zoneId: zone.id, serviceCharge: current.serviceCharge, ratePerM2: current.ratePerM2 });
+      // Every figure carried over, the fixed weight charge and hook bins included.
+      rates.push({
+        zoneId: zone.id,
+        serviceCharge: current.serviceCharge,
+        ratePerM2: current.ratePerM2,
+        weightChargeKind: current.weightChargeKind,
+        fixedWeightCharge: current.fixedWeightCharge,
+        hookBin5: current.hookBin5,
+        hookBin10: current.hookBin10,
+        hookBin15: current.hookBin15,
+      });
     } else {
       const standard = STANDARD_PRICES[zone.slug] ?? STANDARD_PRICES.sydney;
-      rates.push({ zoneId: zone.id, ...(standard as { serviceCharge: string; ratePerM2: string }) });
+      rates.push({
+        zoneId: zone.id,
+        ...(standard as { serviceCharge: string; ratePerM2: string }),
+        weightChargeKind: 'per-m2',
+        fixedWeightCharge: null,
+        hookBin5: null,
+        hookBin10: null,
+        hookBin15: null,
+      });
       missing.push(`${zone.label} ($${standard?.serviceCharge} + $${standard?.ratePerM2}/m²)`);
     }
   }
@@ -272,6 +292,7 @@ async function pickPlace() {
           zoneId: String(place.zoneId),
           expectedAreaM2: 120,
           bagCount: 10,
+          freightItem: 'plasterboard-bagged',
           onDate,
         });
       }
@@ -322,6 +343,8 @@ async function ensureAccount(
       accountsContactEmail: '',
       sendInvitation: false,
       notes: NOTE,
+      receivesCertificates: false,
+      certificateEmail: '',
     },
     { name: ACTOR },
   );

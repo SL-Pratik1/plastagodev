@@ -1,8 +1,10 @@
 import {
+  ChooseVehicleSchema,
   CompletionSchema,
   ContaminationReportSchema,
   DefectReportSchema,
   FutileReportSchema,
+  UnarriveSchema,
   PreStartSubmissionSchema,
   SiteRiskAssessmentSchema,
   StatusUpdateSchema,
@@ -136,6 +138,16 @@ driverRouter.post(
   asyncHandler(driverController.markFutile),
 );
 
+/*
+ * "Unarrive" (Matt, 21 Oct) — arrived, then could not do the job. No charge:
+ * the arrival is cleared and the job goes back to the allocator.
+ */
+driverRouter.post(
+  '/jobs/:jobId/unarrive',
+  validate({ params: JobIdParamsSchema, body: UnarriveSchema }),
+  asyncHandler(driverController.unarrive),
+);
+
 /**
  * Reports a contaminated load.
  *
@@ -147,6 +159,24 @@ driverRouter.post(
   '/jobs/:jobId/contamination',
   validate({ params: JobIdParamsSchema, body: ContaminationReportSchema }),
   asyncHandler(driverController.markContaminated),
+);
+
+/** The hazards, controls, reasons and contamination types, as Settings holds them. */
+driverRouter.get('/lists', asyncHandler(driverController.lists));
+
+/* ── Today's vehicle (Matt, 21 Oct) ──────────────────────────────────────── */
+
+/** In-service vehicles, with who has each today. Read before the pre-start. */
+driverRouter.get('/vehicles', asyncHandler(driverController.vehicleOptions));
+
+/**
+ * The vehicle the driver is on today. One driver per vehicle per day — a taken
+ * vehicle is refused with who has it.
+ */
+driverRouter.post(
+  '/vehicle',
+  validate({ body: ChooseVehicleSchema }),
+  asyncHandler(driverController.chooseVehicle),
 );
 
 /* ── M4.8 · pre-start and site risk ──────────────────────────────────────── */

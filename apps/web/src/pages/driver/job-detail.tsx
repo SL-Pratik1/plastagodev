@@ -1,6 +1,6 @@
 import {
   CONTAMINATION_EXTENT_LABELS,
-  CONTAMINATION_TYPE_LABELS,
+  optionLabel,
   DRIVER_TRANSITION_LABELS,
   LOAD_TYPE_LABELS,
   type DriverContamination,
@@ -14,6 +14,7 @@ import {
   Badge,
   Card,
   CardContent,
+  ConfirmDialog,
   Dialog,
   ErrorState,
   Field,
@@ -33,6 +34,7 @@ import {
   MessageSquareIcon,
   NavigationIcon,
   PhoneIcon,
+  RotateCcwIcon,
   ScaleIcon,
   Share2Icon,
   ShieldAlertIcon,
@@ -47,10 +49,13 @@ import { jobPhotos, missingRequiredPhotos } from '@/components/driver/photo-rule
 import {
   useCompleteJob,
   useDriverJob,
+  useDriverLists,
   useSendDriverMessage,
+  useUnarrive,
   useUpdateStatus,
 } from '@/features/driver/queries';
 import { currentPosition } from '@/lib/geolocation';
+import { cachedDriverLists } from '@/offline/driver-lists-cache';
 import { formatBookedArea } from '@/components/driver/area';
 
 /**
@@ -116,6 +121,8 @@ function JobScreen({ job }: { job: DriverJob }) {
 
   const updateStatus = useUpdateStatus();
   const completeJob = useCompleteJob();
+  const unarrive = useUnarrive();
+  const [unarriveOpen, setUnarriveOpen] = useState(false);
   const sendMessage = useSendDriverMessage();
 
   const [completeOpen, setCompleteOpen] = useState(false);
@@ -169,10 +176,14 @@ function JobScreen({ job }: { job: DriverJob }) {
         return;
       }
 
-      toast.success(
-        to === 'arrived' ? 'On site — clock started' : DRIVER_TRANSITION_LABELS[to],
-        position === null ? 'No GPS fix — the time is still recorded.' : undefined,
-      );
+      /*
+       * No word about GPS. It used to add "No GPS fix — the time is still
+       * recorded" whenever the phone gave no position — every tap, for a
+       * driver who does not share location, and it read as a fault. Matt
+       * asked for location to stop mattering (21 Oct); the position is still
+       * saved whenever the phone offers one.
+       */
+      toast.success(to === 'arrived' ? 'On site — clock started' : DRIVER_TRANSITION_LABELS[to]);
     } catch {
       toast.error('Could not save that', 'Try again — nothing was lost.');
     }
@@ -188,6 +199,26 @@ function JobScreen({ job }: { job: DriverJob }) {
       setCompleteOpen(false);
       setNote('');
       toast.success('Job complete', 'Queued for the office. You can keep working.');
+      await navigate('/driver');
+    } catch {
+      toast.error('Could not save that', 'Try again — nothing was lost.');
+    }
+  };
+
+  /*
+   * "Unarrive" (Matt, 21 Oct): arrived, then could not do the job — no futile,
+   * no charge, just stop the clock. The job leaves this run, so the driver
+   * goes back to their sheet.
+   */
+  const doUnarrive = async () => {
+    const position = await currentPosition();
+    try {
+      await unarrive.mutateAsync({
+        jobId: job.jobId,
+        input: { occurredAt: new Date().toISOString(), position },
+      });
+      setUnarriveOpen(false);
+      toast.success('Arrival undone', 'No charge. The job went back to the office to plan again.');
       await navigate('/driver');
     } catch {
       toast.error('Could not save that', 'Try again — nothing was lost.');
@@ -513,8 +544,33 @@ function JobScreen({ job }: { job: DriverJob }) {
               )}
             </div>
           )}
+
+          {job.status === 'arrived' && (
+            <button
+              type="button"
+              onClick={() => {
+                setUnarriveOpen(true);
+              }}
+              className="focus-ring flex w-full items-center justify-center gap-2 rounded-lg py-2 text-sm text-muted-foreground underline-offset-4 hover:underline"
+            >
+              <RotateCcwIcon aria-hidden className="size-4" />
+              Unarrive — I can&apos;t do this job
+            </button>
+          )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={unarriveOpen}
+        onCancel={() => {
+          setUnarriveOpen(false);
+        }}
+        onConfirm={() => void doUnarrive()}
+        title="Unarrive this job?"
+        description="Your arrival is cleared and the clock stops. Nothing is charged. The job comes off your run and goes back to the office to plan again."
+        confirmLabel="Unarrive"
+        pending={unarrive.isPending}
+      />
 
       {finished && (
         <Alert variant="success" title="Job complete">
@@ -689,13 +745,15 @@ function JobScreen({ job }: { job: DriverJob }) {
  * to the office through the message button below.
  */
 function ContaminationReported({ report }: { report: DriverContamination }) {
+  const types = (useDriverLists().data ?? cachedDriverLists()).contaminationTypes;
   const at = new Date(report.reportedAt).toLocaleTimeString('en-AU', {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
   });
   const what = [
-    report.type === null ? null : CONTAMINATION_TYPE_LABELS[report.type],
+    // A switched-off type keeps its wording (21 Oct); a key never listed shows as itself.
+    report.type === null ? null : (optionLabel(types, report.type) ?? report.type),
     report.extent === null ? null : CONTAMINATION_EXTENT_LABELS[report.extent].split(' —')[0],
   ].filter((part): part is string => part !== null && part !== undefined);
 

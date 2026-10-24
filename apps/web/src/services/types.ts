@@ -1,6 +1,9 @@
 import type { DriverRunService } from './driver-run.types.js';
 import type {
   Account,
+  AccountCommercialTermsDraft,
+  CommercialTermsImpact,
+  CommercialTermsResult,
   ChangeRequestDecision,
   ChangeRequestItem,
   AccountDraft,
@@ -11,6 +14,10 @@ import type {
   AdditionalServiceCreate,
   AdditionalServiceSetting,
   AdditionalServiceUpdate,
+  DriverListName,
+  DriverListOption,
+  DriverLists,
+  DriverListWrite,
   AllocationBoard,
   AwaitingCallUp,
   AwaitingPoChaseResult,
@@ -56,10 +63,17 @@ import type {
   VehicleDefectState,
   VehicleDraft,
   VehicleExpenseDraft,
+  RegoPeriod,
   VehicleListItem,
+  VehiclePreStart,
   ZoneVolumeReport,
-  ExceptionReason,
+  OfficeCancelReason,
+  JobAreaResult,
   InvoiceListItem,
+  InvoiceResendResult,
+  PortalTermsStatus,
+  TermsLibrary,
+  TermsSigning,
   RaisedInvoice,
   Job,
   JobComment,
@@ -333,6 +347,16 @@ export interface CustomerService {
    * and that refusal arrives as a 409 the caller has to show.
    */
   setAccountType: (accountId: string, accountType: AccountType) => Promise<Account>;
+  /**
+   * The rate card, payment terms, PO policy and capture mode (Matt, 21 Oct).
+   * `commercialTermsImpact` is what saving would touch, read before the office
+   * confirms.
+   */
+  commercialTermsImpact: (accountId: string) => Promise<CommercialTermsImpact>;
+  setCommercialTerms: (
+    accountId: string,
+    input: AccountCommercialTermsDraft,
+  ) => Promise<CommercialTermsResult>;
   /*
    * The per-site exception is gone with the sites (Matt, 0:29).
    *
@@ -366,8 +390,15 @@ export interface JobService {
   purchaseOrders: (accountId: string, search?: string) => Promise<BookablePurchaseOrder[]>;
   create: (draft: JobDraft) => Promise<JobListItem>;
   /** M2.4 — cancel with a structured reason, never free text. */
-  cancel: (id: string, reason: ExceptionReason, note: string) => Promise<void>;
+  cancel: (id: string, reason: OfficeCancelReason, note: string) => Promise<void>;
+  /** Undo an arrival — no charge, off the run, back to "to place" (21 Oct). */
+  unarrive: (id: string) => Promise<void>;
   reschedule: (id: string, readyDate: string) => Promise<void>;
+  /**
+   * Set the m² a purchase order left out (23 Oct). Re-prices the job; a
+   * completed job held for it is invoiced there and then.
+   */
+  setArea: (id: string, expectedAreaM2: number) => Promise<JobAreaResult>;
   /**
    * M2.11 / M8.6 · W50, W102 — post to one of the job's three threads.
    *
@@ -396,6 +427,8 @@ export interface DispatchService {
    */
   createRun: (input: CreateRunInput) => Promise<Run>;
   renameRun: (runId: string, name: string) => Promise<void>;
+  /** The run's planned date — runs are not tied to one day (21 Oct). */
+  setRunDate: (runId: string, date: string) => Promise<Run>;
   deleteRun: (runId: string) => Promise<void>;
   /** Adds a job to the end of a run. Moving between runs is add-then-remove. */
   addJobToRun: (runId: string, jobId: string) => Promise<void>;
@@ -465,6 +498,8 @@ export interface InvoiceService {
   /** I1 — re-push to Xero after a failure. */
   /** Resolves with what Xero actually did — `pushed: false` is a rejection, not an error. */
   retryXero: (id: string) => Promise<{ pushed: boolean; message: string | null }>;
+  /** Emails a sent invoice again (21 Oct) — invoices now go out on completion. */
+  resend: (id: string) => Promise<InvoiceResendResult>;
 }
 
 /**
@@ -496,6 +531,8 @@ export interface DriverService {
 export interface VehicleService {
   list: (query: ListQuery) => Promise<ListResult<VehicleListItem>>;
   get: (id: string) => Promise<Vehicle>;
+  /** Its pre-start checks, a page at a time; `filters.date` narrows to one day (23 Oct). */
+  preStarts: (id: string, query: ListQuery) => Promise<ListResult<VehiclePreStart>>;
   create: (draft: VehicleDraft) => Promise<VehicleListItem>;
   update: (id: string, draft: VehicleDraft) => Promise<Vehicle>;
   /**
@@ -530,7 +567,12 @@ export interface VehicleService {
    * they have the amount in front of them. Making them come back later is asking
    * for a cost per kilometre that quietly understates.
    */
-  renewRegistration: (id: string, expense?: VehicleExpenseDraft | null) => Promise<Vehicle>;
+  renewRegistration: (
+    id: string,
+    expense?: VehicleExpenseDraft | null,
+    /** 3, 6 or 12 — chosen on this renewal (Matt, 21 Oct). */
+    periodMonths?: RegoPeriod,
+  ) => Promise<Vehicle>;
 }
 
 /**
@@ -645,6 +687,16 @@ export interface SettingsService {
    * put one customer's job and amounts in front of whoever is editing.
    */
   previewTemplate: (id: string) => Promise<TemplatePreview>;
+
+  /* ── What the driver app asks (Matt, 21 Oct) ─────────────────────────── */
+
+  /** All four lists, switched-off options included — old records read their wording here. */
+  driverLists: () => Promise<DriverLists>;
+  /**
+   * Save one list. The server refuses a removed or reworded option: retiring
+   * is switching off, new wording is a new option.
+   */
+  saveDriverList: (list: DriverListName, input: DriverListWrite) => Promise<DriverListOption[]>;
 }
 
 /**
@@ -1011,6 +1063,24 @@ export interface SuburbService {
   restore: (id: string) => Promise<Place>;
 }
 
+/**
+ * Terms and conditions (Matt, 21 Oct). The office uploads versions and reads
+ * what each customer signed; a customer administrator reads and signs.
+ */
+export interface TermsService {
+  library: () => Promise<TermsLibrary>;
+  /** Uploads a PDF as the next version. Resolves with the library. */
+  upload: (file: File) => Promise<TermsLibrary>;
+  versionUrl: (version: number) => Promise<string>;
+  /** The terms with the signing page appended, for one customer. */
+  signedCopyUrl: (accountId: string) => Promise<string>;
+  status: () => Promise<PortalTermsStatus>;
+  /** The customer's own signed copy — their account only (23 Oct). */
+  mySignedCopyUrl: () => Promise<string>;
+  currentDocument: () => Promise<{ url: string; fileName: string; version: number }>;
+  sign: (input: TermsSigning) => Promise<PortalTermsStatus>;
+}
+
 export interface Services {
   readonly auth: AuthService;
   readonly lookups: LookupService;
@@ -1031,6 +1101,8 @@ export interface Services {
   readonly xero: XeroService;
   readonly queues: QueueService;
   readonly portal: CustomerPortalService;
+  /** Matt, 21 Oct — the terms library, and the customer's signing. */
+  readonly terms: TermsService;
   /**
    * M4 — the driver surface.
    *

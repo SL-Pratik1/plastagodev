@@ -1,4 +1,4 @@
-import { CONTAMINATION_EXTENTS, CONTAMINATION_TYPES } from '@plastago/shared';
+import { CONTAMINATION_EXTENTS } from '@plastago/shared';
 import { Schema, model } from 'mongoose';
 
 export const CONTAMINATION_REPORTS_COLLECTION = 'contaminationreports';
@@ -26,7 +26,8 @@ const contaminationReportSchema = new Schema(
     /** REFERENCE → `jobs._id`. Unique: a job takes one report. */
     jobId: { type: Schema.Types.ObjectId, required: true, ref: 'Job' },
 
-    type: { type: String, required: true, enum: CONTAMINATION_TYPES },
+    // A key from the editable contamination list (Matt, 21 Oct) — no enum.
+    type: { type: String, required: true },
     extent: { type: String, required: true, enum: CONTAMINATION_EXTENTS },
     /** What the driver typed, if anything. */
     note: { type: String, default: null, trim: true },

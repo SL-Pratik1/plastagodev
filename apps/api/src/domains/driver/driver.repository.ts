@@ -5,10 +5,12 @@ import {
   type ContaminationType,
   type DefectSeverity,
   type DriverRun,
+  type FreightItem,
   type JobStatus,
   type LoadType,
   type PhotoPurpose,
   type RunStop,
+  type VehicleType,
   type WeightBasis,
 } from '@plastago/shared';
 import mongoose from 'mongoose';
@@ -25,7 +27,7 @@ import {
 } from '../jobs/job.model.js';
 import { RunModel, RunTipOffModel } from '../dispatch/run.model.js';
 import { toDecimal128 } from '../../lib/money.js';
-import { VehicleModel } from '../fleet/vehicle.model.js';
+import { VehicleChoiceModel, VehicleModel } from '../fleet/vehicle.model.js';
 import { parseContaminationNote } from './contamination-note.js';
 import { ContaminationReportModel } from './contamination-report.model.js';
 import { VehicleDefectModel } from './defect.model.js';
@@ -69,6 +71,8 @@ interface RawJobForDriver {
   gateHours: string | null;
   inductionRequired: boolean;
   craneAvailable: boolean;
+  /** Bagged or hand load as booked — the driver's load-type default. */
+  freightItem: FreightItem;
   siteContactName: string | null;
   siteContactMobile: string | null;
   poNumber: string | null;
@@ -348,6 +352,8 @@ export const driverRepository = {
     docketReference: string;
     docketPhotoKey: string | null;
     tippedOffAt: Date;
+    vehicleId: string | null;
+    vehicleRego: string | null;
   }): Promise<boolean> {
     // One docket per run (Matt, 43:50). An upsert rather than an insert so a
     // phone replaying a queued action does not create a second one.
@@ -360,6 +366,8 @@ export const driverRepository = {
           docketNumber: input.docketReference || null,
           docketPhotoKey: input.docketPhotoKey,
           tippedOffAt: input.tippedOffAt,
+          vehicleId: input.vehicleId ? new mongoose.Types.ObjectId(input.vehicleId) : null,
+          vehicleRego: input.vehicleRego,
         },
       },
       { upsert: true },
@@ -682,6 +690,22 @@ export const driverRepository = {
    * itself changed — see `markFutile`. Keyed on the event's `status`, which is
    * structured, rather than its label, which is copy somebody may reword.
    */
+  /**
+   * Has this driver already unarrived this job? An unarrive takes the job off
+   * their run, so a replay of it can no longer find the job on their sheet —
+   * and must still read as the success it was.
+   */
+  async wasUnarrivedBy(jobId: string, driverName: string): Promise<boolean> {
+    if (!mongoose.isValidObjectId(jobId)) return false;
+
+    const found = await JobEventModel.exists({
+      jobId: new mongoose.Types.ObjectId(jobId),
+      label: 'Unarrived',
+      actor: driverName,
+    });
+    return found !== null;
+  },
+
   async hasStatusEvent(jobId: string, status: JobStatus): Promise<boolean> {
     if (!mongoose.isValidObjectId(jobId)) return false;
 
@@ -703,7 +727,8 @@ export const driverRepository = {
     if (!mongoose.isValidObjectId(jobId)) return 0;
 
     const rows = await JobPhotoModel.find(
-      { jobId: new mongoose.Types.ObjectId(jobId) },
+      // Only photos whose bytes arrived: a failed upload is not evidence.
+      { jobId: new mongoose.Types.ObjectId(jobId), uploadedAt: { $ne: null } },
       { slot: 1, caption: 1 },
     ).lean<Array<{ slot?: string | null; caption: string }>>();
 
@@ -846,7 +871,7 @@ export const driverRepository = {
    *
    * ── Why this is the only source of the rego ──────────────────────────────
    * A pre-start and a defect are records about a TRUCK, and the office finds
-   * them again by matching the plate exactly. The phone cannot be trusted to
+   * them again through the vehicle they link to. The phone cannot be trusted to
    * supply it: a run sheet cached before the pairing existed carries a blank,
    * and a blank files the record against no truck at all — it survives in the
    * collection but never appears on any vehicle screen, which is worse than
@@ -854,47 +879,199 @@ export const driverRepository = {
    *
    * A truck taken off the road has its driver cleared (`vehicle.service.ts`),
    * so an assignment found here is always a usable one.
+   *
+   * ⚠️ Now only the fallback for app builds without the vehicle picker — the
+   * daily choice below comes first (Matt, 21 Oct).
    */
-  async findAssignedVehicle(driverName: string): Promise<{ rego: string; label: string } | null> {
+  async findAssignedVehicle(
+    driverName: string,
+  ): Promise<{ id: string; rego: string; label: string } | null> {
     const name = driverName.trim();
     if (name.length === 0) return null;
 
     const vehicle = await VehicleModel.findOne({ assignedDriverName: name })
       .select({ rego: 1, label: 1 })
-      .lean<{ rego: string; label: string }>();
+      .lean<{ _id: mongoose.Types.ObjectId; rego: string; label: string }>();
 
-    return vehicle ? { rego: vehicle.rego, label: vehicle.label } : null;
+    return vehicle
+      ? { id: vehicle._id.toHexString(), rego: vehicle.rego, label: vehicle.label }
+      : null;
+  },
+
+  /** The vehicle this driver chose for the day, or null. */
+  async findVehicleChoice(
+    driverId: string,
+    date: string,
+  ): Promise<{ id: string; rego: string; label: string } | null> {
+    if (!mongoose.isValidObjectId(driverId)) return null;
+
+    const choice = await VehicleChoiceModel.findOne({
+      date,
+      driverId: new mongoose.Types.ObjectId(driverId),
+    }).lean<{ vehicleId: mongoose.Types.ObjectId }>();
+    if (!choice) return null;
+
+    const vehicle = await VehicleModel.findById(choice.vehicleId)
+      .select({ rego: 1, label: 1 })
+      .lean<{ _id: mongoose.Types.ObjectId; rego: string; label: string }>();
+
+    return vehicle
+      ? { id: vehicle._id.toHexString(), rego: vehicle.rego, label: vehicle.label }
+      : null;
+  },
+
+  /** Who chose this vehicle for the day, or null when nobody has. */
+  async vehicleChosenBy(
+    vehicleId: string,
+    date: string,
+  ): Promise<{ driverId: string; driverName: string } | null> {
+    if (!mongoose.isValidObjectId(vehicleId)) return null;
+
+    const choice = await VehicleChoiceModel.findOne({
+      date,
+      vehicleId: new mongoose.Types.ObjectId(vehicleId),
+    }).lean<{ driverId: mongoose.Types.ObjectId; driverName: string }>();
+
+    return choice ? { driverId: choice.driverId.toHexString(), driverName: choice.driverName } : null;
+  },
+
+  /** The fleet vehicle with this plate, or null. */
+  async findVehicleByRego(rego: string): Promise<{ id: string; rego: string; label: string } | null> {
+    const plate = rego.trim().toUpperCase();
+    if (plate.length === 0) return null;
+
+    const vehicle = await VehicleModel.findOne({ rego: plate })
+      .select({ rego: 1, label: 1 })
+      .lean<{ _id: mongoose.Types.ObjectId; rego: string; label: string }>();
+
+    return vehicle
+      ? { id: vehicle._id.toHexString(), rego: vehicle.rego, label: vehicle.label }
+      : null;
+  },
+
+  async findVehicle(
+    id: string,
+  ): Promise<{ id: string; rego: string; label: string; active: boolean } | null> {
+    if (!mongoose.isValidObjectId(id)) return null;
+
+    const vehicle = await VehicleModel.findById(id)
+      .select({ rego: 1, label: 1, active: 1 })
+      .lean<{ _id: mongoose.Types.ObjectId; rego: string; label: string; active: boolean }>();
+
+    return vehicle
+      ? { id: vehicle._id.toHexString(), rego: vehicle.rego, label: vehicle.label, active: vehicle.active }
+      : null;
+  },
+
+  /** The in-service fleet with who has each vehicle that day — the picker's list. */
+  async vehicleOptions(date: string): Promise<
+    Array<{
+      id: string;
+      rego: string;
+      label: string;
+      type: VehicleType;
+      chosenById: string | null;
+      chosenByName: string | null;
+    }>
+  > {
+    const [vehicles, choices] = await Promise.all([
+      VehicleModel.find({ active: true })
+        .select({ rego: 1, label: 1, type: 1 })
+        .sort({ rego: 1 })
+        .lean<Array<{ _id: mongoose.Types.ObjectId; rego: string; label: string; type: VehicleType }>>(),
+      VehicleChoiceModel.find({ date }).lean<
+        Array<{ vehicleId: mongoose.Types.ObjectId; driverId: mongoose.Types.ObjectId; driverName: string }>
+      >(),
+    ]);
+
+    const byVehicle = new Map(choices.map((choice) => [choice.vehicleId.toHexString(), choice]));
+
+    return vehicles.map((vehicle) => {
+      const choice = byVehicle.get(vehicle._id.toHexString());
+      return {
+        id: vehicle._id.toHexString(),
+        rego: vehicle.rego,
+        label: vehicle.label,
+        type: vehicle.type,
+        chosenById: choice ? choice.driverId.toHexString() : null,
+        chosenByName: choice?.driverName ?? null,
+      };
+    });
+  },
+
+  /**
+   * Records this driver's vehicle for the day, replacing any earlier choice.
+   *
+   * ⚠️ The unique index on (date, vehicle) is the real guard: two drivers
+   * tapping the same truck at once both pass the service's check, and the
+   * second write is refused here rather than giving one truck two drivers.
+   */
+  async chooseVehicle(input: {
+    date: string;
+    vehicleId: string;
+    driverId: string;
+    driverName: string;
+  }): Promise<{ ok: true } | { ok: false; takenBy: string }> {
+    const vehicleId = new mongoose.Types.ObjectId(input.vehicleId);
+
+    try {
+      await VehicleChoiceModel.updateOne(
+        { date: input.date, driverId: new mongoose.Types.ObjectId(input.driverId) },
+        { $set: { vehicleId, driverName: input.driverName } },
+        { upsert: true },
+      );
+      return { ok: true };
+    } catch (error) {
+      if (!(error instanceof mongoose.mongo.MongoServerError && error.code === 11000)) throw error;
+
+      const holder = await VehicleChoiceModel.findOne({ date: input.date, vehicleId }).lean<{
+        driverId: mongoose.Types.ObjectId;
+        driverName: string;
+      }>();
+      // The same driver's double tap racing itself is not a conflict.
+      if (holder?.driverId.toHexString() === input.driverId) return { ok: true };
+      return { ok: false, takenBy: holder?.driverName ?? 'another driver' };
+    }
   },
 
   /* ── Compliance (M4.8) ─────────────────────────────────────────────────── */
 
   /**
-   * M4.8a — the pre-start, recorded against the day's first job.
+   * M4.8a — the pre-start, recorded against the VEHICLE.
    *
-   * Upserted on `jobId`, so a phone replaying the submission updates the record
-   * rather than filing a second one. A duplicate would make "was the obligation
-   * met" ambiguous, which is the one thing this record must never be.
+   * One per driver, day and vehicle (Matt, 21 Oct). Upserted on that key, so a
+   * phone replaying the submission updates the record rather than filing a
+   * second one — a duplicate would make "was the obligation met" ambiguous. The
+   * day's first job is kept on it as a reference only.
    */
   async savePreStart(input: {
     jobId: string;
+    date: string;
     driverId: string;
     driverName: string;
     completedAt: Date;
+    vehicleId: string;
     vehicleRego: string;
     odometerKm: number;
     failedItems: Array<{ key: string; label: string; note: string }>;
+    items: Array<{ key: string; label: string; state: string; note: string }>;
     itemsChecked: number;
   }): Promise<string> {
     const result = await JobPreStartModel.findOneAndUpdate(
-      { jobId: new mongoose.Types.ObjectId(input.jobId) },
+      {
+        driverId: new mongoose.Types.ObjectId(input.driverId),
+        date: input.date,
+        vehicleId: new mongoose.Types.ObjectId(input.vehicleId),
+      },
       {
         $set: {
-          driverId: new mongoose.Types.ObjectId(input.driverId),
+          jobId: new mongoose.Types.ObjectId(input.jobId),
+          vehicleRego: input.vehicleRego,
           driverName: input.driverName,
           completedAt: input.completedAt,
-          vehicleRego: input.vehicleRego,
           odometerKm: input.odometerKm,
           failedItems: input.failedItems,
+          items: input.items,
           itemsChecked: input.itemsChecked,
         },
       },
@@ -904,25 +1081,24 @@ export const driverRepository = {
     return result._id.toHexString();
   },
 
-  async findPreStartForDay(driverId: string, date: string): Promise<{ completedAt: Date } | null> {
-    if (!mongoose.isValidObjectId(driverId)) return null;
+  /**
+   * This driver's pre-start of that vehicle on that day.
+   *
+   * Scoped by driver as well as vehicle, so one driver's check can never
+   * satisfy another's obligation.
+   */
+  async findPreStartForDay(
+    driverId: string,
+    date: string,
+    vehicleId: string,
+  ): Promise<{ completedAt: Date } | null> {
+    if (!mongoose.isValidObjectId(driverId) || !mongoose.isValidObjectId(vehicleId)) return null;
 
-    // Scoped through the runs the driver actually held that day, so one driver's
-    // pre-start can never satisfy another's obligation.
-    const runIds = (await RunModel.distinct('_id', {
+    const record = await JobPreStartModel.findOne({
       driverId: new mongoose.Types.ObjectId(driverId),
       date,
-    })) as mongoose.Types.ObjectId[];
-    if (runIds.length === 0) return null;
-
-    const jobIds = (await JobModel.distinct('_id', {
-      runId: { $in: runIds },
-    })) as mongoose.Types.ObjectId[];
-    if (jobIds.length === 0) return null;
-
-    const record = await JobPreStartModel.findOne({ jobId: { $in: jobIds } })
-      .sort({ completedAt: 1 })
-      .lean<{ completedAt: Date }>();
+      vehicleId: new mongoose.Types.ObjectId(vehicleId),
+    }).lean<{ completedAt: Date }>();
 
     return record ? { completedAt: record.completedAt } : null;
   },
@@ -968,6 +1144,7 @@ export const driverRepository = {
   /* ── Defects (M4.9) ────────────────────────────────────────────────────── */
 
   async reportDefect(input: {
+    vehicleId: string;
     vehicleRego: string;
     reportedByUserId: string;
     reportedByName: string;
@@ -982,6 +1159,7 @@ export const driverRepository = {
     preStartItemKey?: string | null;
   }): Promise<string> {
     const created = await VehicleDefectModel.create({
+      vehicleId: new mongoose.Types.ObjectId(input.vehicleId),
       vehicleRego: input.vehicleRego,
       reportedByUserId: new mongoose.Types.ObjectId(input.reportedByUserId),
       reportedByName: input.reportedByName,
@@ -1057,13 +1235,18 @@ async function decorate(jobs: RawJobForDriver[]): Promise<DriverStopRow[]> {
     zoneLabel: zones.get(job.zoneId.toString()) ?? UNKNOWN_ZONE_LABEL,
     capturesWeight: captureByAccount.get(job.accountId.toHexString()) === 'area-and-weight',
     /*
-     * The driver's own answer wins, falling back to the office's booking guess
-     * (a crane on site means bagged) only until they have saved the screen.
+     * The driver's own answer wins, falling back to the booking's guess only
+     * until they have saved the screen.
      *
      * Using that guess unconditionally overwrote what the driver recorded: the
      * run sheet kept saying "hand load" after they had saved six weighed bags.
+     *
+     * Found by us (21 Oct): the guess came from "Crane on site", which is gone
+     * — Matt: *"There will never be a crane on site."* The booked freight item
+     * says bagged or hand load now (bags asked for means bagged).
      */
-    loadType: job.loadType ?? (job.craneAvailable ? 'bagged' : 'hand-load'),
+    loadType:
+      job.loadType ?? (job.freightItem === 'plasterboard-bagged' ? 'bagged' : 'hand-load'),
     photoCount: photosByJob.get(job._id.toHexString()) ?? 0,
     riskAssessmentDoneAt: sraByJob.get(job._id.toHexString()) ?? null,
   }));

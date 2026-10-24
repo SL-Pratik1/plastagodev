@@ -1,6 +1,7 @@
 import {
   IsoDateSchema,
   ObjectIdSchema,
+  RegoPeriodSchema,
   VehicleDefectStateSchema,
   VehicleExpenseDraftSchema,
   VehicleTypeSchema,
@@ -36,6 +37,15 @@ export const ListVehiclesQuerySchema = z
   })
   .meta({ id: 'ListVehiclesQuery' });
 
+/** A vehicle's pre-start checks, a page at a time — all of them, or one day's (23 Oct). */
+export const VehiclePreStartsQuerySchema = z
+  .object({
+    page: z.coerce.number().int().min(1).default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).default(10),
+    date: IsoDateSchema.optional(),
+  })
+  .meta({ id: 'VehiclePreStartsQuery' });
+
 /** In service, or off the road. Never a delete — see the service. */
 export const SetVehicleActiveSchema = z
   .object({ active: z.boolean() })
@@ -63,5 +73,9 @@ export const SetDefectStateSchema = z
  * they have the amount in front of them.
  */
 export const RenewRegistrationSchema = z
-  .object({ expense: VehicleExpenseDraftSchema.nullable().default(null) })
+  .object({
+    expense: VehicleExpenseDraftSchema.nullable().default(null),
+    /** 3, 6 or 12 months, chosen on this renewal. Absent: the vehicle's current length. */
+    periodMonths: RegoPeriodSchema.optional(),
+  })
   .meta({ id: 'RenewRegistration' });

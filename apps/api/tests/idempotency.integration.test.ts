@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto';
 import express from 'express';
 import mongoose from 'mongoose';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { errorHandler } from '../src/middleware/error-handler.js';
-import { idempotency } from '../src/middleware/idempotency.js';
+import { ABANDONED_CLAIM_MS, idempotency } from '../src/middleware/idempotency.js';
 import { IdempotencyKeyModel } from '../src/middleware/idempotency.model.js';
 
 /**
@@ -190,5 +191,40 @@ describe('idempotency', () => {
     await request(app).post('/charge').set('idempotency-key', OTHER_KEY).send({ a: 2 }).expect(201);
 
     expect(handled).toBe(2);
+  });
+
+  /** The claim a request leaves behind when the API restarts under it. */
+  async function strandClaim(ageMs: number): Promise<void> {
+    await IdempotencyKeyModel.create({
+      key: KEY,
+      userId: 'user-a',
+      method: 'POST',
+      path: '/charge',
+      requestHash: createHash('sha256').update(JSON.stringify({ jobId: 'j1' })).digest('hex'),
+      status: 'in-flight',
+      createdAt: new Date(Date.now() - ageMs),
+    });
+  }
+
+  it('runs a retry whose first attempt died with the server (21 Oct)', async ({ skip }) => {
+    if (!reachable) skip();
+    await strandClaim(ABANDONED_CLAIM_MS + 1_000);
+
+    // Used to be 409 "still being processed" for the key's seven days, so a
+    // completion caught mid-deploy never landed.
+    await request(app).post('/charge').set('idempotency-key', KEY).send({ jobId: 'j1' }).expect(201);
+    await request(app).post('/charge').set('idempotency-key', KEY).send({ jobId: 'j1' }).expect(201);
+
+    expect(handled).toBe(1);
+    const row = await IdempotencyKeyModel.findOne({ key: KEY }).lean<{ status: string }>();
+    expect(row?.status).toBe('complete');
+  });
+
+  it('still refuses a retry while a recent first attempt may be running', async ({ skip }) => {
+    if (!reachable) skip();
+    await strandClaim(5_000);
+
+    await request(app).post('/charge').set('idempotency-key', KEY).send({ jobId: 'j1' }).expect(409);
+    expect(handled).toBe(0);
   });
 });

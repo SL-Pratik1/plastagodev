@@ -13,6 +13,7 @@ import {
   SetVehicleActiveSchema,
   VehicleDefectParamsSchema,
   VehicleIdParamsSchema,
+  VehiclePreStartsQuerySchema,
 } from './vehicle.schemas.js';
 
 /**
@@ -39,6 +40,13 @@ vehicleRouter.get(
   '/:id',
   validate({ params: VehicleIdParamsSchema }),
   asyncHandler(vehicleController.get),
+);
+
+/** Its pre-start checks, a page at a time, optionally one day's (23 Oct). */
+vehicleRouter.get(
+  '/:id/pre-starts',
+  validate({ params: VehicleIdParamsSchema, query: VehiclePreStartsQuerySchema }),
+  asyncHandler(vehicleController.preStarts),
 );
 
 vehicleRouter.post(

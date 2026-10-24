@@ -1,4 +1,5 @@
 import type {
+  RegoPeriod,
   VehicleDefectState,
   VehicleDraft,
   VehicleExpenseDraft,
@@ -48,6 +49,17 @@ export function useVehicle(id: string | undefined) {
   });
 }
 
+/** A vehicle's pre-start checks, one page at a time (23 Oct). */
+export function useVehiclePreStarts(id: string | undefined, query: ListQuery, enabled: boolean) {
+  const { vehicles } = useServices();
+  return useQuery({
+    queryKey: queryKeys.vehicles.preStarts(id ?? 'none', query),
+    queryFn: () => vehicles.preStarts(id ?? '', query),
+    enabled: Boolean(id) && enabled,
+    placeholderData: (previous) => previous,
+  });
+}
+
 /**
  * Renewing registration and resolving a defect both change what the
  * notification centre is chasing, so they invalidate it too — otherwise the bell
@@ -69,8 +81,15 @@ function useFleetMutation<TInput, TResult>(mutationFn: (input: TInput) => Promis
 export function useRenewRegistration() {
   const { vehicles } = useServices();
   return useFleetMutation(
-    ({ id, expense }: { id: string; expense?: VehicleExpenseDraft | null }) =>
-      vehicles.renewRegistration(id, expense),
+    ({
+      id,
+      expense,
+      periodMonths,
+    }: {
+      id: string;
+      expense?: VehicleExpenseDraft | null;
+      periodMonths?: RegoPeriod;
+    }) => vehicles.renewRegistration(id, expense, periodMonths),
   );
 }
 

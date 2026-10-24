@@ -1,4 +1,4 @@
-import type { CreateRunInputSchema } from '@plastago/shared';
+import type { CreateRunInputSchema, RunPlannedDateBodySchema } from '@plastago/shared';
 import type { Response } from 'express';
 import type { ValidatedRequest } from '../../middleware/validate.js';
 import { dispatchService } from './dispatch.service.js';
@@ -59,6 +59,17 @@ export const dispatchController = {
   ): Promise<void> => {
     await dispatchService.renameRun(req.validated.params.id, req.validated.body.name);
     res.status(204).send();
+  },
+
+  /** Returns the run, so the board shows it under its new date straight away. */
+  setPlannedDate: async (
+    req: ValidatedRequest<{
+      params: typeof RunIdParamsSchema;
+      body: typeof RunPlannedDateBodySchema;
+    }>,
+    res: Response,
+  ): Promise<void> => {
+    res.json(await dispatchService.setPlannedDate(req.validated.params.id, req.validated.body.date));
   },
 
   deleteRun: async (

@@ -1,10 +1,15 @@
 import type {
+  ChooseVehicle,
   Completion,
   ContaminationReport,
   DefectReport,
   DriverJob,
+  DriverLists,
   DriverPhoto,
+  DriverVehicleChoice,
+  DriverVehicleOptions,
   FutileReport,
+  Unarrive,
   GeoFix,
   PreStartSubmission,
   RunSheetDay,
@@ -38,6 +43,14 @@ import type {
 export interface DriverRunService {
   runSheet: (date: string) => Promise<RunSheetDay>;
   job: (jobId: string) => Promise<DriverJob>;
+
+  // ── Today's vehicle (Matt, 21 Oct) — direct, NOT queued ─────────────────
+  /** In-service vehicles, with who has each today. */
+  /** Hazards, controls, reasons and contamination types — editable in Settings. */
+  lists: () => Promise<DriverLists>;
+  vehicleOptions: () => Promise<DriverVehicleOptions>;
+  /** Rejects with the server's reason ("… is taken by X today") rather than queueing. */
+  chooseVehicle: (input: ChooseVehicle) => Promise<DriverVehicleChoice>;
 
   // ── M4.2 · status, with timestamp and position on every change ──────────
   updateStatus: (jobId: string, input: StatusUpdate) => Promise<void>;
@@ -77,6 +90,8 @@ export interface DriverRunService {
 
   // ── M4.6, M4.7 · the exception branches that carry charges ──────────────
   markFutile: (jobId: string, input: FutileReport) => Promise<void>;
+  /** Undo "Arrived" — no charge; the job goes back to the allocator (21 Oct). */
+  unarrive: (jobId: string, input: Unarrive) => Promise<void>;
   markContaminated: (jobId: string, input: ContaminationReport) => Promise<void>;
 
   // ── M4.8 · pre-start and site risk ─────────────────────────────────────

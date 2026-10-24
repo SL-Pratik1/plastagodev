@@ -380,6 +380,8 @@ export const leadService = {
         .filter((part) => part !== '')
         .join('\n\n'),
       sendInvitation: input.sendInvitation,
+      receivesCertificates: input.receivesCertificates,
+      certificateEmail: input.certificateEmail,
     });
 
     /*

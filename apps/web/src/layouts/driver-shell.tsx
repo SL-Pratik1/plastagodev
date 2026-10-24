@@ -23,6 +23,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { BrandMark } from '@/components/brand/brand-mark';
+import { UnsentActions } from '@/components/driver/unsent-actions';
 import { InstallButton } from '@/components/pwa/install-button';
 import { ThemeToggle } from '@/components/theme/theme-toggle';
 import { useAuth, useCurrentUser } from '@/features/auth/auth-context';
@@ -265,6 +266,9 @@ export function DriverShell() {
               label="Install"
               className="hidden sm:inline-flex"
             />
+
+            {/* Anything the office has not received, and why (21 Oct). */}
+            <UnsentActions />
 
             <ThemeToggle />
 

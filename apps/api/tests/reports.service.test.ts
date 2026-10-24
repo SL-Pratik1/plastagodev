@@ -31,6 +31,8 @@ let certificateExists = false;
 let storedCertificate: Record<string, unknown> | null = null;
 let issueMatches = true;
 let accountFound = true;
+/** Matt, 21 Oct — whether the account has "Receives certificates" ticked. */
+let receivesCertificates = true;
 
 /** The site, pickup and docket a job-scoped certificate freezes. */
 let jobContext: Record<string, unknown> | null = {
@@ -141,6 +143,7 @@ vi.mock('../src/domains/accounts/account.repository.js', () => ({
               id: 'acc1',
               name: 'Clarendon Homes',
               certificateEmail: 'sustainability@clarendon.com.au',
+              receivesCertificates,
             }
           : null,
       ),
@@ -277,6 +280,7 @@ beforeEach(() => {
   storedCertificate = certificate();
   issueMatches = true;
   accountFound = true;
+  receivesCertificates = true;
   jobContext = {
     jobNumber: 10_482,
     siteName: 'Lot 214',
@@ -823,6 +827,38 @@ describe('automatic drafts from a tip-off', () => {
   it('never throws when the lookup itself fails', async () => {
     certifiableJobsThrows = true;
 
-    await expect(reportService.autoPrepareForRun('run1')).resolves.toEqual({ prepared: 0 });
+    await expect(reportService.autoPrepareForRun('run1')).resolves.toEqual({
+      prepared: 0,
+      issued: 0,
+    });
+  });
+
+  /*
+   * Matt, 21 Oct: *"That should be sent automatically, but only to certain
+   * customers."*
+   */
+  it('issues and emails each certificate straight away for a customer who receives them', async () => {
+    certifiableJobs = [{ jobId: 'job1', accountId: 'acc1', completedOn: '2026-09-02' }];
+    // What the stand-in repository reads back once it is issued.
+    storedCertificate = certificate({ issuedTo: 'sustainability@clarendon.com.au' });
+
+    const result = await reportService.autoPrepareForRun('run1');
+
+    expect(result).toEqual({ prepared: 1, issued: 1 });
+    expect(issued).toEqual([
+      { id: 'cert1', issuedTo: 'sustainability@clarendon.com.au', by: 'PlastaGo' },
+    ]);
+    expect(sentEmails.map((email) => email.to)).toEqual(['sustainability@clarendon.com.au']);
+  });
+
+  it('does nothing for a customer who does not receive certificates — not even a draft', async () => {
+    receivesCertificates = false;
+    certifiableJobs = [{ jobId: 'job1', accountId: 'acc1', completedOn: '2026-09-02' }];
+
+    const result = await reportService.autoPrepareForRun('run1');
+
+    expect(result).toEqual({ prepared: 0, issued: 0 });
+    expect(created).toHaveLength(0);
+    expect(sentEmails).toHaveLength(0);
   });
 });

@@ -6,6 +6,7 @@ import type {
   VehicleDraft,
   VehicleExpenseDraft,
   VehicleListItem,
+  VehiclePreStart,
 } from '@plastago/shared';
 import { AppError } from '../../lib/app-error.js';
 import { logger } from '../../lib/logger.js';
@@ -46,6 +47,18 @@ export const vehicleService = {
   ): Promise<{ data: VehicleListItem[]; meta: PageMeta }> {
     assertFleet(caller);
     return vehicleRepository.list(query);
+  },
+
+  async preStarts(
+    id: string,
+    query: { page: number; pageSize: number; date?: string | undefined },
+    caller: Caller,
+  ): Promise<{ data: VehiclePreStart[]; meta: PageMeta }> {
+    assertFleet(caller);
+
+    const page = await vehicleRepository.preStarts(id, query);
+    if (!page) throw AppError.notFound('No such vehicle');
+    return page;
   },
 
   async get(id: string, caller: Caller): Promise<Vehicle> {
@@ -223,11 +236,18 @@ export const vehicleService = {
     id: string,
     expense: VehicleExpenseDraft | null,
     caller: Caller,
+    periodMonths?: number,
   ): Promise<Vehicle> {
     assertEditor(caller);
 
     const registration = await vehicleRepository.findRegistration(id);
     if (!registration) throw AppError.notFound('No such vehicle');
+
+    /*
+     * Matt, 21 Oct: the length "can vary" — 12 months this time, three the
+     * next. Chosen on each renewal; without one, the vehicle's current length.
+     */
+    const period = periodMonths ?? registration.periodMonths;
 
     /*
      * Rolled forward from the EXPIRY, not from today.
@@ -236,9 +256,23 @@ export const vehicleService = {
      * would have lapsed — measuring from today would silently give away those
      * two weeks every single year.
      */
-    const newExpiry = addMonths(registration.expiresOn, registration.periodMonths);
+    const newExpiry = addMonths(registration.expiresOn, period);
 
-    await vehicleRepository.renewRegistration(id, newExpiry);
+    const renewed = await vehicleRepository.renewRegistration(id, {
+      renewedAt: new Date(),
+      renewedById: caller.userId,
+      renewedBy: caller.name,
+      periodMonths: period,
+      fromExpiry: registration.expiresOn,
+      toExpiry: newExpiry,
+    });
+
+    if (!renewed) {
+      // The expiry moved between the read and the write — usually a second click.
+      throw AppError.conflict(
+        `${registration.rego}'s registration was just renewed — check the new expiry before logging another`,
+      );
+    }
 
     if (expense) {
       await vehicleRepository.addExpense({
@@ -261,6 +295,7 @@ export const vehicleService = {
         rego: registration.rego,
         from: registration.expiresOn,
         to: newExpiry,
+        periodMonths: period,
         withExpense: expense !== null,
         by: caller.name,
       },
@@ -288,8 +323,7 @@ export const vehicleService = {
     const vehicle = await vehicleRepository.findById(vehicleId);
     if (!vehicle) throw AppError.notFound('No such vehicle');
 
-    // Matched by rego, the same way the defect was found — see the repository.
-    const changed = await vehicleRepository.setDefectState(defectId, vehicle.rego, state);
+    const changed = await vehicleRepository.setDefectState(defectId, vehicle.id, state);
     if (!changed) throw AppError.notFound('No such defect on this vehicle');
 
     log.info({ vehicleId, defectId, state, by: caller.name }, 'defect state changed');

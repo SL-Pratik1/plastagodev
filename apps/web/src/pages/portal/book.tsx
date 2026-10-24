@@ -1,5 +1,11 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { normaliseMobile, type Place, type PortalBookingDraft } from '@plastago/shared';
+import {
+  hasAtMostTwoDecimals,
+  normaliseMobile,
+  pickupName,
+  type Place,
+  type PortalBookingDraft,
+} from '@plastago/shared';
 import {
   Alert,
   Button,
@@ -69,7 +75,10 @@ const FormSchema = z.object({
    * ⚠️ The SUBURB is still chosen, because it carries the zone that prices the
    * job and the pin the board plots. Neither survives free text.
    */
-  siteName: z.string().trim().min(1, 'Name the place — our driver navigates by it').max(120, 'Keep the site name under 120 characters'),
+  /*
+   * No pickup-name box: it is built from the lot and street (`pickupName`).
+   * Matt, 21 Oct: *"They're named whatever the address is."*
+   */
   lotNumber: z.string().trim().max(30, 'A lot number is at most 30 characters'),
   addressLine: z.string().trim().min(1, 'Enter the street address').max(160, 'Keep the address under 160 characters'),
   placeId: z.string().min(1, 'Choose the suburb from the list'),
@@ -77,7 +86,6 @@ const FormSchema = z.object({
   accessNotes: z.string().trim().max(1000, 'Keep access notes under 1000 characters'),
   gateHours: z.string().trim().max(120, 'Keep gate hours under 120 characters'),
   inductionRequired: z.boolean(),
-  craneAvailable: z.boolean(),
   siteContactName: z.string().trim().max(80, 'Keep the contact name under 80 characters'),
   /*
    * Checked in its STORED form, after `normaliseMobile` turns "+61 412 345 678"
@@ -102,16 +110,18 @@ const FormSchema = z.object({
     ),
   readyDate: z.string().min(1, 'Tell us the date the board will be ready'),
   /**
-   * Optional in the schema, required in the form — for contractors only.
+   * Optional in the schema, required in the form — unless the customer is on a
+   * fixed price for this suburb.
    *
-   * A builder never sees this field: their area comes off the purchase order
-   * (Matt, 25:19), and `null` here means *"the PO will tell us"*, not zero.
-   * Zero would price the job at the call-out fee and nobody would notice.
+   * Matt, 21 Oct: *"meters square should show for anyone that's not got fixed
+   * price"* — builders and contractors alike — and *"It needs to be an exact
+   * figure… 972.62"*. `null` is what a fixed-price booking sends.
    */
   expectedAreaM2: z.coerce
     .number()
-    .positive('Enter the expected square metres')
+    .positive('Enter the exact square metres')
     .max(100000, 'That is larger than any job on record — check the figure')
+    .refine(hasAtMostTwoDecimals, 'At most two decimal places, e.g. 972.62')
     .nullable(),
   bagCount: z.coerce
     .number()
@@ -156,23 +166,11 @@ export function PortalBookPage() {
   const canSeePricing = scope.data?.canSeePricing ?? false;
 
   /*
-   * A builder's numbers are already on their purchase order.
-   *
-   * Matt, 25:19: *"in the builder's regard it probably won't ask expected
-   * plasterboard square metres, won't ask recycling bags, because **all that
-   * information is in the purchase order**."*
-   *
-   * So the form does not ask. Not because the figures are unimportant — they are
-   * what the job is priced on — but because asking invites a second, contradicting
-   * number from someone who has no reason to know it. The site supervisor booking
-   * this run *"is running the site, they're not going to know it's 823.4 square
-   * metres"* (29:21). The office fills them from the PO.
-   *
-   * A contractor gets the full form, because for them it IS the authorisation:
-   * *"they're just going to fill out the form and we'll generate them an
-   * invoice"* (22:53).
+   * Recycling bags are still a contractor's question only — the builder's
+   * allowance comes off their purchase order (Matt, 25:19), and the 21 Oct
+   * list says not to add a bags box for builders.
    */
-  const fromPurchaseOrder = scope.data?.accountType === 'builder';
+  const isContractor = scope.data?.accountType === 'contractor';
 
   const {
     register,
@@ -184,7 +182,6 @@ export function PortalBookPage() {
     resolver: zodResolver(FormSchema),
     mode: 'onTouched',
     defaultValues: {
-      siteName: '',
       lotNumber: '',
       addressLine: '',
       // Deep-linkable, so a shared booking link can still land with the suburb
@@ -194,26 +191,19 @@ export function PortalBookPage() {
       accessNotes: '',
       gateHours: '',
       inductionRequired: false,
-      craneAvailable: false,
       siteContactName: '',
       siteContactMobile: '',
       siteContactEmail: '',
       readyDate: '',
       /*
-       * `null`, not `''` — *"the PO will tell us"*, which is exactly what the
-       * submit below already sends for a builder.
+       * `null`, not `''` — what a fixed-price booking sends.
        *
-       * ⚠️ An empty STRING made this form unsubmittable for EVERY builder
-       * account. `expectedAreaM2` coerces before it validates, `Number('')` is
-       * 0, and 0 fails `.positive()` — on a field that is not rendered for a
-       * builder at all (see the guard further down). So the resolver reported
-       * an error against an input that was not on the page: `handleSubmit`
-       * refused to run, `shouldFocusError` had nothing to focus, no message
-       * could appear anywhere, and "Book pickup" did nothing at all.
-       *
-       * `null` is what `.nullable()` on the schema is there for, and it leaves
-       * the contractor path alone: they still see the field, and leaving it
-       * blank still fails on the guard below, against an input they can see.
+       * ⚠️ An empty STRING made this form unsubmittable whenever the field was
+       * hidden. `expectedAreaM2` coerces before it validates, `Number('')` is
+       * 0, and 0 fails `.positive()` — on an input that is not on the page. So
+       * `handleSubmit` refused to run with no message anywhere. `null` passes
+       * `.nullable()`, and a blank visible field still fails on the guard in
+       * `submit`, against an input the person can see.
        */
       expectedAreaM2: null,
       bagCount: 0,
@@ -231,14 +221,28 @@ export function PortalBookPage() {
   const watched = useWatch({ control });
 
   /*
+   * Whether the m² is REQUIRED — everyone, unless their rate card charges a
+   * fixed weight charge in this suburb's zone (Matt, 21 Oct). On a fixed price
+   * it is still asked, as optional, and kept for the record (23 Oct). The
+   * server makes the final call on the booking's own date.
+   */
+  const fixedPrice =
+    place !== null && (scope.data?.fixedPriceZoneIds ?? []).includes(place.zoneId);
+  const areaRequired = !fixedPrice;
+
+  const builtName = pickupName(watched.lotNumber ?? '', watched.addressLine ?? '');
+
+  /*
    * The draft the quote is keyed on, memoised so typing a note does not re-ask
-   * for a price. Only the three fields that affect the figure are included.
+   * for a price. Only the fields that affect the figure are included.
    */
   const quoteDraft = useMemo<PortalBookingDraft | null>(() => {
     const placeId = watched.placeId ?? '';
-    const area = Number(watched.expectedAreaM2 ?? 0);
-    // The suburb carries the zone, and the zone is the price. No suburb, no quote.
-    if (!placeId || !Number.isFinite(area) || area <= 0) return null;
+    const area = Number(watched.expectedAreaM2 ?? 0) || 0;
+    const bags = isContractor ? Number(watched.bagCount ?? 0) || 0 : 0;
+    // The suburb carries the zone, and the zone is the price. No suburb, no
+    // quote — and no area yet, no quote, where the area is the price.
+    if (!placeId || !Number.isFinite(area) || (areaRequired && area <= 0)) return null;
 
     return {
       // Only the fields that move the figure are real here; the rest are
@@ -256,9 +260,9 @@ export function PortalBookPage() {
       siteContactName: '',
       siteContactMobile: '',
       siteContactEmail: '',
-      readyDate: watched.readyDate ?? today,
-      expectedAreaM2: area,
-      bagCount: Number(watched.bagCount ?? 0) || 0,
+      readyDate: watched.readyDate || today,
+      expectedAreaM2: area > 0 ? area : null,
+      bagCount: bags,
       serviceLevel: watched.serviceLevel ?? 'standard',
       poNumber: '',
       // No picker on this form yet — a portal booking carries no order, so
@@ -274,6 +278,8 @@ export function PortalBookPage() {
     watched.serviceLevel,
     watched.readyDate,
     today,
+    areaRequired,
+    isContractor,
   ]);
 
   const quote = usePortalQuote(quoteDraft, canSeePricing);
@@ -288,16 +294,17 @@ export function PortalBookPage() {
       return;
     }
 
-    // Contractors must give a figure, because for them the form is the only
-    // source there is. Builders must not be asked — see `fromPurchaseOrder`.
-    if (!fromPurchaseOrder && !values.expectedAreaM2) {
-      setError('expectedAreaM2', { message: 'Enter the expected square metres' });
+    // The exact m² from everyone not on a fixed price (Matt, 21 Oct). The
+    // server holds the same rule on the booking's own date.
+    if (areaRequired && !values.expectedAreaM2) {
+      setError('expectedAreaM2', { message: 'Enter the exact square metres, e.g. 972.62' });
       return;
     }
 
     try {
       const created = await book.mutateAsync({
-        siteName: values.siteName,
+        // Built from the lot and street; the server builds it the same way.
+        siteName: pickupName(values.lotNumber, values.addressLine),
         lotNumber: values.lotNumber,
         addressLine: values.addressLine,
         placeId: values.placeId,
@@ -305,13 +312,16 @@ export function PortalBookPage() {
         accessNotes: values.accessNotes,
         gateHours: values.gateHours,
         inductionRequired: values.inductionRequired,
-        craneAvailable: values.craneAvailable,
+        // Matt, 21 Oct: *"There will never be a crane on site."*
+        craneAvailable: false,
         siteContactName: values.siteContactName,
         siteContactMobile: normaliseMobile(values.siteContactMobile),
         siteContactEmail: values.siteContactEmail,
         readyDate: values.readyDate,
-        expectedAreaM2: fromPurchaseOrder ? null : Number(values.expectedAreaM2),
-        bagCount: fromPurchaseOrder ? 0 : Number(values.bagCount),
+        // Optional on a fixed price: sent when given, kept for the record.
+        expectedAreaM2: Number(values.expectedAreaM2) > 0 ? Number(values.expectedAreaM2) : null,
+        // Bags decide bagged or hand load on the server, so a builder sends 0.
+        bagCount: isContractor ? Number(values.bagCount) : 0,
         serviceLevel: values.serviceLevel,
         poNumber: values.poNumber,
         purchaseOrderId: null,
@@ -359,15 +369,21 @@ export function PortalBookPage() {
               the details for the job"* — because a site is a house being built
               and it is never a pickup twice (3:28).
             */}
+            {/*
+              Who the pickup is FOR, when that is not the account itself.
+              A contractor works across several builders’ sites, and the office
+              reads this to know whose job it is on the ground. Above the
+              address — Matt, 21 Oct: *"you'd probably put builder above lot
+              number, street address."*
+            */}
             <Field
-              id="book-site-name"
-              label="What should we call this pickup?"
-              required
-              error={errors.siteName?.message}
-              hint="Whatever you would say on the phone — “Lot 214” or “the Edgeworth job”."
+              id="book-builder"
+              label="Builder"
+              error={errors.builderName?.message}
+              hint="Who the site belongs to, if it is not your own."
             >
               {(control) => (
-                <Input {...control} placeholder="Lot 214 Allambie Circuit" {...register('siteName')} />
+                <Input {...control} placeholder="Rawson Homes" {...register('builderName')} />
               )}
             </Field>
 
@@ -392,26 +408,22 @@ export function PortalBookPage() {
                   <Input {...control} placeholder="46 Allambie Circuit" {...register('addressLine')} />
                 )}
               </Field>
-
-              {/*
-                Who the pickup is FOR, when that is not the account itself.
-                A contractor works across several builders’ sites, and the office
-                reads this to know whose job it is on the ground. It sat on the
-                schema and in the booking payload with no input, so every portal
-                booking reached them blank.
-              */}
-              <Field
-                id="book-builder"
-                label="Builder"
-                error={errors.builderName?.message}
-                hint="Who the site belongs to, if it is not your own."
-                className="sm:col-span-2"
-              >
-                {(control) => (
-                  <Input {...control} placeholder="Rawson Homes" {...register('builderName')} />
-                )}
-              </Field>
             </div>
+
+            {/*
+              Not a field any more — Matt, 21 Oct: *"They're named whatever the
+              address is."* Shown so nobody wonders what it will be called.
+            */}
+            <p className="text-sm text-muted-foreground" aria-live="polite">
+              {builtName === '' ? (
+                'Your pickup is named from its lot and street address.'
+              ) : (
+                <>
+                  Your pickup will be called{' '}
+                  <span className="font-medium text-foreground">{builtName}</span>
+                </>
+              )}
+            </p>
 
             {/*
               The suburb is PICKED, not typed — it carries the zone that prices
@@ -456,47 +468,53 @@ export function PortalBookPage() {
                 )}
               </Field>
 
-              {/* Both hidden for a builder — see `fromPurchaseOrder` above. */}
-              {!fromPurchaseOrder && (
-                <>
-                  <Field
-                    id="book-area"
-                    label="Expected plasterboard (m²)"
-                    required
-                    error={errors.expectedAreaM2?.message}
-                    hint="A rough figure is fine — we measure on collection."
-                  >
-                    {(control) => (
-                      <Input
-                        {...control}
-                        type="number"
-                        inputMode="numeric"
-                        min={1}
-                        step={10}
-                        placeholder="850"
-                        {...register('expectedAreaM2')}
-                      />
-                    )}
-                  </Field>
+              {/* Required unless the price is fixed — see `areaRequired` above. */}
+              <Field
+                id="book-area"
+                label="Plasterboard (m²)"
+                required={areaRequired}
+                error={errors.expectedAreaM2?.message}
+                hint={
+                  areaRequired
+                    ? 'The exact figure, e.g. 972.62 — it is what you are invoiced on.'
+                    : 'Optional — your price here is fixed, so this is for the record only.'
+                }
+              >
+                {(control) => (
+                  <Input
+                    {...control}
+                    type="number"
+                    inputMode="decimal"
+                    min={0.01}
+                    step={0.01}
+                    placeholder="972.62"
+                    // A blank box is "not given", not 0 — it is optional on a fixed price.
+                    {...register('expectedAreaM2', {
+                      setValueAs: (value: unknown) => (value === '' ? null : value),
+                    })}
+                  />
+                )}
+              </Field>
 
-                  <Field
-                    id="book-bags"
-                    label="Recycling bags needed"
-                    error={errors.bagCount?.message}
-                    hint="Leave at 0 if the board is stacked loose."
-                  >
-                    {(control) => (
-                      <Input
-                        {...control}
-                        type="number"
-                        inputMode="numeric"
-                        min={0}
-                        max={200}
-                        {...register('bagCount')}
-                      />
-                    )}
-                  </Field>
-                </>
+              {/* Contractors only: a builder's allowance is on their purchase order. */}
+              {isContractor && (
+                <Field
+                  id="book-bags"
+                  label="Recycling bags needed"
+                  error={errors.bagCount?.message}
+                  hint="Leave at 0 if the board is stacked loose."
+                >
+                  {(control) => (
+                    <Input
+                      {...control}
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={200}
+                      {...register('bagCount')}
+                    />
+                  )}
+                </Field>
               )}
 
               <Field
@@ -639,15 +657,7 @@ export function PortalBookPage() {
               </span>
             </label>
 
-            <label className="flex items-start gap-2.5 text-sm">
-              <Checkbox className="mt-0.5" {...register('craneAvailable')} />
-              <span>
-                <span className="block font-medium">Crane on site</span>
-                <span className="block text-xs text-muted-foreground">
-                  Changes how the load comes out.
-                </span>
-              </span>
-            </label>
+            {/* No "Crane on site": Matt, 21 Oct — *"There will never be a crane on site."* */}
           </CardContent>
         </Card>
 
@@ -675,8 +685,8 @@ export function PortalBookPage() {
                 required={poRequired}
                 error={errors.poNumber?.message}
                 hint={
-                  fromPurchaseOrder
-                    ? 'We take the area, bag allowance and site supervisor from this order.'
+                  !isContractor
+                    ? 'The number on your purchase order — it prints on the invoice.'
                     : poRequired
                       ? 'Your account requires a PO before we can invoice.'
                       : 'A PO number or your own job reference — whichever you use. It prints as the PO.'
@@ -759,7 +769,9 @@ export function PortalBookPage() {
             <CardContent>
               {quoteDraft === null ? (
                 <p className="text-sm text-muted-foreground">
-                  Choose a site and enter the expected square metres for an estimate.
+                  {areaRequired
+                    ? 'Choose the suburb and enter the square metres for an estimate.'
+                    : 'Choose the suburb for an estimate.'}
                 </p>
               ) : quote.isPending ? (
                 <Spinner label="Pricing" />

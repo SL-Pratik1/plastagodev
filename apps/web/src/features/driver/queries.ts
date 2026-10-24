@@ -1,9 +1,11 @@
 import type {
+  ChooseVehicle,
   Completion,
   ContaminationReport,
   DefectReport,
   DriverJob,
   FutileReport,
+  Unarrive,
   GeoFix,
   PreStartSubmission,
   RunSheetDay,
@@ -14,6 +16,7 @@ import type {
   WeightCapture,
 } from '@plastago/shared';
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { cachedDriverLists } from '@/offline/driver-lists-cache';
 import { useServices } from '@/services/services-context';
 
 /**
@@ -59,11 +62,26 @@ const DRIVER_QUERY_OPTIONS = {
   gcTime: 24 * 60 * 60 * 1_000,
 } as const;
 
+/**
+ * ⚠️ Every driver write runs when the phone says it has no network.
+ *
+ * TanStack's default PAUSES a mutation while the browser reports itself
+ * offline. For the queued writes that meant a tap with no signal never reached
+ * the outbox: it waited in memory, and closing the app lost it — one way the
+ * phone and the office came to disagree about a job (Matt, 21 Oct). For the
+ * direct uploads it meant a spinner and no message. Now a queued write lands
+ * in the outbox at once, and a direct upload fails at once with the true
+ * reason.
+ */
+const DRIVER_MUTATION_OPTIONS = { networkMode: 'always' } as const;
+
 export const runKeys = {
   all: ['run'] as const,
   sheet: (date: string) => ['run', 'sheet', date] as const,
   job: (jobId: string) => ['run', 'job', jobId] as const,
   tipOffPreview: (runId: string, totalKg: number) => ['run', 'tip-off', runId, totalKg] as const,
+  vehicles: () => ['run', 'vehicles'] as const,
+  lists: () => ['run', 'lists'] as const,
 };
 
 export function useRunSheet(date: string) {
@@ -72,6 +90,68 @@ export function useRunSheet(date: string) {
     queryKey: runKeys.sheet(date),
     queryFn: () => run.runSheet(date),
     ...DRIVER_QUERY_OPTIONS,
+  });
+}
+
+/**
+ * Today's vehicles for the picker (Matt, 21 Oct).
+ *
+ * Always fetched fresh rather than from the offline cache: who has which truck
+ * changes through the morning, and a stale list offers one that is taken.
+ */
+/**
+ * What the driver picks from (Matt, 21 Oct). Shows the phone's last copy — or
+ * the built-in lists — straight away, so a screen opened with no signal is
+ * never empty, and swaps in the office's current lists when they arrive.
+ */
+export function useDriverLists() {
+  const { driverRun: run } = useServices();
+  return useQuery({
+    queryKey: runKeys.lists(),
+    queryFn: () => run.lists(),
+    placeholderData: cachedDriverLists,
+    ...DRIVER_QUERY_OPTIONS,
+  });
+}
+
+export function useDriverVehicles(enabled: boolean) {
+  const { driverRun: run } = useServices();
+  return useQuery({
+    queryKey: runKeys.vehicles(),
+    queryFn: () => run.vehicleOptions(),
+    enabled,
+    staleTime: 0,
+  });
+}
+
+/** Choosing re-reads the run sheet: the vehicle and the pre-start state both move. */
+export function useChooseVehicle() {
+  const { driverRun: run } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
+    mutationFn: (input: ChooseVehicle) => run.chooseVehicle(input),
+    // Patched straight away so the pre-start opens on the new vehicle without
+    // flashing the picker again; the refetch below settles the pre-start state.
+    onSuccess: (choice) => {
+      queryClient.setQueryData(runKeys.sheet(choice.date), (current: RunSheetDay | undefined) =>
+        current
+          ? {
+              ...current,
+              vehicleId: choice.vehicleId,
+              vehicleRego: choice.rego,
+              vehicleLabel: choice.label,
+              vehicleChosen: true,
+              preStartCompletedAt:
+                current.vehicleId === choice.vehicleId ? current.preStartCompletedAt : null,
+            }
+          : current,
+      );
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: runKeys.all });
+    },
   });
 }
 
@@ -95,6 +175,7 @@ export function useDriverJob(jobId: string | undefined) {
 function useRunMutation<TInput>(mutationFn: (input: TInput) => Promise<void>) {
   const queryClient = useQueryClient();
   return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
     mutationFn,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: runKeys.all });
@@ -127,6 +208,7 @@ export function useAddPhoto() {
   const { driverRun: run } = useServices();
   const queryClient = useQueryClient();
   return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
     mutationFn: ({
       jobId,
       slot,
@@ -165,6 +247,7 @@ export function useRemovePhoto() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
     mutationFn: ({ jobId, photoId }: { jobId: string; photoId: string }) =>
       run.removePhoto(jobId, photoId),
     onSuccess: (_result, { jobId, photoId }) => {
@@ -225,6 +308,7 @@ export function useMarkFutile() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
     mutationFn: ({ jobId, input }: { jobId: string; input: FutileReport }) =>
       run.markFutile(jobId, input),
     onSuccess: (_result, { jobId, input }) =>
@@ -235,12 +319,40 @@ export function useMarkFutile() {
   });
 }
 
+/**
+ * Undo "Arrived" (21 Oct). The job leaves this driver's run, so it comes off
+ * the cached sheet straight away — whether the request went now or was queued.
+ */
+export function useUnarrive() {
+  const { driverRun: run } = useServices();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
+    mutationFn: ({ jobId, input }: { jobId: string; input: Unarrive }) =>
+      run.unarrive(jobId, input),
+    onSuccess: (_result, { jobId }) => {
+      const offSheet = (stops: RunStop[]) => stops.filter((stop) => stop.jobId !== jobId);
+      queryClient.setQueriesData<RunSheetDay>({ queryKey: ['run', 'sheet'] }, (current) =>
+        current
+          ? {
+              ...current,
+              stops: offSheet(current.stops),
+              runs: current.runs.map((sheetRun) => ({ ...sheetRun, stops: offSheet(sheetRun.stops) })),
+            }
+          : current,
+      );
+    },
+  });
+}
+
 /** M4.7 — one contamination report per job, so the job says it has been made. */
 export function useMarkContaminated() {
   const { driverRun: run } = useServices();
   const queryClient = useQueryClient();
 
   return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
     mutationFn: ({ jobId, input }: { jobId: string; input: ContaminationReport }) =>
       run.markContaminated(jobId, input),
     onSuccess: (_result, { jobId, input }) =>
@@ -276,6 +388,7 @@ export function useSubmitPreStart() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
     mutationFn: (input: PreStartSubmission) => run.submitPreStart(input),
     onSuccess: (_result, input) => {
       queryClient.setQueryData(runKeys.sheet(input.date), (current: RunSheetDay | undefined) =>
@@ -320,6 +433,7 @@ export function useTipOffPreview(runId: string | null, totalKg: number, enabled:
 export function useUploadDocketPhoto() {
   const { driverRun: run } = useServices();
   return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
     mutationFn: ({ runId, blob }: { runId: string; blob: Blob }) =>
       run.uploadDocketPhoto(runId, blob),
   });
@@ -340,6 +454,7 @@ export function useRecordTipOff() {
 export function useUploadDefectPhoto() {
   const { driverRun: run } = useServices();
   return useMutation({
+    ...DRIVER_MUTATION_OPTIONS,
     mutationFn: (blob: Blob) => run.uploadDefectPhoto(blob),
   });
 }

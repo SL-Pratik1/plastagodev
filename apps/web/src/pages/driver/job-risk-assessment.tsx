@@ -1,4 +1,3 @@
-import { RISK_CONTROLS, SITE_HAZARDS } from '@plastago/shared';
 import {
   Alert,
   Checkbox,
@@ -20,7 +19,8 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { useDriverJob, useSubmitRiskAssessment } from '@/features/driver/queries';
+import { useDriverJob, useDriverLists, useSubmitRiskAssessment } from '@/features/driver/queries';
+import { cachedDriverLists } from '@/offline/driver-lists-cache';
 import { useOnlineStatus } from '@/offline/use-offline-state';
 import { currentPosition } from '@/lib/geolocation';
 
@@ -91,6 +91,10 @@ function RiskForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['d
   const navigate = useNavigate();
   const online = useOnlineStatus();
   const submit = useSubmitRiskAssessment();
+  // The questions are edited in Settings (Matt, 21 Oct); only those switched on are asked.
+  const lists = useDriverLists().data ?? cachedDriverLists();
+  const hazardOptions = lists.siteHazards.filter((option) => option.active);
+  const controlOptions = lists.riskControls.filter((option) => option.active);
 
   const [hazards, setHazards] = useState<string[]>([]);
   const [controls, setControls] = useState<string[]>([]);
@@ -214,7 +218,7 @@ function RiskForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['d
       <fieldset className="space-y-2">
         <legend className="text-sm font-medium">What can you see on this site?</legend>
         <ul className="space-y-1.5">
-          {SITE_HAZARDS.map((hazard) => (
+          {hazardOptions.map((hazard) => (
             <li key={hazard.key}>
               <label
                 className={cn(
@@ -247,7 +251,7 @@ function RiskForm({ job }: { job: NonNullable<ReturnType<typeof useDriverJob>['d
       <fieldset className="space-y-2">
         <legend className="text-sm font-medium">What are you doing about it?</legend>
         <ul className="space-y-1.5">
-          {RISK_CONTROLS.map((control) => (
+          {controlOptions.map((control) => (
             <li key={control.key}>
               <label
                 className={cn(

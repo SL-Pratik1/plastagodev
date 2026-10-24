@@ -66,6 +66,7 @@ vi.mock('../src/integrations/maps.js', () => ({
 }));
 
 const { dispatchService } = await import('../src/domains/dispatch/dispatch.service.js');
+const { todayInSydney } = await import('../src/lib/business-day.js');
 
 const DATE = '2026-03-02';
 const WAYNE = DRIVERS[0]!.id;
@@ -253,11 +254,25 @@ describe('a run that is already with a driver', () => {
     });
   });
 
-  it('refuses a reorder', async () => {
+  /*
+   * Decided, 21 Oct: the allocator may reorder by hand until the driver starts
+   * the first stop — a staffed run included, and the driver's sheet follows.
+   */
+  it('accepts a reorder until the driver starts a stop', async () => {
     const { run, jobIds } = await assignedRun();
+
+    await dispatchService.reorderRun(run.id, [...jobIds].reverse());
+
+    expect(runs.run(run.id)?.stops).toEqual([...jobIds].reverse());
+  });
+
+  it('refuses a reorder once the driver has started a stop', async () => {
+    const { run, jobIds } = await assignedRun();
+    runs.setStopStatus(jobIds[0]!, 'in-transit');
 
     await expect(dispatchService.reorderRun(run.id, [...jobIds].reverse())).rejects.toMatchObject({
       status: 409,
+      message: expect.stringContaining('started'),
     });
   });
 
@@ -630,5 +645,121 @@ describe('the board', () => {
 
     expect(board.runs).toHaveLength(1);
     expect(board.runs[0]?.driverId).toBeNull();
+  });
+});
+
+/*
+ * Matt, 21 Oct: *"for us, runs aren't day specific… all the runs that exist,
+ * that are not yet completed, should be visible."*
+ */
+describe('runs not tied to one date', () => {
+  const OTHER_DAY = '2026-03-09';
+
+  it('shows an open run planned for another day', async () => {
+    await dispatchService.createRun({ name: 'Friday run', date: OTHER_DAY, driverId: null, jobIds: [] });
+
+    const board = await dispatchService.board(DATE);
+
+    expect(board.runs.map((run) => run.name)).toEqual(['Friday run']);
+  });
+
+  it('keeps a driver’s day to the runs planned for that day', async () => {
+    const jobIds = runs.seedJobs('fri1'.padStart(24, '0'));
+    const run = await dispatchService.createRun({ name: 'Friday run', date: OTHER_DAY, driverId: null, jobIds });
+    await dispatchService.assignRun(run.id, WAYNE);
+
+    const board = await dispatchService.board(DATE);
+    const wayne = board.drivers.find((d) => d.driverId === WAYNE);
+
+    expect(wayne?.runs).toHaveLength(0);
+  });
+
+  /* Decided: "finished" means completed, futile or cancelled. */
+  it('completes a run once every stop is finished, and it leaves the board', async () => {
+    const jobIds = runs.seedJobs('a1'.padStart(24, '0'), 'a2'.padStart(24, '0'), 'a3'.padStart(24, '0'));
+    const run = await dispatchService.createRun({ name: 'Done run', date: OTHER_DAY, driverId: null, jobIds });
+    runs.setStopStatus(jobIds[0]!, 'completed');
+    runs.setStopStatus(jobIds[1]!, 'futile');
+    runs.setStopStatus(jobIds[2]!, 'cancelled');
+
+    const board = await dispatchService.board(DATE);
+
+    expect(board.runs.find((shown) => shown.id === run.id)).toBeUndefined();
+    expect(runs.run(run.id)?.status).toBe('closed');
+  });
+
+  it('keeps a run with one stop still to do', async () => {
+    const jobIds = runs.seedJobs('b1'.padStart(24, '0'), 'b2'.padStart(24, '0'));
+    const run = await dispatchService.createRun({ name: 'Half done', date: OTHER_DAY, driverId: null, jobIds });
+    runs.setStopStatus(jobIds[0]!, 'completed');
+
+    const board = await dispatchService.board(DATE);
+
+    expect(board.runs.find((shown) => shown.id === run.id)?.status).toBe('planning');
+  });
+
+  it('never completes a run with no stops — it is still being built', async () => {
+    await dispatchService.createRun({ name: 'Empty', date: OTHER_DAY, driverId: null, jobIds: [] });
+
+    const board = await dispatchService.board(DATE);
+
+    expect(board.runs[0]?.status).toBe('planning');
+  });
+
+  it('still hands back a completed run on its own day, for the run sheet', async () => {
+    const jobIds = runs.seedJobs('c1'.padStart(24, '0'));
+    const run = await dispatchService.createRun({ name: 'Today done', date: DATE, driverId: null, jobIds });
+    runs.setStopStatus(jobIds[0]!, 'completed');
+
+    const board = await dispatchService.board(DATE);
+
+    expect(board.runs.find((shown) => shown.id === run.id)?.status).toBe('closed');
+  });
+});
+
+describe('a run’s planned date', () => {
+  const day = (offset: number) => {
+    const at = new Date(`${todayInSydney()}T00:00:00Z`);
+    at.setUTCDate(at.getUTCDate() + offset);
+    return at.toISOString().slice(0, 10);
+  };
+
+  it('moves a run to another day', async () => {
+    const { run } = await runWithStops(2);
+
+    const moved = await dispatchService.setPlannedDate(run.id, day(3));
+
+    expect(moved.date).toBe(day(3));
+  });
+
+  it('refuses a day that has passed', async () => {
+    const { run } = await runWithStops(1);
+
+    await expect(dispatchService.setPlannedDate(run.id, day(-1))).rejects.toMatchObject({
+      status: 422,
+      issues: [{ path: 'date' }],
+    });
+  });
+
+  it('refuses once the driver has started a stop', async () => {
+    const { run, jobIds } = await runWithStops(2);
+    await dispatchService.assignRun(run.id, WAYNE);
+    runs.setStopStatus(jobIds[0]!, 'arrived');
+
+    await expect(dispatchService.setPlannedDate(run.id, day(2))).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
+  it('takes the next slot in the driver’s new day, and closes the gap in the old one', async () => {
+    const jobA = runs.seedJobs('d1'.padStart(24, '0'));
+    const jobB = runs.seedJobs('d2'.padStart(24, '0'));
+    const first = await dispatchService.createRun({ name: 'Morning', date: day(1), driverId: WAYNE, jobIds: jobA });
+    const second = await dispatchService.createRun({ name: 'Afternoon', date: day(1), driverId: WAYNE, jobIds: jobB });
+
+    await dispatchService.setPlannedDate(first.id, day(4));
+
+    expect(runs.run(first.id)).toMatchObject({ date: day(4), sequenceForDay: 1 });
+    expect(runs.run(second.id)?.sequenceForDay).toBe(1);
   });
 });

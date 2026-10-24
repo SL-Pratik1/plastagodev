@@ -119,6 +119,10 @@ export function createFakeJobRepository() {
       return Promise.resolve(job ? { id, ...job } : null);
     },
 
+    async countStopsOnRun(runId: string): Promise<number> {
+      return Promise.resolve([...jobs.values()].filter((job) => job.run?.id === runId).length);
+    },
+
     async allocationOf(id: string) {
       const job = jobs.get(id);
       if (!job?.run) return Promise.resolve(null);
@@ -133,9 +137,15 @@ export function createFakeJobRepository() {
       });
     },
 
-    async releaseFromRun(id: string, runId: string): Promise<boolean> {
+    async releaseFromRun(
+      id: string,
+      runId: string,
+      fromStatuses: readonly string[] = ['booked', 'assigned', 'in-transit', 'arrived'],
+    ): Promise<boolean> {
       const job = jobs.get(id);
-      if (job?.run?.id !== runId) return Promise.resolve(false);
+      if (job?.run?.id !== runId || !fromStatuses.includes(job.status)) {
+        return Promise.resolve(false);
+      }
 
       calls.releases.push({ id, runId });
       jobs.set(id, { ...job, run: null, driverId: null, status: 'booked' });
@@ -187,11 +197,17 @@ export function createFakeJobRepository() {
       return Promise.resolve(true);
     },
 
-    async reschedule(id: string, readyDate: string, targetDate: string): Promise<boolean> {
+    /** Like the real one, hands back the dates as they were BEFORE the move. */
+    async reschedule(id: string, readyDate: string, targetDate: string) {
       calls.reschedules.push({ id, readyDate, targetDate });
       const job = jobs.get(id);
-      if (job) jobs.set(id, { ...job, readyDate, targetDate });
-      return Promise.resolve(jobs.has(id));
+      if (!job) return Promise.resolve(null);
+      jobs.set(id, { ...job, readyDate, targetDate });
+      return Promise.resolve({
+        readyDate: job.readyDate,
+        targetDate: job.targetDate,
+        accountName: job.accountName,
+      });
     },
 
     async addComment(input: CreateCommentInput): Promise<JobComment> {

@@ -17,8 +17,16 @@ let updated: Array<Record<string, unknown>> = [];
 let expenses: Array<Record<string, unknown>> = [];
 let assignments: Array<{ id: string; driverName: string | null }> = [];
 let activeChanges: Array<{ id: string; active: boolean }> = [];
-let renewals: Array<{ id: string; newExpiry: string }> = [];
-let defectStates: Array<{ defectId: string; rego: string; state: string }> = [];
+let renewals: Array<{
+  id: string;
+  newExpiry: string;
+  fromExpiry: string;
+  periodMonths: number;
+  renewedById: string;
+}> = [];
+/** False when the expiry moved since it was read — a second click. */
+let renewMatches = true;
+let defectStates: Array<{ defectId: string; vehicleId: string; state: string }> = [];
 let nextServices: Array<{ id: string; dueOn: string | null }> = [];
 
 /** What the repository reports back. Set per test. */
@@ -27,11 +35,22 @@ let regoTaken = false;
 let registration: { rego: string; expiresOn: string; periodMonths: number } | null = null;
 let defectMatches = true;
 
+/** What the pre-start list was asked for (23 Oct). */
+const preStartQueries: Array<{ id: string; page: number; pageSize: number; date?: string }> = [];
+
 vi.mock('../src/domains/fleet/vehicle.repository.js', () => ({
   vehicleRepository: {
     list: () =>
       Promise.resolve({ data: [], meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 } }),
     findById: () => Promise.resolve(stored),
+    preStarts: (id: string, query: { page: number; pageSize: number; date?: string }) => {
+      preStartQueries.push({ id, ...query });
+      return Promise.resolve(
+        id === 'missing'
+          ? null
+          : { data: [], meta: { page: query.page, pageSize: query.pageSize, total: 0, totalPages: 1 } },
+      );
+    },
     regoTaken: () => Promise.resolve(regoTaken),
     create: (input: Record<string, unknown>) => {
       created.push(input);
@@ -58,13 +77,23 @@ vi.mock('../src/domains/fleet/vehicle.repository.js', () => ({
       return Promise.resolve(true);
     },
     findRegistration: () => Promise.resolve(registration),
-    renewRegistration: (id: string, newExpiry: string) => {
-      renewals.push({ id, newExpiry });
+    renewRegistration: (
+      id: string,
+      renewal: { toExpiry: string; fromExpiry: string; periodMonths: number; renewedById: string },
+    ) => {
+      if (!renewMatches) return Promise.resolve(false);
+      renewals.push({
+        id,
+        newExpiry: renewal.toExpiry,
+        fromExpiry: renewal.fromExpiry,
+        periodMonths: renewal.periodMonths,
+        renewedById: renewal.renewedById,
+      });
       return Promise.resolve(true);
     },
-    setDefectState: (defectId: string, rego: string, state: string) => {
+    setDefectState: (defectId: string, vehicleId: string, state: string) => {
       if (!defectMatches) return Promise.resolve(false);
-      defectStates.push({ defectId, rego, state });
+      defectStates.push({ defectId, vehicleId, state });
       return Promise.resolve(true);
     },
     expiringSoon: () => Promise.resolve([]),
@@ -165,6 +194,7 @@ beforeEach(() => {
   regoTaken = false;
   registration = { rego: 'BQ12AB', expiresOn: '2027-03-31', periodMonths: 12 };
   defectMatches = true;
+  renewMatches = true;
 });
 
 describe('who may see and change the fleet', () => {
@@ -304,6 +334,45 @@ describe('registration renewal (F43)', () => {
       status: 404,
     });
   });
+
+  /*
+   * Matt, 21 Oct: "You can have 12 months or change to three months." The
+   * length is chosen on each renewal and kept with it.
+   */
+  it('uses the length chosen on this renewal and keeps it with the renewal', async () => {
+    registration = { rego: 'BQ12AB', expiresOn: '2027-03-31', periodMonths: 12 };
+
+    await vehicleService.renewRegistration(ID, null, OPERATIONS, 3);
+
+    expect(renewals[0]).toMatchObject({
+      newExpiry: '2027-06-30',
+      fromExpiry: '2027-03-31',
+      periodMonths: 3,
+    });
+  });
+
+  it('records who logged it by their user id', async () => {
+    await vehicleService.renewRegistration(ID, null, OPERATIONS);
+
+    expect(renewals[0]?.renewedById).toBe(OPERATIONS.userId);
+  });
+
+  it("falls back to the vehicle's current length when none is chosen", async () => {
+    registration = { rego: 'BQ12AB', expiresOn: '2027-03-31', periodMonths: 6 };
+
+    await vehicleService.renewRegistration(ID, null, OPERATIONS);
+
+    expect(renewals[0]?.periodMonths).toBe(6);
+  });
+
+  it('refuses to roll forward twice when the expiry already moved', async () => {
+    renewMatches = false;
+
+    await expect(
+      vehicleService.renewRegistration(ID, null, OPERATIONS, 12),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(expenses).toHaveLength(0);
+  });
 });
 
 describe('taking a truck off the road', () => {
@@ -392,7 +461,8 @@ describe('driver-reported defects (M4.9 · W33)', () => {
 
     // `scheduled` is the state that was missing: "booked in for Thursday" is
     // neither broken-and-ignored nor fixed.
-    expect(defectStates[0]).toEqual({ defectId: 'def1', rego: 'BQ12AB', state: 'scheduled' });
+    // Matched on the vehicle's id, not its plate: new plates keep the defects.
+    expect(defectStates[0]).toEqual({ defectId: 'def1', vehicleId: ID, state: 'scheduled' });
   });
 
   it('resolves one', async () => {
@@ -401,7 +471,7 @@ describe('driver-reported defects (M4.9 · W33)', () => {
     expect(defectStates[0]?.state).toBe('resolved');
   });
 
-  /* Matched by rego, so a defect id from another truck matches nothing. */
+  /* Matched by the vehicle, so a defect id from another truck matches nothing. */
   it('404s a defect that is not on this vehicle', async () => {
     defectMatches = false;
 
@@ -430,5 +500,32 @@ describe('booking a service (W113)', () => {
     await vehicleService.setNextService(ID, null, ALLOCATOR);
 
     expect(nextServices[0]?.dueOn).toBeNull();
+  });
+});
+
+/**
+ * A vehicle's pre-start checks, a page at a time (23 Oct) — one a day per
+ * truck grows without end, so the vehicle page no longer carries them all.
+ */
+describe("a vehicle's pre-start checks, paged (23 Oct)", () => {
+  it('passes the page, the size and the day through', async () => {
+    preStartQueries.length = 0;
+
+    const page = await vehicleService.preStarts('veh1', { page: 2, pageSize: 10, date: '2026-10-23' }, OPERATIONS);
+
+    expect(preStartQueries).toEqual([{ id: 'veh1', page: 2, pageSize: 10, date: '2026-10-23' }]);
+    expect(page.meta).toMatchObject({ page: 2, pageSize: 10 });
+  });
+
+  it('answers 404 for a vehicle that does not exist', async () => {
+    await expect(vehicleService.preStarts('missing', { page: 1, pageSize: 10 }, OPERATIONS)).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
+  it('refuses a driver — the fleet screens are for the office', async () => {
+    await expect(vehicleService.preStarts('veh1', { page: 1, pageSize: 10 }, DRIVER)).rejects.toMatchObject({
+      status: 403,
+    });
   });
 });

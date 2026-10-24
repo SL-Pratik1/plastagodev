@@ -24,6 +24,7 @@ import {
 import { MailIcon, PhoneIcon, SaveIcon } from 'lucide-react';
 import { useState } from 'react';
 import { DetailList } from '@/components/detail-list';
+import { MySignedTermsCard } from '@/features/terms/components/my-signed-terms-card';
 import { Link } from 'react-router';
 import {
   useOnboardingInvite,
@@ -373,6 +374,9 @@ function AccountSettings({ account }: { account: PortalAccount }) {
               </p>
             </CardContent>
           </Card>
+
+          {/* Their own signed terms, and the copy they signed (23 Oct). */}
+          <MySignedTermsCard />
 
           <Alert variant="info" title="Need something changed?">
             Payment terms, rates and purchase-order rules are set with your account manager. Call

@@ -6,14 +6,18 @@ import {
   API_PREFIX,
   BookablePurchaseOrderSchema,
   CertificateSchema,
+  CommercialTermsImpactSchema,
+  CommercialTermsResultSchema,
   DriverSchema,
   FinancialReportSchema,
   InvitationResultSchema,
   InvoiceDownloadsSchema,
   InvoiceListItemSchema,
+  InvoiceResendResultSchema,
   RaisedInvoiceSchema,
   InvoiceSchema,
   JobCommentSchema,
+  JobAreaResultSchema,
   JobListItemSchema,
   JobSchema,
   MapPinSchema,
@@ -22,18 +26,21 @@ import {
   RunSchema,
   RunSheetSchema,
   VehicleListItemSchema,
+  VehiclePreStartSchema,
   VehicleSchema,
   ZoneVolumeReportSchema,
+  type AccountCommercialTermsDraft,
   type AccountDraft,
   type AccountType,
   type CreateRunInput,
-  type ExceptionReason,
+  type OfficeCancelReason,
   type JobCommentDraft,
   type JobDraft,
   type ReportFilters,
   type VehicleDefectState,
   type VehicleDraft,
   type VehicleExpenseDraft,
+  type RegoPeriod,
 } from '@plastago/shared';
 import * as z from 'zod';
 import type { AccountUpdate } from '@plastago/shared';
@@ -159,6 +166,22 @@ export function createHttpCustomerService(api: ApiClient): CustomerService {
         }),
       ),
 
+    commercialTermsImpact: (accountId: string) =>
+      viaService(() =>
+        api.request(`${base}/${accountId}/commercial-terms/impact`, {
+          schema: CommercialTermsImpactSchema,
+        }),
+      ),
+
+    setCommercialTerms: (accountId: string, input: AccountCommercialTermsDraft) =>
+      viaService(() =>
+        api.request(`${base}/${accountId}/commercial-terms`, {
+          method: 'PATCH',
+          body: input,
+          schema: CommercialTermsResultSchema,
+        }),
+      ),
+
     setRiskAssessmentRequired: (accountId: string, required: boolean) =>
       viaService(() =>
         api.request(`${base}/${accountId}/risk-assessment`, {
@@ -223,7 +246,7 @@ export function createHttpJobService(api: ApiClient): JobService {
         api.request(base, { method: 'POST', body: draft, schema: JobListItemSchema }),
       ),
 
-    cancel: async (id: string, reason: ExceptionReason, note: string) => {
+    cancel: async (id: string, reason: OfficeCancelReason, note: string) => {
       await viaService(() =>
         api.request(`${base}/${id}/cancel`, {
           method: 'POST',
@@ -232,6 +255,21 @@ export function createHttpJobService(api: ApiClient): JobService {
           body: { reason, note },
           schema: NoContentSchema,
         }),
+      );
+    },
+
+    setArea: (id: string, expectedAreaM2: number) =>
+      viaService(() =>
+        api.request(`${base}/${id}/area`, {
+          method: 'POST',
+          body: { expectedAreaM2 },
+          schema: JobAreaResultSchema,
+        }),
+      ),
+
+    unarrive: async (id: string) => {
+      await viaService(() =>
+        api.request(`${base}/${id}/unarrive`, { method: 'POST', schema: NoContentSchema }),
       );
     },
 
@@ -297,6 +335,15 @@ export function createHttpDispatchService(api: ApiClient): DispatchService {
         }),
       );
     },
+
+    setRunDate: (runId: string, date: string) =>
+      viaService(() =>
+        api.request(`${base}/runs/${runId}/date`, {
+          method: 'PATCH',
+          body: { date },
+          schema: RunSchema,
+        }),
+      ),
 
     deleteRun: async (runId: string) => {
       await viaService(() =>
@@ -421,6 +468,15 @@ export function createHttpInvoiceService(api: ApiClient): InvoiceService {
         api.request(`${base}/${id}/xero-retry`, {
           method: 'POST',
           schema: XeroRetryResultSchema,
+        }),
+      ),
+
+    // 200 with who it reached and who it failed for — a partial resend is an answer.
+    resend: (id: string) =>
+      viaService(() =>
+        api.request(`${base}/${id}/resend`, {
+          method: 'POST',
+          schema: InvoiceResendResultSchema,
         }),
       ),
   };
@@ -553,6 +609,14 @@ export function createHttpVehicleService(api: ApiClient): VehicleService {
 
     get: (id: string) => viaService(() => api.request(`${base}/${id}`, { schema: VehicleSchema })),
 
+    preStarts: (id: string, query: ListQuery) =>
+      viaService(() =>
+        api.request(`${base}/${id}/pre-starts`, {
+          searchParams: listParams(query),
+          schema: pageOf(VehiclePreStartSchema),
+        }),
+      ),
+
     create: (draft: VehicleDraft) =>
       viaService(() =>
         api.request(base, { method: 'POST', body: draft, schema: VehicleListItemSchema }),
@@ -576,11 +640,15 @@ export function createHttpVehicleService(api: ApiClient): VehicleService {
     setNextService: (id: string, dueOn: string | null) =>
       mutate(`${base}/${id}/next-service`, { dueOn }),
 
-    renewRegistration: (id: string, expense?: VehicleExpenseDraft | null) =>
+    renewRegistration: (
+      id: string,
+      expense?: VehicleExpenseDraft | null,
+      periodMonths?: RegoPeriod,
+    ) =>
       // The expense is optional and sent as null when absent: the moment
       // somebody renews is the only moment they have the amount in front of
       // them, but making it mandatory would block the renewal on a missing
       // receipt.
-      mutate(`${base}/${id}/registration/renew`, { expense: expense ?? null }),
+      mutate(`${base}/${id}/registration/renew`, { expense: expense ?? null, periodMonths }),
   };
 }

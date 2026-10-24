@@ -1,6 +1,6 @@
 import { VEHICLE_TYPE_LABELS, VEHICLE_TYPES, type VehicleListItem } from '@plastago/shared';
 import { Alert, Badge, Button, Card, Pagination } from '@plastago/ui';
-import { PlusIcon, WrenchIcon } from 'lucide-react';
+import { CheckIcon, PlusIcon, WrenchIcon, XIcon } from 'lucide-react';
 import { useState } from 'react';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/data-table-toolbar';
@@ -118,11 +118,31 @@ const COLUMNS: readonly DataTableColumn<VehicleListItem>[] = [
   },
   {
     id: 'driver',
-    header: 'Driver',
+    header: 'Driver today',
     priority: 'detail',
-    cell: (row) => (
-      <span className="text-muted-foreground">{row.assignedDriverName ?? 'Unassigned'}</span>
-    ),
+    // Drivers choose their vehicle each day (Matt, 21 Oct); the office no longer pairs them.
+    cell: (row) => <span className="text-muted-foreground">{row.driverToday ?? 'Not chosen'}</span>,
+  },
+  {
+    /*
+     * Was the truck checked today (23 Oct)? The one question the office asks
+     * across the whole fleet each morning — the history is on each vehicle.
+     */
+    id: 'preStartToday',
+    header: 'Pre-start today',
+    priority: 'detail',
+    cell: (row) =>
+      row.preStartToday ? (
+        <span className="inline-flex items-center gap-1 text-success">
+          <CheckIcon aria-hidden className="size-4" />
+          Done
+        </span>
+      ) : (
+        <span className="inline-flex items-center gap-1 text-muted-foreground">
+          <XIcon aria-hidden className="size-4" />
+          Not done
+        </span>
+      ),
   },
   {
     /*

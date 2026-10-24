@@ -86,7 +86,9 @@ export function DriverRunSheetPage() {
         >
           <p className="flex items-center gap-2 text-sm font-semibold">
             <ClipboardCheckIcon aria-hidden className="size-5 shrink-0 text-warning" />
-            Pre-start check not done
+            {data.vehicleChosen
+              ? 'Pre-start check not done'
+              : 'Choose your vehicle and do the pre-start'}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             Do this before you drive. It is a legal requirement on the operator as well as on you.

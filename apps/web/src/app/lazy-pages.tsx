@@ -203,6 +203,10 @@ export const PortalWelcomePage = lazy(async () => ({
   default: (await import('@/pages/portal/welcome')).PortalWelcomePage,
 }));
 
+export const PortalOnboardingPage = lazy(async () => ({
+  default: (await import('@/pages/portal/onboarding')).PortalOnboardingPage,
+}));
+
 export const PortalAccountPage = lazy(async () => ({
   default: (await import('@/pages/portal/account')).PortalAccountPage,
 }));

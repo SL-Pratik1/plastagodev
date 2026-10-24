@@ -129,16 +129,34 @@ export function createFakeDriverRepository(driverId: string) {
   let failNextCharge = false;
   const photos = new Map<string, DriverPhotoRow & { jobId: string }>();
   const messages: Array<DriverMessageRow & { jobId: string }> = [];
-  const preStarts: Array<{ jobId: string; date: string; completedAt: Date; failed: number }> = [];
+  const preStarts: Array<{
+    jobId: string;
+    date: string;
+    driverId: string;
+    vehicleId: string;
+    vehicleRego: string;
+    completedAt: Date;
+    failed: number;
+    items: number;
+  }> = [];
   const assessments = new Map<string, DriverRiskAssessmentRow>();
   const defects: Array<{
+    vehicleId: string;
     rego: string;
     severity: string;
     summary: string;
     preStartItemKey: string | null;
     photoIds: string[];
   }> = [];
-  const tipOffs: Array<{ runId: string; totalKg: number; docketReference: string }> = [];
+  const tipOffs: Array<{
+    runId: string;
+    totalKg: number;
+    docketReference: string;
+    vehicleId: string | null;
+    vehicleRego: string | null;
+  }> = [];
+  /** Jobs an earlier unarrive took off a driver's run, and who did it. */
+  const unarrivedBy = new Map<string, string>();
   const imputed: Array<{ jobId: string; imputedKg: number }> = [];
   const runs = new Map<string, { name: string; date: string; driverId: string }>();
 
@@ -147,10 +165,14 @@ export function createFakeDriverRepository(driverId: string) {
    * decides whether a pre-start or a defect can be filed at all — a driver with
    * none is refused, and that refusal is the rule under test.
    */
-  let assignedVehicle: { rego: string; label: string } | null = {
+  let assignedVehicle: { id?: string; rego: string; label: string } | null = {
     rego: 'BQ12AB',
     label: 'Truck 1 — Isuzu crane',
   };
+
+  /** The fleet the picker offers, and who chose which vehicle on which day. */
+  const fleet = new Map<string, { id: string; rego: string; label: string; active: boolean }>();
+  const choices: Array<{ date: string; vehicleId: string; driverId: string; driverName: string }> = [];
 
   const toRow = (stop: StoredStop): DriverStopRow =>
     ({
@@ -281,17 +303,99 @@ export function createFakeDriverRepository(driverId: string) {
     stop(jobId: string) {
       return stops.get(jobId);
     },
+    /** As if an earlier unarrive by `driverName` took the job off their run. */
+    unarrived(jobId: string, driverName: string) {
+      unarrivedBy.set(jobId, driverName);
+      stops.delete(jobId);
+    },
     photoCount() {
       return photos.size;
     },
     /** Pair this driver with a truck, or leave them with none. */
-    assignVehicle(vehicle: { rego: string; label: string } | null) {
+    assignVehicle(vehicle: { id?: string; rego: string; label: string } | null) {
       assignedVehicle = vehicle;
+    },
+    /** A vehicle on the fleet; returns its id. */
+    addVehicle(vehicle: { rego: string; label?: string; active?: boolean }) {
+      const id = objectId(vehicle.rego).toHexString();
+      fleet.set(id, { id, rego: vehicle.rego, label: vehicle.label ?? vehicle.rego, active: vehicle.active ?? true });
+      return id;
+    },
+    /** As if `driverId` had chosen that vehicle for `date`. */
+    choose(date: string, vehicleId: string, driverId: string, driverName: string) {
+      choices.push({ date, vehicleId, driverId, driverName });
+    },
+    get choices() {
+      return choices;
     },
 
     repository: {
       findAssignedVehicle(driverName: string) {
-        return Promise.resolve(driverName.trim().length === 0 ? null : assignedVehicle);
+        if (driverName.trim().length === 0 || !assignedVehicle) return Promise.resolve(null);
+        return Promise.resolve({
+          id: assignedVehicle.id ?? objectId(assignedVehicle.rego).toHexString(),
+          rego: assignedVehicle.rego,
+          label: assignedVehicle.label,
+        });
+      },
+
+      findVehicleChoice(driverId: string, date: string) {
+        const choice = choices.find((row) => row.driverId === driverId && row.date === date);
+        const vehicle = choice ? fleet.get(choice.vehicleId) : undefined;
+        return Promise.resolve(vehicle ? { id: vehicle.id, rego: vehicle.rego, label: vehicle.label } : null);
+      },
+
+      vehicleChosenBy(vehicleId: string, date: string) {
+        const choice = choices.find((row) => row.vehicleId === vehicleId && row.date === date);
+        return Promise.resolve(choice ? { driverId: choice.driverId, driverName: choice.driverName } : null);
+      },
+
+      // Same id as the pairing above gives that plate, so both paths agree.
+      findVehicleByRego(rego: string) {
+        const plate = rego.trim().toUpperCase();
+        if (plate.length === 0) return Promise.resolve(null);
+        const known = [...fleet.values()].find((vehicle) => vehicle.rego === plate);
+        return Promise.resolve(
+          known
+            ? { id: known.id, rego: known.rego, label: known.label }
+            : { id: objectId(plate).toHexString(), rego: plate, label: plate },
+        );
+      },
+
+      findVehicle(id: string) {
+        return Promise.resolve(fleet.get(id) ?? null);
+      },
+
+      vehicleOptions(date: string) {
+        return Promise.resolve(
+          [...fleet.values()]
+            .filter((vehicle) => vehicle.active)
+            .sort((a, b) => a.rego.localeCompare(b.rego))
+            .map((vehicle) => {
+              const choice = choices.find((row) => row.vehicleId === vehicle.id && row.date === date);
+              return {
+                id: vehicle.id,
+                rego: vehicle.rego,
+                label: vehicle.label,
+                type: 'crane-truck' as const,
+                chosenById: choice?.driverId ?? null,
+                chosenByName: choice?.driverName ?? null,
+              };
+            }),
+        );
+      },
+
+      // Like the real one: the (date, vehicle) unique index refuses a second driver.
+      chooseVehicle(input: { date: string; vehicleId: string; driverId: string; driverName: string }) {
+        const holder = choices.find(
+          (row) => row.date === input.date && row.vehicleId === input.vehicleId && row.driverId !== input.driverId,
+        );
+        if (holder) return Promise.resolve({ ok: false as const, takenBy: holder.driverName });
+
+        const mine = choices.find((row) => row.date === input.date && row.driverId === input.driverId);
+        if (mine) mine.vehicleId = input.vehicleId;
+        else choices.push({ ...input });
+        return Promise.resolve({ ok: true as const });
       },
 
       async runSheet(caller: string, date: string) {
@@ -381,7 +485,13 @@ export function createFakeDriverRepository(driverId: string) {
         return Promise.resolve();
       },
 
-      recordTipOff(input: { runId: string; totalKg: number; docketReference: string }) {
+      recordTipOff(input: {
+        runId: string;
+        totalKg: number;
+        docketReference: string;
+        vehicleId: string | null;
+        vehicleRego: string | null;
+      }) {
         // Upsert, like the real one: a replay updates rather than duplicating.
         const existing = tipOffs.findIndex((row) => row.runId === input.runId);
         if (existing >= 0) tipOffs[existing] = input;
@@ -550,6 +660,10 @@ export function createFakeDriverRepository(driverId: string) {
         return Promise.resolve();
       },
 
+      wasUnarrivedBy(jobId: string, driverName: string) {
+        return Promise.resolve(unarrivedBy.get(jobId) === driverName);
+      },
+
       hasStatusEvent(jobId: string, status: JobStatus) {
         return Promise.resolve(
           events.some((event) => event.jobId === jobId && event.status === status),
@@ -625,24 +739,41 @@ export function createFakeDriverRepository(driverId: string) {
         return Promise.resolve();
       },
 
+      // Upserted on (driver, day, vehicle), like the real one.
       savePreStart(input: {
         jobId: string;
+        date: string;
+        driverId: string;
+        vehicleId: string;
+        vehicleRego: string;
         completedAt: Date;
         failedItems: Array<{ key: string }>;
+        items: unknown[];
       }) {
-        const id = nextId();
-        preStarts.push({
+        const row = {
           jobId: input.jobId,
-          date: '2026-09-10',
+          date: input.date,
+          driverId: input.driverId,
+          vehicleId: input.vehicleId,
+          vehicleRego: input.vehicleRego,
           completedAt: input.completedAt,
           failed: input.failedItems.length,
-        });
-        return Promise.resolve(id);
+          items: input.items.length,
+        };
+        const existing = preStarts.findIndex(
+          (check) =>
+            check.driverId === input.driverId && check.date === input.date && check.vehicleId === input.vehicleId,
+        );
+        if (existing >= 0) preStarts[existing] = row;
+        else preStarts.push(row);
+        return Promise.resolve(nextId());
       },
 
-      findPreStartForDay() {
-        const first = preStarts[0];
-        return Promise.resolve(first ? { completedAt: first.completedAt } : null);
+      findPreStartForDay(driverId: string, date: string, vehicleId: string) {
+        const check = preStarts.find(
+          (row) => row.driverId === driverId && row.date === date && row.vehicleId === vehicleId,
+        );
+        return Promise.resolve(check ? { completedAt: check.completedAt } : null);
       },
 
       saveRiskAssessment(input: {
@@ -661,6 +792,7 @@ export function createFakeDriverRepository(driverId: string) {
       },
 
       reportDefect(input: {
+        vehicleId: string;
         vehicleRego: string;
         severity: string;
         summary: string;
@@ -668,6 +800,7 @@ export function createFakeDriverRepository(driverId: string) {
         photoIds?: string[];
       }) {
         defects.push({
+          vehicleId: input.vehicleId,
           rego: input.vehicleRego,
           severity: input.severity,
           summary: input.summary,

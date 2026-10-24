@@ -166,6 +166,8 @@ export function AdminCustomerCreatePage() {
       accountsContactEmail: '',
       sendInvitation: false,
       notes: '',
+      receivesCertificates: false,
+      certificateEmail: '',
     },
   });
 
@@ -173,6 +175,7 @@ export function AdminCustomerCreatePage() {
   // in the form, and the React Compiler skips a component that calls it.
   const accountType = useWatch({ control, name: 'accountType' });
   const sendInvitation = useWatch({ control, name: 'sendInvitation' });
+  const receivesCertificates = useWatch({ control, name: 'receivesCertificates' });
 
   const submit = handleSubmit(async (values) => {
     try {
@@ -180,9 +183,13 @@ export function AdminCustomerCreatePage() {
        * The cast is safe: `CustomerFormSchema` has already rejected `''`, so by
        * the time the resolver hands values over, the type has been chosen.
        */
+      const receivesCertificates = values.receivesCertificates ?? false;
       const { account, welcome } = await create.mutateAsync({
         ...values,
         accountType: values.accountType as AccountType,
+        receivesCertificates,
+        // Only kept when ticked — an unticked box should not save a hidden address.
+        certificateEmail: receivesCertificates ? (values.certificateEmail ?? '') : '',
       });
 
       /*
@@ -471,6 +478,43 @@ export function AdminCustomerCreatePage() {
                 </Select>
               )}
             </Field>
+
+            {/* Matt, 21 Oct — certificates go "only to certain customers". */}
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border p-3 sm:col-span-2">
+              <Checkbox
+                id="cc-certificates"
+                className="mt-0.5"
+                {...register('receivesCertificates')}
+              />
+              <span>
+                <span className="block text-sm font-medium">Receives certificates</span>
+                <span className="block text-xs text-muted-foreground">
+                  A Certificate of Recycling is issued and emailed after each crane-weighed pickup.
+                  Needs m² + kg above and a certificate email.
+                </span>
+              </span>
+            </label>
+
+            {receivesCertificates && (
+              <Field
+                id="cc-certificate-email"
+                label="Certificates emailed to"
+                required
+                error={errors.certificateEmail?.message}
+                hint="Often a sustainability or ESG mailbox, not accounts."
+                className="sm:col-span-2"
+              >
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    type="email"
+                    inputMode="email"
+                    placeholder="esg@company.com.au"
+                    {...register('certificateEmail')}
+                  />
+                )}
+              </Field>
+            )}
           </CardContent>
         </Card>
 
@@ -522,9 +566,10 @@ export function AdminCustomerCreatePage() {
               <span>
                 <span className="block text-sm font-medium">Email them the onboarding link</span>
                 <span className="block text-xs text-muted-foreground">
-                  They complete their own details and accept the terms. Leave this off for a
-                  customer whose terms are already covered by a signed contract. Needs an accounts
-                  contact email above — there is nowhere else to send it.
+                  On first sign-in they complete their company details and the director’s
+                  guarantee, and sign the terms and conditions. Leave this off for a customer
+                  already covered by a signed contract. Needs an accounts contact email above —
+                  there is nowhere else to send it.
                 </span>
               </span>
             </label>

@@ -11,12 +11,16 @@ import {
 } from '../schemas/identity.js';
 import { IsoDateSchema, ObjectIdSchema } from '../schemas/primitives.js';
 import {
+  ChooseVehicleSchema,
   CompletionSchema,
   ContaminationOutcomeSchema,
   ContaminationReportSchema,
   DefectReportSchema,
   DriverJobSchema,
   DriverMessageSchema,
+  DriverVehicleChoiceSchema,
+  DriverListsSchema,
+  DriverVehicleOptionsSchema,
   FutileReportSchema,
   PhotoUploadTicketSchema,
   PresignDocketPhotoSchema,
@@ -29,6 +33,7 @@ import {
   StatusUpdateSchema,
   TipOffEntrySchema,
   TipOffReconciliationSchema,
+  UnarriveSchema,
   WeightCaptureSchema,
 } from '../schemas/driver.js';
 import { errorResponses, jsonResponse } from './helpers.js';
@@ -406,6 +411,18 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
         success: 'Status recorded',
       }),
 
+      [`${API_PREFIX}/driver/jobs/{jobId}/unarrive`]: driverAction({
+        operationId: 'unarriveJob',
+        summary: 'Undo "Arrived" — the job could not be done',
+        description:
+          'Clears the arrival and stops the on-site timer. Nothing is charged: the job leaves ' +
+          "the driver's run and goes back to the allocator, who is notified. Replay-safe — a " +
+          'second send after the job has left the run succeeds without doing anything.',
+        body: UnarriveSchema,
+        path: JobIdPathSchema,
+        success: 'Arrival cleared and the job returned to the allocator',
+      }),
+
       [`${API_PREFIX}/driver/jobs/{jobId}/complete`]: driverAction({
         operationId: 'completeJob',
         summary: 'Finish the job',
@@ -538,6 +555,65 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
         response: ContaminationOutcomeSchema,
       }),
 
+      [`${API_PREFIX}/driver/lists`]: {
+        get: {
+          tags: ['Driver'],
+          operationId: 'getDriverLists',
+          summary: 'The options the driver picks from',
+          description:
+            'Site hazards, risk controls, "can\'t collect" reasons and contamination types. ' +
+            'The office edits these in Settings, so the app must load them rather than keep ' +
+            'its own copy. Offer only `active` options; keep the rest to show what an earlier ' +
+            'report said. Send the option `key`. A switched-off key is still accepted, so a ' +
+            'queued report never fails; a key the list never held is refused with 422 ' +
+            '(futile reason, contamination type).',
+          security: signedIn,
+          responses: {
+            '200': jsonResponse('The lists', DriverListsSchema),
+            ...errorResponses('401', '403'),
+          },
+        },
+      },
+
+      [`${API_PREFIX}/driver/vehicles`]: {
+        get: {
+          tags: ['Driver'],
+          operationId: 'listDriverVehicles',
+          summary: "Today's vehicles, for the picker",
+          description:
+            'The in-service fleet, by rego. Drivers choose the vehicle they are driving each ' +
+            'day before the pre-start. One driver per vehicle per day: a vehicle another ' +
+            'driver chose has `takenBy` set, and the picker shows "Taken by …" instead of ' +
+            "offering it. `mine` marks the driver's own choice.",
+          security: signedIn,
+          responses: {
+            '200': jsonResponse("Today's vehicles", DriverVehicleOptionsSchema),
+            ...errorResponses('401', '403'),
+          },
+        },
+      },
+
+      [`${API_PREFIX}/driver/vehicle`]: {
+        post: {
+          tags: ['Driver'],
+          operationId: 'chooseDriverVehicle',
+          summary: 'Choose the vehicle for today',
+          description:
+            'Sets the vehicle this driver is on today; choosing again moves them to the new ' +
+            'one. The pre-start, defects and tip-off from then on are filed against it, and ' +
+            '`preStartCompletedAt` on the run sheet is for this vehicle — a new vehicle needs ' +
+            'its own pre-start.\n\n' +
+            'NOT queued offline: the driver needs the answer before the pre-start. 409 when ' +
+            'another driver has it today (the message names them) or it is out of service.',
+          security: signedIn,
+          requestBody: jsonBody(ChooseVehicleSchema),
+          responses: {
+            '200': jsonResponse('The vehicle chosen for today', DriverVehicleChoiceSchema),
+            ...errorResponses('400', '422', '401', '403', '404', '409'),
+          },
+        },
+      },
+
       [`${API_PREFIX}/driver/pre-start`]: driverAction({
         operationId: 'submitPreStart',
         summary: 'Daily vehicle check',
@@ -547,8 +623,9 @@ export function buildOpenApiDocument(): ReturnType<typeof createDocument> {
           'against the vehicle rather than a box ticked for the driver\'s benefit — which is ' +
           'why any item marked `fail` becomes a defect report (see `/driver/defects`) and ' +
           'carries a required note.\n\n' +
-          'Scoped to the DAY, not the run: the vehicle does not change between the morning ' +
-          'and afternoon trips.',
+          'One per driver, day and VEHICLE: it is filed against the vehicle the driver chose ' +
+          'for `date` (see `POST /driver/vehicle`), not against `vehicleRego` in the body. ' +
+          '409 when the driver has no vehicle for that day.',
         body: PreStartSubmissionSchema,
         success: 'Pre-start recorded',
       }),

@@ -65,7 +65,9 @@ async function main(): Promise<void> {
   }
   const defaultRateCard = await settingsRepository.findRateCard(DEFAULT_RATE_CARD_ID);
   if (!defaultRateCard) {
-    throw new Error(`Rate card "${DEFAULT_RATE_CARD_ID}" does not exist yet — run migrate-tv-reference-data.ts first.`);
+    throw new Error(
+      `Rate card "${DEFAULT_RATE_CARD_ID}" does not exist yet — run migrate-tv-reference-data.ts first.`,
+    );
   }
 
   const rows = readGridDump(join(inputDir, 'customers.json'));
@@ -77,7 +79,13 @@ async function main(): Promise<void> {
     const codeRaw = (row.CustomerCode ?? '').trim();
 
     if (isLikelyTestRow(name)) {
-      report.excludeTestRow({ entity: 'account', key: name, code: 'TEST_ROW', message: 'name matches the test-row pattern', rawRow: row });
+      report.excludeTestRow({
+        entity: 'account',
+        key: name,
+        code: 'TEST_ROW',
+        message: 'name matches the test-row pattern',
+        rawRow: row,
+      });
       continue;
     }
 
@@ -86,7 +94,8 @@ async function main(): Promise<void> {
         entity: 'account',
         key: name || '(no name)',
         code: 'NO_CUSTOMER_CODE',
-        message: 'TransVirtual row has no Customer Code — nothing to use as this account\'s unique code.',
+        message:
+          "TransVirtual row has no Customer Code — nothing to use as this account's unique code.",
         rawRow: row,
       });
       continue;
@@ -121,6 +130,14 @@ async function main(): Promise<void> {
             accountsContactEmail: '',
             notes: '',
             sendInvitation: false,
+            /*
+             * Not ticked, explicitly. TransVirtual's export says nothing about who
+             * receives certificates, and an account ticked without a certificate email
+             * is one that fails every issue. `migrate-receives-certificates` is where
+             * that decision is made, against who has actually been issued one.
+             */
+            receivesCertificates: false,
+            certificateEmail: '',
           });
           if (status !== 'active') {
             // provision()/accountRepository.create() hardcodes 'active' — see
@@ -164,7 +181,8 @@ async function main(): Promise<void> {
       entity: 'account',
       key: code,
       code: 'NO_CONTACT_CAPTURED',
-      message: 'TransVirtual\'s customer export has no contact name/email column — no contact was created. Add one via the admin UI.',
+      message:
+        "TransVirtual's customer export has no contact name/email column — no contact was created. Add one via the admin UI.",
     });
   }
 

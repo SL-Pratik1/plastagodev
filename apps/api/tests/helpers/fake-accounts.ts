@@ -65,6 +65,10 @@ function accountOf(id: string, row: StoredAccount): Account {
     invoiceTemplateId: null,
     riskAssessmentRequired: row.riskAssessmentRequired,
     certificateEmail: null,
+    receivesCertificates: false,
+    termsRequired: false,
+    termsSignature: null,
+    termsPending: false,
     abn: '12345678901',
     /*
      * The customer's own registered details. Null across the board because the

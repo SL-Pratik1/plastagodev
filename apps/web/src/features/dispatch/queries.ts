@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CreateRunInput } from '@plastago/shared';
+import { LIVE_REFRESH } from '@/lib/live-refresh';
 import { queryKeys } from '@/lib/query-keys';
 import { useServices } from '@/services/services-context';
 
@@ -25,6 +26,7 @@ export function useAllocationBoard(date: string) {
     queryKey: queryKeys.dispatch.board(date),
     queryFn: () => dispatch.board(date),
     placeholderData: (previous) => previous,
+    ...LIVE_REFRESH,
   });
 }
 
@@ -35,6 +37,7 @@ export function useRunSheet(runId: string | null) {
     queryKey: queryKeys.dispatch.runSheet(runId ?? 'none'),
     queryFn: () => dispatch.runSheet(runId ?? ''),
     enabled: Boolean(runId),
+    ...LIVE_REFRESH,
   });
 }
 
@@ -44,6 +47,7 @@ export function useMapPins(date: string) {
     queryKey: queryKeys.dispatch.map(date),
     queryFn: () => dispatch.mapPins(date),
     placeholderData: (previous) => previous,
+    ...LIVE_REFRESH,
   });
 }
 
@@ -117,6 +121,18 @@ export function useRemoveJobFromRun() {
   return useMutation({
     mutationFn: ({ runId, jobId }: { runId: string; jobId: string }) =>
       dispatch.removeJobFromRun(runId, jobId),
+    onSuccess: invalidate,
+  });
+}
+
+/** The run's planned date (21 Oct). Returns the run under its new date. */
+export function useSetRunDate() {
+  const { dispatch } = useServices();
+  const invalidate = useDispatchInvalidation();
+
+  return useMutation({
+    mutationFn: ({ runId, date }: { runId: string; date: string }) =>
+      dispatch.setRunDate(runId, date),
     onSuccess: invalidate,
   });
 }

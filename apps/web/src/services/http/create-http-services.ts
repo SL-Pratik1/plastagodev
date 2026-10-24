@@ -14,6 +14,7 @@ import { createHttpExtractorService } from './extractor.http.js';
 import { createHttpPortalService } from './portal.http.js';
 import { createHttpQueueService } from './queues.http.js';
 import { createHttpSupportService } from './sortd.http.js';
+import { createHttpTermsService } from './terms.http.js';
 import { createHttpXeroService } from './xero.http.js';
 import {
   createHttpDashboardService,
@@ -60,6 +61,7 @@ export function createHttpServices(api: ApiClient): Services {
     xero: createHttpXeroService(api),
     queues: createHttpQueueService(api),
     portal: createHttpPortalService(api),
+    terms: createHttpTermsService(api),
     driverRun: createHttpDriverRunService(api),
   };
 }
